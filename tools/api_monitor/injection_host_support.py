@@ -1,5 +1,6 @@
 """Run the production main-program broker in an owned x64 console test host."""
 import configparser
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -39,7 +40,7 @@ class InjectionHost:
                         str(cpp),str(ROOT/"shared/ApiMonitorInjectionBroker.cpp"),"/Fe:"+str(self.executable),
                         "/Fo:"+str(directory)+"\\","/link","Advapi32.lib"],env=environment,check=True)
     def inject(self,pid,agent):
-        path=Path(tempfile.gettempdir())/"KswordApiMon"/f"config_{pid}.ini"
+        path=Path(os.environ.get("WINDIR", "C:/Windows"))/"Temp"/"KswordApiMon"/f"config_{pid}.ini"
         config=configparser.ConfigParser(interpolation=None);config.read(path,encoding="utf-16")
         values=config["monitor"]
         self.process=subprocess.Popen([str(self.executable),str(pid),str(agent),values["session_id"],values["stop_flag_path"]],

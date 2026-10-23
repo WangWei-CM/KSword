@@ -1,762 +1,331 @@
-// ============================================================
-// ContextMenuCleanerTab.BackupFile.cpp
-// 作用：
-// 1) 把本页纳管的全部右键菜单注册表位置（多根键 × 32/64 视图）递归导出成一个 JSON 文件，
-//    默认落在 exe 同级目录的 ContextMenuBackups 下；
-// 2) 支持从该文件恢复：恢复前先把"当前状态"也整份导出（带时间戳），
-//    因为"恢复备份"本身就等于遗弃当前状态；
-// 3) 目的：本程序若在测量期间异常退出、注册表里留下临时禁用覆盖项，用户可以一键回到干净状态。
-//
-// 与 ContextMenuCleanerTab.Backup.cpp 的区别：
-// - 那个是"URL 绑定页删除前"的**注册表内**批次备份（RecBackup 键 + batchId）；
-// - 本文件是**文件级**的整份快照，跨七个子页通用，也是崩溃兜底手段。
-// ============================================================
-
 #include "ContextMenuCleanerTab.h"
-
 #include "ContextMenuCleanerTab.Internal.h"
-
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
-#include <QFileInfo>
-#include <QJsonArray>
 #include <QJsonDocument>
-#include <QJsonObject>
+#include <QJsonParseError>
 #include <QMessageBox>
+#include <QPointer>
+#include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
-#include <QStringList>
-
-#include <algorithm>
+#include <QUuid>
 #include <array>
-#include <utility>
-#include <vector>
 
 namespace ks::misc
 {
-
 using namespace context_menu_cleaner_detail;
-
 namespace
 {
-    // 备份文件格式标识与版本：解析时先校验，避免把别的 JSON 当备份吃进去。
-    constexpr char kBackupSchema[] = "ksword-context-menu-backup";
-    constexpr int kBackupFormatVersion = 1;
-
-    // 递归深度上限：菜单注册表结构很浅，超过这个深度说明结构异常，宁可不收录也不冒险。
-    constexpr int kMaxBackupDepth = 8;
-
-    // 单次读取值数据的缓冲上限（字节）。菜单项的值都很小，64KB 足够。
-    constexpr DWORD kValueBufferBytes = 64U * 1024U;
-
-    // rootIdFromKey：把注册表根键转成可写入 JSON 的稳定标识。
-    // 入参 rootKey：根键句柄；返回：标识字符串（未知根键返回空）。
-    QString rootIdFromKey(const HKEY rootKey)
+    using namespace shell_transaction;
+    QString classRelativePath(const Key& key)
     {
-        if (rootKey == HKEY_CURRENT_USER)
-        {
-            return QStringLiteral("HKCU");
-        }
-        if (rootKey == HKEY_LOCAL_MACHINE)
-        {
-            return QStringLiteral("HKLM");
-        }
-        if (rootKey == HKEY_CLASSES_ROOT)
-        {
-            return QStringLiteral("HKCR");
-        }
-        return QString();
+        if(key.root=="HKCR")return key.path;
+        const QString prefix="Software\\Classes\\";
+        return key.path.startsWith(prefix,Qt::CaseInsensitive)?key.path.mid(prefix.size()):QString();
     }
-
-    // rootKeyFromId：标识字符串还原成根键句柄。
-    // 入参 id：标识；返回：根键句柄（未知返回 nullptr）。
-    HKEY rootKeyFromId(const QString& id)
+    bool legacyClassContainer(const Key& key)
     {
-        if (id == QStringLiteral("HKCU"))
-        {
-            return HKEY_CURRENT_USER;
-        }
-        if (id == QStringLiteral("HKLM"))
-        {
-            return HKEY_LOCAL_MACHINE;
-        }
-        if (id == QStringLiteral("HKCR"))
-        {
-            return HKEY_CLASSES_ROOT;
-        }
-        return nullptr;
+        static const QSet<QString> paths{"*","allfilesystemobjects","directory","directory\\background","folder","drive"};
+        return key.root!="HKCR"&&paths.contains(classRelativePath(key).toCaseFolded());
     }
-
-    // viewIdFromFlag：把 WOW64 视图标记转成字符串，用于备份与恢复时保持同一视图。
-    // 入参 viewFlag：REGSAM 视图标记；返回："64"、"32" 或 "default"。
-    QString viewIdFromFlag(const REGSAM viewFlag)
+    bool reservedClassNamespace(const QString& name)
     {
-        if ((viewFlag & KEY_WOW64_64KEY) != 0U)
-        {
-            return QStringLiteral("64");
-        }
-        if ((viewFlag & KEY_WOW64_32KEY) != 0U)
-        {
-            return QStringLiteral("32");
-        }
-        return QStringLiteral("default");
+        static const QSet<QString> names{"clsid","interface","typelib","appid","record","component categories",
+            "installer","licenses","mime","extensions","activatableclasses","packagedcom","packagedappxdebug",
+            "wow6432node","virtualstore","local settings"};
+        return names.contains(name.toCaseFolded());
     }
-
-    // viewFlagFromId：字符串还原成 REGSAM 视图标记。
-    // 入参 id：视图标识；返回：REGSAM 标记（未知返回 0）。
-    REGSAM viewFlagFromId(const QString& id)
+    bool protocolName(const QString& name)
+    {return !reservedClassNamespace(name)&&name.compare("Applications",Qt::CaseInsensitive)!=0&&name.compare("SystemFileAssociations",Qt::CaseInsensitive)!=0&&QRegularExpression("^[A-Za-z][A-Za-z0-9+.-]*$").match(name).hasMatch();}
+    bool wholeProtocolScope(const Key& key)
+    {const auto path=classRelativePath(key);return !path.isEmpty()&&!path.contains('\\')&&protocolName(path);}
+    bool allowedBackupScope(const Key& key)
     {
-        if (id == QStringLiteral("64"))
+        if(!validKey(key))return false;
+        const auto path=classRelativePath(key);
+        if(!path.isEmpty())
         {
-            return KEY_WOW64_64KEY;
+            const auto parts=path.split('\\');
+            if(reservedClassNamespace(parts[0]))return false;
+            if(parts.size()==1)return key.root!="HKCR"&&protocolName(parts[0]);
+            const int branch=(parts[0].compare("Applications",Qt::CaseInsensitive)==0
+                ||parts[0].compare("SystemFileAssociations",Qt::CaseInsensitive)==0
+                ||(parts[0].compare("Directory",Qt::CaseInsensitive)==0&&parts[1].compare("Background",Qt::CaseInsensitive)==0))?2:1;
+            if(parts.size()<=branch)return false;
+            const auto& name=parts[branch];
+            // Descendants of a managed branch support older partial files; a deeper occurrence
+            // of 'shell' cannot establish a new writable namespace.
+            return name.compare("shell",Qt::CaseInsensitive)==0||name.compare("shellex",Qt::CaseInsensitive)==0
+                ||name.compare("OpenWithList",Qt::CaseInsensitive)==0||name.compare("OpenWithProgids",Qt::CaseInsensitive)==0;
         }
-        if (id == QStringLiteral("32"))
+        if(key.root=="HKCR")return false;
+        const QString ie="Software\\Microsoft\\Internet Explorer\\MenuExt";
+        if(key.path.compare(ie,Qt::CaseInsensitive)==0||key.path.startsWith(ie+'\\',Qt::CaseInsensitive))return true;
+        const QString fileExts="Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\";
+        if(key.root=="HKCU"&&key.view==0&&key.path.startsWith(fileExts,Qt::CaseInsensitive))
         {
-            return KEY_WOW64_32KEY;
+            const auto tail=key.path.mid(fileExts.size()).split('\\');
+            return tail.size()>=2&&tail[0].size()>1&&tail[0].startsWith('.')
+                &&(tail[1].compare("OpenWithList",Qt::CaseInsensitive)==0||tail[1].compare("OpenWithProgids",Qt::CaseInsensitive)==0);
         }
-        return 0;
+        const QString explorer="Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\";
+        if(key.path.startsWith(explorer,Qt::CaseInsensitive))
+        {
+            const auto tail=key.path.mid(explorer.size()).split('\\');
+            return tail.size()>=2&&(tail[0].compare("Desktop",Qt::CaseInsensitive)==0
+                ||tail[0].compare("MyComputer",Qt::CaseInsensitive)==0||tail[0].compare("HomeFolder",Qt::CaseInsensitive)==0)
+                &&(tail[1].compare("NameSpace",Qt::CaseInsensitive)==0
+                    ||(tail[1].size()>10&&tail[1].startsWith("NameSpace_",Qt::CaseInsensitive)));
+        }
+        const QString url="Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\";
+        if(key.root=="HKCU"&&key.view==0&&key.path.startsWith(url,Qt::CaseInsensitive))
+        {const auto tail=key.path.mid(url.size()).split('\\');return tail.size()>=2&&protocolName(tail[0])&&tail[1].compare("UserChoice",Qt::CaseInsensitive)==0;}
+        return false;
     }
-
-    // registryLocationsForBackup：本页需要纳管的全部菜单注册表位置。
-    // 说明：复用 Internal.h 里既有的三类位置构造 helper，保证与"枚举"口径完全一致——
-    // 备份范围必须 ≥ 枚举范围，否则恢复会漏项。
-    // 入参：无；返回：位置定义数组。
-    std::vector<RegistryLocationDefinition> registryLocationsForBackup()
+    const Node* snapshotNode(const Snapshot& snapshot,const Key& key)
+    {for(const auto& node:snapshot.nodes)if(identity(node.key)==identity(key))return &node;return nullptr;}
+    bool hasNamedValue(const Snapshot& snapshot,const Key& key,const QString& name)
+    {if(const auto* node=snapshotNode(snapshot,key))for(const auto& value:node->values)if(value.name.compare(name,Qt::CaseInsensitive)==0)return true;return false;}
+    bool validateProtocolScopes(const Snapshot& snapshot,QString* error)
     {
-        std::vector<RegistryLocationDefinition> locations;
-
-        // 文件与文件夹的 shell / shellex：覆盖 * / AllFilesystemObjects / Directory / Folder / Drive。
-        addUserAndMachineClassLocations(&locations, QStringLiteral("*"),
-            QStringLiteral("文件 *"), QStringLiteral("shellex"), false, true);
-        addUserAndMachineClassLocations(&locations, QStringLiteral("AllFilesystemObjects"),
-            QStringLiteral("全部文件系统对象"), QStringLiteral("shellex"), false, true);
-        addUserAndMachineClassLocations(&locations, QStringLiteral("Directory"),
-            QStringLiteral("文件夹"), QStringLiteral("shellex"), false, true);
-        addUserAndMachineClassLocations(&locations, QStringLiteral("Directory\\Background"),
-            QStringLiteral("文件夹背景"), QStringLiteral("shellex"), false, true);
-        addUserAndMachineClassLocations(&locations, QStringLiteral("Folder"),
-            QStringLiteral("文件夹(Folder)"), QStringLiteral("shellex"), false, true);
-        addUserAndMachineClassLocations(&locations, QStringLiteral("Drive"),
-            QStringLiteral("驱动器"), QStringLiteral("shellex"), false, true);
-
-        // IE 右键菜单（MenuExt）与资源管理器主页命名空间。
-        addIeMenuExtLocations(&locations);
-
-        // 格式右键菜单（扩展名 / ProgID / SystemFileAssociations）。
-        addFormatContextMenuLocations(&locations);
-
-        return locations;
+        for(const auto& scope:snapshot.scopes)if(wholeProtocolScope(scope)&&!(snapshot.mergeOnly&&legacyClassContainer(scope)))
+            if(snapshotNode(snapshot,scope)&&!hasNamedValue(snapshot,scope,"URL Protocol"))
+                return fail(error,QStringLiteral("Protocol backup lacks URL Protocol identity:"),scope,ERROR_INVALID_DATA);
+        return true;
     }
-
-    // encodeValue：把一个注册表值转成 JSON。
-    // 入参 type：REG_* 类型；data：原始数据指针；size：数据字节数。
-    // 返回：JSON 值；遇到不支持的类型返回 QJsonValue::Undefined。
-    QJsonValue encodeValue(const DWORD type, const BYTE* data, const DWORD size)
+    bool decodeBackupDocument(const QJsonObject& document,Snapshot& snapshot,QString* error)
+    {const bool legacy=document.value("formatVersion").toInt()==1||document.value("mergeOnly").toBool(false);
+        return decode(document,snapshot,[legacy](const Key& key){return allowedBackupScope(key)||(legacy&&validKey(key)&&legacyClassContainer(key));},error)&&validateProtocolScopes(snapshot,error);}
+    bool protectReadOnlyProtocols(Snapshot& backup,const Snapshot& current,QString* error)
     {
-        switch (type)
+        QVector<Key> protocols;
+        for(const auto& node:current.nodes)if(wholeProtocolScope(node.key)&&hasNamedValue(current,node.key,"URL Protocol"))protocols.push_back(node.key);
+        for(const auto& node:backup.nodes)if(wholeProtocolScope(node.key)&&hasNamedValue(backup,node.key,"URL Protocol"))protocols.push_back(node.key);
+        // Absent desired roots may only remove an actual URL protocol, never an unrelated ProgID.
+        for(const auto& scope:backup.scopes)if(wholeProtocolScope(scope)&&!(backup.mergeOnly&&legacyClassContainer(scope))
+            &&snapshotNode(current,scope)&&!hasNamedValue(current,scope,"URL Protocol"))
+            return fail(error,QStringLiteral("Current key is not a URL protocol:"),scope,ERROR_INVALID_DATA);
+        for(const auto& protocol:normalizedScopes(std::move(protocols)))
         {
-        case REG_SZ:
-        case REG_EXPAND_SZ:
-            // 字符串型按 UTF-16 读取，去掉结尾的 NUL。
-            return QJsonValue(QString::fromWCharArray(reinterpret_cast<const wchar_t*>(data),
-                static_cast<int>(size / sizeof(wchar_t))).remove(QChar(u'\0')));
-
-        case REG_MULTI_SZ:
-        {
-            // 多字符串型拆成 JSON 数组，保留每一项的原文。
-            QJsonArray items;
-            const wchar_t* cursor = reinterpret_cast<const wchar_t*>(data);
-            const wchar_t* end = cursor + size / sizeof(wchar_t);
-            while (cursor < end && *cursor != L'\0')
+            if(protocol.root!="HKLM")continue;
+            const auto name=classRelativePath(protocol).toCaseFolded();
+            static const QSet<QString> protectedNames{"windowsdefender","ms-device-enrollment","ms-search","ms-windows-search",
+                "ms-actioncenter","ms-print-addprinter","explorer.zipselection"};
+            bool protectedProtocol=protectedNames.contains(name)||name.startsWith("ms-");
+            for(const auto* snapshot:{static_cast<const Snapshot*>(&backup),&current})
             {
-                const QString item = QString::fromWCharArray(cursor);
-                items.append(item);
-                cursor += item.size() + 1;
+                const auto has=[&](const QString& suffix,const QString& value){Key key=protocol;key.path+=suffix;return hasNamedValue(*snapshot,key,value);};
+                protectedProtocol=protectedProtocol||has({},"EditFlags")||has("\\shell\\open\\command","DelegateExecute")
+                    ||has("\\shell\\open","PackageId")||has("\\shell\\open","ActivatableClassId")
+                    ||has("\\shell\\open","ContractId")||has("\\Application","AppUserModelId");
             }
-            return items;
-        }
-
-        case REG_DWORD:
-            return QJsonValue(size >= sizeof(DWORD)
-                ? static_cast<int>(*reinterpret_cast<const DWORD*>(data))
-                : 0);
-
-        case REG_QWORD:
-        {
-            if (size < sizeof(ULONGLONG))
-            {
-                return QJsonValue(0);
-            }
-            // QJsonValue 只能存 double，QWORD 用量级有限的场景够用（这里都是小整数）。
-            return QJsonValue(static_cast<double>(*reinterpret_cast<const ULONGLONG*>(data)));
-        }
-
-        case REG_BINARY:
-            return QJsonValue(QString::fromLatin1(
-                QByteArray(reinterpret_cast<const char*>(data), static_cast<int>(size)).toBase64()));
-
-        default:
-            return QJsonValue(QJsonValue::Undefined);
-        }
-    }
-
-    // readKeyValues：读取一个键的全部值并序列化进 entries。
-    // 入参 hKey：已打开的键；out：输出数组；errorTextOut：可空，失败原因。
-    // 返回：成功 true，失败 false。
-    bool readKeyValues(HKEY hKey, QJsonArray* out, QString* errorTextOut)
-    {
-        std::vector<BYTE> nameBuffer(32U * 1024U);
-        std::vector<BYTE> dataBuffer(kValueBufferBytes);
-
-        for (DWORD index = 0;; ++index)
-        {
-            DWORD nameLength = static_cast<DWORD>(nameBuffer.size());
-            DWORD type = 0;
-            DWORD dataLength = static_cast<DWORD>(dataBuffer.size());
-            const LSTATUS status = ::RegEnumValueW(hKey, index,
-                reinterpret_cast<wchar_t*>(nameBuffer.data()), &nameLength,
-                nullptr, &type, dataBuffer.data(), &dataLength);
-            if (status == ERROR_NO_MORE_ITEMS)
-            {
-                return true;
-            }
-            if (status != ERROR_SUCCESS)
-            {
-                if (errorTextOut != nullptr)
-                {
-                    *errorTextOut = QStringLiteral("RegEnumValueW 失败，错误码=%1").arg(status);
-                }
-                return false;
-            }
-
-            const QString valueName = QString::fromWCharArray(
-                reinterpret_cast<const wchar_t*>(nameBuffer.data()), static_cast<int>(nameLength));
-            const QJsonValue encoded = encodeValue(type, dataBuffer.data(), dataLength);
-            if (encoded.isUndefined())
-            {
-                // 不支持的类型（例如 REG_LINK）跳过，不阻断整份备份。
-                continue;
-            }
-
-            QJsonObject valueObject;
-            valueObject.insert(QStringLiteral("name"), valueName);
-            valueObject.insert(QStringLiteral("type"), static_cast<int>(type));
-            valueObject.insert(QStringLiteral("data"), encoded);
-            out->append(valueObject);
-        }
-    }
-
-    // collectKeyRecursively：递归收集一个键及其全部子键。
-    // 入参 rootKey/subKeyPath/viewFlag/rootId：位置信息；entries：输出；depth：当前深度。
-    // 返回：无（打不开的键直接跳过，不计入备份，恢复时会被当成"当前多出"的键删掉，
-    //        因此这里必须只跳过"确实不存在"的情况）。
-    void collectKeyRecursively(
-        const HKEY rootKey,
-        const QString& subKeyPath,
-        const REGSAM viewFlag,
-        const QString& rootId,
-        QJsonArray* entries,
-        const int depth)
-    {
-        if (depth > kMaxBackupDepth)
-        {
-            return;
-        }
-
-        HKEY key = nullptr;
-        if (::RegOpenKeyExW(rootKey, subKeyPath.toStdWString().c_str(), 0,
-                KEY_READ | viewFlag, &key) != ERROR_SUCCESS)
-        {
-            return;
-        }
-
-        // 先把本键的值收进来（即使没有值也要留下键记录，否则恢复时会漏建空键）。
-        QJsonArray values;
-        readKeyValues(key, &values, nullptr);
-        QJsonObject entryObject;
-        entryObject.insert(QStringLiteral("root"), rootId);
-        entryObject.insert(QStringLiteral("view"), viewIdFromFlag(viewFlag));
-        entryObject.insert(QStringLiteral("path"), subKeyPath);
-        entryObject.insert(QStringLiteral("values"), values);
-        entries->append(entryObject);
-
-        // 再递归子键。
-        std::vector<QString> children;
-        std::vector<wchar_t> nameBuffer(16U * 1024U);
-        for (DWORD index = 0;; ++index)
-        {
-            DWORD nameLength = static_cast<DWORD>(nameBuffer.size());
-            const LSTATUS status = ::RegEnumKeyExW(key, index, nameBuffer.data(), &nameLength,
-                nullptr, nullptr, nullptr, nullptr);
-            if (status == ERROR_NO_MORE_ITEMS)
-            {
-                break;
-            }
-            if (status != ERROR_SUCCESS)
-            {
-                break;
-            }
-            children.push_back(QString::fromWCharArray(nameBuffer.data(), static_cast<int>(nameLength)));
-        }
-        ::RegCloseKey(key);
-
-        for (const QString& child : children)
-        {
-            collectKeyRecursively(rootKey, subKeyPath + QLatin1Char('\\') + child,
-                viewFlag, rootId, entries, depth + 1);
-        }
-    }
-
-    // deleteKeyTreeRecursively：删除一个键及其全部子键。
-    // 入参 rootKey/subKeyPath/viewFlag：位置；errorTextOut：可空，失败原因。
-    // 返回：成功 true。
-    bool deleteKeyTreeRecursively(
-        const HKEY rootKey,
-        const QString& subKeyPath,
-        const REGSAM viewFlag,
-        QString* errorTextOut)
-    {
-        HKEY key = nullptr;
-        if (::RegOpenKeyExW(rootKey, subKeyPath.toStdWString().c_str(), 0,
-                KEY_READ | KEY_WRITE | viewFlag, &key) != ERROR_SUCCESS)
-        {
-            // 已经不存在，视为成功。
-            return true;
-        }
-
-        std::vector<QString> children;
-        std::vector<wchar_t> nameBuffer(16U * 1024U);
-        for (DWORD index = 0;; ++index)
-        {
-            DWORD nameLength = static_cast<DWORD>(nameBuffer.size());
-            const LSTATUS status = ::RegEnumKeyExW(key, index, nameBuffer.data(), &nameLength,
-                nullptr, nullptr, nullptr, nullptr);
-            if (status == ERROR_NO_MORE_ITEMS)
-            {
-                break;
-            }
-            if (status != ERROR_SUCCESS)
-            {
-                break;
-            }
-            children.push_back(QString::fromWCharArray(nameBuffer.data(), static_cast<int>(nameLength)));
-        }
-        ::RegCloseKey(key);
-
-        // 先删子键再删自己，避免"键非空"错误。
-        for (const QString& child : children)
-        {
-            deleteKeyTreeRecursively(rootKey, subKeyPath + QLatin1Char('\\') + child,
-                viewFlag, errorTextOut);
-        }
-
-        const LSTATUS status = ::RegDeleteKeyExW(rootKey, subKeyPath.toStdWString().c_str(),
-            viewFlag, 0);
-        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("删除 %1 失败，错误码=%2")
-                    .arg(subKeyPath, QString::number(status));
-            }
-            return false;
+            if(!protectedProtocol)continue;
+            Snapshot saved,actual;saved.mergeOnly=backup.mergeOnly;actual.mergeOnly=backup.mergeOnly;
+            for(const auto& scope:backup.scopes)if(beneath(scope,protocol)){saved.scopes.push_back(scope);actual.scopes.push_back(scope);}
+            for(const auto& node:backup.nodes)if(beneath(node.key,protocol))saved.nodes.push_back(node);
+            for(const auto& node:current.nodes)
+                for(const auto& scope:saved.scopes)if(beneath(node.key,scope)){actual.nodes.push_back(node);break;}
+            if(backup.mergeOnly?!recordedProjectionMatches(saved,actual):!equivalent(saved,actual))
+                return fail(error,QStringLiteral("Protected URL protocol differs; restore refused:"),protocol,ERROR_ACCESS_DENIED);
+            backup.scopes.erase(std::remove_if(backup.scopes.begin(),backup.scopes.end(),[&](const Key& key){return beneath(key,protocol);}),backup.scopes.end());
+            backup.nodes.erase(std::remove_if(backup.nodes.begin(),backup.nodes.end(),[&](const Node& node){return beneath(node.key,protocol);}),backup.nodes.end());
         }
         return true;
     }
-
-    // applyBackupValue：把一条备份里的值写回注册表。
-    // 入参 key：目标键；name：值名；type：REG_*；data：JSON 数据；errorTextOut：可空。
-    // 返回：成功 true。
-    bool applyBackupValue(
-        HKEY key,
-        const QString& name,
-        const DWORD type,
-        const QJsonValue& data,
-        QString* errorTextOut)
+    bool discoverBackupScopes(Port& port,QVector<Key>& scopes,QString* error)
     {
-        const std::wstring wideName = name.toStdWString();
-        const wchar_t* namePointer = name.isEmpty() ? nullptr : wideName.c_str();
-        LSTATUS status = ERROR_SUCCESS;
-
-        switch (type)
+        const auto read=[&](const Key& key,QVector<Value>& values,QStringList& children,bool required=false){
+            const auto status=port.read(key,values,children);
+            if((status==ERROR_FILE_NOT_FOUND||status==ERROR_PATH_NOT_FOUND)&&!required)return true;
+            return status==ERROR_SUCCESS||fail(error,QStringLiteral("Registry scope discovery failed:"),key,status);
+        };
+        const auto branches=[&](const Key& parent,const QStringList& children){
+            for(const auto& child:children)
+                if(child.compare("shell",Qt::CaseInsensitive)==0||child.compare("shellex",Qt::CaseInsensitive)==0
+                    ||child.compare("OpenWithList",Qt::CaseInsensitive)==0||child.compare("OpenWithProgids",Qt::CaseInsensitive)==0)
+                    scopes.push_back(Key{parent.root,parent.view,parent.path+'\\'+child});
+        };
+        for(const auto& location:QVector<Key>{{"HKCU",0,{}},{"HKLM",KEY_WOW64_64KEY,{}},{"HKLM",KEY_WOW64_32KEY,{}}})
         {
-        case REG_SZ:
-        case REG_EXPAND_SZ:
-        {
-            const std::wstring value = data.toString().toStdWString();
-            status = ::RegSetValueExW(key, namePointer, 0, type,
-                reinterpret_cast<const BYTE*>(value.c_str()),
-                static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
-            break;
-        }
-        case REG_MULTI_SZ:
-        {
-            // 多字符串以双 NUL 结尾。
-            std::wstring joined;
-            for (const QJsonValue& item : data.toArray())
+            const auto& root=location.root;const REGSAM view=location.view;
+            const Key classes{root,view,QStringLiteral("Software\\Classes")};QVector<Value> values;QStringList names;
+            if(!read(classes,values,names))return false;
+            for(const auto& name:names)
             {
-                joined += item.toString().toStdWString();
-                joined.push_back(L'\0');
+                if(reservedClassNamespace(name))continue;
+                const Key key{root,view,classes.path+'\\'+name};values.clear();QStringList children;
+                if(!read(key,values,children,true))return false;
+                for(const auto& value:values)if(protocolName(name)&&value.name.compare("URL Protocol",Qt::CaseInsensitive)==0){scopes.push_back(key);break;}
+                branches(key,children);
+                if(name.compare("Directory",Qt::CaseInsensitive)==0)
+                    for(const auto& sub:children)if(sub.compare("Background",Qt::CaseInsensitive)==0)
+                    {Key background{root,view,key.path+'\\'+sub};values.clear();QStringList leaves;if(!read(background,values,leaves,true))return false;branches(background,leaves);}
+                if(name.compare("SystemFileAssociations",Qt::CaseInsensitive)==0||name.compare("Applications",Qt::CaseInsensitive)==0)
+                    for(const auto& sub:children){Key nested{root,view,key.path+'\\'+sub};values.clear();QStringList leaves;if(!read(nested,values,leaves,true))return false;branches(nested,leaves);}
             }
-            joined.push_back(L'\0');
-            status = ::RegSetValueExW(key, namePointer, 0, type,
-                reinterpret_cast<const BYTE*>(joined.c_str()),
-                static_cast<DWORD>(joined.size() * sizeof(wchar_t)));
-            break;
+            const QString explorer="Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\";
+            for(const auto& section:QStringList{"Desktop","MyComputer","HomeFolder"})
+            {
+                const Key parent{root,view,explorer+section};values.clear();QStringList children;if(!read(parent,values,children))return false;
+                // Keep all namespace data in the snapshot; UI can hide protected rows independently.
+                for(const auto& child:children)if(child.compare("NameSpace",Qt::CaseInsensitive)==0||child.startsWith("NameSpace_",Qt::CaseInsensitive))
+                    scopes.push_back(Key{root,view,parent.path+'\\'+child});
+            }
+            scopes.push_back(Key{root,view,QStringLiteral("Software\\Microsoft\\Internet Explorer\\MenuExt")});
         }
-        case REG_DWORD:
+        for(const auto& base:QStringList{"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts",
+            "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations"})
         {
-            const DWORD value = static_cast<DWORD>(data.toInt());
-            status = ::RegSetValueExW(key, namePointer, 0, type,
-                reinterpret_cast<const BYTE*>(&value), sizeof(value));
-            break;
+            const Key parent{"HKCU",0,base};QVector<Value> values;QStringList names;if(!read(parent,values,names))return false;
+            for(const auto& name:names)
+            {
+                const Key key{"HKCU",0,base+'\\'+name};values.clear();QStringList children;if(!read(key,values,children,true))return false;
+                for(const auto& child:children)
+                    if((base.endsWith("FileExts")&&(child.compare("OpenWithList",Qt::CaseInsensitive)==0||child.compare("OpenWithProgids",Qt::CaseInsensitive)==0))
+                        ||(base.endsWith("UrlAssociations")&&child.compare("UserChoice",Qt::CaseInsensitive)==0))
+                        scopes.push_back(Key{key.root,key.view,key.path+'\\'+child});
+            }
         }
-        case REG_QWORD:
-        {
-            const ULONGLONG value = static_cast<ULONGLONG>(data.toDouble());
-            status = ::RegSetValueExW(key, namePointer, 0, type,
-                reinterpret_cast<const BYTE*>(&value), sizeof(value));
-            break;
-        }
-        case REG_BINARY:
-        {
-            const QByteArray bytes = QByteArray::fromBase64(data.toString().toLatin1());
-            status = ::RegSetValueExW(key, namePointer, 0, type,
-                reinterpret_cast<const BYTE*>(bytes.constData()),
-                static_cast<DWORD>(bytes.size()));
-            break;
-        }
-        default:
-            return true; // 未知类型按"跳过"处理，不阻断恢复。
-        }
-
-        if (status != ERROR_SUCCESS && errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("写入值 %1 失败，错误码=%2")
-                .arg(name.isEmpty() ? QStringLiteral("(默认)") : name, QString::number(status));
-        }
-        return status == ERROR_SUCCESS;
+        return true;
     }
-}  // namespace
-
-QString ContextMenuCleanerTab::contextMenuBackupDirectory() const
-{
-    // 首选 exe 同级目录（便携、用户一眼能找到）；不可写时回落到用户本地目录。
-    const QString besideExe = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ContextMenuBackups"));
-    QDir directory(besideExe);
-    if (directory.mkpath(QStringLiteral(".")))
+    bool readSnapshotFile(const QString& path,Snapshot& snapshot,QString* error)
     {
-        // 用一次真实写入探测权限：mkpath 成功不代表能写文件（只读盘上也可能建出目录）。
-        QFile probe(directory.filePath(QStringLiteral(".write_probe")));
-        if (probe.open(QIODevice::WriteOnly))
-        {
-            probe.close();
-            probe.remove();
-            return besideExe;
-        }
+        QFile file(path);
+        if(!file.open(QIODevice::ReadOnly)){*error=QStringLiteral("无法打开备份文件：%1").arg(path);return false;}
+        const auto bytes=file.readAll();if(file.error()!=QFileDevice::NoError){*error=file.errorString();return false;}
+        QJsonParseError parse;const auto document=QJsonDocument::fromJson(bytes,&parse);
+        if(parse.error!=QJsonParseError::NoError||!document.isObject()){*error=parse.errorString();return false;}
+        return decodeBackupDocument(document.object(),snapshot,error);
     }
-
-    const QString fallback = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("ContextMenuBackups"));
-    QDir().mkpath(fallback);
-    return fallback;
 }
 
-bool ContextMenuCleanerTab::exportContextMenuBackupToFile(QString* filePathOut, QString* errorTextOut) const
+QString ContextMenuCleanerTab::contextMenuBackupDirectory()
 {
-    const std::vector<RegistryLocationDefinition> locations = registryLocationsForBackup();
-
-    QJsonArray entries;
-    for (const RegistryLocationDefinition& location : locations)
+    const QString beside=QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("ContextMenuBackups"));
+    QDir directory(beside);
+    if(directory.mkpath(QStringLiteral(".")))
     {
-        const QString rootId = rootIdFromKey(location.rootKey);
-        if (rootId.isEmpty() || location.subKeyPath.isEmpty())
-        {
-            continue;
-        }
-        collectKeyRecursively(location.rootKey, location.subKeyPath, location.viewFlag,
-            rootId, &entries, 0);
+        const QString probePath=directory.filePath(QStringLiteral(".write_probe-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        QFile probe(probePath);if(probe.open(QIODevice::WriteOnly|QIODevice::NewOnly)){probe.close();if(probe.remove())return beside;}
     }
+    const QString fallback=QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("ContextMenuBackups"));
+    QDir().mkpath(fallback);return fallback;
+}
 
-    if (entries.isEmpty())
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("没有采集到任何菜单注册表项，已放弃写出备份文件");
-        }
-        return false;
-    }
-
-    QJsonObject document;
-    document.insert(QStringLiteral("schema"), QString::fromLatin1(kBackupSchema));
-    document.insert(QStringLiteral("formatVersion"), kBackupFormatVersion);
-    document.insert(QStringLiteral("createdUtc"),
-        QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-    document.insert(QStringLiteral("entryCount"), entries.size());
-    document.insert(QStringLiteral("entries"), entries);
-
-    const QString directory = contextMenuBackupDirectory();
-    const QString fileName = QStringLiteral("context-menu-%1.json")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
-    const QString filePath = QDir(directory).filePath(fileName);
-
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法写入备份文件：%1").arg(filePath);
-        }
-        return false;
-    }
-    file.write(QJsonDocument(document).toJson(QJsonDocument::Indented));
-    file.close();
-
-    if (filePathOut != nullptr)
-    {
-        *filePathOut = filePath;
-    }
+bool ContextMenuCleanerTab::exportContextMenuBackupToFile(QString* pathOut,QString* error,
+    QJsonObject* snapshotOut,const QString& suffix,const QVector<shell_transaction::Key>& extraScopes,const bool mergeOnly)
+{
+    using namespace shell_transaction;
+    QVector<Key> scopes=extraScopes;
+    NativePort port;
+    if(!discoverBackupScopes(port,scopes,error))return false;
+    for(const auto& scope:scopes)if(!allowedBackupScope(scope)&&!(mergeOnly&&legacyClassContainer(scope)))return fail(error,QStringLiteral("Unsupported backup scope:"),scope,ERROR_ACCESS_DENIED);
+    Snapshot snapshot;
+    if(!collect(port,std::move(scopes),snapshot,error))return false;
+    snapshot.completeFamilies=true;snapshot.mergeOnly=mergeOnly; // Legacy wide-container safety files remain explicitly merge-only.
+    QJsonObject document=encode(snapshot);
+    if(snapshotOut)*snapshotOut=document;
+    document.insert("createdUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    const QString path=QDir(contextMenuBackupDirectory()).filePath(QStringLiteral("context-menu-%1-%2%3.json")
+        .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmsszzz")),
+            QUuid::createUuid().toString(QUuid::WithoutBraces),suffix));
+    QSaveFile file(path);
+    if(!commitDocument(file,document,error))
+    {if(error)*error=QStringLiteral("无法写入备份文件：%1").arg(path)+*error;return false;}
+    if(pathOut)*pathOut=path;
+    kLogEvent event;info<<event<<"[ContextMenuCleanerTab] complete backup receipt: path="<<path.toStdString()
+        <<", keys="<<snapshot.nodes.size()<<", scopes="<<snapshot.scopes.size()<<eol;
     return true;
 }
 
 QString ContextMenuCleanerTab::backupContextMenuToFile(const bool showSuccessMessage)
 {
-    QString filePath;
-    QString errorText;
-    if (!exportContextMenuBackupToFile(&filePath, &errorText))
-    {
-        kLogEvent event;
-        err << event << "[ContextMenuCleanerTab] 备份右键菜单失败: "
-            << errorText.toStdString() << eol;
-        if (showSuccessMessage)
-        {
-            QMessageBox::warning(this, QStringLiteral("备份右键菜单"),
-                QStringLiteral("备份失败：%1").arg(errorText));
-        }
-        return QString();
-    }
+    if(!beginShellAction())return {};
+    submitShellTransaction([]{
+        ShellTransactionResult result;result.stage=ShellTransactionStage::Completed;
+        result.ok=exportContextMenuBackupToFile(&result.path,&result.error);return result;
+    },[this,showSuccessMessage](const ShellTransactionResult& result){
+        if(!showSuccessMessage)return;
+        if(result.ok)QMessageBox::information(this,QStringLiteral("备份右键菜单"),
+            QStringLiteral("已导出整份右键菜单注册表：\n%1").arg(QDir::toNativeSeparators(result.path)));
+        else QMessageBox::warning(this,QStringLiteral("备份右键菜单"),QStringLiteral("备份失败：%1").arg(result.failureText()));
+    });
+    return {}; // Path is delivered by the accepted receipt, never synchronously queried by GUI.
+}
 
-    kLogEvent event;
-    info << event << "[ContextMenuCleanerTab] 已备份右键菜单: "
-         << filePath.toStdString() << eol;
-    if (showSuccessMessage)
-    {
-        QMessageBox::information(this, QStringLiteral("备份右键菜单"),
-            QStringLiteral("已导出整份右键菜单注册表：\n%1").arg(QDir::toNativeSeparators(filePath)));
-    }
-    return filePath;
+ContextMenuCleanerTab::ShellTransactionResult ContextMenuCleanerTab::prepareContextMenuRestore(const QString& path)
+{
+    using namespace shell_transaction;
+    ShellTransactionResult result;result.stage=ShellTransactionStage::Completed;
+    Snapshot backup;if(!readSnapshotFile(path,backup,&result.error))return result;
+    QJsonObject safety;
+    if(!exportContextMenuBackupToFile(&result.path,&result.error,&safety,QStringLiteral("-before-restore"),backup.scopes,backup.mergeOnly))return result;
+    result.payload={{"backup",encode(backup)},{"current",safety},{"source",path},{"limited",!backup.completeFamilies||backup.mergeOnly}};
+    result.ok=true;return result;
+}
+
+ContextMenuCleanerTab::ShellTransactionResult ContextMenuCleanerTab::applyContextMenuRestore(const QJsonObject& plan)
+{
+    using namespace shell_transaction;
+    ShellTransactionResult result;result.stage=ShellTransactionStage::Completed;
+    Snapshot backup,current;
+    if(!decodeBackupDocument(plan.value("backup").toObject(),backup,&result.error)
+        ||!decodeBackupDocument(plan.value("current").toObject(),current,&result.error))return result;
+    NativePort port;Snapshot actual;
+    auto scopes=current.scopes;
+    if(!discoverBackupScopes(port,scopes,&result.error) || !collect(port,std::move(scopes),actual,&result.error))return result;
+    actual.completeFamilies=current.completeFamilies;actual.mergeOnly=current.mergeOnly;
+    if(!equivalent(actual,current))
+    {result.error=QStringLiteral("当前注册表状态已变化，未执行恢复；请重新选择备份后确认。");return result;}
+    if(backup.completeFamilies&&!backup.mergeOnly){backup.scopes+=actual.scopes;backup.scopes=normalizedScopes(std::move(backup.scopes));}
+    if(!protectReadOnlyProtocols(backup,actual,&result.error))return result;
+    const auto receipt=restoreVerified(port,backup,actual);result.ok=receipt.ok();result.count=receipt.keys;result.failures=receipt.failures;
+    result.payload={{"values",receipt.values},{"deleted",receipt.deleted}};return result;
 }
 
 void ContextMenuCleanerTab::restoreContextMenuFromFile()
 {
-    const QString directory = contextMenuBackupDirectory();
-    const QString filePath = QFileDialog::getOpenFileName(
-        this,
-        QStringLiteral("选择右键菜单备份文件"),
-        directory,
+    if(!beginShellAction())return;
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    // Directory suggestion does no filesystem probing; all I/O is in accepted worker phases.
+    const auto path=QFileDialog::getOpenFileName(this,QStringLiteral("选择右键菜单备份文件"),
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("ContextMenuBackups")),
         QStringLiteral("Ksword 菜单备份 (*.json)"));
-    if (filePath.isEmpty())
-    {
-        return;
-    }
-
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly))
-    {
-        QMessageBox::warning(this, QStringLiteral("恢复备份"),
-            QStringLiteral("无法打开备份文件：%1").arg(QDir::toNativeSeparators(filePath)));
-        return;
-    }
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
-    file.close();
-
-    const QJsonObject rootObject = document.object();
-    if (rootObject.value(QStringLiteral("schema")).toString() != QString::fromLatin1(kBackupSchema))
-    {
-        QMessageBox::warning(this, QStringLiteral("恢复备份"),
-            QStringLiteral("这个文件不是 Ksword 的右键菜单备份（schema 不匹配）。"));
-        return;
-    }
-    const QJsonArray entries = rootObject.value(QStringLiteral("entries")).toArray();
-    if (entries.isEmpty())
-    {
-        QMessageBox::warning(this, QStringLiteral("恢复备份"),
-            QStringLiteral("备份文件里没有任何条目，已中止。"));
-        return;
-    }
-
-    // 恢复前先把当前状态整份导出：恢复本身等于遗弃当前状态，必须留退路。
-    QString safetyPath;
-    QString safetyError;
-    if (!exportContextMenuBackupToFile(&safetyPath, &safetyError))
-    {
-        QMessageBox::warning(this, QStringLiteral("恢复备份"),
-            QStringLiteral("恢复前的当前状态备份失败，为避免不可逆操作已中止：\n%1").arg(safetyError));
-        return;
-    }
-    const QString beforeRestorePath = QStringLiteral("%1-before-restore.json").arg(safetyPath.left(safetyPath.size() - 5));
-
-    const QMessageBox::StandardButton confirm = QMessageBox::question(
-        this,
-        QStringLiteral("恢复备份"),
-        QStringLiteral("将用备份覆盖当前右键菜单注册表：\n%1\n\n恢复前的当前状态已自动另存为：\n%2\n\n注意：恢复等于遗弃当前状态，安装后新增的菜单项会被删除。继续吗？")
-            .arg(QDir::toNativeSeparators(filePath), QDir::toNativeSeparators(beforeRestorePath)),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirm != QMessageBox::Yes)
-    {
-        QMessageBox::information(this, QStringLiteral("恢复备份"),
-            QStringLiteral("已取消。当前状态备份保留在：\n%1")
-                .arg(QDir::toNativeSeparators(beforeRestorePath)));
-        return;
-    }
-
-    kLogEvent event;
-    info << event << "[ContextMenuCleanerTab] 开始恢复右键菜单备份: "
-         << filePath.toStdString() << ", 恢复前状态: " << beforeRestorePath.toStdString() << eol;
-
-    // 收集备份里出现过的位置，用于判断"当前多出来的键"。
-    QStringList restoredPaths;
-    for (const QJsonValue& value : entries)
-    {
-        const QJsonObject entryObject = value.toObject();
-        restoredPaths.push_back(entryObject.value(QStringLiteral("path")).toString());
-    }
-
-    int writtenKeys = 0;
-    int writtenValues = 0;
-    int deletedKeys = 0;
-    QStringList failures;
-
-    // 第一步：删除当前存在、但备份里没有的键（从深到浅），随后重建备份里的键。
-    const std::vector<RegistryLocationDefinition> locations = registryLocationsForBackup();
-    for (const RegistryLocationDefinition& location : locations)
-    {
-        if (location.subKeyPath.isEmpty())
+    if(!alive)return;
+    if(path.isEmpty()){endShellAction();return;}
+    submitShellTransaction([path]{return prepareContextMenuRestore(path);},[this,path](const ShellTransactionResult& prepared){
+        if(!prepared.ok){QMessageBox::warning(this,QStringLiteral("恢复备份"),prepared.failureText());return;}
+        // Reserve the second modal before another action can change the current snapshot.
+        if(!beginShellAction())return;
+        const QPointer<ContextMenuCleanerTab> alive(this);
+        const QString limited=prepared.payload.value("limited").toBool()
+            ? QStringLiteral("\n\n这是旧版或有限范围备份；旧版仅合并文件明确记录的键值，保留未记录内容。") : QString();
+        const auto answer=QMessageBox::question(this,QStringLiteral("恢复备份"),
+            QStringLiteral("将根据备份恢复右键菜单注册表：\n%1\n\n恢复前的当前状态已自动另存为：\n%2\n\n完整新版备份会移除范围内新增内容；旧版仅合并已记录内容。继续吗？")
+                .arg(QDir::toNativeSeparators(path),QDir::toNativeSeparators(prepared.path))+limited,
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No);
+        if(!alive)return;
+        if(answer!=QMessageBox::Yes)
         {
-            continue;
+            endShellAction();QMessageBox::information(this,QStringLiteral("恢复备份"),
+                QStringLiteral("已取消。当前状态备份保留在：\n%1").arg(QDir::toNativeSeparators(prepared.path)));return;
         }
-        // 只有"本位置下的键"归本位置管，避免把别的分类误删。
-        const QString prefix = location.subKeyPath + QLatin1Char('\\');
-        QStringList currentPaths;
-        {
-            HKEY key = nullptr;
-            if (::RegOpenKeyExW(location.rootKey, location.subKeyPath.toStdWString().c_str(), 0,
-                    KEY_READ | location.viewFlag, &key) == ERROR_SUCCESS)
-            {
-                std::vector<wchar_t> nameBuffer(16U * 1024U);
-                for (DWORD index = 0;; ++index)
-                {
-                    DWORD nameLength = static_cast<DWORD>(nameBuffer.size());
-                    if (::RegEnumKeyExW(key, index, nameBuffer.data(), &nameLength,
-                            nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
-                    {
-                        break;
-                    }
-                    currentPaths.push_back(prefix + QString::fromWCharArray(
-                        nameBuffer.data(), static_cast<int>(nameLength)));
-                }
-                ::RegCloseKey(key);
-            }
-        }
-
-        for (const QString& currentPath : currentPaths)
-        {
-            bool keep = false;
-            for (const QString& restoredPath : restoredPaths)
-            {
-                if (restoredPath == currentPath || restoredPath.startsWith(currentPath + QLatin1Char('\\')))
-                {
-                    keep = true;
-                    break;
-                }
-            }
-            if (!keep)
-            {
-                QString deleteError;
-                if (deleteKeyTreeRecursively(location.rootKey, currentPath,
-                        location.viewFlag, &deleteError))
-                {
-                    ++deletedKeys;
-                }
-                else
-                {
-                    failures.push_back(deleteError);
-                }
-            }
-        }
-    }
-
-    // 第二步：按备份写回键与值。
-    for (const QJsonValue& value : entries)
-    {
-        const QJsonObject entryObject = value.toObject();
-        const HKEY rootKey = rootKeyFromId(entryObject.value(QStringLiteral("root")).toString());
-        const QString path = entryObject.value(QStringLiteral("path")).toString();
-        const REGSAM viewFlag = viewFlagFromId(entryObject.value(QStringLiteral("view")).toString());
-        if (rootKey == nullptr || path.isEmpty())
-        {
-            continue;
-        }
-
-        HKEY key = nullptr;
-        if (::RegCreateKeyExW(rootKey, path.toStdWString().c_str(), 0, nullptr,
-                REG_OPTION_NON_VOLATILE, KEY_WRITE | viewFlag, nullptr, &key, nullptr)
-            != ERROR_SUCCESS)
-        {
-            failures.push_back(QStringLiteral("创建 %1 失败").arg(path));
-            continue;
-        }
-        ++writtenKeys;
-
-        for (const QJsonValue& valueEntry : entryObject.value(QStringLiteral("values")).toArray())
-        {
-            const QJsonObject valueObject = valueEntry.toObject();
-            QString valueError;
-            if (applyBackupValue(key,
-                    valueObject.value(QStringLiteral("name")).toString(),
-                    static_cast<DWORD>(valueObject.value(QStringLiteral("type")).toInt()),
-                    valueObject.value(QStringLiteral("data")),
-                    &valueError))
-            {
-                ++writtenValues;
-            }
-            else
-            {
-                failures.push_back(valueError);
-            }
-        }
-        ::RegCloseKey(key);
-    }
-
-    // 第三步：刷新所有子页，让界面与注册表重新对齐。
-    const std::array<MenuArea, 7> allAreas{
-        MenuArea::InternetExplorer, MenuArea::Desktop, MenuArea::File, MenuArea::UrlBinding,
-        MenuArea::OpenWith, MenuArea::FormatMenu, MenuArea::ExplorerHome };
-    for (const MenuArea area : allAreas)
-    {
-        AreaWidgets* areaWidgets = widgetsForArea(area);
-        if (areaWidgets != nullptr && areaWidgets->hasLoaded)
-        {
-            refreshArea(area);
-        }
-    }
-
-    info << event << "[ContextMenuCleanerTab] 恢复完成: 写回键=" << writtenKeys
-         << ", 写回值=" << writtenValues << ", 删除当前多出的键=" << deletedKeys
-         << ", 失败=" << failures.size() << eol;
-
-    QString summary = QStringLiteral("恢复完成。\n\n写回注册表键：%1\n写回注册表值：%2\n删除当前多出的键：%3\n恢复前状态备份：%4")
-        .arg(writtenKeys).arg(writtenValues).arg(deletedKeys)
-        .arg(QDir::toNativeSeparators(beforeRestorePath));
-    if (!failures.isEmpty())
-    {
-        summary += QStringLiteral("\n\n失败项（前 5 条）：\n%1").arg(failures.mid(0, 5).join(QLatin1Char('\n')));
-    }
-    QMessageBox::information(this, QStringLiteral("恢复备份"), summary);
+        const auto plan=prepared.payload;const auto safetyPath=prepared.path;
+        submitShellTransaction([plan]{return applyContextMenuRestore(plan);},[this,safetyPath](const ShellTransactionResult& result){
+            const std::array<MenuArea,7> areas{MenuArea::InternetExplorer,MenuArea::Desktop,MenuArea::File,
+                MenuArea::UrlBinding,MenuArea::OpenWith,MenuArea::FormatMenu,MenuArea::ExplorerHome};
+            for(const auto area:areas)if(widgetsForArea(area)->hasLoaded)refreshArea(area);
+            QString summary=QStringLiteral("恢复结果。\n\n写回注册表键：%1\n写回注册表值：%2\n删除当前多出的键：%3\n恢复前状态备份：%4")
+                .arg(result.count).arg(result.payload.value("values").toInt()).arg(result.payload.value("deleted").toInt()).arg(QDir::toNativeSeparators(safetyPath));
+            if(result.stage!=ShellTransactionStage::Completed||!result.error.isEmpty())summary=result.failureText()+QStringLiteral("\n恢复前状态备份：%1").arg(QDir::toNativeSeparators(safetyPath));
+            if(!result.failures.isEmpty())summary+=QStringLiteral("\n\n失败项（前 5 条）：\n%1").arg(result.failures.mid(0,5).join('\n'));
+            if(result.ok)QMessageBox::information(this,QStringLiteral("恢复备份"),summary);
+            else QMessageBox::warning(this,QStringLiteral("恢复备份"),summary);
+        });
+    });
 }
-
-}  // namespace ks::misc
+} // namespace ks::misc

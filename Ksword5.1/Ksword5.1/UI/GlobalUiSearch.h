@@ -14,6 +14,7 @@
 //    Dock 激活均通过回调注入，便于复用与单元验证。
 // ============================================================
 
+#include "./PageNavigationCatalog.h"
 #include <QObject>
 #include <QList>
 #include <QPersistentModelIndex>
@@ -22,6 +23,7 @@
 #include <QVector>
 
 #include <functional>
+#include <memory>
 
 class QCheckBox;
 class QEvent;
@@ -42,6 +44,7 @@ namespace ads
 
 namespace ks::ui
 {
+    struct TableCellSearchCursor;
     // UiSearchScope：三个搜索作用域；输入框 Tab/Shift+Tab 还会跨越独立的 CMD 模式。
     enum class UiSearchScope
     {
@@ -64,6 +67,10 @@ namespace ks::ui
         QPersistentModelIndex targetModelIndex;    // targetModelIndex：表格单元格命中的稳定模型索引。
         QString matchedText;                       // matchedText：命中控件的完整原始文本（单行化处理后）。
         QString pagePathText;                      // pagePathText：形如“内核 › 回调审计”的页面路径文本。
+        QString navigationDescriptorId;
+        QString navigationBodyTargetName;
+        bool navigationEnabled = true;
+        bool navigationRoot = false;
         int matchRank = 2;                         // matchRank：排序权重（0=整串相等，1=前缀，2=包含）。
     };
 
@@ -83,9 +90,17 @@ namespace ks::ui
         // DockListProvider：返回参与搜索的 Dock 列表（按展示顺序）。
         using DockListProvider = std::function<QList<ads::CDockWidget*>()>;
         // DockPreparer：确保 Dock 懒加载内容已初始化（重入安全）。
-        using DockPreparer = std::function<void(ads::CDockWidget*)>;
-        // NestedDockPreparer：在搜索前准备 Dock 内部的懒 Tab，登记真实嵌套导航目标。
-        using NestedDockPreparer = std::function<void(ads::CDockWidget*)>;
+        // The bool is true only for Global search with a resolved cold-body
+        // catalog/navigator. Actual activation always requests normal content.
+        using DockPreparer = std::function<void(ads::CDockWidget*, bool)>;
+        // CurrentPage prepares the selected branch; Global retains complete
+        // discovery until a source proves searchable body coverage.
+        // MorePages schedules the next factory; Waiting is resumed once by the
+        // supplied callback. Activation requests full synchronous preparation.
+        // The final bool permits proven cold body substitutions only while a
+        // valid catalog and the real descriptor navigator are both available.
+        using NestedDockPreparer = std::function<PageSearchPreparation(ads::CDockWidget*, UiSearchScope,
+            bool, bool, std::function<void()>)>;
         // DockActivator：把 Dock 置前并设为当前页签（含关闭态恢复）。
         using DockActivator = std::function<void(ads::CDockWidget*)>;
 
@@ -109,6 +124,9 @@ namespace ks::ui
         // - 作用：注入参与搜索的 Dock 列表回调；
         // - 调用：MainWindow 接线时调用一次。
         void setDockListProvider(DockListProvider dockListProvider);
+
+        void setPageCatalog(PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator,
+            PageNavigationCatalogSearchCompleteness searchCompleteness = {});
 
         // setDockPreparer：
         // - 作用：注入 Dock 懒加载初始化回调（搜索前逐个调用）；
@@ -269,6 +287,9 @@ namespace ks::ui
         DockListProvider m_dockListProvider;      // m_dockListProvider：Dock 列表回调。
         DockPreparer m_dockPreparer;              // m_dockPreparer：Dock 懒加载初始化回调。
         NestedDockPreparer m_nestedDockPreparer;  // m_nestedDockPreparer：嵌套懒页准备回调。
+        PageNavigationCatalogProvider m_pageCatalogProvider;
+        PageNavigationCatalogSearchCompleteness m_pageCatalogSearchCompleteness;
+        PageNavigationCatalogNavigator m_pageCatalogNavigator;
         DockActivator m_dockActivator;            // m_dockActivator：Dock 置前激活回调。
 
         QFrame* m_popupPanel = nullptr;           // m_popupPanel：结果弹层容器（宿主窗口子控件）。
@@ -299,6 +320,13 @@ namespace ks::ui
         QPointer<QTableView> m_targetTableView;     // m_targetTableView：表格入口显式指定的目标表格。
         QPointer<QTableView> m_recentTableView;     // m_recentTableView：最近鼠标/键盘交互过的表格。
         QPointer<ads::CDockWidget> m_recentPageDockWidget; // m_recentPageDockWidget：最近交互控件所属 Dock。
+        std::shared_ptr<TableCellSearchCursor> m_tableSearchCursor;
+        struct DockSearchCursor;
+        std::shared_ptr<DockSearchCursor> m_dockSearchCursor;
+        // Query-local preparation identity; a changed content root must be prepared again.
+        QPointer<ads::CDockWidget> m_preparingSearchDock;
+        QPointer<QWidget> m_preparingSearchContent;
+        bool m_preparingHasBodyCatalog = false;
         QPointer<QTableView> m_pendingDirectTableView; // m_pendingDirectTableView：当前表格范围待扫描对象。
         QList<QPointer<QTableView>> m_filteredTableViewList; // m_filteredTableViewList：当前由通用搜索附加过滤的表格。
     };

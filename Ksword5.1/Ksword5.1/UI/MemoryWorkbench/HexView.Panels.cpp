@@ -16,6 +16,8 @@
 #include <QApplication>
 #include <QEvent>
 #include <QKeySequence>
+#include <QPointer>
+#include <QShowEvent>
 #include <QShortcut>
 #include <QSplitter>
 
@@ -303,84 +305,187 @@ namespace ks::ui
 
     // ======================== 导出 ========================
 
-    // 导出的统一实现：取数据、写文件、把结果显示在状态条并发 exportFinished。
-    // 传入：种类、目标路径、说明输出（可为空指针，拿到状态条上的同一段文字）。传出：是否成功。
-    bool HexView::runExport(hexexport::Kind kind, const QString& path, QString* messageOut)
+    // Freeze the already acquired complete value; never fetch a new target range.
+    bool HexView::captureExport(hexexport::Kind kind, hexexport::ExportSnapshot& value, QString& error) const
     {
-        // finish：统一收尾——显示、发信号、回填说明。
-        const auto finish = [this, messageOut](bool ok, const QString& message) {
-            showStatusMessage(ok ? HexViewStatusBar::Kind::Info : HexViewStatusBar::Kind::Error, message);
-            if (messageOut != nullptr)
-            {
-                *messageOut = message;
-            }
-            emit exportFinished(ok, message);
-            return ok;
-        };
-
-        QString error;
-        if (kind == hexexport::Kind::Binary)
+        value.kind = kind;
+        value.bytes = m_buffer;
+        value.baseAddress = m_baseAddress;
+        value.sourceVersion = m_bufferGeneration;
+        value.offset = 0;
+        value.length = m_buffer.size();
+        if (kind == hexexport::Kind::SelectedHex)
         {
-            if (m_buffer.isEmpty())
+            std::uint64_t first = 0;
+            std::uint64_t last = 0;
+            if (!selectionRange(first, last) || first >= static_cast<std::uint64_t>(m_buffer.size()) || last <= first)
             {
-                return finish(false, QStringLiteral("导出失败：当前无数据"));
+                error = QStringLiteral("导出失败：未选中有效字节");
+                return false;
             }
-            if (!hexexport::WriteBinaryFile(path, m_buffer, &error))
-            {
-                return finish(false, QStringLiteral("导出失败：%1").arg(error));
-            }
-            return finish(true, QStringLiteral("导出完成：%1 字节 -> %2")
-                .arg(static_cast<qulonglong>(m_buffer.size()))
-                .arg(path));
+            const auto end = (std::min)(last, static_cast<std::uint64_t>(m_buffer.size()));
+            value.offset = static_cast<qsizetype>(first);
+            value.length = static_cast<qsizetype>(end - first);
         }
-
-        if (kind == hexexport::Kind::HexDump)
+        else if (m_buffer.isEmpty())
         {
-            if (m_buffer.isEmpty())
-            {
-                return finish(false, QStringLiteral("导出失败：当前无数据"));
-            }
-            if (!hexexport::WriteTextFile(path, hexexport::FormatDump(m_baseAddress, m_buffer), &error))
-            {
-                return finish(false, QStringLiteral("导出失败：%1").arg(error));
-            }
-            return finish(true, QStringLiteral("导出完成：十六进制文本 -> %1").arg(path));
+            error = QStringLiteral("导出失败：当前无数据");
+            return false;
         }
-
-        // 选中字节：来自缓冲；没有数据就没有选区。
-        const QByteArray selected = selectedBytes();
-        if (selected.isEmpty())
-        {
-            return finish(false, QStringLiteral("导出失败：未选中有效字节"));
-        }
-        if (!hexexport::WriteTextFile(path, hexexport::FormatSelectedHex(selected), &error))
-        {
-            return finish(false, QStringLiteral("导出失败：%1").arg(error));
-        }
-        return finish(true, QStringLiteral("导出完成：%1 字节十六进制数据 -> %2")
-            .arg(static_cast<qulonglong>(selected.size()))
-            .arg(path));
+        return true;
     }
 
-    // 带对话框的导出：没有数据先直接报错（不问路径）；用户取消什么也不做；写失败再弹错误框。
+    void HexView::finishExport(bool ok, const QString& message)
+    {
+        const QPointer<HexView> guard(this);
+        showStatusMessage(ok ? HexViewStatusBar::Kind::Info : HexViewStatusBar::Kind::Error, message);
+        if (guard) emit exportFinished(ok, message);
+    }
+
+    // Existing direct callers require an actual completion result, not admission.
+    // They share bounded atomic serialization; all interactive actions use startExport.
+    bool HexView::runExport(hexexport::Kind kind, const QString& path, QString* messageOut)
+    {
+        hexexport::ExportSnapshot value;
+        QString message;
+        bool ok = captureExport(kind, value, message);
+        if (ok)
+        {
+            QString error;
+            ok = hexexport::WriteSnapshotFile(path, value, &error);
+            if (!ok) message = QStringLiteral("导出失败：%1").arg(error);
+            else if (kind == hexexport::Kind::Binary)
+                message = QStringLiteral("导出完成：%1 字节 -> %2").arg(static_cast<qulonglong>(value.length)).arg(path);
+            else if (kind == hexexport::Kind::HexDump)
+                message = QStringLiteral("导出完成：十六进制文本 -> %1").arg(path);
+            else
+                message = QStringLiteral("导出完成：%1 字节十六进制数据 -> %2").arg(static_cast<qulonglong>(value.length)).arg(path);
+        }
+        if (messageOut) *messageOut = message;
+        finishExport(ok, message);
+        return ok;
+    }
+
+    bool HexView::startExport(std::shared_ptr<const hexexport::ExportSnapshot> value, const QString& path)
+    {
+        if (!m_exportState)
+        {
+            m_exportState = std::make_unique<ExportState>();
+            m_exportState->operation = std::make_unique<CompleteExportOperation>(this);
+        }
+        const QPointer<HexView> guard(this);
+        m_exportState->operation->reconcile();
+        if (!guard || m_exportState->operation->isBusy()) return false;
+
+        const auto kind = value->kind;
+        const auto length = value->length;
+        const auto sourceVersion = value->sourceVersion;
+        const auto identity = QString::number(static_cast<qulonglong>(value->baseAddress), 16)
+            + QChar(u':') + QString::number(value->offset) + QChar(u':') + QString::number(value->length);
+        const auto control = value->control;
+        auto input = MakeCompleteExportInput(value, identity, sourceVersion, std::nullopt,
+            ks::i18n::LanguageManager::instance().sourceTextSnapshot(),
+            [](const hexexport::ExportSnapshot& frozen, CompleteExportSink& sink, const ks::i18n::SourceTextSnapshot&) {
+                return hexexport::SerializeSnapshot(frozen, sink);
+            });
+        input.fileMode = kind == hexexport::Kind::Binary ? CompleteExportFileMode::Binary : CompleteExportFileMode::NativeText;
+        input.utf8Bom = false;
+        auto* operation = m_exportState->operation.get();
+        const auto journal = operation->journal();
+        m_exportState->control = control;
+        const auto accepted = operation->startFile(path, std::move(input),
+            [guard, control, journal, kind, length, path](const CompleteExportReceipt& receipt) {
+                if (!guard) return;
+                const bool unknown = receipt.phase == CompleteExportPhase::OutcomeUnavailable;
+                const bool canceled = !unknown && control->phase.load() == hexexport::ExportControl::Phase::Canceled;
+                const bool ok = receipt.succeeded();
+                QString message;
+                if (unknown)
+                    message = QStringLiteral("导出结果尚未确认，请核对目标文件：%1").arg(path);
+                else if (canceled)
+                    message = QStringLiteral("导出已取消");
+                else if (ok && kind == hexexport::Kind::Binary)
+                    message = QStringLiteral("导出完成：%1 字节 -> %2").arg(static_cast<qulonglong>(length)).arg(path);
+                else if (ok && kind == hexexport::Kind::HexDump)
+                    message = QStringLiteral("导出完成：十六进制文本 -> %1").arg(path);
+                else if (ok)
+                    message = QStringLiteral("导出完成：%1 字节十六进制数据 -> %2").arg(static_cast<qulonglong>(length)).arg(path);
+                else
+                {
+                    QString error = QStringLiteral("未开始写入文件，请重试导出。");
+                    if (receipt.error == CompleteExportError::OpenFailed)
+                        error = QStringLiteral("无法写入文件：%1（%2）").arg(path, receipt.nativeError);
+                    else if (receipt.error == CompleteExportError::WriteFailed || receipt.error == CompleteExportError::FlushFailed
+                        || receipt.error == CompleteExportError::CommitFailed)
+                        error = QStringLiteral("写入不完整：%1（%2）").arg(path, receipt.nativeError);
+                    message = QStringLiteral("导出失败：%1").arg(error);
+                }
+                if (!unknown && receipt.terminal()) journal->acknowledge(receipt.id);
+                if (guard->m_exportState && guard->m_exportState->control == control) guard->m_exportState->control.reset();
+                guard->finishExport(ok, message);
+                if (guard && !ok && !canceled) hexexport::ShowExportError(guard, message);
+            });
+        if (!guard) return accepted != 0;
+        if (accepted == 0)
+        {
+            if (m_exportState->control == control) m_exportState->control.reset();
+            return false;
+        }
+        if (m_exportState->control == control)
+            showStatusMessage(HexViewStatusBar::Kind::Info, QStringLiteral("正在准备完整导出；再次点击可取消准备。"));
+        return true;
+    }
+
+    // The next export action cancels only preparation; an admitted commit finishes.
     void HexView::runExportWithDialog(hexexport::Kind kind)
     {
-        const bool noData = m_buffer.isEmpty() || (kind == hexexport::Kind::SelectedHex && selectedBytes().isEmpty());
-        if (noData)
+        const QPointer<HexView> guard(this);
+        if (m_exportState)
         {
-            runExport(kind, QString());
+            m_exportState->operation->reconcile();
+            if (!guard) return;
+            if (m_exportState->operation->isBusy())
+            {
+                const auto control = m_exportState->control;
+                const bool canceled = control && (control->cancelPreparation()
+                    || control->phase.load() == hexexport::ExportControl::Phase::Canceled);
+                showStatusMessage(HexViewStatusBar::Kind::Info,
+                    canceled ? QStringLiteral("导出已取消") : QStringLiteral("导出进行中"));
+                return;
+            }
+        }
+        hexexport::ExportSnapshot value;
+        QString error;
+        if (!captureExport(kind, value, error))
+        {
+            finishExport(false, error);
             return;
         }
+        // Retain before the nested dialog: cancel/close also retires a replaced source off GUI.
+        value.control = std::make_shared<hexexport::ExportControl>();
+        auto snapshot = RetainCompleteExportSnapshot<hexexport::ExportSnapshot>(
+            std::make_shared<const hexexport::ExportSnapshot>(std::move(value)));
         const QString path = hexexport::PickSavePath(this, kind);
-        if (path.trimmed().isEmpty())
+        if (!guard || path.trimmed().isEmpty()) return;
+        if (m_exportState)
         {
-            return;
+            m_exportState->operation->reconcile();
+            if (!guard) return;
+            if (m_exportState->operation->isBusy()) return;
         }
-        QString message;
-        if (!runExport(kind, path, &message))
+        if (!startExport(std::move(snapshot), path) && guard)
         {
-            hexexport::ShowExportError(this, message);
+            const auto message = QStringLiteral("未开始写入文件，请重试导出。");
+            finishExport(false, message);
+            if (guard) hexexport::ShowExportError(this, message);
         }
+    }
+
+    void HexView::showEvent(QShowEvent* event)
+    {
+        const QPointer<HexView> guard(this);
+        QWidget::showEvent(event);
+        if (guard && m_exportState) m_exportState->operation->reconcile();
     }
 
     // 三个不弹对话框的导出。

@@ -2354,6 +2354,13 @@ namespace ksword::ark
         std::uint64_t ioTimerAddress = 0;      // DeviceObject.Timer；只读诊断地址。
     };
 
+    // Complete native module value for one worker enumeration only. Never cache across refreshes.
+    // Empty means unavailable/redacted/malformed and preserves the original R0 attribution path.
+    struct DriverObjectModuleSnapshot
+    {
+        std::vector<std::uint8_t> systemInformation;
+    };
+
     // DriverObjectQueryResult 承载 Phase-9 DriverObject/DeviceObject 查询响应。
     struct DriverObjectQueryResult
     {

@@ -104,6 +104,7 @@ namespace ks::ui
         IWorkbenchBytesProvider* provider_ = nullptr; // 宿主拥有的共同数据源。
         WorkbenchPseudocodeContext context_;          // 当前冻结分析上下文。
         WorkbenchPseudocodeContext requestContext_;   // 启动时身份、代次和范围。
+        mutable std::optional<std::vector<std::uint64_t>> requestContentStamp_;
         DecompilerRequest request_;                  // 启动时字节，用于完成后逐字复核。
         std::shared_ptr<const std::vector<std::uint8_t>> fileSnapshot_; // 同一份完整 PE 证据。
         QVector<FileAnalysisRegion> fileRegions_;    // 单义文件偏移与 RVA 映射。

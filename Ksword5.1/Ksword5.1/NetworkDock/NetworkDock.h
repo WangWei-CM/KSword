@@ -11,18 +11,24 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "PacketMonitorTable.h"
+#include "../UI/PageNavigationCatalog.h"
 #include "../MonitorDock/ProcessTraceTimelineWidget.h"
 #include "../ksword/network/network_nids.h"
 
+#include <QCache>
+#include <QCursor>
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QSet>
 #include <QStringList>
 #include <QThreadPool>
 #include <QVector>
 #include <QWidget>
 
+#include <array>
 #include <atomic>        // std::atomic_bool：存活主机扫描的并发状态控制。
 #include <condition_variable> // std::condition_variable：析构阶段等待扫描任务退出。
 #include <cstdint>       // std::uint32_t/std::uint64_t：PID、序号与长度字段。
@@ -46,6 +52,7 @@ class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class QTableView;
 class QTabWidget;
 class QTimer;
 class QUrl;
@@ -60,6 +67,64 @@ class CodeEditorWidget;
 class MultiThreadDownloadSegmentBarWidget;
 class NetworkFirewallPage;
 class NetworkAuditPage;
+
+namespace ks::ui { class AsyncUiDispatcher; class RetainedCleanupJob; }
+
+namespace network_dock_detail
+{
+    struct TrafficPacketMailbox
+    {
+        std::mutex mutex;
+        std::deque<ks::network::PacketRecord> packets;
+        std::uint64_t dropped = 0;
+        bool closed = false;
+    };
+    // One accepted capture epoch. Native calls and capture joins only run on workers.
+    struct TrafficCaptureLifetime
+    {
+        explicit TrafficCaptureLifetime(std::shared_ptr<ks::network::TrafficMonitorService> value)
+            : service(std::move(value)) {}
+        bool reserve();
+        void release(const std::shared_ptr<ks::ui::RetainedCleanupJob>& job);
+        void requestStop();
+        bool ready();
+        bool stopR0(QString* error = nullptr, bool rememberFailure = true);
+        bool finish(QString* error);
+        const std::shared_ptr<ks::network::TrafficMonitorService> service;
+        std::mutex gate;
+        std::size_t inFlight = 0;
+        bool closing = false;
+        std::atomic_bool r0Touched{false};
+        bool r0FailurePending = false; // Published by the last reservation's gate release.
+        QString r0Failure;
+        std::atomic_bool finished{false};
+    };
+    struct TrafficCaptureReservation
+    {
+        std::shared_ptr<TrafficCaptureLifetime> lifetime;
+        std::shared_ptr<ks::ui::RetainedCleanupJob> job;
+        ~TrafficCaptureReservation() { if (lifetime) lifetime->release(job); }
+    };
+    struct HttpsSystemProxySnapshot
+    {
+        bool captured = false;
+        std::optional<std::uint32_t> proxyEnable;
+        std::optional<std::uint32_t> autoDetect;
+        std::optional<QString> proxyServer;
+        std::optional<QString> proxyOverride;
+        std::optional<QString> autoConfigUrl;
+    };
+    struct HttpsProxyRecoveryState
+    {
+        HttpsSystemProxySnapshot snapshot;
+        bool frozen = false; // GUI-owned publication boundary.
+        std::atomic_bool ready{true}; // No write is accepted until create succeeds.
+        std::atomic_bool stopRequested{false};
+    };
+}
+
+namespace ks::ui { class AsyncOperation; }
+namespace network_dock_detail { class NidsAnalysisSession; struct NidsAnalysisBatch; }
 
 namespace ks::network
 {
@@ -79,10 +144,12 @@ class NetworkDock final : public QWidget
     Q_OBJECT
 
 public:
+    struct RouteRecord;
     // 构造函数：
     // - 作用：初始化 UI、绑定后台服务回调、连接交互信号。
     // - 参数 parent：Qt 父控件，可为空。
-    explicit NetworkDock(QWidget* parent = nullptr);
+    enum class ConstructScope { Full, ProcessConnections };
+    explicit NetworkDock(QWidget* parent = nullptr, ConstructScope scope = ConstructScope::Full);
 
     // 析构函数：
     // - 作用：停止后台抓包线程，避免窗口释放后仍有异步回调。
@@ -94,6 +161,11 @@ public:
     // setProcessDetailConnectionScope：进程详情内嵌时仅显示网络审计 Cross-View 入口。
     void setProcessDetailConnectionScope();
 
+    static ks::ui::PageNavigationCatalog navigationCatalog(const NetworkDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+    // Actual tab factories register existing identities, never lazy business creation.
+    void registerNavigationTab(const QString& id, QTabWidget* tabs, QWidget* page);
+
 protected:
     // showEvent：
     // - 首次显示时再初始化 HTTPS 代理服务实例；
@@ -101,6 +173,13 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    struct NavigationTarget
+    {
+        QPointer<QTabWidget> tabs;
+        QPointer<QWidget> page;
+    };
+    QHash<QString, NavigationTarget> m_navigationTargets;
+
     // PacketTableColumn：流量监控主表列索引定义。
     enum class PacketTableColumn : int
     {
@@ -300,6 +379,7 @@ private:
     // MultiThreadDownloadTaskState：
     // - 作用：保存单任务下载状态、分段集合和后台线程状态；
     // - 仅供“多线程下载”页面内部逻辑使用。
+    class MultiThreadDownloadTaskModel;
     struct MultiThreadDownloadTaskState
     {
         int taskId = 0; // taskId：任务编号。
@@ -312,6 +392,7 @@ private:
         std::uint64_t totalBytes = 0; // totalBytes：目标文件总字节数。
         std::atomic<std::uint64_t> downloadedBytes{ 0 }; // downloadedBytes：任务累计已下载字节数。
         std::atomic_int runningWorkerCount{ 0 }; // runningWorkerCount：仍在运行的下载线程数量。
+        std::atomic_bool preparing{ false }; // preparing：目录/HEAD/文件准备尚未完成；普通结果字段仅GUI发布。
         std::atomic_bool finished{ false }; // finished：任务是否已完成（成功或失败结束）。
         std::atomic_bool failed{ false }; // failed：任务是否失败结束。
         std::atomic_bool cancelRequested{ false }; // cancelRequested：任务是否收到取消请求。
@@ -329,6 +410,13 @@ private:
     // - 作用：初始化根布局与侧边栏 Tab 容器。
     // - 返回：无。
     void initializeUi();
+
+    // Hidden diagnostics retain their page identities but do not query global state.
+    void initializeVisibleDiagnosticPage();
+    bool isPacketProjectionVisible() const;
+    void synchronizeVisiblePacketProjection();
+    void synchronizeVisibleNidsProjection();
+    void loadHostsFileEditor();
 
     // initializeTrafficMonitorTab：
     // - 作用：构建“流量监控”页（控制栏 + 组合过滤栏 + 报文表）。
@@ -374,6 +462,8 @@ private:
     void initializeRouteTableTab();
     void refreshRouteTable();
     void addRouteEntry();
+    void submitRouteMutation(int kind, RouteRecord original, RouteRecord target, bool persistent);
+    ks::ui::AsyncOperation* m_routeMutationOperation = nullptr;
     void editSelectedRouteEntry();
     void deleteSelectedRouteEntry();
 
@@ -406,12 +496,23 @@ private:
     // - 作用：统一连接按钮、输入框、表格的信号槽。
     // - 返回：无。
     void initializeConnections();
+    bool ensureNetworkToolPage(QWidget* page);
+    void ensureVisibleNetworkToolPage();
+    void initializeNidsConnections();
+    void initializeHttpsAnalyzeConnections();
+    void initializeMultiThreadDownloadConnections();
+    void initializeManualRequestConnections();
+    void initializeArpCacheConnections();
+    void initializeDnsCacheConnections();
+    void initializeAliveHostScanConnections();
+    QHash<QWidget*, std::function<void()>> m_coldNetworkToolFactories;
 
     // ========================= 抓包控制 =========================
     // startTrafficMonitor：
     // - 作用：请求后台服务启动抓包线程。
     // - 返回：无。
     void startTrafficMonitor();
+    bool ensureTrafficCaptureLifetime();
 
     // stopTrafficMonitor：
     // - 作用：请求后台服务停止抓包线程。
@@ -440,19 +541,20 @@ private:
     // - 作用：处理一条抓包记录，写入缓存并按过滤状态决定是否显示。
     // - 参数 packetRecord：后台服务解析出的报文记录。
     // - 返回：无。
-    void onPacketCaptured(const ks::network::PacketRecord& packetRecord);
+    void onPacketCaptured(ks::network::PacketRecord packetRecord);
 
     // processNidsPacket：
     // - 作用：把单条报文送入 NIDS 引擎并追加新告警。
     // - 参数 packetRecord：后台服务解析出的报文记录。
     // - 返回：无。
     void processNidsPacket(const ks::network::PacketRecord& packetRecord);
-
-    // appendNidsAlertRow：
-    // - 作用：把单条 NIDS 告警追加到表格末尾。
-    // - 参数 alertRecord：待显示告警。
-    // - 返回：无。
-    void appendNidsAlertRow(const ks::network::NidsAlert& alertRecord);
+    void scheduleNidsAnalysis();
+    void launchNidsAnalysisBatch();
+    void retireNidsAnalysisSession();
+    QIcon resolveNidsProcessIcon(const ks::network::NidsAlert& alert);
+    void scheduleNidsIconWork();
+    void launchNidsIconWork();
+    void applyNidsAnalysisBatch(const std::shared_ptr<network_dock_detail::NidsAnalysisBatch>& batch);
 
     // rebuildNidsAlertTable：
     // - 作用：按当前等级过滤重建 NIDS 告警表。
@@ -469,11 +571,6 @@ private:
     // - 返回：无。
     void updateNidsStatusLabel();
 
-    // nidsAlertPassesFilter：
-    // - 作用：判断告警是否满足当前等级过滤。
-    // - 参数 alertRecord：待判断告警。
-    // - 返回：true=显示；false=隐藏。
-    bool nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecord) const;
 
     // onStatusMessageArrived：
     // - 作用：显示后台状态文本并同步按钮状态。
@@ -487,11 +584,9 @@ private:
     // - 返回：无。
     void onRateLimitActionArrived(const ks::network::RateLimitActionEvent& actionEvent);
 
-    // appendPacketToMonitorTable：
-    // - 作用：把一条报文追加到“流量监控”主表末尾。
-    // - 参数 packetRecord：待追加报文。
-    // - 返回：无。
-    void appendPacketToMonitorTable(const ks::network::PacketRecord& packetRecord);
+    // Visible metadata requests never materialize or mutate table items.
+    void requestPacketMetadata(const ks::network::PacketRecord& packetRecord);
+    void drainPacketMetadata();
 
     // scheduleDomainResolutionForPacket：
     // - 对远端 IP 启动有界线程池解析，优先使用本机 DNS 缓存；
@@ -509,6 +604,8 @@ private:
     // - 作用：按当前组合过滤条件重建主流量表。
     // - 返回：无。
     void rebuildMonitorTableByFilter();
+    void requestPacketTableProjection();
+    void replacePacketTableRecord(std::uint64_t sequence);
 
     // trimOldestPacketWhenNeeded：
     // - 作用：当缓存超上限时删除最老报文，限制内存占用。
@@ -786,9 +883,9 @@ private:
     // - 参数 packetRecord：待匹配报文。
     // - 参数 groupFilter：编译后的规则组。
     // - 返回：true=命中；false=不命中。
-    bool packetMatchesMonitorFilterGroup(
+    static bool packetMatchesMonitorFilterGroup(
         const ks::network::PacketRecord& packetRecord,
-        const MonitorFilterRuleGroupCompiled& groupFilter) const;
+        const MonitorFilterRuleGroupCompiled& groupFilter);
 
     // findMonitorFilterRuleGroupById：
     // - 作用：按规则组 ID 查找 UI 状态对象。
@@ -940,10 +1037,11 @@ private:
     void browseMultiThreadDownloadDirectory();
 
     // loadMultiThreadDownloadCaptureSettings：
-    // - 作用：读取“剪贴板自动捕获下载链接”设置并同步到多线程下载页控件；
-    // - 调用方式：多线程下载页 UI 构建完成后调用。
+    // - 作用：启动时读取“剪贴板自动捕获下载链接”值，未访问下载页也持续捕获；
+    // - 调用方式：完整网络宿主启动时读取，惰性UI随后回填已有值。
     // - 返回：无。
     void loadMultiThreadDownloadCaptureSettings();
+    void updateMultiThreadDownloadCaptureSettingsUi();
 
     // saveMultiThreadDownloadCaptureSettings：
     // - 作用：把“剪贴板自动捕获下载链接”设置写入 JSON 文件；
@@ -1050,10 +1148,10 @@ private:
     // - 返回：无。
     void stopAliveHostScan();
 
-    // cancelAndWaitForAliveHostScan：
-    // - 作用：请求 ICMP 扫描停止，并在析构前等待后台协调任务及其 worker 退出；
+    // cancelAliveHostScan：
+    // - 作用：请求 ICMP 扫描停止，后台值任务自行归还原生句柄；
     // - 返回：无。
-    void cancelAndWaitForAliveHostScan();
+    void cancelAliveHostScan();
 
     // appendAliveHostRow：
     // - 作用：向扫描结果表追加一行。
@@ -1121,7 +1219,7 @@ private:
     // clearHttpsSystemProxyRecoveryTransaction：
     // - 作用：仅在代理原值写回且 WinINet 刷新成功后删除持久化事务；
     // - 返回：true=删除并落盘成功或记录不存在；false=仍须保留事务。
-    bool clearHttpsSystemProxyRecoveryTransaction(QString* errorTextOut) const;
+    static bool clearHttpsSystemProxyRecoveryTransaction(QString* errorTextOut);
 
     // recoverPendingHttpsSystemProxyTransaction：
     // - 作用：启动时加载上次异常退出遗留的持久化事务并自动恢复系统代理；
@@ -1134,6 +1232,10 @@ private:
     // - 作用：恢复本页应用 HTTPS 代理前保存的当前用户代理项。
     // - 返回：true=恢复成功；false=恢复失败。
     bool restoreHttpsSystemProxySnapshot(QString* errorTextOut);
+    static bool restoreHttpsSystemProxySnapshotValues(
+        const network_dock_detail::HttpsSystemProxySnapshot& snapshot, QString* errorTextOut);
+    bool ensureHttpsProxyRecoveryCleanup();
+    void retireHttpsProxyRecovery();
 
     // onHttpsProxyParsedEntryArrived：
     // - 作用：接收代理层解析结果并写入表格。
@@ -1163,6 +1265,8 @@ private:
     // - 作用：按关键字与事件类型过滤 HTTPS 解析表，仅影响显示结果。
     // - 返回：无。
     void applyHttpsParsedTableFilter();
+    void synchronizeVisibleHttpsProjection();
+    void adjustHttpsParsedEventCount(const QString& eventType, int delta);
 
     // clearHttpsParsedEntries：
     // - 作用：清空 HTTPS 解析表及对应详情缓存。
@@ -1268,6 +1372,10 @@ private:
 
 private:
     // ========================= 顶层布局 =========================
+    bool m_routeInitialReadStarted = false;
+    bool m_arpInitialReadStarted = false;
+    bool m_dnsInitialReadStarted = false;
+    bool m_hostsInitialReadStarted = false;
     QVBoxLayout* m_rootLayout = nullptr;   // 根布局，只承载侧边栏 Tab 容器。
     QTabWidget* m_sideTabWidget = nullptr; // 侧边栏 Tab（West）。
 
@@ -1298,7 +1406,7 @@ private:
     QPushButton* m_exportMonitorFilterButton = nullptr;     // 导出配置按钮。
     QLabel* m_monitorFilterStateLabel = nullptr;            // 当前过滤状态汇总标签。
     ProcessTraceTimelineWidget* m_packetTimelineWidget = nullptr; // 流量监控页时间轴（复用 ETW 框选交互控件）。
-    QTableWidget* m_packetTable = nullptr;             // 全量发送报文表格。
+    PacketMonitorTable* m_packetTable = nullptr;             // 全量发送报文表格。
 
     // ========================= Tab2：NIDS ====================
     QWidget* m_nidsPage = nullptr;            // NIDS 页容器。
@@ -1308,7 +1416,11 @@ private:
     QComboBox* m_nidsSeverityFilterCombo = nullptr; // 告警等级过滤。
     QPushButton* m_nidsClearButton = nullptr; // 清空 NIDS 告警按钮。
     QLabel* m_nidsStatusLabel = nullptr;      // NIDS 运行状态标签。
-    QTableWidget* m_nidsAlertTable = nullptr; // NIDS 告警表。
+    QTableView* m_nidsAlertTable = nullptr;
+    class NidsAlertModel;
+    class NidsAlertProxy;
+    NidsAlertModel* m_nidsAlertModel = nullptr;
+    NidsAlertProxy* m_nidsAlertProxy = nullptr; // NIDS 告警表。
 
     // ========================= Tab3：进程限速 ====================
     QWidget* m_rateLimitPage = nullptr;           // 进程限速页容器。
@@ -1338,10 +1450,12 @@ private:
     QSet<quint32> m_connectionPidFilterSet;          // 进程页“转到网络”注入的独立 PID 筛选。
 
     // ========================= Tab4：防火墙 ====================
-    NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙页容器。
+    QWidget* m_firewallTabPage = nullptr; // 稳定顶层Tab壳；实际控制器按需创建。
+    NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙实际页面/控制器。
 
     // ========================= Tab4：网络审计 ====================
-    NetworkAuditPage* m_networkAuditPage = nullptr;  // 网络审计页容器。
+    QWidget* m_networkAuditTabPage = nullptr; // 稳定顶层Tab壳，PID跳转也先完成此工厂。
+    NetworkAuditPage* m_networkAuditPage = nullptr;  // 网络审计实际页面。
 
     // ========================= Tab5：请求构造 ====================
     QWidget* m_manualRequestPage = nullptr;          // 请求构造页容器。
@@ -1386,7 +1500,7 @@ private:
     QPushButton* m_multiDownloadBrowseDirButton = nullptr; // 选择下载目录按钮。
     QPushButton* m_multiDownloadStartButton = nullptr; // 启动下载按钮。
     QLabel* m_multiDownloadStatusLabel = nullptr;      // 下载状态标签。
-    QTableWidget* m_multiDownloadTaskTable = nullptr;  // 下载任务总览表。
+    QTableView* m_multiDownloadTaskTable = nullptr;  // 下载任务总览表。
     QTableWidget* m_multiDownloadSegmentTable = nullptr; // 当前任务分段进度表。
     MultiThreadDownloadSegmentBarWidget* m_multiDownloadSegmentBar = nullptr; // 断节式总进度条控件。
     QLabel* m_multiDownloadTotalProgressLabel = nullptr; // 总进度百分比标签。
@@ -1415,6 +1529,12 @@ public:
 private:
 
     // ========================= Tab6：路由表 ====================
+    void applyRouteTableRead(const std::vector<RouteRecord>& records, DWORD status);
+    void applyArpTableRead(const std::vector<QStringList>& rows, bool success);
+    void applyDnsTableRead(const std::vector<QStringList>& rows, const QString& errorText);
+    ks::ui::AsyncOperation* m_routeReadOperation = nullptr;
+    ks::ui::AsyncOperation* m_arpReadOperation = nullptr;
+    ks::ui::AsyncOperation* m_dnsReadOperation = nullptr;
     QWidget* m_routeTablePage = nullptr;
     QVBoxLayout* m_routeTableLayout = nullptr;
     QHBoxLayout* m_routeTableControlLayout = nullptr;
@@ -1479,9 +1599,19 @@ private:
     QPushButton* m_httpsExportParsedButton = nullptr;// HTTPS解析结果导出按钮。
     QCheckBox* m_httpsAutoScrollCheck = nullptr;    // HTTPS解析表自动滚动开关。
     QLabel* m_httpsParsedSummaryLabel = nullptr;    // HTTPS解析表统计标签。
-    QTableWidget* m_httpsParsedTable = nullptr;     // HTTPS解析结果表格。
+    QTableView* m_httpsParsedTable = nullptr;
+    class HttpsParsedModel;
+    class HttpsParsedProxy;
+    HttpsParsedModel* m_httpsParsedModel = nullptr;
+    HttpsParsedProxy* m_httpsParsedProxy = nullptr;
+    bool m_httpsProjectionDirty = false;
+    bool m_httpsProjectionInProgress = false;     // HTTPS解析结果表格。
     QPlainTextEdit* m_httpsProxyLogOutput = nullptr;// HTTPS代理日志输出框。
-    std::vector<ks::network::HttpsProxyParsedEntry> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
+    int m_httpsParsedVisibleCount = 0;
+    int m_httpsParsedRequestCount = 0;
+    int m_httpsParsedResponseCount = 0;
+    int m_httpsParsedErrorCount = 0;
+    std::deque<std::shared_ptr<const ks::network::HttpsProxyParsedEntry>> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
 
     // ========================= Tab10：hosts文件编辑 ====================
     QWidget* m_hostsFileEditorPage = nullptr;       // hosts文件编辑页容器。
@@ -1489,14 +1619,29 @@ private:
     CodeEditorWidget* m_hostsFileEditor = nullptr;  // hosts文件编辑器（全屏复用项目文本编辑组件）。
 
     // ========================= 后台服务与缓存 ====================
-    std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
-    ks::network::NidsEngine m_nidsEngine; // NIDS 规则引擎实例。
+    const ConstructScope m_constructScope;
+    std::shared_ptr<ks::network::TrafficMonitorService> m_trafficService; // Capture epoch cleanup retains the independent service.
+    std::shared_ptr<network_dock_detail::TrafficCaptureLifetime> m_trafficLifetime;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_trafficCleanup;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_trafficDispatcher;
+    std::shared_ptr<network_dock_detail::NidsAnalysisSession> m_nidsAnalysisSession;
+    ks::ui::AsyncOperation* m_nidsAnalysisOperation = nullptr;
+    bool m_nidsAnalysisKickScheduled = false;
+    bool m_nidsAnalysisFailed = false;
+    ks::ui::AsyncOperation* m_nidsIconOperation = nullptr;
+    bool m_nidsIconKickScheduled = false;
+    QStringList m_nidsIconActivePaths;
+    QCache<QString, QIcon> m_nidsIconCache{512}; // Disposable rendering only; canonical alert identity never capped here.
+    QSet<QString> m_nidsIconPendingPaths;
+    std::deque<QString> m_nidsIconQueue;
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_r0TrafficRefreshTimer = nullptr; // R0 WFP 逐包增量查询轮询定时器。
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
     QTimer* m_multiDownloadRefreshTimer = nullptr; // 多线程下载页面刷新定时器（进度UI节流）。
     std::unique_ptr<ks::network::HttpsMitmProxyService> m_httpsProxyService; // HTTPS MITM 代理服务对象。
+    std::shared_ptr<network_dock_detail::HttpsProxyRecoveryState> m_httpsRecoveryState;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_httpsRecoveryCleanup;
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
     enum class TrafficMonitorSource : std::uint8_t
     {
@@ -1518,7 +1663,6 @@ private:
     std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
     std::atomic_bool m_r0TrafficRefreshPending{ false }; // R0 逐包查询重入门控。
     std::atomic<std::uint64_t> m_monitorGeneration{ 0 }; // 启停代数，丢弃过期异步结果。
-    std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 
     // 当前已应用过滤状态：
     // - m_monitorFilterRuleGroupUiList 保存“原始 UI 配置”；
@@ -1536,7 +1680,7 @@ private:
     // - 仍保留硬上限，避免极端场景内存失控。
     static constexpr std::size_t kMaxPendingPacketQueueCount = 80000;
     std::deque<std::uint64_t> m_packetSequenceOrder; // 报文序号按时间顺序缓存。
-    std::unordered_map<std::uint64_t, ks::network::PacketRecord> m_packetBySequence; // 序号 -> 报文映射。
+    std::unordered_map<std::uint64_t, std::shared_ptr<ks::network::PacketRecord>> m_packetBySequence; // 序号 -> 报文映射。
     std::uint64_t m_r0LastEventSequence = 0; // 已消费的驱动 WFP 逐包 cursor，用于严格增量去重。
     std::uint64_t m_r0LastDroppedEventCount = 0; // 驱动逐包 ring 累计覆盖数，供状态栏显示。
     std::uint64_t m_r0SyntheticSequence = (1ULL << 63U); // UI 主键序号；原始驱动 sequence 单独保存在 PacketRecord。
@@ -1553,16 +1697,42 @@ private:
     std::uint64_t m_packetTimelineAccumulatedActive100ns = 0; // 已完成会话累计监控时长，停机时不增加。
     std::uint64_t m_packetTimelineLastHeartbeatSecond = 0; // 时间轴空闲刷新秒号，用于空流量时补零速率。
     qint64 m_lastPacketTimelineRefreshMs = 0; // 上次把完整点集复制到时间轴控件的时间，用于限制高频全量复制。
+    struct PacketTableProjectionState
+    {
+        std::uint64_t generation = 0;
+        bool active = false, enabled = true, locked = false;
+        int sortColumn = -1;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+        QCursor cursor;
+    };
+    std::deque<std::vector<std::uint64_t>> m_packetMetadataBatches;
+    std::size_t m_packetMetadataCursor = 0;
+    bool m_packetMetadataScheduled = false, m_packetTableKickScheduled = false;
+    QHash<QString, QSet<qulonglong>> m_packetSequencesByAddress;
+    std::uint64_t m_packetTableContentVersion = 0;
+    ks::ui::AsyncOperation* m_packetTableProjectionOperation = nullptr;
+    std::unordered_map<std::uint64_t, std::shared_ptr<const PacketMonitorRecord>> m_packetTableRecords;
+    PacketTableProjectionState m_packetTableProjection;
+    bool m_packetTableProjectionDirty = false;
+    bool m_packetTimelineProjectionDirty = false;
+    ks::ui::AsyncOperation* m_packetTimelineProjectionOperation = nullptr;
+    std::uint64_t m_packetTimelineProjectionEpoch = 0;
+    bool m_packetTimelineProjectionQueued = false;
     bool m_packetTimelineUserSelectionActive = false;      // 用户是否已启用流量时间轴框选过滤。
     bool m_packetTimelineSessionActive = false;            // 是否存在正在运行的时间轴监控会话。
 
     // 后台线程 -> UI 线程的报文暂存队列（只存数据，不碰 UI 控件）。
-    std::deque<ks::network::PacketRecord> m_pendingPacketQueue;
-    mutable std::mutex m_pendingPacketMutex;
-    std::uint64_t m_droppedPacketCount = 0; // 队列满时丢弃计数（用于状态提示）。
+    std::shared_ptr<network_dock_detail::TrafficPacketMailbox> m_packetMailbox =
+        std::make_shared<network_dock_detail::TrafficPacketMailbox>();
+    std::deque<ks::network::PacketRecord>& m_pendingPacketQueue = m_packetMailbox->packets;
+    std::mutex& m_pendingPacketMutex = m_packetMailbox->mutex;
+    std::uint64_t& m_droppedPacketCount = m_packetMailbox->dropped;
 
     static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
-    std::deque<ks::network::NidsAlert> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
+    bool m_nidsProjectionNeedsRebuild = false;
+    bool m_nidsProjectionInProgress = false;
+    std::array<std::size_t, 4> m_nidsRetainedSeverityCounts{};
+    std::deque<std::shared_ptr<const ks::network::NidsAlert>> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
     std::uint64_t m_nidsAnalyzedPacketCount = 0; // 已送入 NIDS 的报文数量。
     std::uint64_t m_nidsTotalAlertCount = 0;     // 本轮累计告警数量。
 
@@ -1579,23 +1749,24 @@ private:
     // AliveScanTaskState：让后台扫描在 QWidget 生命周期之外仍可安全记录退出状态。
     struct AliveScanTaskState
     {
-        std::mutex mutex; // mutex：保护 activeTaskCount。
-        std::condition_variable completion; // completion：最后一个协调任务退出时唤醒析构路径。
         std::atomic_bool cancelRequested{ false }; // cancelRequested：独立于 QWidget 的取消请求。
-        std::size_t activeTaskCount = 0; // activeTaskCount：尚未退出的 ICMP 扫描协调任务数。
     };
 
     // 存活主机扫描状态：防止重复启动并支持用户中断。
     std::atomic_bool m_aliveScanRunning{ false };
     std::atomic_bool m_aliveScanCancel{ false };
     int m_aliveScanProgressPid = 0;
-    QThreadPool m_aliveScanThreadPool; // m_aliveScanThreadPool：仅承载本 Dock 的扫描协调任务，避免等待全局任务池。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_aliveScanDispatcher; // GUI close gate; workers never borrow QObject receiver.
     std::shared_ptr<AliveScanTaskState> m_aliveScanTaskState = std::make_shared<AliveScanTaskState>();
 
     // 多线程下载任务运行状态：支持多任务并行与界面周期刷新。
+    MultiThreadDownloadTaskModel* m_multiDownloadTaskModel = nullptr; // 完整历史模型，活动行独立增量刷新。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_multiDownloadDispatcher; // 析构第一步关闭，后台只持共享门禁。
     mutable std::mutex m_multiDownloadTaskMutex; // m_multiDownloadTaskMutex：下载任务列表并发访问锁。
     std::vector<std::shared_ptr<MultiThreadDownloadTaskState>> m_multiDownloadTaskList; // m_multiDownloadTaskList：下载任务状态集合。
     int m_multiDownloadNextTaskId = 1; // m_multiDownloadNextTaskId：新建任务编号递增计数器。
+    int m_multiDownloadLastSegmentTaskId = 0; // 已投影的分段任务身份，切选时重新投影。
+    bool m_multiDownloadSegmentProjectionTerminal = false; // 完成分段不参加周期重复绘制。
     int m_multiDownloadSelectedTaskId = 0; // m_multiDownloadSelectedTaskId：当前分段详情面板绑定的任务编号。
     bool m_multiDownloadAutoCaptureClipboardEnabled = true; // m_multiDownloadAutoCaptureClipboardEnabled：是否启用剪贴板自动捕获。
     QStringList m_multiDownloadCaptureSuffixList; // m_multiDownloadCaptureSuffixList：当前用于识别下载链接的后缀集合。

@@ -14,5 +14,5 @@ namespace apimon
 {
     bool InstallConfiguredHooks(std::wstring* errorTextOut);
     bool UninstallConfiguredHooks();
-    void RetryPendingHooks();
+    void RetryPendingHooks(std::wstring* detailTextOut = nullptr);
 }

@@ -14,6 +14,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <memory>
+namespace ks::ui { class ImmutableValueTable; }
 
 class QComboBox;
 class QLabel;
@@ -96,9 +98,10 @@ private:
     // currentQueryScope：返回当前 owner/target 查询范围，非法值回退到目标线程。
     QueryScope currentQueryScope() const;
     // applyQueryResult：在 UI 线程应用一次查询结果。
-    void applyQueryResult(std::uint64_t ticket, const QueryResult& result);
+    void applyQueryResult(std::uint64_t ticket, const std::shared_ptr<const QueryResult>& result);
     // rebuildTable：使用已过滤行重建表格，并为空结果保留可复制诊断行。
-    void rebuildTable(const QueryResult& result);
+    void rebuildTable(const std::shared_ptr<const QueryResult>& result);
+    void finishQueryPresentation(std::uint64_t ticket, const std::shared_ptr<const QueryResult>& result);
     // applyColumnPreset：应用互补的 A/B 精简列组。
     void applyColumnPreset(const QString& presetName);
     // updateColumnPresetButtons：同步 A/B 按钮的选中样式。
@@ -128,7 +131,7 @@ private:
     QComboBox* m_scopeCombo = nullptr; // m_scopeCombo：目标侧、所有者侧或两侧查询范围。
     QPushButton* m_columnAButton = nullptr; // m_columnAButton：常用定位列组。
     QPushButton* m_columnBButton = nullptr; // m_columnBButton：底层证据列组。
-    QTableWidget* m_table = nullptr;   // m_table：消息 Hook 结果表格。
+    ks::ui::ImmutableValueTable* m_table = nullptr;   // m_table：消息 Hook 结果表格。
     bool m_refreshInProgress = false;  // m_refreshInProgress：防止并发重复查询。
     bool m_refreshPending = false;     // m_refreshPending：查询中再次刷新时排队一次。
     std::uint64_t m_refreshTicket = 0; // m_refreshTicket：丢弃过期查询结果。

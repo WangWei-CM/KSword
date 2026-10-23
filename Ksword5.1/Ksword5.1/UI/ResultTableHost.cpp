@@ -73,6 +73,7 @@ namespace ks::ui
         m_columns = columns;
         m_capabilities = capabilities;
         m_explicitColumns = true;
+        m_configured = false;
         if (m_view->model() != model)
         {
             PrepareTableSearchModelChange(m_view.data());
@@ -99,7 +100,11 @@ namespace ks::ui
                 m_columns.append({column, QString::number(column)});
             }
         }
-        ConfigureResultTableInteractions(m_view.data(), m_capabilities);
+        if (!m_configured)
+        {
+            ConfigureResultTableInteractions(m_view.data(), m_capabilities);
+            m_configured = true;
+        }
         m_refreshing = false;
     }
 

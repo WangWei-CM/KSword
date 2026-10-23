@@ -87,7 +87,22 @@ private:
     QString describeWatchStateHere(unsigned long state) const;
     // selectedWatch：当前选中行对应的快照，没选中返回 false。
     bool selectedWatch(ksword::hvm::HvmWatchEntry* entryOut) const;
+    struct WatchEvidence {
+        ksword::hvm::HvmWatchEntry entry;
+        ksword::hvm::HvmWatchAttribution attribution;
+        ksword::hvm::HvmMemoryResult mapping;
+        QString label;
+        QString sampledAt;
+        ks::ui::FieldDocument document;
+    };
+    static ks::ui::FieldDocument buildDetailDocument(const WatchEvidence& evidence,
+        const QHash<quint64, ksword::hvm::HvmProcessAttribution>& processes, bool residentActive);
+    const WatchEvidence* evidenceFor(const ksword::hvm::HvmWatchEntry& entry) const;
+    bool selectedIdentityMatches(const ksword::hvm::HvmWatchEntry& entry) const;
     void showDetail(const ksword::hvm::HvmWatchEntry& entry);
+    void readEvidenceMemory(bool writer);
+    QVector<WatchEvidence> m_evidence;
+    quint64 m_evidenceRequest = 0;
 
     void startAdd();
     void startRearm();
@@ -164,6 +179,7 @@ private:
     // 而重复跑一次几百进程的遍历只是浪费。缓存是快照，所以显示时必须带上
     // "这是后来解析出来的"这层限定，不能说成命中那一刻的事实。
     QHash<quint64, ksword::hvm::HvmProcessAttribution> m_processAttribution;
+    quint64 m_processAttributionRevision = 0;
 
     // m_residentActive：刷新那一刻至少有一个逻辑处理器处于 VMX non-root。
     //

@@ -1,25 +1,37 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelDock.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/CodeTextEdit.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/CodeEditorWidget.h"
+#include "../UI/SecondaryPageLayout.h"
+#include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "KernelDock.CallbackIntercept.h"
 #include "KernelDock.CallbackPromptManager.h"
 #include "../SettingsDock/AppearanceSettings.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QPersistentModelIndex>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
+#include <QTextDocument>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -44,11 +56,17 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSize>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStringList>
 #include <QStyledItemDelegate>
+#include <QStandardItemModel>
+#include <QSignalBlocker>
+#include <QScopedValueRollback>
+#include <QElapsedTimer>
+#include <QEvent>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableView>
@@ -66,14 +84,21 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <deque>
+#include <memory>
 #include <limits>
 #include <utility>
 #include <vector>
 
 using ksword::kernel_dock_internal::kernelText;
 
+Q_DECLARE_METATYPE(CallbackRuleModel)
+
 namespace
 {
+    constexpr int RuleCustomMaskDraftRole = Qt::UserRole + 1;
+    constexpr int RuleEditorCursorRole = Qt::UserRole + 2;
+
     enum class GroupColumn : int
     {
         Id = 0,
@@ -699,77 +724,42 @@ namespace
         return trimmedText;
     }
 
-    void installCallbackTableCopyMenu(QTableWidget* tableWidget, const int processIdColumn)
+    void installCallbackTableCopyMenu(QTableView* tableWidget, const int processIdColumn)
     {
-        // installCallbackTableCopyMenu：
-        // - 输入：回调拦截页内需要复制证据行的表格；
-        // - 处理：右键选中当前行，并把所有列按 TSV 写入剪贴板；
-        // - 返回：无。只读复制，不修改规则、驱动状态或监控状态。
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-
+        if (tableWidget == nullptr) return;
         tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget, processIdColumn](const QPoint& localPosition)
+        QObject::connect(tableWidget, &QTableView::customContextMenuRequested, tableWidget, [tableWidget, processIdColumn](const QPoint& localPosition)
         {
-            const auto clickedIndex = tableWidget->indexAt(localPosition);
-            if (clickedIndex.isValid())
-            {
-                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
-            }
-
+            const auto hit = tableWidget->indexAt(localPosition);
+            if (hit.isValid()) tableWidget->setCurrentIndex(hit);
+            const QPersistentModelIndex current(tableWidget->currentIndex());
+            const QPointer<QTableView> guard(tableWidget);
             QMenu contextMenu(tableWidget);
             contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 kernelText("kernel.callback.intercept.menu.copy_current_row", QStringLiteral("复制当前行")));
-            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
-            const QTableWidgetItem* processIdItem =
-                processIdColumn >= 0 && processIdColumn < tableWidget->columnCount() && tableWidget->currentRow() >= 0
-                ? tableWidget->item(tableWidget->currentRow(), processIdColumn)
-                : nullptr;
+            copyRowAction->setEnabled(current.isValid());
             bool processIdOk = false;
-            const quint32 processId = processIdItem != nullptr
-                ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-                : 0U;
+            const quint32 processId = current.isValid() && processIdColumn >= 0
+                ? QModelIndex(current).siblingAtColumn(processIdColumn).data().toString().trimmed().toUInt(&processIdOk, 10) : 0U;
             QAction* openProcessAction = nullptr;
             if (processIdColumn >= 0)
             {
-                openProcessAction = contextMenu.addAction(
-                    QIcon(QStringLiteral(":/Icon/process_details.svg")),
-                    QStringLiteral("转到进程详细信息"));
+                openProcessAction = contextMenu.addAction(QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("转到进程详细信息"));
                 openProcessAction->setEnabled(processIdOk && processId != 0U);
             }
-
             QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition));
-            if (selectedAction == openProcessAction)
-            {
-                ks::ui::OpenProcessDetailByPid(processId);
-                return;
-            }
-            if (selectedAction != copyRowAction)
-            {
-                return;
-            }
-
-            QClipboard* clipboardObject = QApplication::clipboard();
-            const int rowIndex = tableWidget->currentRow();
-            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
-            {
-                return;
-            }
-
-            QStringList rowFields;
-            rowFields.reserve(tableWidget->columnCount());
-            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
-            {
-                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
-                rowFields.push_back(item != nullptr ? item->text() : QString());
-            }
-            clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+            if (guard.isNull() || !current.isValid() || current.model() != guard->model()) return;
+            if (selectedAction == openProcessAction && openProcessAction != nullptr) { ks::ui::OpenProcessDetailByPid(processId); return; }
+            if (selectedAction != copyRowAction) return;
+            QClipboard* clipboard = QApplication::clipboard();
+            if (clipboard == nullptr) return;
+            QStringList fields;
+            for (int column = 0; column < guard->model()->columnCount(); ++column)
+                fields.push_back(QModelIndex(current).siblingAtColumn(column).data().toString());
+            clipboard->setText(fields.join(QLatin1Char('\t')));
         });
     }
 
@@ -777,7 +767,7 @@ namespace
     // - 输入 tableWidget：驱动回调 Tab 内的表格；
     // - 处理：背景图模式下关闭表格和 viewport 的自动填充，确保背景图能透过表格空白区；
     // - 返回：无返回值。
-    void applyCallbackTableTransparency(QTableWidget* tableWidget)
+    void applyCallbackTableTransparency(QTableView* tableWidget)
     {
         if (tableWidget == nullptr)
         {
@@ -1605,11 +1595,10 @@ namespace
             return;
         }
 
-        comboBox->setStyleSheet(callbackRuleComboStyle());
-        if (comboBox->view() != nullptr)
-        {
-            comboBox->view()->setStyleSheet(KswordTheme::ThemedComboBoxPopupViewStyle());
-        }
+        const QString style = callbackRuleComboStyle();
+        if (comboBox->styleSheet() != style) comboBox->setStyleSheet(style);
+        // The standard combo popup lifecycle supplies popup theme on first show.
+        // Do not construct every hidden rule popup during import/group updates.
     }
 
     // resolveFileMonitorProcessNameText：
@@ -1674,8 +1663,78 @@ namespace
         quint32 totalQueuedBeforeDrain = 0U;        // totalQueuedBeforeDrain：取出前队列深度。
         quint32 droppedCount = 0U;                  // droppedCount：累计丢弃事件数。
         QVector<FileMonitorPreparedEvent> events;   // events：已解析完进程名的事件行。
-        QHash<quint32, QString> resolvedNames;      // resolvedNames：本轮解析出的 PID→进程名，回投后并回主缓存。
     };
+    // One append-only canonical value archive; the view requests only painted cells.
+    class FileMonitorEventModel final : public QAbstractTableModel
+    {
+    public:
+        FileMonitorEventModel(QStringList headers, QObject* parent) : QAbstractTableModel(parent), m_headers(std::move(headers)) {}
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_events.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_headers.size(); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size())
+                return QAbstractTableModel::headerData(section, orientation, role);
+            if (role == Qt::DisplayRole || role == Qt::EditRole) return m_headers[section];
+            return m_headerRoles.value(section).value(role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return false;
+            if (role == Qt::DisplayRole || role == Qt::EditRole) m_headers[section] = value.toString();
+            else m_headerRoles[section][role] = value;
+            emit headerDataChanged(orientation, section, section); return true;
+        }
+        QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()) return {};
+            const auto& prepared = m_events[static_cast<std::size_t>(index.row())];
+            const auto& row = prepared.eventRow;
+            const bool fsctl = (row.operationType & KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL) != 0U;
+            if (role == Qt::UserRole) return fsctl;
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+            switch (static_cast<FileMonitorColumn>(index.column()))
+            {
+            case FileMonitorColumn::Time: return utc100nsToDisplayText(static_cast<quint64>(row.timeUtc100ns));
+            case FileMonitorColumn::Pid: return QString::number(row.processId);
+            case FileMonitorColumn::Process: return prepared.processNameText;
+            case FileMonitorColumn::Path: return QString::fromStdWString(row.path);
+            case FileMonitorColumn::FsctlName: return fsctl ? fileMonitorFsctlNameText(row.fsControlCode) : QStringLiteral("-");
+            case FileMonitorColumn::ControlCode: return fsctl ? formatFileMonitorHex32(row.fsControlCode) : QStringLiteral("-");
+            case FileMonitorColumn::Status: return (row.fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_RESULT_PRESENT) != 0U ? formatFileMonitorHex32(static_cast<quint32>(row.resultStatus)) : QStringLiteral("-");
+            case FileMonitorColumn::FileObject: return formatFileMonitorHex64(row.fileObjectAddress);
+            case FileMonitorColumn::InputLength: return fsctl ? QString::number(row.fsInputBufferLength) : QStringLiteral("-");
+            case FileMonitorColumn::OutputLength: return fsctl ? QString::number(row.fsOutputBufferLength) : QStringLiteral("-");
+            default: return {};
+            }
+        }
+        void append(QVector<FileMonitorPreparedEvent> events)
+        {
+            if (events.isEmpty()) return;
+            const int first = rowCount();
+            beginInsertRows({}, first, first + static_cast<int>(events.size()) - 1);
+            for (auto& event : events) m_events.push_back(std::move(event));
+            endInsertRows();
+        }
+        void clear() { if (m_events.empty()) return; beginResetModel(); m_events.clear(); endResetModel(); }
+    private:
+        std::deque<FileMonitorPreparedEvent> m_events;
+        QStringList m_headers;
+        QHash<int, QHash<int, QVariant>> m_headerRoles;
+    };
+    class FileMonitorEventFilter final : public QSortFilterProxyModel
+    {
+    public:
+        explicit FileMonitorEventFilter(FileMonitorEventModel* source, QObject* parent) : QSortFilterProxyModel(parent)
+        { setDynamicSortFilter(false); setSortRole(Qt::DisplayRole); setSortLocaleAware(true); setSourceModel(source); }
+        void setFsctlOnly(bool only) { if (m_only == only) return; m_only = only; invalidateFilter(); }
+    protected:
+        bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+        { return !m_only || sourceModel()->index(row, 0, parent).data(Qt::UserRole).toBool(); }
+    private:
+        bool m_only = true;
+    };
+
 }
 
 class CallbackInterceptController final : public QObject
@@ -1685,9 +1744,36 @@ public:
         : QObject(parent)
         , m_hostPage(hostPage)
     {
+        m_runtimeQuery = new ks::ui::AsyncOperation(this);
+        m_controlOperation = new ks::ui::AsyncOperation(this);
+        m_importOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_controlOperation->setStateChangedCallback([this]() { updateControlActions(); });
+        m_importOperation->setStateChangedCallback([this]() {
+            if (m_importOperation->isBusy())
+            {
+                // Preserve the old import's atomic replacement of the draft,
+                // while allowing the rest of the window to keep responding.
+                if (!m_hostPage->testAttribute(Qt::WA_ForceDisabled))
+                {
+                    m_importDisabledHost = true;
+                    m_hostPage->setEnabled(false);
+                }
+            }
+            else if (m_importDisabledHost)
+            {
+                m_importDisabledHost = false;
+                m_hostPage->setEnabled(true);
+            }
+            updateControlActions();
+        });
+        updateControlActions();
 
+        m_ruleProjectionTimer = new QTimer(this);
+        m_ruleProjectionTimer->setInterval(0);
+        connect(m_ruleProjectionTimer, &QTimer::timeout, this, [this]() { projectPendingRules(); });
+        m_ruleTabWidget->installEventFilter(this);
         addDefaultGroupIfNeeded();
         refreshRuleGroupComboOptions();
         reloadRuntimeState();
@@ -1708,9 +1794,36 @@ public:
         }
     }
 
-    ~CallbackInterceptController() override = default;
+    ~CallbackInterceptController() override
+    {
+        if (m_importOperation != nullptr) m_importOperation->close();
+        if (m_controlOperation != nullptr) m_controlOperation->close();
+        if (m_runtimeQuery != nullptr) m_runtimeQuery->close();
+    }
 
 private:
+    void updateControlActions()
+    {
+        const bool ready = !m_controlOperation->isBusy() && !m_importOperation->isBusy();
+        for (auto* button : {m_applyButton, m_minifilterBypassApplyButton, m_minifilterBypassClearButton,
+            m_minifilterBypassRefreshButton, m_processProtectApplyButton, m_processProtectClearButton,
+            m_processProtectRefreshButton, m_startFileMonitorFsctlButton})
+            if (button != nullptr) button->setEnabled(ready);
+        if (m_reloadStateButton != nullptr) m_reloadStateButton->setEnabled(ready && !m_runtimeQuery->isBusy());
+        if (m_importButton != nullptr) m_importButton->setEnabled(ready);
+        // Successful protect writes read back the canonical driver configuration.
+        // Keep this local draft stable until that accepted receipt is presented.
+        if (m_processProtectPage != nullptr) m_processProtectPage->setEnabled(ready);
+        if (m_minifilterBypassPage != nullptr) m_minifilterBypassPage->setEnabled(ready);
+    }
+
+    void controlOperationFailed()
+    {
+        // An exception is not proof that an accepted driver write failed. Keep
+        // its draft/known state and use the existing failure wording; never retry.
+        appendAppLog(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
+
     void initializeUi()
     {
         if (m_hostPage == nullptr)
@@ -1887,12 +2000,12 @@ private:
         ks::ui::StyleJoinedResultTabs(m_ruleTabWidget, ruleHeader);
         rightLayout->addWidget(m_ruleTabWidget, 1);
 
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, kernelText("kernel.callback.intercept.tab.registry", QStringLiteral("注册表")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, kernelText("kernel.callback.intercept.tab.process", QStringLiteral("进程创建")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, kernelText("kernel.callback.intercept.tab.thread", QStringLiteral("线程创建")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, kernelText("kernel.callback.intercept.tab.image", QStringLiteral("镜像加载")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, kernelText("kernel.callback.intercept.tab.object", QStringLiteral("对象管理器")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, kernelText("kernel.callback.intercept.tab.minifilter", QStringLiteral("文件系统微过滤器")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, "audit.intercept.registry");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, "audit.intercept.process");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, "audit.intercept.thread");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, "audit.intercept.image");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, "audit.intercept.object");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, "audit.intercept.minifilter");
         createMinifilterBypassPidTab(m_ruleTabWidget);
         createProcessProtectTab(m_ruleTabWidget);
 
@@ -1900,12 +2013,32 @@ private:
         ks::ui::StylePageTabsContentFrame(logTabWidget);
         m_appLogEditor = new CodeTextEdit(logTabWidget);
         static_cast<CodeTextEdit*>(m_appLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-        m_eventLogEditor = new CodeTextEdit(logTabWidget);
+        auto* eventLogPage = new QWidget(logTabWidget);
+        auto* eventLogLayout = new QVBoxLayout(eventLogPage);
+        eventLogLayout->setContentsMargins(0, 0, 0, 0);
+        eventLogLayout->setSpacing(6);
+        auto* eventLogTools = new QHBoxLayout();
+        auto* openArchiveButton = new QPushButton(kernelText("kernel.callback.intercept.logs.open_full", QStringLiteral("完整事件日志")), eventLogPage);
+        auto* retention = new QLabel(kernelText("kernel.callback.intercept.logs.recent_window", QStringLiteral("此处显示最近 4096 行；完整搜索、复制和导出请打开完整日志。")), eventLogPage);
+        retention->setWordWrap(true);
+        eventLogTools->addWidget(openArchiveButton);
+        eventLogTools->addWidget(retention, 1);
+        ks::ui::NormalizeToolbarRow(eventLogTools);
+        eventLogLayout->addLayout(eventLogTools);
+        m_eventLogEditor = new CodeTextEdit(eventLogPage);
         static_cast<CodeTextEdit*>(m_eventLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
+        m_eventLogEditor->document()->setMaximumBlockCount(4096);
+        eventLogLayout->addWidget(m_eventLogEditor, 1);
+        m_eventLogFlushTimer = new QTimer(this);
+        m_eventLogFlushTimer->setSingleShot(true);
+        m_eventLogFlushTimer->setInterval(16);
+        connect(m_eventLogFlushTimer, &QTimer::timeout, this, [this]() { flushEventLogWindow(); });
+        connect(openArchiveButton, &QPushButton::clicked, this, [this]() { openCompleteEventLog(); });
+        m_eventLogEditor->installEventFilter(this);
         m_appLogEditor->setReadOnly(true);
         m_eventLogEditor->setReadOnly(true);
-        logTabWidget->addTab(m_appLogEditor, kernelText("kernel.callback.intercept.log_tab.application", QStringLiteral("应用日志")));
-        logTabWidget->addTab(m_eventLogEditor, kernelText("kernel.callback.intercept.log_tab.events", QStringLiteral("事件日志")));
+        ksword::kernel_navigation::addTab(logTabWidget, m_appLogEditor, "audit.intercept.application");
+        ksword::kernel_navigation::addTab(logTabWidget, eventLogPage, "audit.intercept.events");
         rootLayout->addWidget(logTabWidget, 0);
 
         auto* fileMonitorFrame = new QFrame(scrollContent);
@@ -1952,11 +2085,10 @@ private:
         ks::ui::NormalizeToolbarRow(fileMonitorToolbar);
         fileMonitorLayout->addLayout(fileMonitorToolbar, 0);
 
-        m_fileMonitorTable = new ks::ui::VisibleTableWidget(fileMonitorFrame);
-        // 事件流水已有读取/清理/导出业务条，紧凑辅助动作避免重复。
+        m_fileMonitorTable = new ks::ui::TableActionTableView(fileMonitorFrame);
         ks::ui::SetTableActionBarMode(m_fileMonitorTable, ks::ui::TableActionBarMode::Compact);
-        m_fileMonitorTable->setColumnCount(static_cast<int>(FileMonitorColumn::Count));
-        m_fileMonitorTable->setHorizontalHeaderLabels(QStringList{
+        ks::ui::SetTableRowFilterBusinessOwnership(m_fileMonitorTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+        m_fileMonitorModel = new FileMonitorEventModel(QStringList{
             kernelText("kernel.callback.intercept.file_monitor.header.time", QStringLiteral("时间")),
             QStringLiteral("PID"),
             kernelText("kernel.callback.intercept.file_monitor.header.process", QStringLiteral("进程")),
@@ -1967,16 +2099,20 @@ private:
             QStringLiteral("FileObject"),
             QStringLiteral("In"),
             QStringLiteral("Out")
-            });
+            }, m_fileMonitorTable);
+        m_fileMonitorProxy = new FileMonitorEventFilter(m_fileMonitorModel, m_fileMonitorTable);
+        m_fileMonitorTable->setModel(m_fileMonitorProxy);
+        ks::ui::InstallTableHeaderClickSorting(m_fileMonitorTable);
         m_fileMonitorTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_fileMonitorTable->setSelectionMode(QAbstractItemView::SingleSelection);
         m_fileMonitorTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_fileMonitorTable->setAlternatingRowColors(true);
         m_fileMonitorTable->setWordWrap(false);
         m_fileMonitorTable->verticalHeader()->setVisible(false);
-        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        m_fileMonitorTable->horizontalHeader()->setResizeContentsPrecision(100);
+        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
         m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(FileMonitorColumn::Path), QHeaderView::Stretch);
-        m_fileMonitorTable->setStyleSheet(callbackRuleTableStyle());
+        m_fileMonitorTable->setStyleSheet(QString(callbackRuleTableStyle()).replace(QStringLiteral("QTableWidget"), QStringLiteral("QTableView")));
         applyCallbackTableTransparency(m_fileMonitorTable);
         installCallbackTableCopyMenu(m_fileMonitorTable, static_cast<int>(FileMonitorColumn::Pid));
         fileMonitorLayout->addWidget(m_fileMonitorTable, 1);
@@ -2104,10 +2240,7 @@ private:
 
         connect(m_ruleTabWidget, &QTabWidget::currentChanged, m_hostPage, [this](int) {
             // 当前所有回调类型均已经接入规则表；切换 Tab 时保持工具按钮可用。
-            m_addRuleButton->setEnabled(currentRuleTable() != nullptr);
-            m_removeRuleButton->setEnabled(currentRuleTable() != nullptr);
-            m_moveRuleUpButton->setEnabled(currentRuleTable() != nullptr);
-            m_moveRuleDownButton->setEnabled(currentRuleTable() != nullptr);
+            scheduleRuleProjection();
         });
 
         connect(m_startFileMonitorFsctlButton, &QPushButton::clicked, m_hostPage, [this]() {
@@ -2138,42 +2271,48 @@ private:
         // - 返回：可直接填表的进程名文本。
         // 说明：仅供 UI 线程的单次、低频路径（白名单表）使用；文件监控 drain 的批量
         // 解析已经搬到后台线程，不再走这里。
-        return resolveFileMonitorProcessNameText(processId, m_fileMonitorProcessNameCache);
+        QHash<quint32, QString> names;
+        return resolveFileMonitorProcessNameText(processId, names);
     }
 
     void startFileMonitorFsctlCapture()
     {
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::FileMonitorStatusResult beforeStatus = driverClient.queryFileMonitorStatus();
-        unsigned long requestedMask = KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-        if (beforeStatus.io.ok &&
-            (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
-        {
-            requestedMask = beforeStatus.operationMask | KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-        }
+        if (m_controlOperation->isBusy()) return;
+        struct Result { ksword::ark::IoResult startResult; unsigned long requestedMask = 0UL; };
+        m_controlOperation->submitTransaction<int, Result>(0,
+            [](int) {
+                const ksword::ark::DriverClient driverClient;
+                const auto beforeStatus = driverClient.queryFileMonitorStatus();
+                Result result;
+                result.requestedMask = KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+                if (beforeStatus.io.ok && (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+                    result.requestedMask = beforeStatus.operationMask | KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+                result.startResult = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+                    result.requestedMask, beforeStatus.io.ok ? beforeStatus.processIdFilter : 0UL, 0UL);
+                return result;
+            },
+            [this](const Result& result, std::uint64_t) {
+                const auto& startResult = result.startResult;
+                const auto requestedMask = result.requestedMask;
+                if (!startResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
+                    m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.start_failed", QStringLiteral("启动失败：error=%1")).arg(startResult.win32Error));
+                    appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.start_failed", QStringLiteral("文件监控 FSCTL 启动失败：%1")).arg(detailText));
+                    return true;
+                }
 
-        const ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
-            KSWORD_ARK_FILE_MONITOR_ACTION_START,
-            requestedMask,
-            beforeStatus.io.ok ? beforeStatus.processIdFilter : 0UL,
-            0UL);
-        if (!startResult.ok)
-        {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
-            m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.start_failed", QStringLiteral("启动失败：error=%1")).arg(startResult.win32Error));
-            appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.start_failed", QStringLiteral("文件监控 FSCTL 启动失败：%1")).arg(detailText));
-            return;
-        }
-
-        m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.started", QStringLiteral("FSCTL 文件监控已启动，mask=0x%1"))
-            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
-        appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.started", QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1"))
-            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
-        if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
-        {
-            m_fileMonitorDrainTimer->start();
-        }
-        drainFileMonitorEvents();
+                m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.started", QStringLiteral("FSCTL 文件监控已启动，mask=0x%1"))
+                    .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+                appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.started", QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1"))
+                    .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+                if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
+                {
+                    m_fileMonitorDrainTimer->start();
+                }
+                drainFileMonitorEvents();
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void drainFileMonitorEvents()
@@ -2210,11 +2349,10 @@ private:
         }
         m_fileMonitorDrainInFlight = true;
 
-        const QHash<quint32, QString> nameCacheSnapshot = m_fileMonitorProcessNameCache;
         QThreadPool::globalInstance()->start(
-            [guardThis, nameCacheSnapshot]()
+            [guardThis]()
             {
-                QHash<quint32, QString> workerNameCache = nameCacheSnapshot;
+                QHash<quint32, QString> workerNameCache;
                 FileMonitorDrainSnapshot snapshot;
 
                 const ksword::ark::DriverClient driverClient;
@@ -2234,7 +2372,6 @@ private:
                             resolveFileMonitorProcessNameText(eventRow.processId, workerNameCache);
                         snapshot.events.push_back(std::move(preparedEvent));
                     }
-                    snapshot.resolvedNames = std::move(workerNameCache);
                 }
 
                 QCoreApplication* const appInstance = QCoreApplication::instance();
@@ -2256,10 +2393,11 @@ private:
 
     void applyFileMonitorDrainSnapshot(FileMonitorDrainSnapshot snapshot)
     {
-        // applyFileMonitorDrainSnapshot：
-        // - 输入 snapshot：后台 drain 任务产出的纯值类型结果；
-        // - 处理：合并进程名缓存、追加表格行、刷新过滤与状态标签；
-        // - 返回：无返回值，并清除在途标志允许下一次周期性 drain。
+        const QPointer<CallbackInterceptController> guard(this);
+        auto pending = std::make_shared<FileMonitorDrainSnapshot>(std::move(snapshot));
+        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("callback-fsctl-accepted-batch"),
+            {m_fileMonitorTable}, [guard, pending]() { if (guard) guard->applyFileMonitorDrainSnapshot(std::move(*pending)); })) return;
+        snapshot = std::move(*pending);
         m_fileMonitorDrainInFlight = false;
         if (m_fileMonitorTable == nullptr || m_fileMonitorStatusLabel == nullptr)
         {
@@ -2272,75 +2410,26 @@ private:
             return;
         }
 
-        for (auto nameIterator = snapshot.resolvedNames.constBegin();
-             nameIterator != snapshot.resolvedNames.constEnd();
-             ++nameIterator)
-        {
-            m_fileMonitorProcessNameCache.insert(nameIterator.key(), nameIterator.value());
-        }
-
-        for (const FileMonitorPreparedEvent& preparedEvent : snapshot.events)
-        {
-            appendFileMonitorEventRow(preparedEvent.eventRow, preparedEvent.processNameText);
-        }
-        applyFileMonitorEventFilter();
+        const auto acceptedCount = snapshot.events.size();
+        m_fileMonitorModel->append(std::move(snapshot.events));
         m_fileMonitorStatusLabel->setText(
             kernelText("kernel.callback.intercept.file_monitor.status.drained", QStringLiteral("读取 %1 条，队列前=%2，丢弃=%3"))
-            .arg(snapshot.events.size())
+            .arg(acceptedCount)
             .arg(snapshot.totalQueuedBeforeDrain)
             .arg(snapshot.droppedCount));
     }
 
-    void appendFileMonitorEventRow(const ksword::ark::FileMonitorEventRow& eventRow, const QString& processNameText)
-    {
-        if (m_fileMonitorTable == nullptr)
-        {
-            return;
-        }
-
-        const bool isFsctlEvent =
-            (eventRow.operationType & KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL) != 0U;
-        const int rowIndex = m_fileMonitorTable->rowCount();
-        m_fileMonitorTable->insertRow(rowIndex);
-
-        QTableWidgetItem* timeItem = makeReadOnlyItem(utc100nsToDisplayText(static_cast<quint64>(eventRow.timeUtc100ns)));
-        timeItem->setData(Qt::UserRole, isFsctlEvent);
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Time), timeItem);
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Pid), makeReadOnlyItem(QString::number(eventRow.processId)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Process), makeReadOnlyItem(processNameText));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Path), makeReadOnlyItem(QString::fromStdWString(eventRow.path)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FsctlName), makeReadOnlyItem(isFsctlEvent ? fileMonitorFsctlNameText(eventRow.fsControlCode) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::ControlCode), makeReadOnlyItem(isFsctlEvent ? formatFileMonitorHex32(eventRow.fsControlCode) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Status), makeReadOnlyItem(
-            (eventRow.fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_RESULT_PRESENT) != 0U
-            ? formatFileMonitorHex32(static_cast<quint32>(eventRow.resultStatus))
-            : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FileObject), makeReadOnlyItem(formatFileMonitorHex64(eventRow.fileObjectAddress)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::InputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsInputBufferLength) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::OutputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsOutputBufferLength) : QStringLiteral("-")));
-    }
-
     void applyFileMonitorEventFilter()
     {
-        if (m_fileMonitorTable == nullptr || m_fileMonitorFsctlOnlyCheck == nullptr)
-        {
-            return;
-        }
-
-        const bool fsctlOnly = m_fileMonitorFsctlOnlyCheck->isChecked();
-        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
-        {
-            const QTableWidgetItem* markerItem = m_fileMonitorTable->item(rowIndex, static_cast<int>(FileMonitorColumn::Time));
-            const bool isFsctlEvent = markerItem != nullptr && markerItem->data(Qt::UserRole).toBool();
-            m_fileMonitorTable->setRowHidden(rowIndex, fsctlOnly && !isFsctlEvent);
-        }
+        if (m_fileMonitorProxy != nullptr && m_fileMonitorFsctlOnlyCheck != nullptr)
+            m_fileMonitorProxy->setFsctlOnly(m_fileMonitorFsctlOnlyCheck->isChecked());
     }
 
     void clearFileMonitorEvents()
     {
         if (m_fileMonitorTable != nullptr)
         {
-            m_fileMonitorTable->setRowCount(0);
+            m_fileMonitorModel->clear();
         }
         if (m_fileMonitorStatusLabel != nullptr)
         {
@@ -2376,24 +2465,22 @@ private:
 
         QStringList lines;
         QStringList headerCells;
-        for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+        for (int columnIndex = 0; columnIndex < m_fileMonitorTable->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* headerItem = m_fileMonitorTable->horizontalHeaderItem(columnIndex);
-            headerCells << (headerItem != nullptr ? headerItem->text() : QString());
+            headerCells << m_fileMonitorTable->model()->headerData(columnIndex, Qt::Horizontal).toString();
         }
         lines << headerCells.join(QLatin1Char('\t'));
 
-        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
+        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->model()->rowCount(); ++rowIndex)
         {
             if (m_fileMonitorTable->isRowHidden(rowIndex))
             {
                 continue;
             }
             QStringList rowCells;
-            for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+            for (int columnIndex = 0; columnIndex < m_fileMonitorTable->model()->columnCount(); ++columnIndex)
             {
-                const QTableWidgetItem* cellItem = m_fileMonitorTable->item(rowIndex, columnIndex);
-                QString cellText = cellItem != nullptr ? cellItem->text() : QString();
+                QString cellText = m_fileMonitorTable->model()->index(rowIndex, columnIndex).data().toString();
                 cellText.replace(QLatin1Char('\t'), QLatin1Char(' '));
                 cellText.replace(QLatin1Char('\n'), QLatin1Char(' '));
                 cellText.replace(QLatin1Char('\r'), QLatin1Char(' '));
@@ -2417,6 +2504,7 @@ private:
         }
 
         auto* tabPage = new QWidget(parentWidget);
+        m_minifilterBypassPage = tabPage;
         auto* tabLayout = new QVBoxLayout(tabPage);
         tabLayout->setContentsMargins(8, 8, 8, 8);
         tabLayout->setSpacing(8);
@@ -2478,7 +2566,7 @@ private:
         m_minifilterBypassStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         tabLayout->addWidget(m_minifilterBypassStatusLabel, 0);
 
-        m_ruleTabWidget->addTab(tabPage, kernelText("kernel.callback.intercept.minifilter.tab", QStringLiteral("Minifilter PID 放行")));
+        ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, "audit.intercept.bypass");
     }
 
     QList<quint32> parseMinifilterBypassPidText(const QString& rawText, QString* errorTextOut) const
@@ -2690,37 +2778,43 @@ private:
 
     void applyMinifilterBypassPidsToDriver()
     {
-        // 输入：当前白名单表格；处理：通过 ArkDriverClient 设置驱动白名单；
-        // 返回：无；失败弹窗并写应用日志。
-        const std::vector<std::uint32_t> processIds = collectMinifilterBypassPidsFromUi();
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult ioResult = driverClient.setMinifilterBypassPids(processIds);
-        if (!ioResult.ok)
-        {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
-            if (m_minifilterBypassStatusLabel != nullptr)
-            {
-                m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.apply_failed", QStringLiteral("应用失败：error=%1")).arg(ioResult.win32Error));
-            }
-            appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.apply_failed", QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2"))
-                .arg(ioResult.win32Error)
-                .arg(detailText));
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
-                kernelText("kernel.callback.intercept.minifilter.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。")).arg(ioResult.win32Error));
-            return;
-        }
+        if (m_controlOperation->isBusy()) return;
+        const auto processIds = collectMinifilterBypassPidsFromUi();
+        m_controlOperation->submitTransaction<std::vector<std::uint32_t>, ksword::ark::IoResult>(processIds,
+            [](const std::vector<std::uint32_t>& ids) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.setMinifilterBypassPids(ids);
+            },
+            [this, processIds](const ksword::ark::IoResult& ioResult, std::uint64_t) {
+                if (!ioResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
+                    if (m_minifilterBypassStatusLabel != nullptr)
+                    {
+                        m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.apply_failed", QStringLiteral("应用失败：error=%1")).arg(ioResult.win32Error));
+                    }
+                    appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.apply_failed", QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2"))
+                        .arg(ioResult.win32Error)
+                        .arg(detailText));
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
+                        kernelText("kernel.callback.intercept.minifilter.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。")).arg(ioResult.win32Error));
+                    return true;
+                }
 
-        if (m_minifilterBypassStatusLabel != nullptr)
-        {
-            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.applied", QStringLiteral("已应用到驱动：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
-        }
-        appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.applied", QStringLiteral("Minifilter PID 放行已应用：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
+                if (m_minifilterBypassStatusLabel != nullptr)
+                {
+                    m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.applied", QStringLiteral("已应用到驱动：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
+                }
+                appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.applied", QStringLiteral("Minifilter PID 放行已应用：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void clearMinifilterBypassPidsAndApply()
     {
+        if (m_controlOperation->isBusy()) return;
         // 输入：无；处理：清空 UI 表格并立即向驱动下发空白名单；
         // 返回：无，失败时驱动状态可能仍保持原白名单。
         if (m_minifilterBypassPidTable != nullptr)
@@ -2732,11 +2826,23 @@ private:
 
     void refreshMinifilterBypassPidsFromDriver()
     {
-        // 输入：无；处理：查询驱动当前白名单并刷新表格；
-        // 返回：无；失败只更新状态栏/日志，不改变本地表格。
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::MinifilterBypassPidResult queryResult =
-            driverClient.queryMinifilterBypassPids();
+        if (m_controlOperation->isBusy()) return;
+        // Share the write admission/busy gate: a manual read cannot race a
+        // later accepted write or replace its post-write receipt.
+        m_controlOperation->submit<int, ksword::ark::MinifilterBypassPidResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.queryMinifilterBypassPids();
+            },
+            [this](const ksword::ark::MinifilterBypassPidResult& queryResult, std::uint64_t) {
+                presentMinifilterBypassPidsResult(queryResult);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
+    }
+
+    void presentMinifilterBypassPidsResult(const ksword::ark::MinifilterBypassPidResult& queryResult)
+    {
+        // Native failure retains the local draft, as before.
         if (!queryResult.io.ok)
         {
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
@@ -2783,6 +2889,7 @@ private:
         }
 
         auto* tabPage = new QWidget(parentWidget);
+        m_processProtectPage = tabPage;
         auto* tabLayout = new QVBoxLayout(tabPage);
         tabLayout->setContentsMargins(0, 0, 0, 0);
         auto* workspace = new ks::ui::ParameterWorkspace(tabPage, 460); // 保护参数滚动，规则与信任结果同时保留。
@@ -3097,9 +3204,7 @@ private:
         }
         workspace->finish();
 
-        m_ruleTabWidget->addTab(
-            tabPage,
-            kernelText("kernel.callback.intercept.process_protect.tab", QStringLiteral("进程保护")));
+        ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, "audit.intercept.protect");
     }
 
     QTableWidgetItem* makeProcessProtectCheckItem(const bool checkedState) const
@@ -3705,47 +3810,68 @@ private:
 
     void applyProcessProtectToDriver()
     {
-        // 输入：当前表格与开关；处理：整表下发到 R0；
-        // 返回：无；成功后立即回读一次，让统计与能力状态与驱动对齐。
-        const std::vector<KSWORD_ARK_PROCESS_PROTECT_RULE> ruleList = collectProcessProtectRulesFromUi();
-        const std::vector<KSWORD_ARK_PROCESS_PROTECT_TRUSTED> trustedList = collectProcessProtectTrustedFromUi();
-        const quint32 globalFlags = collectProcessProtectGlobalFlags();
-
-        const unsigned long scanIntervalMs = m_processProtectScanIntervalSpin != nullptr
-            ? static_cast<unsigned long>(m_processProtectScanIntervalSpin->value())
-            : KSWORD_ARK_PROCESS_PROTECT_SCAN_INTERVAL_DEFAULT_MS;
-
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult ioResult =
-            driverClient.setProcessProtectConfig(globalFlags, ruleList, trustedList, scanIntervalMs);
-        if (!ioResult.ok)
+        if (m_controlOperation->isBusy()) return;
+        struct Request
         {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
-            setProcessProtectStatusText(
-                kernelText("kernel.callback.intercept.process_protect.status.apply_failed", QStringLiteral("应用失败：error=%1"))
-                .arg(ioResult.win32Error));
-            appendAppLog(
-                kernelText("kernel.callback.intercept.process_protect.log.apply_failed", QStringLiteral("进程保护配置应用失败：error=%1，detail=%2"))
-                .arg(ioResult.win32Error)
-                .arg(detailText));
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.process_protect.title", QStringLiteral("进程保护")),
-                kernelText("kernel.callback.intercept.process_protect.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。"))
-                .arg(ioResult.win32Error));
-            return;
-        }
+            std::vector<KSWORD_ARK_PROCESS_PROTECT_RULE> ruleList;
+            std::vector<KSWORD_ARK_PROCESS_PROTECT_TRUSTED> trustedList;
+            quint32 globalFlags;
+            unsigned long scanIntervalMs;
+        };
+        struct Result { ksword::ark::IoResult io; ksword::ark::ProcessProtectStateResult state; };
+        const Request request{collectProcessProtectRulesFromUi(), collectProcessProtectTrustedFromUi(),
+            collectProcessProtectGlobalFlags(), m_processProtectScanIntervalSpin != nullptr
+                ? static_cast<unsigned long>(m_processProtectScanIntervalSpin->value())
+                : KSWORD_ARK_PROCESS_PROTECT_SCAN_INTERVAL_DEFAULT_MS};
+        m_controlOperation->submitTransaction<Request, Result>(request,
+            [](const Request& value) {
+                const ksword::ark::DriverClient driverClient;
+                Result result;
+                result.io = driverClient.setProcessProtectConfig(value.globalFlags, value.ruleList,
+                    value.trustedList, value.scanIntervalMs);
+                if (result.io.ok)
+                {
+                    try { result.state = driverClient.queryProcessProtectState(); }
+                    catch (...) { result.state.io.ok = false; result.state.io.win32Error = ERROR_UNHANDLED_EXCEPTION; }
+                }
+                return result;
+            },
+            [this, request](const Result& result, std::uint64_t) {
+                const auto& ioResult = result.io;
+                const auto& ruleList = request.ruleList;
+                const auto& trustedList = request.trustedList;
+                const auto globalFlags = request.globalFlags;
+                if (!ioResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
+                    setProcessProtectStatusText(
+                        kernelText("kernel.callback.intercept.process_protect.status.apply_failed", QStringLiteral("应用失败：error=%1"))
+                        .arg(ioResult.win32Error));
+                    appendAppLog(
+                        kernelText("kernel.callback.intercept.process_protect.log.apply_failed", QStringLiteral("进程保护配置应用失败：error=%1，detail=%2"))
+                        .arg(ioResult.win32Error)
+                        .arg(detailText));
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.process_protect.title", QStringLiteral("进程保护")),
+                        kernelText("kernel.callback.intercept.process_protect.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。"))
+                        .arg(ioResult.win32Error));
+                    return true;
+                }
 
-        appendAppLog(
-            kernelText("kernel.callback.intercept.process_protect.log.applied", QStringLiteral("进程保护配置已应用：rules=%1，trusted=%2，flags=0x%3。"))
-            .arg(static_cast<qulonglong>(ruleList.size()))
-            .arg(static_cast<qulonglong>(trustedList.size()))
-            .arg(globalFlags, 8, 16, QChar('0')));
-        refreshProcessProtectFromDriver();
+                appendAppLog(
+                    kernelText("kernel.callback.intercept.process_protect.log.applied", QStringLiteral("进程保护配置已应用：rules=%1，trusted=%2，flags=0x%3。"))
+                    .arg(static_cast<qulonglong>(ruleList.size()))
+                    .arg(static_cast<qulonglong>(trustedList.size()))
+                    .arg(globalFlags, 8, 16, QChar('0')));
+                presentProcessProtectState(result.state);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void clearProcessProtectAndApply()
     {
+        if (m_controlOperation->isBusy()) return;
         if (m_processProtectRuleTable != nullptr)
         {
             m_processProtectRuleTable->setRowCount(0);
@@ -3763,10 +3889,20 @@ private:
 
     void refreshProcessProtectFromDriver()
     {
-        // 输入：无；处理：回读 R0 当前配置并重建两张表；
-        // 返回：无；失败只更新状态栏与日志，不清空本地编辑内容。
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessProtectStateResult queryResult = driverClient.queryProcessProtectState();
+        if (m_controlOperation->isBusy()) return;
+        m_controlOperation->submit<int, ksword::ark::ProcessProtectStateResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.queryProcessProtectState();
+            },
+            [this](const ksword::ark::ProcessProtectStateResult& queryResult, std::uint64_t) {
+                presentProcessProtectState(queryResult);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
+    }
+
+    void presentProcessProtectState(const ksword::ark::ProcessProtectStateResult& queryResult)
+    {
         if (!queryResult.io.ok)
         {
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
@@ -3932,7 +4068,7 @@ private:
         return statusParts.join(QLatin1Char(' '));
     }
 
-    void createRuleTableTab(quint32 callbackType, const QString& titleText)
+    void createRuleTableTab(quint32 callbackType, const char* navigationId)
     {
         auto* tabPage = new QWidget(m_ruleTabWidget);
         auto* tabLayout = new QVBoxLayout(tabPage);
@@ -4000,7 +4136,9 @@ private:
             showRuleTableContextMenu(ruleTable, callbackType, localPos);
         });
 
-        const int tabIndex = m_ruleTabWidget->addTab(tabPage, titleText);
+        ruleTable->viewport()->installEventFilter(this);
+        connect(ruleTable->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scheduleRuleProjection(); });
+        const int tabIndex = ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, navigationId);
         m_tabCallbackTypeMap.insert(tabIndex, callbackType);
         m_ruleTableMap.insert(callbackType, ruleTable);
     }
@@ -4097,6 +4235,7 @@ private:
         QTableWidget* ruleTable,
         const quint32 callbackType)
     {
+        if (!m_pendingRuleRows.value(callbackType).isEmpty()) return;
         if (ruleTable == nullptr)
         {
             return;
@@ -4280,11 +4419,13 @@ private:
             QIcon(QStringLiteral(":/Icon/codeeditor_paste.svg")),
             kernelText("kernel.callback.intercept.context_menu.paste_rule", QStringLiteral("粘贴为新规则")));
 
-        removeRuleAction->setEnabled(hasCurrentRule);
-        moveUpRuleAction->setEnabled(hasCurrentRule && logicalRuleIndex > 0);
-        moveDownRuleAction->setEnabled(hasCurrentRule && logicalRuleIndex < (ruleCount - 1));
+        const bool projectionComplete = m_pendingRuleRows.value(callbackType).isEmpty();
+        addRuleAction->setEnabled(projectionComplete);
+        removeRuleAction->setEnabled(projectionComplete && hasCurrentRule);
+        moveUpRuleAction->setEnabled(projectionComplete && hasCurrentRule && logicalRuleIndex > 0);
+        moveDownRuleAction->setEnabled(projectionComplete && hasCurrentRule && logicalRuleIndex < (ruleCount - 1));
         copyRuleAction->setEnabled(hasCurrentRule);
-        pasteRuleAction->setEnabled(QApplication::clipboard() != nullptr &&
+        pasteRuleAction->setEnabled(projectionComplete && QApplication::clipboard() != nullptr &&
             !QApplication::clipboard()->text().trimmed().isEmpty());
 
         QAction* selectedAction = contextMenu.exec(ruleTable->viewport()->mapToGlobal(localPos));
@@ -4302,6 +4443,7 @@ private:
             }
         }
 
+        if (selectedAction != copyRuleAction && !m_pendingRuleRows.value(callbackType).isEmpty()) return;
         if (selectedAction == addRuleAction)
         {
             addRuleToCurrentTab();
@@ -4370,6 +4512,7 @@ private:
 
     void setDirtyState(const bool dirtyState)
     {
+        if (dirtyState) ++m_editRevision;
         m_dirty = dirtyState;
         updateStatusLabel();
     }
@@ -4395,7 +4538,34 @@ private:
         const QString lineText = QStringLiteral("[%1] %2")
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
             .arg(logText);
-        m_eventLogEditor->appendPlainText(lineText);
+        m_eventLogArchive.push_back(lineText);
+        m_pendingEventLogLines.push_back(lineText);
+        while (m_pendingEventLogLines.size() > 4096) m_pendingEventLogLines.removeFirst();
+        if (m_eventLogEditor->isVisible() && !m_eventLogFlushTimer->isActive()) m_eventLogFlushTimer->start();
+    }
+
+    void flushEventLogWindow()
+    {
+        if (m_eventLogEditor == nullptr || !m_eventLogEditor->isVisible() || m_pendingEventLogLines.isEmpty()) return;
+        const auto lines = std::exchange(m_pendingEventLogLines, {});
+        m_eventLogEditor->appendPlainText(lines.join(QLatin1Char('\n')));
+    }
+
+    void openCompleteEventLog()
+    {
+        auto* dialog = new QDialog(m_hostPage);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(kernelText("kernel.callback.intercept.logs.full_title", QStringLiteral("完整事件日志（%1 条）")).arg(m_eventLogArchive.size()));
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryWindow(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* editor = new CodeEditorWidget(dialog);
+        editor->setReadOnly(true);
+        editor->setReadOnlyExportEnabled(true);
+        editor->setRawText(m_eventLogArchive.join(QLatin1Char('\n')));
+        layout->addWidget(editor, 1);
+        ks::ui::applyResponsiveWindowGeometry(dialog, m_hostPage, QSize(1000, 720), QSize(480, 320));
+        dialog->show();
     }
 
     quint32 allocateNextGroupId() const
@@ -4441,6 +4611,8 @@ private:
                 }
             }
         }
+        for (auto iterator = m_pendingRuleRows.cbegin(); iterator != m_pendingRuleRows.cend(); ++iterator)
+            for (const auto& rule : iterator.value()) maxRuleId = std::max(maxRuleId, rule.ruleId);
         return maxRuleId + 1U;
     }
 
@@ -4916,6 +5088,7 @@ private:
     void addRuleToCurrentTab()
     {
         const quint32 callbackType = currentRuleCallbackType();
+        if (!m_pendingRuleRows.value(callbackType).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         if (ruleTable == nullptr)
         {
@@ -4956,6 +5129,7 @@ private:
 
     void removeCurrentRule()
     {
+        if (!m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         const quint32 callbackType = currentRuleCallbackType();
         if (ruleTable == nullptr)
@@ -4979,11 +5153,8 @@ private:
         ruleList.removeAt(currentRuleIndex);
 
         m_ignoreUiSignal = true;
-        ruleTable->setRowCount(0);
-        for (const CallbackRuleModel& ruleModel : ruleList)
-        {
-            appendRuleRow(ruleTable, callbackType, ruleModel);
-        }
+        ruleTable->removeRow(currentRuleIndex * 2 + 1);
+        ruleTable->removeRow(currentRuleIndex * 2);
         m_ignoreUiSignal = false;
 
         if (ruleCountOfTable(ruleTable) > 0)
@@ -4997,6 +5168,7 @@ private:
 
     void moveCurrentRule(const int direction)
     {
+        if (!m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty()) return;
         QTableWidget* ruleTable = currentRuleTable();
         const quint32 callbackType = currentRuleCallbackType();
         if (ruleTable == nullptr)
@@ -5031,28 +5203,49 @@ private:
         }
 
         m_ignoreUiSignal = true;
-        ruleTable->setRowCount(0);
-        for (const CallbackRuleModel& ruleModel : ruleList)
-        {
-            appendRuleRow(ruleTable, callbackType, ruleModel);
-        }
+        const int first = std::min(currentRuleIndex, targetRuleIndex);
+        // Recreate only the two exchanged rule pairs; preserve every other editor.
+        for (int removed = 0; removed < 4; ++removed) ruleTable->removeRow(first * 2);
+        appendRuleRow(ruleTable, callbackType, ruleList[first], first);
+        appendRuleRow(ruleTable, callbackType, ruleList[first + 1], first + 1);
+        for (int index = 0; index < ruleList.size(); ++index)
+            if (auto* item = ruleTable->item(index * 2, static_cast<int>(RuleColumn::Priority)))
+                item->setText(QString::number(ruleList[index].priority));
         m_ignoreUiSignal = false;
 
         ruleTable->setCurrentCell(targetRuleIndex * 2, static_cast<int>(RuleColumn::RuleName));
         setDirtyState(true);
     }
 
+    CallbackRuleModel ruleWithComboFallbacks(CallbackRuleModel rule, const quint32 callbackType) const
+    {
+        const auto selectedValue = [](const quint32 value, const QList<QPair<QString, quint32>>& options) {
+            return containsOptionValue(options, value) ? value : (options.isEmpty() ? 0U : options.front().second);
+        };
+        // Match the existing Combo findData/index-zero fallback without creating an editor.
+        if (!m_groupOptionLabels.contains(rule.groupId))
+            rule.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+        rule.matchMode = selectedValue(rule.matchMode, allowedMatchModeListByType(callbackType));
+        rule.action = selectedValue(rule.action, allowedActionListByType(callbackType));
+        rule.timeoutDefaultDecision = selectedValue(rule.timeoutDefaultDecision, decisionOptionList());
+        return rule;
+    }
+
     void appendRuleRow(
         QTableWidget* ruleTable,
         const quint32 callbackType,
-        const CallbackRuleModel& ruleModel)
+        const CallbackRuleModel& ruleModel,
+        const int insertLogicalIndex = -1)
     {
         if (ruleTable == nullptr)
         {
             return;
         }
 
-        const int headerRow = ruleTable->rowCount();
+        if (m_groupOptionsModel == nullptr) refreshRuleGroupComboOptions();
+        const auto draft = ruleWithComboFallbacks(ruleModel, callbackType);
+
+        const int headerRow = insertLogicalIndex < 0 ? ruleTable->rowCount() : insertLogicalIndex * 2;
         const int detailRow = headerRow + 1;
         ruleTable->insertRow(headerRow);
         ruleTable->insertRow(detailRow);
@@ -5066,11 +5259,33 @@ private:
 
         auto* enabledItem = new QTableWidgetItem();
         enabledItem->setFlags(enabledItem->flags() | Qt::ItemIsUserCheckable);
-        enabledItem->setCheckState(ruleModel.enabled ? Qt::Checked : Qt::Unchecked);
+        enabledItem->setCheckState(draft.enabled ? Qt::Checked : Qt::Unchecked);
         setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Enabled, enabledItem);
-        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleId, makeReadOnlyItem(QString::number(ruleModel.ruleId)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleId, makeReadOnlyItem(QString::number(draft.ruleId)));
         setRuleIdentityColumnSpan(ruleTable, headerRow);
 
+        auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId));
+        source->setData(Qt::UserRole, QVariant::fromValue(draft));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleName, new QTableWidgetItem(draft.ruleName));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::TimeoutMs, new QTableWidgetItem(QString::number(draft.timeoutMs)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Priority, new QTableWidgetItem(QString::number(draft.priority)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::GroupId, makeReadOnlyItem(QString::number(draft.groupId)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::OperationMask, makeReadOnlyItem(operationMaskToText(draft.operationMask)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::MatchMode, makeReadOnlyItem(callbackMatchModeToDisplayText(draft.matchMode)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Action, makeReadOnlyItem(callbackActionToDisplayText(draft.action)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::TimeoutDefaultDecision, makeReadOnlyItem(callbackDecisionToDisplayText(draft.timeoutDefaultDecision)));
+        ruleTable->setSpan(detailRow, static_cast<int>(RuleColumn::GroupId), 1,
+            static_cast<int>(RuleColumn::Count) - static_cast<int>(RuleColumn::GroupId));
+        ruleTable->setItem(detailRow, static_cast<int>(RuleColumn::GroupId),
+            makeReadOnlyItem(QStringList{draft.initiatorPattern, draft.targetPattern, draft.comment}.join(QLatin1Char(' '))));
+        if (m_ruleProjectionTimer) scheduleRuleProjection();
+    }
+
+    void materializeRuleEditors(QTableWidget* ruleTable, const quint32 callbackType,
+        const CallbackRuleModel& ruleModel, const int headerRow)
+    {
+        const int detailRow = headerRow + 1;
+        const QPersistentModelIndex ruleAnchor(ruleTable->model()->index(headerRow, 0));
         auto* groupCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(groupCombo);
         setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::GroupId, groupCombo);
@@ -5080,7 +5295,6 @@ private:
                 setDirtyState(true);
             }
         });
-        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleName, new QTableWidgetItem(ruleModel.ruleName));
 
         QWidget* operationPanel = createOperationMaskPanel(
             ruleTable,
@@ -5100,7 +5314,9 @@ private:
         }
         const int matchModeIndex = matchModeCombo->findData(ruleModel.matchMode);
         matchModeCombo->setCurrentIndex(matchModeIndex >= 0 ? matchModeIndex : 0);
-        connect(matchModeCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, headerRow, callbackType](int) {
+        connect(matchModeCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, ruleAnchor, callbackType](int) {
+            if (!ruleAnchor.isValid()) return;
+            const int headerRow = ruleAnchor.row();
             if (m_ignoreUiSignal)
             {
                 return;
@@ -5146,7 +5362,9 @@ private:
         }
         const int actionIndex = actionCombo->findData(ruleModel.action);
         actionCombo->setCurrentIndex(actionIndex >= 0 ? actionIndex : 0);
-        connect(actionCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, headerRow](int) {
+        connect(actionCombo, &QComboBox::currentIndexChanged, m_hostPage, [this, ruleTable, ruleAnchor](int) {
+            if (!ruleAnchor.isValid()) return;
+            const int headerRow = ruleAnchor.row();
             if (m_ignoreUiSignal)
             {
                 return;
@@ -5192,12 +5410,6 @@ private:
         });
         setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::Action, actionCombo);
 
-        setRuleHeaderCell(
-            ruleTable,
-            headerRow,
-            RuleColumn::TimeoutMs,
-            new QTableWidgetItem(QString::number(ruleModel.timeoutMs)));
-
         auto* timeoutDecisionCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(timeoutDecisionCombo);
         for (const QPair<QString, quint32>& optionPair : decisionOptionList())
@@ -5218,78 +5430,297 @@ private:
             RuleColumn::TimeoutDefaultDecision,
             timeoutDecisionCombo);
 
-        setRuleHeaderCell(
-            ruleTable,
-            headerRow,
-            RuleColumn::Priority,
-            new QTableWidgetItem(QString::number(ruleModel.priority)));
-
         QWidget* detailPanel = createRuleDetailPanel(ruleTable, callbackType, ruleModel);
         setRuleDetailWidget(ruleTable, detailRow, detailPanel);
 
         refreshRuleGroupComboForCell(groupCombo, ruleModel.groupId);
+        auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId));
+        if (source != nullptr && source->data(RuleCustomMaskDraftRole).isValid())
+        {
+            if (auto* custom = operationPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit")))
+                custom->setText(source->data(RuleCustomMaskDraftRole).toString());
+            source->setData(RuleCustomMaskDraftRole, {});
+        }
+        if (source != nullptr)
+        {
+            const auto cursors = source->data(RuleEditorCursorRole).toList();
+            const QList<QLineEdit*> edits{
+                operationPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleInitiatorEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleTargetEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"))};
+            for (qsizetype index = 0; index < edits.size() && index < cursors.size(); ++index)
+                if (edits[index]) edits[index]->setCursorPosition(cursors[index].toInt());
+            source->setData(RuleEditorCursorRole, {});
+        }
+        m_materializedRuleRows.push_back(ruleAnchor);
+        // Clear the frozen seed only after every existing editor was populated.
+        // Header items remain canonical for enabled/name/timeout/priority edits.
+        if (auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId))) source->setData(Qt::UserRole, {});
+    }
+
+    bool ruleEditorsMayBeReclaimed(const QPersistentModelIndex& anchor) const
+    {
+        if (!anchor.isValid()) return false;
+        auto* table = qobject_cast<QTableWidget*>(anchor.model()->parent());
+        if (table == nullptr) return false;
+        const int row = anchor.row();
+        if (table->isVisible() && table->viewport()->isVisible())
+        {
+            const int firstAt = table->rowAt(0);
+            const int lastAt = table->rowAt(table->viewport()->height() - 1);
+            const int first = firstAt < 0 ? -1 : normalizeRuleHeaderRow(firstAt);
+            const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+            // Keep one neighbouring rule on either side to avoid edge churn.
+            if (first >= 0 && row >= first - 2 && row <= last + 2) return false;
+        }
+        const auto protectedEditor = [](QWidget* widget) {
+            if (widget == nullptr) return false;
+            auto* focus = QApplication::focusWidget();
+            auto* popup = QApplication::activePopupWidget();
+            if ((focus != nullptr && (widget == focus || widget->isAncestorOf(focus)))
+                || (popup != nullptr && (widget == popup || widget->isAncestorOf(popup)))) return true;
+            // QLineEdit has no public undo-stack serialization. Retain edited
+            // text controls rather than silently discarding undo or selection.
+            for (const auto* edit : widget->findChildren<QLineEdit*>())
+                if (edit->isUndoAvailable() || edit->isRedoAvailable() || edit->hasSelectedText()) return true;
+            return false;
+        };
+        for (int column = 0; column < table->columnCount(); ++column)
+            if (protectedEditor(table->cellWidget(row, column))
+                || protectedEditor(table->cellWidget(row + 1, column))) return false;
+        return true;
+    }
+
+    bool reclaimRuleEditors(const QPersistentModelIndex& anchor)
+    {
+        if (!ruleEditorsMayBeReclaimed(anchor)) return false;
+        auto* table = qobject_cast<QTableWidget*>(anchor.model()->parent());
+        const int row = anchor.row();
+        auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+        auto* group = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::GroupId)));
+        auto* operation = table->cellWidget(row, static_cast<int>(RuleColumn::OperationMask));
+        auto* match = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::MatchMode)));
+        auto* action = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::Action)));
+        auto* decision = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::TimeoutDefaultDecision)));
+        auto* detail = table->cellWidget(row + 1, static_cast<int>(RuleColumn::GroupId));
+        if (!source || !group || !operation || !match || !action || !decision || !detail) return false;
+        auto* custom = operation->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit"));
+        auto* initiator = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleInitiatorEdit"));
+        auto* target = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleTargetEdit"));
+        auto* comment = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"));
+        if (!custom || !initiator || !target || !comment) return false;
+
+        CallbackRuleModel draft;
+        draft.groupId = group->currentData().toUInt();
+        draft.matchMode = match->currentData().toUInt();
+        draft.action = action->currentData().toUInt();
+        draft.timeoutDefaultDecision = decision->currentData().toUInt();
+        // Preserve checkbox bits and the raw custom text independently. OR-ing
+        // them here would change checkbox states or lose an invalid draft.
+        draft.operationMask = 0U;
+        for (const auto* check : operation->findChildren<QCheckBox*>(QString(), Qt::FindDirectChildrenOnly))
+            if (check->isChecked()) draft.operationMask |= check->property("operationMaskBit").toUInt();
+        draft.initiatorPattern = initiator->text();
+        draft.targetPattern = target->text();
+        draft.comment = comment->text();
+        source->setData(RuleCustomMaskDraftRole, custom->text());
+        source->setData(RuleEditorCursorRole, QVariantList{custom->cursorPosition(), initiator->cursorPosition(),
+            target->cursorPosition(), comment->cursorPosition()});
+        source->setData(Qt::UserRole, QVariant::fromValue(draft));
+        const auto setSummary = [table, row](RuleColumn column, const QString& text) {
+            if (auto* item = table->item(row, static_cast<int>(column))) item->setText(text);
+        };
+        setSummary(RuleColumn::GroupId, group->currentText());
+        setSummary(RuleColumn::MatchMode, match->currentText());
+        setSummary(RuleColumn::Action, action->currentText());
+        setSummary(RuleColumn::TimeoutDefaultDecision, decision->currentText());
+        setSummary(RuleColumn::OperationMask, operationMaskToText(draft.operationMask)
+            + (custom->text().isEmpty() ? QString() : QStringLiteral(" | ") + custom->text()));
+        if (auto* item = table->item(row + 1, static_cast<int>(RuleColumn::GroupId)))
+            item->setText(QStringList{draft.initiatorPattern, draft.targetPattern, draft.comment}.join(QLatin1Char(' ')));
+        for (int column = 0; column < table->columnCount(); ++column)
+        {
+            if (table->cellWidget(row, column)) table->removeCellWidget(row, column);
+            if (table->cellWidget(row + 1, column)) table->removeCellWidget(row + 1, column);
+        }
+        return true;
+    }
+
+    bool hasReclaimableRuleEditors() const
+    {
+        for (const auto& anchor : m_materializedRuleRows)
+            if (ruleEditorsMayBeReclaimed(anchor)) return true;
+        return false;
+    }
+
+    bool hasVisibleRuleDrafts(QTableWidget* table) const
+    {
+        if (!table || !table->isVisible() || !table->viewport()->isVisible()
+            || table->viewport()->height() <= 0 || table->viewport()->width() <= 0 || table->rowCount() == 0) return false;
+        const int firstAt = table->rowAt(0);
+        if (firstAt < 0) return false;
+        const int first = normalizeRuleHeaderRow(firstAt);
+        const int lastAt = table->rowAt(table->viewport()->height() - 1);
+        const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+        for (int row = first; row <= last; row += 2)
+            if (const auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+                source && source->data(Qt::UserRole).canConvert<CallbackRuleModel>()) return true;
+        return false;
+    }
+
+    void materializeVisibleRuleEditors(QTableWidget* table, const quint32 type, QElapsedTimer& budget, int& count)
+    {
+        if (!table || !table->isVisible() || !table->viewport()->isVisible()
+            || table->viewport()->height() <= 0 || table->viewport()->width() <= 0 || table->rowCount() == 0) return;
+        const int firstAt = table->rowAt(0);
+        if (firstAt < 0) return;
+        const int first = normalizeRuleHeaderRow(firstAt);
+        const int lastAt = table->rowAt(table->viewport()->height() - 1);
+        const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+        for (int row = first; row <= last && count < 4 && (count == 0 || budget.elapsed() < 3); row += 2)
+        {
+            const auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+            if (!source || !source->data(Qt::UserRole).canConvert<CallbackRuleModel>()) continue;
+            const auto rule = source->data(Qt::UserRole).value<CallbackRuleModel>();
+            materializeRuleEditors(table, type, rule, row);
+            ++count;
+        }
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == m_eventLogEditor && event != nullptr && event->type() == QEvent::Show
+            && m_eventLogFlushTimer != nullptr && !m_pendingEventLogLines.isEmpty()) m_eventLogFlushTimer->start();
+        if (event && (event->type() == QEvent::Show || event->type() == QEvent::Resize))
+            for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+                if (table.value() && watched == table.value()->viewport()) { scheduleRuleProjection(); break; }
+        if (watched == m_ruleTabWidget && event != nullptr)
+        {
+            if (event->type() == QEvent::Show) scheduleRuleProjection();
+            else if (event->type() == QEvent::Hide && m_ruleProjectionTimer != nullptr) m_ruleProjectionTimer->stop();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    void scheduleRuleProjection()
+    {
+        const bool pending = !m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty();
+        const bool editors = hasVisibleRuleDrafts(currentRuleTable());
+        const bool editable = currentRuleTable() != nullptr && !pending;
+        m_addRuleButton->setEnabled(editable);
+        m_removeRuleButton->setEnabled(editable);
+        m_moveRuleUpButton->setEnabled(editable);
+        m_moveRuleDownButton->setEnabled(editable);
+        if (m_ruleProjectionTimer == nullptr) return;
+        if ((pending || editors || (currentRuleTable() != nullptr && hasReclaimableRuleEditors())) && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
+        else m_ruleProjectionTimer->stop();
+    }
+
+    void projectPendingRules()
+    {
+        if (m_ruleTabWidget == nullptr || !m_ruleTabWidget->isVisible()) { scheduleRuleProjection(); return; }
+        const quint32 type = currentRuleCallbackType();
+        QTableWidget* table = currentRuleTable();
+        if (table == nullptr) { scheduleRuleProjection(); return; }
+        auto pending = m_pendingRuleRows.find(type);
+        if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({table}))
+        {
+            m_ruleProjectionTimer->stop();
+            const QPointer<CallbackInterceptController> guard(this);
+            ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("callback-rule-import-projection"),
+                {table}, [guard]() { if (guard) guard->scheduleRuleProjection(); });
+            return;
+        }
+        const QScopedValueRollback<bool> silence(m_ignoreUiSignal, true);
+        QElapsedTimer budget; budget.start();
+        int count = 0;
+        materializeVisibleRuleEditors(table, type, budget, count);
+        for (auto it = m_materializedRuleRows.begin(); it != m_materializedRuleRows.end();)
+        {
+            if (!it->isValid()) { it = m_materializedRuleRows.erase(it); continue; }
+            if (count < 4 && (count == 0 || budget.elapsed() < 3) && reclaimRuleEditors(*it))
+            {
+                it = m_materializedRuleRows.erase(it);
+                ++count;
+            }
+            else ++it;
+        }
+        while (pending != m_pendingRuleRows.end() && !pending->isEmpty() && count < 4 && (count == 0 || budget.elapsed() < 3))
+        {
+            const auto rule = pending->takeFirst();
+            appendRuleRow(table, type, rule);
+            ++count;
+        }
+        if (pending != m_pendingRuleRows.end() && pending->isEmpty()) { m_pendingRuleRows.erase(pending); updateStatusLabel(); }
+        else if (pending != m_pendingRuleRows.end()) m_statusLabel->setText(kernelText("kernel.callback.intercept.rules.loading", QStringLiteral("正在加载规则编辑器，剩余 %1 条")).arg(pending->size()));
+        scheduleRuleProjection();
     }
 
     void refreshRuleGroupComboForCell(QComboBox* groupCombo, const quint32 selectedGroupId)
     {
-        if (groupCombo == nullptr)
-        {
-            return;
-        }
-
-        applyRuleComboStyle(groupCombo);
-        groupCombo->blockSignals(true);
-        groupCombo->clear();
-        for (int rowIndex = 0; rowIndex < m_groupTable->rowCount(); ++rowIndex)
-        {
-            QTableWidgetItem* groupIdItem = m_groupTable->item(rowIndex, static_cast<int>(GroupColumn::Id));
-            QTableWidgetItem* groupNameItem = m_groupTable->item(rowIndex, static_cast<int>(GroupColumn::Name));
-            if (groupIdItem == nullptr || groupNameItem == nullptr)
-            {
-                continue;
-            }
-
-            quint32 groupId = 0U;
-            if (!parseUnsignedText(groupIdItem->text(), &groupId))
-            {
-                continue;
-            }
-            groupCombo->addItem(
-                QStringLiteral("[%1] %2").arg(groupId).arg(groupNameItem->text().trimmed()),
-                groupId);
-        }
-
+        if (groupCombo == nullptr) return;
+        if (m_groupOptionsModel == nullptr) refreshRuleGroupComboOptions();
+        const QSignalBlocker blocker(groupCombo);
+        if (groupCombo->model() != m_groupOptionsModel) groupCombo->setModel(m_groupOptionsModel);
         int targetIndex = groupCombo->findData(selectedGroupId);
-        if (targetIndex < 0)
-        {
-            targetIndex = 0;
-        }
-        groupCombo->setCurrentIndex(targetIndex);
-        groupCombo->blockSignals(false);
+        groupCombo->setCurrentIndex(targetIndex < 0 ? 0 : targetIndex);
     }
 
     void refreshRuleGroupComboOptions()
     {
-        for (auto iterator = m_ruleTableMap.begin(); iterator != m_ruleTableMap.end(); ++iterator)
+        QVector<QPair<quint32, QString>> options;
+        for (int row = 0; row < m_groupTable->rowCount(); ++row)
         {
-            QTableWidget* ruleTable = iterator.value();
-            if (ruleTable == nullptr)
-            {
-                continue;
-            }
-
-            for (int rowIndex = 0; rowIndex < ruleTable->rowCount(); rowIndex += 2)
-            {
-                auto* groupCombo = qobject_cast<QComboBox*>(
-                    ruleTable->cellWidget(rowIndex, static_cast<int>(RuleColumn::GroupId)));
-                quint32 selectedGroupId = firstGroupId();
-                if (groupCombo != nullptr)
-                {
-                    selectedGroupId = static_cast<quint32>(groupCombo->currentData().toUInt());
-                }
-                refreshRuleGroupComboForCell(groupCombo, selectedGroupId);
-            }
+            const auto* id = m_groupTable->item(row, static_cast<int>(GroupColumn::Id));
+            const auto* name = m_groupTable->item(row, static_cast<int>(GroupColumn::Name));
+            quint32 value = 0U;
+            if (id != nullptr && name != nullptr && parseUnsignedText(id->text(), &value))
+                options.push_back({value, QStringLiteral("[%1] %2").arg(value).arg(name->text().trimmed())});
         }
+        if (m_groupOptionsModel != nullptr && options == m_groupOptions) return;
+        struct Selection { QPointer<QComboBox> combo; quint32 group; bool blocked; };
+        QVector<Selection> selections;
+        for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+            if (table.value() != nullptr)
+                for (int row = 0; row < table.value()->rowCount(); row += 2)
+                    if (auto* combo = qobject_cast<QComboBox*>(table.value()->cellWidget(row, static_cast<int>(RuleColumn::GroupId))))
+                        selections.push_back({combo, static_cast<quint32>(combo->currentData().toUInt()), combo->blockSignals(true)});
+        if (m_groupOptionsModel == nullptr) m_groupOptionsModel = new QStandardItemModel(this);
+        m_groupOptionsModel->clear();
+        for (const auto& option : options)
+        {
+            auto* item = new QStandardItem(option.second);
+            item->setData(option.first, Qt::UserRole);
+            m_groupOptionsModel->appendRow(item);
+        }
+        m_groupOptions = std::move(options);
+        m_groupOptionLabels.clear();
+        for (const auto& option : m_groupOptions) m_groupOptionLabels.insert(option.first, option.second);
+        for (auto pending = m_pendingRuleRows.begin(); pending != m_pendingRuleRows.end(); ++pending)
+            for (auto& rule : pending.value())
+                if (!m_groupOptionLabels.contains(rule.groupId))
+                    rule.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+        for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+        {
+            if (!table.value()) continue;
+            const QSignalBlocker silence(table.value());
+            for (int row = 0; row < table.value()->rowCount(); row += 2)
+                if (auto* source = table.value()->item(row, static_cast<int>(RuleColumn::RuleId));
+                    source && source->data(Qt::UserRole).canConvert<CallbackRuleModel>())
+                {
+                    auto draft = source->data(Qt::UserRole).value<CallbackRuleModel>();
+                    if (!m_groupOptionLabels.contains(draft.groupId)) draft.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+                    source->setData(Qt::UserRole, QVariant::fromValue(draft));
+                    if (auto* cell = table.value()->item(row, static_cast<int>(RuleColumn::GroupId))) cell->setText(m_groupOptionLabels.value(draft.groupId));
+                }
+        }
+        for (const auto& selection : selections)
+            if (selection.combo)
+            {
+                refreshRuleGroupComboForCell(selection.combo, selection.group);
+                selection.combo->blockSignals(selection.blocked);
+            }
     }
 
     quint32 currentRuleCallbackType() const
@@ -5404,16 +5835,17 @@ private:
                 ? detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"))
                 : nullptr;
 
+            const bool lazy = ruleIdItem && ruleIdItem->data(Qt::UserRole).canConvert<CallbackRuleModel>();
             if (ruleIdItem == nullptr || ruleNameItem == nullptr || enabledItem == nullptr ||
                 timeoutItem == nullptr || priorityItem == nullptr ||
-                groupCombo == nullptr || operationPanel == nullptr ||
+                (!lazy && (groupCombo == nullptr || operationPanel == nullptr ||
                 matchModeCombo == nullptr || actionCombo == nullptr || timeoutDecisionCombo == nullptr ||
-                initiatorEdit == nullptr || targetEdit == nullptr || commentEdit == nullptr)
+                initiatorEdit == nullptr || targetEdit == nullptr || commentEdit == nullptr)))
             {
                 continue;
             }
 
-            CallbackRuleModel ruleModel;
+            CallbackRuleModel ruleModel = lazy ? ruleIdItem->data(Qt::UserRole).value<CallbackRuleModel>() : CallbackRuleModel{};
             if (!parseUnsignedText(ruleIdItem->text(), &ruleModel.ruleId))
             {
                 if (errorTextOut != nullptr)
@@ -5423,7 +5855,7 @@ private:
                 return false;
             }
 
-            ruleModel.groupId = static_cast<quint32>(groupCombo->currentData().toUInt());
+            ruleModel.groupId = lazy ? ruleModel.groupId : static_cast<quint32>(groupCombo->currentData().toUInt());
             if (ruleModel.groupId == 0U)
             {
                 if (errorTextOut != nullptr)
@@ -5433,8 +5865,16 @@ private:
                 return false;
             }
 
-            bool operationParseOk = false;
-            ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
+            bool operationParseOk = lazy;
+            if (lazy && ruleIdItem->data(RuleCustomMaskDraftRole).isValid())
+            {
+                const auto customText = ruleIdItem->data(RuleCustomMaskDraftRole).toString().trimmed();
+                quint32 customMask = 0U;
+                if (!customText.isEmpty())
+                    operationParseOk = parseUnsignedText(normalizeMaskTextForEdit(customText), &customMask);
+                if (operationParseOk) ruleModel.operationMask |= customMask;
+            }
+            if (!lazy) ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
             if (!operationParseOk || ruleModel.operationMask == 0U)
             {
                 if (errorTextOut != nullptr)
@@ -5469,14 +5909,14 @@ private:
             ruleModel.ruleName = ruleNameItem->text().trimmed();
             ruleModel.enabled = (enabledItem->checkState() == Qt::Checked);
             ruleModel.callbackType = callbackType;
-            ruleModel.initiatorPattern = normalizeMatchAllPattern(initiatorEdit->text());
-            ruleModel.targetPattern = normalizeMatchAllPattern(targetEdit->text());
-            ruleModel.matchMode = static_cast<quint32>(matchModeCombo->currentData().toUInt());
-            ruleModel.action = static_cast<quint32>(actionCombo->currentData().toUInt());
+            ruleModel.initiatorPattern = normalizeMatchAllPattern(lazy ? ruleModel.initiatorPattern : initiatorEdit->text());
+            ruleModel.targetPattern = normalizeMatchAllPattern(lazy ? ruleModel.targetPattern : targetEdit->text());
+            if (!lazy) ruleModel.matchMode = static_cast<quint32>(matchModeCombo->currentData().toUInt());
+            if (!lazy) ruleModel.action = static_cast<quint32>(actionCombo->currentData().toUInt());
             ruleModel.timeoutMs = timeoutMs;
-            ruleModel.timeoutDefaultDecision = static_cast<quint32>(timeoutDecisionCombo->currentData().toUInt());
+            if (!lazy) ruleModel.timeoutDefaultDecision = static_cast<quint32>(timeoutDecisionCombo->currentData().toUInt());
             ruleModel.priority = rulePriority;
-            ruleModel.comment = commentEdit->text().trimmed();
+            ruleModel.comment = (lazy ? ruleModel.comment : commentEdit->text()).trimmed();
 
             if (!ruleModel.initiatorPattern.trimmed().isEmpty())
             {
@@ -5504,6 +5944,8 @@ private:
             ruleListOut->push_back(ruleModel);
         }
 
+        for (const auto& pending : m_pendingRuleRows.value(callbackType))
+            ruleListOut->push_back(ruleWithComboFallbacks(pending, callbackType));
         return true;
     }
 
@@ -5660,39 +6102,37 @@ private:
         return degradedItems.join(QStringLiteral("、"));
     }
 
-    bool queryRuntimeState(KSWORD_ARK_CALLBACK_RUNTIME_STATE* runtimeStateOut, QString* errorTextOut) const
-    {
-        if (runtimeStateOut == nullptr)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = kernelText("kernel.callback.intercept.validation.runtime_state_out_null", QStringLiteral("内部错误：runtimeStateOut 为空。"));
-            }
-            return false;
-        }
-
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::CallbackRuntimeResult runtimeResult = driverClient.queryCallbackRuntimeState();
-        if (!runtimeResult.io.ok)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
-                    .arg(runtimeResult.io.win32Error)
-                    .arg(callbackRuleIoMessageText(QString::fromStdString(runtimeResult.io.message)));
-            }
-            return false;
-        }
-
-        *runtimeStateOut = runtimeResult.state;
-        return true;
-    }
-
     void reloadRuntimeState()
     {
-        KSWORD_ARK_CALLBACK_RUNTIME_STATE runtimeState{};
-        QString errorText;
-        if (!queryRuntimeState(&runtimeState, &errorText))
+        if (m_controlOperation->isBusy()) return;
+        m_reloadStateButton->setEnabled(false);
+        m_statusLabel->setText(kernelText("kernel.callback.intercept.status.waiting_refresh", QStringLiteral("状态：等待刷新")));
+        const auto ticket = m_runtimeQuery->submit<int, ksword::ark::CallbackRuntimeResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient client;
+                return client.queryCallbackRuntimeState();
+            },
+            [this](const ksword::ark::CallbackRuntimeResult& result, std::uint64_t) {
+                m_reloadStateButton->setEnabled(!m_controlOperation->isBusy());
+                const QString error = result.io.ok ? QString()
+                    : kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
+                        .arg(result.io.win32Error).arg(callbackRuleIoMessageText(QString::fromStdString(result.io.message)));
+                applyRuntimeState(result.state, error);
+                return true;
+            },
+            [this](std::exception_ptr) { runtimeReadFailed(); });
+        if (ticket == 0) runtimeReadFailed();
+    }
+
+    void runtimeReadFailed()
+    {
+        m_reloadStateButton->setEnabled(!m_controlOperation->isBusy());
+        applyRuntimeState({}, kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
+
+    void applyRuntimeState(const KSWORD_ARK_CALLBACK_RUNTIME_STATE& runtimeState, const QString& errorText)
+    {
+        if (!errorText.isEmpty())
         {
             RtlZeroMemory(&m_runtimeState, sizeof(m_runtimeState));
             appendAppLog(kernelText("kernel.callback.intercept.runtime.reload_failed", QStringLiteral("重新加载驱动状态失败：%1")).arg(errorText));
@@ -5729,20 +6169,47 @@ private:
         updateStatusLabel();
     }
 
-    void ensureMinifilterRuntimeStarted(
-        const CallbackConfigDocument& configDocument,
+    struct MinifilterStartReceipt
+    {
+        bool needed = false;
+        bool legacyStarted = false;
+        bool unexpectedFailure = false;
+        ksword::ark::FileMonitorStatusResult before;
+        ksword::ark::IoResult start;
+        ksword::ark::FileMonitorStatusResult after;
+    };
+
+    static MinifilterStartReceipt startMinifilterRuntimeIfNeeded(const bool needed,
         const ksword::ark::DriverClient& driverClient)
     {
-        // 作用：应用含 Minifilter 规则后自动启动共享 file-monitor minifilter。
-        // 处理：只发 START，不主动 STOP，避免覆盖用户在文件监控页已有的运行意图。
-        // 返回：无；失败只写应用日志，规则应用本身仍然保持成功。
-        if (!hasActiveMinifilterRule(configDocument))
+        MinifilterStartReceipt receipt;
+        receipt.needed = needed;
+        if (!needed) return receipt;
+        receipt.before = driverClient.queryFileMonitorStatus();
+        if (receipt.before.io.ok && (receipt.before.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+            return receipt;
+        receipt.start = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+            KSWORD_ARK_FILE_MONITOR_OPERATION_ALL, 0UL, 0UL);
+        if (!receipt.start.ok)
+        {
+            const auto legacyStart = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+                KSWORD_ARK_FILE_MONITOR_OPERATION_ALL & ~KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL, 0UL, 0UL);
+            if (legacyStart.ok) { receipt.legacyStarted = true; receipt.start = legacyStart; }
+        }
+        // The original path rechecks status after both successful and failed starts.
+        receipt.after = driverClient.queryFileMonitorStatus();
+        return receipt;
+    }
+
+    void ensureMinifilterRuntimeStarted(const MinifilterStartReceipt& receipt)
+    {
+        if (!receipt.needed)
         {
             return;
         }
 
-        const ksword::ark::FileMonitorStatusResult beforeStatus =
-            driverClient.queryFileMonitorStatus();
+        if (receipt.unexpectedFailure) { controlOperationFailed(); return; }
+        const auto& beforeStatus = receipt.before;
         if (beforeStatus.io.ok &&
             (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
         {
@@ -5762,32 +6229,18 @@ private:
                 .arg(callbackRuleIoMessageText(QString::fromStdString(beforeStatus.io.message))));
         }
 
-        ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
-            KSWORD_ARK_FILE_MONITOR_ACTION_START,
-            KSWORD_ARK_FILE_MONITOR_OPERATION_ALL,
-            0UL,
-            0UL);
-        if (!startResult.ok)
+        const auto& startResult = receipt.start;
+        if (receipt.legacyStarted)
         {
             const unsigned long legacyOperationMask =
                 KSWORD_ARK_FILE_MONITOR_OPERATION_ALL & ~KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-            const ksword::ark::IoResult legacyStartResult = driverClient.controlFileMonitor(
-                KSWORD_ARK_FILE_MONITOR_ACTION_START,
-                legacyOperationMask,
-                0UL,
-                0UL);
-            if (legacyStartResult.ok)
-            {
-                appendAppLog(
-                    kernelText("kernel.callback.intercept.runtime.minifilter.legacy_started", QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。"))
-                    .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
-                startResult = legacyStartResult;
-            }
+            appendAppLog(
+                kernelText("kernel.callback.intercept.runtime.minifilter.legacy_started", QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。"))
+                .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
         }
         if (!startResult.ok)
         {
-            const ksword::ark::FileMonitorStatusResult failStatus =
-                driverClient.queryFileMonitorStatus();
+            const auto& failStatus = receipt.after;
             const QString statusSuffix = failStatus.io.ok
                 ? kernelText("kernel.callback.intercept.runtime.minifilter.status_suffix", QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8"))
                     .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)))
@@ -5809,8 +6262,7 @@ private:
             return;
         }
 
-        const ksword::ark::FileMonitorStatusResult afterStatus =
-            driverClient.queryFileMonitorStatus();
+        const auto& afterStatus = receipt.after;
         if (afterStatus.io.ok)
         {
             appendAppLog(
@@ -5832,6 +6284,7 @@ private:
 
     void applyRulesToDriver()
     {
+        if (m_controlOperation->isBusy()) return;
         CallbackConfigDocument configDocument;
         QString errorText;
         if (!collectConfigFromUi(&configDocument, &errorText))
@@ -5853,111 +6306,162 @@ private:
             return;
         }
 
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult applyResult = driverClient.setCallbackRules(
-            blobBytes.data(),
-            static_cast<unsigned long>(blobBytes.size()));
-
-        if (!applyResult.ok)
+        struct Request { QByteArray blob; bool needsMinifilter; };
+        struct Result
         {
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
-                kernelText("kernel.callback.intercept.apply.error", QStringLiteral("应用到驱动失败，error=%1。")).arg(applyResult.win32Error));
-            appendAppLog(kernelText("kernel.callback.intercept.apply.log_failed", QStringLiteral("应用到驱动失败，error=%1，detail=%2"))
-                .arg(applyResult.win32Error)
-                .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
-            return;
-        }
+            ksword::ark::IoResult apply;
+            MinifilterStartReceipt minifilter;
+            ksword::ark::CallbackRuntimeResult runtime;
+        };
+        const quint64 acceptedEditRevision = m_editRevision;
+        m_runtimeQuery->cancel(); // Old read receipts cannot overwrite this write's post-check.
+        const auto ticket = m_controlOperation->submitTransaction<Request, Result>(
+            Request{blobBytes, hasActiveMinifilterRule(configDocument)},
+            [](const Request& value) {
+                const ksword::ark::DriverClient driverClient;
+                Result result;
+                result.apply = driverClient.setCallbackRules(value.blob.constData(),
+                    static_cast<unsigned long>(value.blob.size()));
+                if (!result.apply.ok) return result;
+                result.minifilter.needed = value.needsMinifilter;
+                try { result.minifilter = startMinifilterRuntimeIfNeeded(value.needsMinifilter, driverClient); }
+                catch (...) { result.minifilter.unexpectedFailure = true; }
+                try { result.runtime = driverClient.queryCallbackRuntimeState(); }
+                catch (...) { result.runtime.io.ok = false; result.runtime.io.win32Error = ERROR_UNHANDLED_EXCEPTION; }
+                return result;
+            },
+            [this, configDocument, blobBytes, acceptedEditRevision](const Result& result, std::uint64_t) {
+                const auto& applyResult = result.apply;
+                if (!applyResult.ok)
+                {
+                    const QPointer<CallbackInterceptController> owner(this);
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                        kernelText("kernel.callback.intercept.apply.error", QStringLiteral("应用到驱动失败，error=%1。")).arg(applyResult.win32Error));
+                    if (!owner) return true;
+                    appendAppLog(kernelText("kernel.callback.intercept.apply.log_failed", QStringLiteral("应用到驱动失败，error=%1，detail=%2"))
+                        .arg(applyResult.win32Error)
+                        .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
+                    return true;
+                }
 
-        m_rulesApplied = true;
-        m_dirty = false;
-        m_nextRuleVersion = configDocument.ruleVersion + 1ULL;
+                m_rulesApplied = true;
+                m_dirty = m_editRevision != acceptedEditRevision;
+                m_nextRuleVersion = std::max<quint64>(m_nextRuleVersion, configDocument.ruleVersion + 1ULL);
 
-        appendAppLog(
-            kernelText("kernel.callback.intercept.apply.success", QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4"))
-            .arg(configDocument.ruleVersion)
-            .arg(configDocument.groups.size())
-            .arg(configDocument.rules.size())
-            .arg(blobBytes.size()));
+                appendAppLog(
+                    kernelText("kernel.callback.intercept.apply.success", QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4"))
+                    .arg(configDocument.ruleVersion)
+                    .arg(configDocument.groups.size())
+                    .arg(configDocument.rules.size())
+                    .arg(blobBytes.size()));
 
-        ensureMinifilterRuntimeStarted(configDocument, driverClient);
-        reloadRuntimeState();
-        const bool hasAskUserRule = std::any_of(
-            configDocument.rules.cbegin(),
-            configDocument.rules.cend(),
-            [](const CallbackRuleModel& ruleModel) {
-                return ruleModel.enabled &&
-                    (ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
-                        ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
-                    ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER;
-            });
-        if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)
-        {
-            appendAppLog(
-                kernelText("kernel.callback.intercept.apply.ask_user_warning", QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。请确认弹窗管理器已启动，否则驱动将按默认决策回退。")));
-        }
-        updateStatusLabel();
+                ensureMinifilterRuntimeStarted(result.minifilter);
+                const QString runtimeError = result.runtime.io.ok ? QString()
+                    : kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
+                        .arg(result.runtime.io.win32Error)
+                        .arg(callbackRuleIoMessageText(QString::fromStdString(result.runtime.io.message)));
+                applyRuntimeState(result.runtime.state, runtimeError);
+                const bool hasAskUserRule = std::any_of(
+                    configDocument.rules.cbegin(),
+                    configDocument.rules.cend(),
+                    [](const CallbackRuleModel& ruleModel) {
+                        return ruleModel.enabled &&
+                            (ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+                                ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
+                            ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER;
+                    });
+                if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)
+                {
+                    appendAppLog(
+                        kernelText("kernel.callback.intercept.apply.ask_user_warning", QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。请确认弹窗管理器已启动，否则驱动将按默认决策回退。")));
+                }
+                updateStatusLabel();
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
+        if (ticket == 0) updateControlActions();
     }
 
     void importConfigFromFile()
     {
+        if (m_importOperation->isBusy() || m_controlOperation->isBusy()) return;
+        const QPointer<CallbackInterceptController> owner(this);
         const QString filePath = QFileDialog::getOpenFileName(
             m_hostPage,
             kernelText("kernel.callback.intercept.import.dialog_title", QStringLiteral("导入回调规则")),
             QString(),
             QStringLiteral("Ksword Rule File (*.kswrules);;JSON (*.json);;All Files (*)"));
-        if (filePath.trimmed().isEmpty())
-        {
-            return;
-        }
+        if (!owner || filePath.trimmed().isEmpty()) return;
+        if (m_importOperation->isBusy() || m_controlOperation->isBusy()) return;
 
-        QFile inputFile(filePath);
-        if (!inputFile.open(QIODevice::ReadOnly))
+        struct Request
         {
-            const QString errorText = kernelText("kernel.callback.intercept.import.open_failed", QStringLiteral("打开文件失败：%1")).arg(inputFile.errorString());
-            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
-            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
-            return;
-        }
-
-        const QByteArray jsonBytes = inputFile.readAll();
-        inputFile.close();
-
-        CallbackConfigDocument importedDocument;
-        QStringList warningList;
-        QString errorText;
-        if (!importCallbackConfigFromJson(jsonBytes, &importedDocument, &warningList, &errorText))
+            QString filePath;
+            ks::i18n::SourceTextSnapshot language;
+        };
+        struct Result
         {
-            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
-            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
-            return;
-        }
-
-        const CallbackValidationResult validationResult = validateCallbackConfig(importedDocument);
-        if (!validationResult.success)
-        {
-            const QString validateError = validationResult.errorList.join(QStringLiteral("；"));
-            QMessageBox::warning(m_hostPage,
-                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
-                kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
-            appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
-            return;
-        }
-
-        for (const QString& warningText : warningList)
-        {
-            appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warningText));
-        }
-        for (const QString& warningText : validationResult.warningList)
-        {
-            appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warningText));
-        }
-
-        populateUiFromConfig(importedDocument);
-        m_nextRuleVersion = std::max(m_nextRuleVersion, importedDocument.ruleVersion + 1ULL);
-        setDirtyState(true);
-        appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
+            bool parsed = false;
+            CallbackConfigDocument document;
+            CallbackValidationResult validation;
+            QStringList warnings;
+            QString error;
+        };
+        Request request{filePath, ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
+        m_importOperation->submit<Request, Result>(std::move(request),
+            [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+                Result result;
+                QFile file(input.filePath);
+                if (!file.open(QIODevice::ReadOnly))
+                {
+                    result.error = input.language.contextText(
+                        QStringLiteral("kernel.callback.intercept.import.open_failed"),
+                        QStringLiteral("打开文件失败：%1")).arg(file.errorString());
+                    return result;
+                }
+                const QByteArray bytes = file.readAll();
+                file.close();
+                if (token.isCanceled()) return result;
+                result.parsed = importCallbackConfigFromJson(bytes, &result.document,
+                    &result.warnings, &result.error, &input.language);
+                if (result.parsed && !token.isCanceled())
+                    result.validation = validateCallbackConfig(result.document, &input.language);
+                return result;
+            },
+            [owner, filePath](const Result& result, std::uint64_t) {
+                if (!owner) return true;
+                if (!result.parsed)
+                {
+                    QMessageBox::warning(owner->m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), result.error);
+                    if (!owner) return true;
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(result.error));
+                    return true;
+                }
+                if (!result.validation.success)
+                {
+                    const QString error = result.validation.errorList.join(QStringLiteral("；"));
+                    QMessageBox::warning(owner->m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                        kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
+                    if (!owner) return true;
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
+                    return true;
+                }
+                for (const QString& warning : result.warnings)
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warning));
+                for (const QString& warning : result.validation.warningList)
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warning));
+                owner->populateUiFromConfig(result.document);
+                owner->m_nextRuleVersion = std::max(owner->m_nextRuleVersion, result.document.ruleVersion + 1ULL);
+                owner->setDirtyState(true);
+                owner->appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
+                return true;
+            },
+            [owner](std::exception_ptr) {
+                if (owner) owner->controlOperationFailed();
+            });
     }
 
     void exportConfigToFile()
@@ -6010,6 +6514,9 @@ private:
     void populateUiFromConfig(const CallbackConfigDocument& configDocument)
     {
         m_ignoreUiSignal = true;
+        m_pendingRuleRows.clear();
+        m_materializedRuleRows.clear();
+        if (m_ruleProjectionTimer != nullptr) m_ruleProjectionTimer->stop();
 
         if (m_globalEnabledCheck != nullptr)
         {
@@ -6030,6 +6537,7 @@ private:
             appendGroupRow(groupModel);
         }
         addDefaultGroupIfNeeded();
+        refreshRuleGroupComboOptions();
 
         for (auto iterator = m_ruleTableMap.begin(); iterator != m_ruleTableMap.end(); ++iterator)
         {
@@ -6059,11 +6567,12 @@ private:
             {
                 continue;
             }
-            appendRuleRow(ruleTable, ruleModel.callbackType, ruleModel);
+            m_pendingRuleRows[ruleModel.callbackType].push_back(ruleModel);
         }
 
         m_ignoreUiSignal = false;
         refreshRuleGroupComboOptions();
+        scheduleRuleProjection();
     }
 
 private:
@@ -6073,6 +6582,12 @@ private:
     QCheckBox* m_globalEnabledCheck = nullptr;
     QPushButton* m_applyButton = nullptr;
     QPushButton* m_reloadStateButton = nullptr;
+    ks::ui::AsyncOperation* m_runtimeQuery = nullptr;
+    ks::ui::AsyncOperation* m_controlOperation = nullptr;
+    ks::ui::AsyncOperation* m_importOperation = nullptr;
+    bool m_importDisabledHost = false;
+    QWidget* m_processProtectPage = nullptr;
+    QWidget* m_minifilterBypassPage = nullptr;
     QPushButton* m_importButton = nullptr;
     QPushButton* m_exportButton = nullptr;
     QLabel* m_statusLabel = nullptr;
@@ -6082,6 +6597,12 @@ private:
     QPushButton* m_moveGroupUpButton = nullptr;
     QPushButton* m_moveGroupDownButton = nullptr;
     QTableWidget* m_groupTable = nullptr;
+    QHash<quint32, QList<CallbackRuleModel>> m_pendingRuleRows;
+    QTimer* m_ruleProjectionTimer = nullptr;
+    QVector<QPersistentModelIndex> m_materializedRuleRows;
+    QStandardItemModel* m_groupOptionsModel = nullptr;
+    QVector<QPair<quint32, QString>> m_groupOptions;
+    QHash<quint32, QString> m_groupOptionLabels;
 
     QPushButton* m_addRuleButton = nullptr;
     QPushButton* m_removeRuleButton = nullptr;
@@ -6134,6 +6655,9 @@ private:
 
     QPlainTextEdit* m_appLogEditor = nullptr;
     QPlainTextEdit* m_eventLogEditor = nullptr;
+    QStringList m_eventLogArchive;
+    QStringList m_pendingEventLogLines;
+    QTimer* m_eventLogFlushTimer = nullptr;
 
     QPushButton* m_startFileMonitorFsctlButton = nullptr;
     QPushButton* m_drainFileMonitorButton = nullptr;
@@ -6141,15 +6665,17 @@ private:
     QPushButton* m_exportFileMonitorButton = nullptr;
     QCheckBox* m_fileMonitorFsctlOnlyCheck = nullptr;
     QLabel* m_fileMonitorStatusLabel = nullptr;
-    QTableWidget* m_fileMonitorTable = nullptr;
+    QTableView* m_fileMonitorTable = nullptr;
+    FileMonitorEventModel* m_fileMonitorModel = nullptr;
+    FileMonitorEventFilter* m_fileMonitorProxy = nullptr;
     QTimer* m_fileMonitorDrainTimer = nullptr;
-    QHash<quint32, QString> m_fileMonitorProcessNameCache;
     bool m_fileMonitorDrainInFlight = false;    // m_fileMonitorDrainInFlight：后台 drain 任务在途标志，只在 UI 线程读写，防止周期定时器堆积请求。
 
     KSWORD_ARK_CALLBACK_RUNTIME_STATE m_runtimeState{};
     quint64 m_nextRuleVersion = 1ULL;
     bool m_rulesApplied = false;
     bool m_dirty = false;
+    quint64 m_editRevision = 0;
     bool m_ignoreUiSignal = false;
 };
 

@@ -54,7 +54,7 @@ namespace ks::ui
                 const QPointer<MemoryWorkbenchView> self(this);
                 const bool wasBusy = subPageFollowBusy_;
                 subPageFollowBusy_ = true;
-                hexPane_->requestBrowseWindow(address, length);
+                hexPane_->requestBrowseWindow(address, length, HexCanvas::RangeReadPurpose::ExplicitRead);
                 if (self) subPageFollowBusy_ = wasBusy;
             });
         connect(pseudocodeView_, &WorkbenchPseudocodeView::requestHexLocate, this,

@@ -48,7 +48,7 @@ namespace ks::ui
             return reinterpret_cast<HWND>(winId());
         }
 
-        void showOverPhysicalRect(const RECT& physicalRect)
+        void showOverPhysicalRect(HWND target, const RECT& physicalRect)
         {
             const int width = physicalRect.right - physicalRect.left;
             const int height = physicalRect.bottom - physicalRect.top;
@@ -57,15 +57,25 @@ namespace ks::ui
                 hide();
                 return;
             }
-            ::SetWindowPos(
-                nativeHandle(),
+            const HWND overlay = nativeHandle();
+            if (m_target == target && ::EqualRect(&m_physicalRect, &physicalRect)
+                && ::IsWindowVisible(overlay))
+            {
+                return; // 同一物理几何只维持命中查询，不重发位置和整框更新。
+            }
+            if (::SetWindowPos(
+                overlay,
                 HWND_TOPMOST,
                 physicalRect.left,
                 physicalRect.top,
                 width,
                 height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            update();
+                SWP_NOACTIVATE | SWP_SHOWWINDOW) != FALSE)
+            {
+                m_target = target;
+                m_physicalRect = physicalRect; // 失败不提交缓存，下次移动仍允许重试。
+                update();
+            }
         }
 
     protected:
@@ -80,6 +90,9 @@ namespace ks::ui
             painter.setBrush(Qt::NoBrush);
             painter.drawRect(rect().adjusted(1, 1, -2, -2));
         }
+    private:
+        HWND m_target = nullptr;
+        RECT m_physicalRect{};
     };
 
     namespace
@@ -274,7 +287,7 @@ namespace ks::ui
         RECT windowRect{};
         if (::GetWindowRect(targetWindow, &windowRect) != FALSE && m_highlight != nullptr)
         {
-            m_highlight->showOverPhysicalRect(windowRect);
+            m_highlight->showOverPhysicalRect(targetWindow, windowRect);
         }
 
         if (newProcessId != m_hoverProcessId)

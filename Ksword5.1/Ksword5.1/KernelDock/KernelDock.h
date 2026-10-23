@@ -12,10 +12,19 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "KernelResultModel.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QWidget>
 #include <QString>
+#include <QPointer>
+#include <QPersistentModelIndex>
+#include <QVector>
+#include <QStringList>
+#include <memory>
+#include <functional>
+#include <array>
+#include "../UI/PageNavigationCatalog.h"
 
 #include <atomic>   // std::atomic_bool：控制异步刷新互斥。
 #include <cstdint>  // std::uintXX_t：固定宽度整数。
@@ -29,9 +38,13 @@ namespace ksword::kernel_dock_internal
     // - 返回：当前语言下的界面或诊断文本。
     inline QString kernelText(const char* const contextKey, const QString& sourceText)
     {
-        return ks::i18n::contextText(QString::fromLatin1(contextKey), sourceText);
+        return resultTexts ? resultTexts->contextText(QString::fromLatin1(contextKey), sourceText)
+            : ks::i18n::contextText(QString::fromLatin1(contextKey), sourceText);
     }
 }
+
+namespace ksword::kernel_navigation { class Registry; }
+namespace ks::ui { class AsyncOperation; }
 
 // Qt 前置声明：减少头文件耦合。
 class QPoint;
@@ -44,6 +57,8 @@ class QProgressBar;
 class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
+class QTreeWidgetItem;
+class QTimer;
 class QVBoxLayout;
 class QEvent;
 class QShowEvent;
@@ -554,9 +569,14 @@ public:
     // - 参数 parent：Qt 父控件。
     explicit KernelDock(QWidget* parent = nullptr);
 
+    static ks::ui::PageNavigationCatalog navigationCatalog(const KernelDock* existing = nullptr);
+    static ks::ui::PageNavigationCatalog selfDriverNavigationCatalog(const KernelDock* existing = nullptr);
+    QWidget* activateSelfDriverNavigationDescriptor(const QString& id);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 析构函数：
     // - 资源由 Qt 父子机制与容器自动释放。
-    ~KernelDock() override = default;
+    ~KernelDock() override;
 
     // requestDynDataRefresh：
     // - 作用：对外触发 DynData 页初始化和异步刷新。
@@ -686,7 +706,7 @@ private:
     // ensureTabInitialized：
     // - 作用：按需初始化指定 Tab 的 UI 与首次数据加载。
     // - 参数 tabIndex：顶层 Tab 索引。
-    void ensureTabInitialized(int tabIndex);
+    bool ensureTabInitialized(int tabIndex); // true only when this call created lazy UI.
 
     // ensureSelfDriverCurrentTabRefreshed：
     // - 外层自身驱动页可见或内部页切换后延迟一轮复核；
@@ -697,7 +717,7 @@ private:
     // - 输入 innerTabIndex：I/O 管理内部横向子页索引；
     // - 处理：仅为 SSDT/ShadowSSDT 启动原有惰性 UI 与首次刷新；
     // - 返回：无，IDT/GDT 自行在首次显示时加载，IOCTLS 无后台查询。
-    void ensureIoManagementTabInitialized(int innerTabIndex);
+    bool ensureIoManagementTabInitialized(int innerTabIndex);
 
     // ==================== 异步刷新 ====================
     // refreshObjectNamespaceAsync：
@@ -786,18 +806,28 @@ private:
     void updateTabIconContrast();
 
     // rebuildAtomTable：
-    // - 作用：根据筛选关键词重建原子表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildAtomTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildAtomTable(bool sourceChanged = false, std::function<void()> onReady = {});
+    static constexpr int KernelSearchFieldsRole = Qt::UserRole + 171;
+    static constexpr auto KernelSearchLanguageProperty = "ksword_kernel_search_language";
+    void publishKernelResultRows(KernelResultTable* table, std::size_t rowCount,
+        std::function<void(KernelResultValues&, std::size_t)> fillRow, std::function<void()> finalize,
+        std::function<void()> onReady, bool rebuildSource = true, QLineEdit* firstFilter = nullptr);
+    void applyKernelResultFilter(KernelResultTable* table, QLineEdit* edit, int separatorRow = -1);
+    int firstKernelResultRow(const KernelResultTable* table) const;
+    std::array<QPointer<ks::ui::AsyncOperation>, 5> m_kernelActionOperations;
+    void applyKernelResultFilterAsync(KernelResultTable* table, QLineEdit* edit, int separatorRow = -1);
+
 
     // rebuildNtQueryTable：
     // - 作用：重建历史 NtQuery 结果表格。
     void rebuildNtQueryTable();
 
     // rebuildSsdtTable：
-    // - 作用：根据筛选关键词重建 SSDT 结果表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildSsdtTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildSsdtTable(bool sourceChanged = false, std::function<void()> onReady = {});
 
     // rebuildDynDataFieldTable：
     // - 作用：根据筛选关键词重建动态偏移字段表。
@@ -815,26 +845,27 @@ private:
     void rebuildDriverCapabilityTable(const QString& filterKeyword);
 
     // rebuildCallbackEnumTable：
-    // - 作用：根据筛选关键词重建回调遍历表。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildCallbackEnumTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildCallbackEnumTable(bool sourceChanged = false, std::function<void()> onReady = {});
+    void prepareMinifilterCallbackTree();
 
     // rebuildShadowSsdtTable：
-    // - 作用：根据筛选关键词重建 SSSDT 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildShadowSsdtTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildShadowSsdtTable(bool sourceChanged = false, std::function<void()> onReady = {});
 
     // rebuildInlineHookTable：
-    // - 作用：根据筛选关键词重建 Inline Hook 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildInlineHookTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildInlineHookTable(bool sourceChanged = false, std::function<void()> onReady = {});
 
     // rebuildIatEatHookTable：
-    // - 作用：根据筛选关键词重建 IAT/EAT Hook 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildIatEatHookTable(const QString& filterKeyword);
+    // - 后台准备不可变字段、排序及过滤；GUI按源代次交换值模型。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildIatEatHookTable(bool sourceChanged = false, std::function<void()> onReady = {});
 
-    void rebuildTimerDpcTable(const QString& filterKeyword);
+    void rebuildTimerDpcTable(bool sourceChanged = false, std::function<void()> onReady = {});
 
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
@@ -1025,7 +1056,12 @@ private:
 
 private:
     // ==================== 根级控件 ====================
+    quint64 m_displayFallbackRevision = 0;
+    bool m_displayGeometryPrepared = false;
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
+    ksword::kernel_navigation::Registry* m_navigationRegistry = nullptr;
+    QPointer<QTabWidget> m_selfDriverNavigationTabs;
+    std::array<QPointer<QWidget>, 3> m_selfDriverNavigationPages;
     QTabWidget* m_tabWidget = nullptr;   // m_tabWidget：顶层 Tab 容器。
     QProgressBar* m_tabInitializingProgressBar = nullptr; // m_tabInitializingProgressBar：Tab 初始化顶部不确定进度条。
     QLabel* m_tabInitializingStatusLabel = nullptr;       // m_tabInitializingStatusLabel：Tab 初始化状态提示文字。
@@ -1102,7 +1138,7 @@ private:
     QPushButton* m_refreshAtomButton = nullptr;     // m_refreshAtomButton：原子表刷新按钮。
     QLineEdit* m_atomFilterEdit = nullptr;          // m_atomFilterEdit：原子关键词过滤输入框。
     QLabel* m_atomStatusLabel = nullptr;            // m_atomStatusLabel：原子表状态文本。
-    QTableWidget* m_atomTable = nullptr;            // m_atomTable：原子结果表。
+    KernelResultTable* m_atomTable = nullptr;            // m_atomTable：原子结果表。
     ks::ui::StructuredFieldView* m_atomDetailEditor = nullptr; // m_atomDetailEditor：原子详情编辑器（只读）。
 
     // ==================== 历史 NtQuery 页 ====================
@@ -1140,7 +1176,7 @@ private:
     QPushButton* m_restoreSsdtButton = nullptr;        // m_restoreSsdtButton：按验证磁盘基线恢复槽位。
     QLineEdit* m_ssdtFilterEdit = nullptr;             // m_ssdtFilterEdit：SSDT 筛选输入框。
     QLabel* m_ssdtStatusLabel = nullptr;               // m_ssdtStatusLabel：SSDT 状态文本。
-    QTableWidget* m_ssdtTable = nullptr;               // m_ssdtTable：SSDT 结果表。
+    KernelResultTable* m_ssdtTable = nullptr;               // m_ssdtTable：SSDT 结果表。
     ks::ui::StructuredFieldView* m_ssdtDetailEditor = nullptr;    // m_ssdtDetailEditor：SSDT 详情编辑器（只读）。
 
     // ==================== ShadowSSDT 子页 ====================
@@ -1150,7 +1186,7 @@ private:
     QPushButton* m_refreshShadowSsdtButton = nullptr;  // m_refreshShadowSsdtButton：SSSDT 刷新按钮。
     QLineEdit* m_shadowSsdtFilterEdit = nullptr;       // m_shadowSsdtFilterEdit：SSSDT 筛选框。
     QLabel* m_shadowSsdtStatusLabel = nullptr;         // m_shadowSsdtStatusLabel：SSSDT 状态文本。
-    QTableWidget* m_shadowSsdtTable = nullptr;         // m_shadowSsdtTable：SSSDT 表格。
+    KernelResultTable* m_shadowSsdtTable = nullptr;         // m_shadowSsdtTable：SSSDT 表格。
     ks::ui::StructuredFieldView* m_shadowSsdtDetailEditor = nullptr; // m_shadowSsdtDetailEditor：SSSDT 详情文本框。
 
     // ==================== Inline Hook 页 ====================
@@ -1163,7 +1199,7 @@ private:
     QLineEdit* m_inlineHookModuleEdit = nullptr;            // m_inlineHookModuleEdit：R0 模块过滤框。
     QComboBox* m_inlineHookIncludeCombo = nullptr;          // m_inlineHookIncludeCombo：扫描范围选项。
     QLabel* m_inlineHookStatusLabel = nullptr;              // m_inlineHookStatusLabel：状态文本。
-    QTableWidget* m_inlineHookTable = nullptr;              // m_inlineHookTable：Inline Hook 表格。
+    KernelResultTable* m_inlineHookTable = nullptr;              // m_inlineHookTable：Inline Hook 表格。
     ks::ui::StructuredFieldView* m_inlineHookDetailEditor = nullptr;   // m_inlineHookDetailEditor：详情文本框。
 
     // ==================== IAT/EAT Hook 页 ====================
@@ -1178,7 +1214,7 @@ private:
     QLineEdit* m_iatEatHookModuleEdit = nullptr;            // m_iatEatHookModuleEdit：R0 模块过滤框。
     QComboBox* m_iatEatHookIncludeCombo = nullptr;          // m_iatEatHookIncludeCombo：IAT/EAT 范围选项。
     QLabel* m_iatEatHookStatusLabel = nullptr;              // m_iatEatHookStatusLabel：状态文本。
-    QTableWidget* m_iatEatHookTable = nullptr;              // m_iatEatHookTable：IAT/EAT 表格。
+    KernelResultTable* m_iatEatHookTable = nullptr;              // m_iatEatHookTable：IAT/EAT 表格。
     ks::ui::StructuredFieldView* m_iatEatHookDetailEditor = nullptr;   // m_iatEatHookDetailEditor：详情文本框。
 
     // ==================== KTIMER/DPC 页 ====================
@@ -1187,7 +1223,7 @@ private:
     QPushButton* m_refreshTimerDpcButton = nullptr;
     QLineEdit* m_timerDpcFilterEdit = nullptr;
     QLabel* m_timerDpcStatusLabel = nullptr;
-    QTableWidget* m_timerDpcTable = nullptr;
+    KernelResultTable* m_timerDpcTable = nullptr;
     ks::ui::StructuredFieldView* m_timerDpcDetailEditor = nullptr;
 
     // ==================== 动态偏移页 ====================
@@ -1229,8 +1265,12 @@ private:
     QPushButton* m_refreshCallbackEnumButton = nullptr;             // m_refreshCallbackEnumButton：回调遍历刷新按钮。
     QLineEdit* m_callbackEnumFilterEdit = nullptr;                  // m_callbackEnumFilterEdit：回调遍历筛选输入框。
     QLabel* m_callbackEnumStatusLabel = nullptr;                    // m_callbackEnumStatusLabel：回调遍历状态文本。
-    QTableWidget* m_callbackEnumTable = nullptr;                    // m_callbackEnumTable：回调遍历表。
-    QTreeWidget* m_minifilterCallbackTree = nullptr;                // m_minifilterCallbackTree：Filter -> Pre/Post 回调树。
+    KernelResultTable* m_callbackEnumTable = nullptr;                    // m_callbackEnumTable：回调遍历表。
+    KernelMinifilterTree* m_minifilterCallbackTree = nullptr;
+    bool m_minifilterCallbackSourceDirty = true;
+    bool m_minifilterCallbackFilterDirty = true;
+    std::uint64_t m_callbackEnumSourceRevision = 0; // Advances only when the canonical callback snapshot is replaced.
+    QPersistentModelIndex m_callbackEnumSeparatorIndex;                // m_minifilterCallbackTree：Filter -> Pre/Post 回调树。
     ks::ui::StructuredFieldView* m_callbackEnumDetailEditor = nullptr;         // m_callbackEnumDetailEditor：回调遍历详情文本框。
     QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：嵌入在回调遍历页底部的移除面板容器。
     QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除面板内部布局。
@@ -1241,20 +1281,26 @@ private:
     QLabel* m_callbackRemoveStatusLabel = nullptr;                  // m_callbackRemoveStatusLabel：状态文本。
 
     // ==================== 数据缓存 ====================
+    bool m_objectNamespaceProjectionDirty = true;
+    bool m_objectNamespaceFiltering = false;
+    QTimer* m_objectNamespaceFilterTimer = nullptr;
+    QTreeWidgetItem* m_objectNamespaceUnfilteredSelection = nullptr;
+    int m_objectNamespaceUnfilteredHorizontalScroll = 0;
+    int m_objectNamespaceUnfilteredVerticalScroll = 0;
     std::vector<KernelObjectNamespaceEntry> m_objectNamespaceRows; // m_objectNamespaceRows：对象命名空间快照行。
-    std::vector<KernelAtomEntry> m_atomRows;                       // m_atomRows：原子快照行。
+    KernelSnapshotRows<KernelAtomEntry> m_atomRows;                       // m_atomRows：原子快照行。
     std::vector<KernelNtQueryResultEntry> m_ntQueryResults;        // m_ntQueryResults：历史 NtQuery 快照行。
-    std::vector<KernelSsdtEntry> m_ssdtRows;                       // m_ssdtRows：SSDT 快照行。
+    KernelSnapshotRows<KernelSsdtEntry> m_ssdtRows;                       // m_ssdtRows：SSDT 快照行。
     KernelDynDataSummary m_dynDataSummary;                         // m_dynDataSummary：动态偏移摘要快照。
     std::vector<KernelDynDataFieldEntry> m_dynDataRows;            // m_dynDataRows：动态偏移字段快照行。
     std::vector<KernelDynDataV4ItemEntry> m_dynDataV4ItemRows;      // m_dynDataV4ItemRows：v4 accepted item 快照行。
     KernelDriverStatusSummary m_driverStatusSummary;               // m_driverStatusSummary：统一驱动状态摘要快照。
     std::vector<KernelDriverCapabilityEntry> m_driverCapabilityRows; // m_driverCapabilityRows：能力矩阵快照行。
-    std::vector<KernelCallbackEnumEntry> m_callbackEnumRows;        // m_callbackEnumRows：回调遍历快照行。
-    std::vector<KernelSsdtEntry> m_shadowSsdtRows;                  // m_shadowSsdtRows：SSSDT 快照行。
-    std::vector<KernelInlineHookEntry> m_inlineHookRows;            // m_inlineHookRows：Inline Hook 快照行。
-    std::vector<KernelIatEatHookEntry> m_iatEatHookRows;            // m_iatEatHookRows：IAT/EAT 快照行。
-    std::vector<KernelTimerDpcEntry> m_timerDpcRows;                 // m_timerDpcRows：KTIMER/DPC 快照行。
+    KernelSnapshotRows<KernelCallbackEnumEntry> m_callbackEnumRows;        // m_callbackEnumRows：回调遍历快照行。
+    KernelSnapshotRows<KernelSsdtEntry> m_shadowSsdtRows;                  // m_shadowSsdtRows：SSSDT 快照行。
+    KernelSnapshotRows<KernelInlineHookEntry> m_inlineHookRows;            // m_inlineHookRows：Inline Hook 快照行。
+    KernelSnapshotRows<KernelIatEatHookEntry> m_iatEatHookRows;            // m_iatEatHookRows：IAT/EAT 快照行。
+    KernelSnapshotRows<KernelTimerDpcEntry> m_timerDpcRows;                 // m_timerDpcRows：KTIMER/DPC 快照行。
 
     // ==================== 刷新状态 ====================
     bool m_itemThemeRefreshScheduled = false; // 同一轮 palette 传播只重着色一次存量节点。

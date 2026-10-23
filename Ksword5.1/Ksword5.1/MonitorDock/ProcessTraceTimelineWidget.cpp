@@ -1,4 +1,6 @@
 #include "ProcessTraceTimelineWidget.h"
+#include "../UI/CompleteExport.h"
+#include "../UI/AsyncOperation.h"
 
 // ============================================================
 // ProcessTraceTimelineWidget.cpp
@@ -27,6 +29,8 @@
 #include <QHelpEvent>
 #include <QToolTip>
 #include <QSet>
+#include <QPointer>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -163,7 +167,8 @@ bool ProcessTraceTimelineWidget::setTracks(const std::vector<ks::ui::EventTimeli
         categories.insert(category);
     }
     m_tracks = tracks;
-    m_eventBucketsDirty = true;
+    ++m_trackRevision;
+    invalidateEventBuckets();
     update();
     return true;
 }
@@ -195,8 +200,18 @@ void ProcessTraceTimelineWidget::ensureEventBuckets() const
     const int pixelBudget = aggregationPixelBudget(); // DPR 热变化也会改变绘制预算。
     if (m_eventBucketsDirty || pixelBudget != m_bucketPixelBudget)
     {
-        m_eventBuckets = ks::ui::AggregateTimelineEvents(m_eventPointList, m_tracks,
-            m_rangeStart100ns, m_rangeEnd100ns, pixelBudget);
+        if (m_asyncEventProjection)
+        {
+            auto* self = const_cast<ProcessTraceTimelineWidget*>(this);
+            if (!m_eventBucketsDirty) self->invalidateEventBuckets();
+            else self->scheduleEventProjection();
+            return; // Painting never rebuilds a complete network event source.
+        }
+        static const std::vector<ProcessTraceTimelineEventPoint> empty;
+        m_eventBuckets = ks::ui::RetainCompleteExportSnapshot(
+            std::make_shared<const std::vector<ks::ui::EventTimelineBucket>>(
+                ks::ui::AggregateTimelineEvents(m_events.m_points ? *m_events.m_points : empty, m_tracks,
+                    m_rangeStart100ns, m_rangeEnd100ns, pixelBudget)));
         m_eventBucketsDirty = false;
         m_bucketPixelBudget = pixelBudget;
     }
@@ -205,23 +220,28 @@ void ProcessTraceTimelineWidget::ensureEventBuckets() const
 const std::vector<ks::ui::EventTimelineBucket>& ProcessTraceTimelineWidget::eventBuckets() const
 {
     ensureEventBuckets();
-    return m_eventBuckets;
+    static const std::vector<ks::ui::EventTimelineBucket> empty;
+    // Never expose buckets belonging to another track/range/viewport identity.
+    return !m_eventBucketsDirty && m_bucketPixelBudget == aggregationPixelBudget() && m_eventBuckets
+        ? *m_eventBuckets : empty;
 }
 
 std::size_t ProcessTraceTimelineWidget::eventPointCount() const
 {
-    return m_eventPointList.size();
+    return m_events.m_points ? m_events.m_points->size() : 0;
 }
 
 void ProcessTraceTimelineWidget::resizeEvent(QResizeEvent* eventPointer)
 {
     QWidget::resizeEvent(eventPointer);
-    m_eventBucketsDirty = true;
+    invalidateEventBuckets();
     update();
 }
 
 bool ProcessTraceTimelineWidget::event(QEvent* eventPointer)
 {
+    if (eventPointer != nullptr && eventPointer->type() == QEvent::Show && m_eventBucketsDirty)
+        scheduleEventProjection();
     if (eventPointer != nullptr && eventPointer->type() == QEvent::ToolTip)
     {
         // 悬停展示当前轨道的真实桶计数和 100ns 边界，不改选区或宿主过滤结果。
@@ -280,9 +300,10 @@ void ProcessTraceTimelineWidget::setCaptureRange(
     {
         m_hasPreviousRateRange = false;
     }
+    const bool rangeChanged = m_rangeStart100ns != start100ns || m_rangeEnd100ns != normalizedEnd100ns;
     m_rangeStart100ns = start100ns;
     m_rangeEnd100ns = normalizedEnd100ns;
-    m_eventBucketsDirty = true; // 新范围不能继续使用旧范围的像素桶。
+    if (rangeChanged) invalidateEventBuckets(); // 不重复重建未改变的范围。
 
     // 用户未手动调整选区前，选区持续覆盖完整捕获范围，避免默认产生隐式时间过滤。
     if (!hadRange || !m_userAdjustedSelection)
@@ -300,12 +321,17 @@ void ProcessTraceTimelineWidget::setCaptureRange(
 
 void ProcessTraceTimelineWidget::resetTimeline(const std::uint64_t start100ns)
 {
-    m_eventPointList.clear();
+    ++m_eventProjectionRevision;
+    if (m_eventProjectionOperation != nullptr) m_eventProjectionOperation->cancel();
+    m_events = {};
+    m_eventBuckets.reset();
     m_eventBucketsDirty = true;
     m_rateAnimation->stop();
     m_rateAnimationProgress = 1.0;
     m_hasPreviousRatePoint = false;
-    m_ratePointList.clear();
+    m_rateOverlay = {};
+    m_rateProjection = {};
+    m_rateProjectionValid = false;
     m_rangeStart100ns = start100ns;
     m_rangeEnd100ns = saturatingAdd(start100ns, kDefaultRange100ns);
     m_previousRateRangeStart100ns = m_rangeStart100ns;
@@ -342,24 +368,156 @@ bool ProcessTraceTimelineWidget::setEventPoints(
         return false; // 外部旧两字段初始化必须明确适配，不能悄悄改变其原泳道。
     }
     // 原始点完整保留；范围或 viewport 改变后能重新聚合，绝不只保留每格最新事件。
-    m_eventPointList = eventPointList;
+    m_asyncEventProjection = false; // The existing public API remains synchronous.
+    ++m_eventProjectionRevision;
+    if (m_eventProjectionOperation != nullptr) m_eventProjectionOperation->cancel();
+    m_events.m_points = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const std::vector<ProcessTraceTimelineEventPoint>>(eventPointList));
+    m_events.m_buckets.reset();
     m_eventBucketsDirty = true;
     update();
     return true;
 }
 
+ProcessTraceTimelineWidget::EventProjectionParameters ProcessTraceTimelineWidget::eventProjectionParameters(
+    const std::uint64_t start100ns, const std::uint64_t end100ns) const
+{
+    return {m_tracks, start100ns, end100ns > start100ns ? end100ns : saturatingAdd(start100ns, kDefaultRange100ns),
+        m_trackRevision, m_eventProjectionRevision, aggregationPixelBudget()};
+}
+
+ProcessTraceTimelineWidget::PreparedEventPoints ProcessTraceTimelineWidget::prepareEventPoints(
+    std::vector<ProcessTraceTimelineEventPoint> points, EventProjectionParameters projection)
+{
+    PreparedEventPoints prepared;
+    if (std::any_of(points.begin(), points.end(), [](const auto& point)
+        { return point.categoryId == ks::ui::TimelineCategory::Unspecified; })) return prepared;
+    prepared.m_buckets = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const std::vector<ks::ui::EventTimelineBucket>>(ks::ui::AggregateTimelineEvents(
+            points, projection.tracks, projection.start100ns, projection.end100ns, projection.pixelBudget)));
+    prepared.m_points = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const std::vector<ProcessTraceTimelineEventPoint>>(std::move(points)));
+    prepared.m_projection = std::move(projection);
+    return prepared;
+}
+
+bool ProcessTraceTimelineWidget::applyPreparedEventPoints(const PreparedEventPoints& prepared)
+{
+    const auto& projection = prepared.m_projection;
+    if (!prepared.m_points || !prepared.m_buckets || projection.trackRevision != m_trackRevision
+        || projection.viewRevision != m_eventProjectionRevision
+        || projection.pixelBudget != aggregationPixelBudget()) return false;
+    m_asyncEventProjection = true;
+    setCaptureRange(projection.start100ns, projection.end100ns);
+    ++m_eventProjectionRevision;
+    if (m_eventProjectionOperation != nullptr) m_eventProjectionOperation->cancel();
+    m_events = prepared;
+    m_eventBuckets = prepared.m_buckets;
+    m_bucketPixelBudget = projection.pixelBudget;
+    m_eventBucketsDirty = false;
+    update();
+    return true;
+}
+
+void ProcessTraceTimelineWidget::invalidateEventBuckets()
+{
+    m_eventBucketsDirty = true;
+    ++m_eventProjectionRevision;
+    scheduleEventProjection();
+}
+
+void ProcessTraceTimelineWidget::scheduleEventProjection()
+{
+    if (!m_asyncEventProjection || !m_events.m_points || !isVisible() || m_eventProjectionQueued) return;
+    if (m_eventProjectionOperation != nullptr && m_eventProjectionOperation->isInFlight()
+        && m_eventProjectionSubmittedRevision == m_eventProjectionRevision
+        && m_eventProjectionSubmittedPixelBudget == aggregationPixelBudget()) return;
+    m_eventProjectionQueued = true;
+    const QPointer<ProcessTraceTimelineWidget> self(this);
+    QTimer::singleShot(0, this, [self]()
+    {
+        if (!self) return;
+        self->m_eventProjectionQueued = false;
+        if (!self->m_asyncEventProjection || !self->m_eventBucketsDirty || !self->isVisible()
+            || !self->m_events.m_points) return;
+        struct Input
+        {
+            std::shared_ptr<const std::vector<ProcessTraceTimelineEventPoint>> points;
+            EventProjectionParameters projection;
+            std::uint64_t revision = 0;
+        };
+        Input input{self->m_events.m_points,
+            self->eventProjectionParameters(self->m_rangeStart100ns, self->m_rangeEnd100ns),
+            self->m_eventProjectionRevision};
+        const auto revision = input.revision;
+        self->m_eventProjectionSubmittedRevision = revision;
+        self->m_eventProjectionSubmittedPixelBudget = input.projection.pixelBudget;
+        if (self->m_eventProjectionOperation == nullptr)
+            self->m_eventProjectionOperation = new ks::ui::AsyncOperation(self.data());
+        self->m_eventProjectionOperation->submit<Input, PreparedEventPoints>(std::move(input),
+            [](const Input& value, const ks::ui::AsyncOperationToken& token)
+            {
+                PreparedEventPoints result;
+                if (token.isCanceled()) return result;
+                result.m_points = value.points;
+                result.m_projection = value.projection;
+                result.m_buckets = ks::ui::RetainCompleteExportSnapshot(
+                    std::make_shared<const std::vector<ks::ui::EventTimelineBucket>>(ks::ui::AggregateTimelineEvents(
+                        *value.points, value.projection.tracks, value.projection.start100ns,
+                        value.projection.end100ns, value.projection.pixelBudget)));
+                return result;
+            },
+            [self, revision](const PreparedEventPoints& prepared, std::uint64_t)
+            {
+                if (!self || revision != self->m_eventProjectionRevision || !self->isVisible()) return true;
+                if (prepared.m_projection.pixelBudget != self->aggregationPixelBudget())
+                {
+                    self->scheduleEventProjection();
+                    return true;
+                }
+                self->m_eventBuckets = prepared.m_buckets;
+                self->m_bucketPixelBudget = prepared.m_projection.pixelBudget;
+                self->m_eventBucketsDirty = false;
+                self->update();
+                return true;
+            }, [](std::exception_ptr) {});
+    });
+}
+
 void ProcessTraceTimelineWidget::setRateOverlayPoints(
     const std::vector<ProcessTraceTimelineRatePoint>& ratePointList)
 {
-    // 速率折线是可选叠加层：
-    // - ETW 页不会设置该列表，因此原有事件瀑布流绘制不受影响；
-    // - 网络页传入按秒聚合后的上传/下载速率，控件只负责映射到当前时间范围。
-    const ProcessTraceTimelineRatePoint previousRatePoint = m_ratePointList.empty()
+    // Compatibility callers retain the synchronous complete-value contract.
+    applyRateOverlayPoints(prepareRateOverlayPoints(ratePointList));
+}
+
+ProcessTraceTimelineWidget::PreparedRateOverlay ProcessTraceTimelineWidget::prepareRateOverlayPoints(
+    std::vector<ProcessTraceTimelineRatePoint> ratePointList)
+{
+    PreparedRateOverlay prepared;
+    prepared.m_values = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const ks::ui::TimelineRateValues>(std::move(ratePointList)));
+    return prepared;
+}
+
+const std::vector<ProcessTraceTimelineRatePoint>& ProcessTraceTimelineWidget::rateOverlayPoints() const
+{
+    static const std::vector<ProcessTraceTimelineRatePoint> empty;
+    return m_rateOverlay.m_values ? m_rateOverlay.m_values->points : empty;
+}
+
+void ProcessTraceTimelineWidget::applyRateOverlayPoints(const PreparedRateOverlay& prepared)
+{
+    static const std::vector<ProcessTraceTimelineRatePoint> empty;
+    const auto& ratePointList = prepared.m_values ? prepared.m_values->points : empty;
+    const ProcessTraceTimelineRatePoint previousRatePoint = rateOverlayPoints().empty()
         ? (ratePointList.empty() ? ProcessTraceTimelineRatePoint{} : ratePointList.back())
-        : m_ratePointList.back();
-    m_ratePointList = ratePointList;
-    if (m_ratePointList.empty())
+        : rateOverlayPoints().back();
+    m_rateOverlay = prepared; // O(1); the obsolete full vector retires on the existing value lane.
+    m_rateProjectionValid = false;
+    if (rateOverlayPoints().empty())
     {
+        m_rateProjection = {};
         m_rateAnimation->stop();
         m_rateAnimationProgress = 1.0;
         m_hasPreviousRatePoint = false;
@@ -472,9 +630,10 @@ void ProcessTraceTimelineWidget::mouseMoveEvent(QMouseEvent* eventPointer)
         m_selectionEnd100ns = currentTime100ns;
     }
 
-    // 任何拖动都会把时间轴切换到用户选区模式，并立即通知事件表筛选。
-    m_userAdjustedSelection = true;
+    // 拉回完整范围后恢复实时跟随；局部选区继续保持绝对时间。
     clampSelectionToRange();
+    m_userAdjustedSelection = m_selectionStart100ns != m_rangeStart100ns
+        || m_selectionEnd100ns != m_rangeEnd100ns;
     update();
     eventPointer->accept();
     notifySelectionChanged(); // 回调可销毁本控件，之后不再访问this或事件对象。
@@ -548,9 +707,17 @@ void ProcessTraceTimelineWidget::wheelEvent(QWheelEvent* eventPointer)
         : m_rangeStart100ns;
     m_selectionEnd100ns = saturatingAdd(m_selectionStart100ns, newWidth100ns);
 
+    // 全宽时锚点不能把左端推离范围起点，否则右端夹紧后仍会留下局部选区。
+    if (newWidth100ns == rangeWidth100ns)
+    {
+        m_selectionStart100ns = m_rangeStart100ns;
+        m_selectionEnd100ns = m_rangeEnd100ns;
+    }
+
     // 滚轮缩放同样是用户主动选择时间窗口，需要立即叠加到事件表。
-    m_userAdjustedSelection = true;
     clampSelectionToRange();
+    m_userAdjustedSelection = m_selectionStart100ns != m_rangeStart100ns
+        || m_selectionEnd100ns != m_rangeEnd100ns;
     update();
     eventPointer->accept();
     notifySelectionChanged(); // 接管事件后才回调，允许宿主同步关闭时间轴窗口。

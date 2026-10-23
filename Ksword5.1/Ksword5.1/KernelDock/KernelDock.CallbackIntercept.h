@@ -9,6 +9,8 @@
 
 #include "../../../shared/driver/KswordArkCallbackIoctl.h"
 
+namespace ks::i18n { class SourceTextSnapshot; }
+
 struct CallbackRuleGroupModel
 {
     quint32 groupId = 0;
@@ -55,13 +57,14 @@ struct CallbackValidationResult
     QStringList warningList;
 };
 
-QString callbackTypeToDisplayText(quint32 callbackType);
-QString callbackActionToDisplayText(quint32 actionType);
-QString callbackMatchModeToDisplayText(quint32 matchMode);
+QString callbackTypeToDisplayText(quint32 callbackType, const ks::i18n::SourceTextSnapshot* translator = nullptr);
+QString callbackActionToDisplayText(quint32 actionType, const ks::i18n::SourceTextSnapshot* translator = nullptr);
+QString callbackMatchModeToDisplayText(quint32 matchMode, const ks::i18n::SourceTextSnapshot* translator = nullptr);
 QString callbackDecisionToDisplayText(quint32 decision);
 QString callbackGuidToString(const KSWORD_ARK_GUID128& guidValue);
 
-CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& configDocument);
+CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& configDocument,
+    const ks::i18n::SourceTextSnapshot* translator = nullptr);
 
 bool exportCallbackConfigToJson(
     const CallbackConfigDocument& configDocument,
@@ -72,7 +75,8 @@ bool importCallbackConfigFromJson(
     const QByteArray& jsonBytes,
     CallbackConfigDocument* configOut,
     QStringList* warningListOut,
-    QString* errorTextOut);
+    QString* errorTextOut,
+    const ks::i18n::SourceTextSnapshot* translator = nullptr);
 
 bool buildCallbackRuleBlobFromConfig(
     const CallbackConfigDocument& configDocument,

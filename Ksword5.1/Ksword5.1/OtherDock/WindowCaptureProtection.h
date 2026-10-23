@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <functional>
 
 namespace ks::window
 {
@@ -38,6 +39,16 @@ namespace ks::window
         std::string detail;                         // detail：面向日志/提示的诊断文本。
     };
 
+    // Frozen identities supplied by the GUI selection transaction. Native
+    // helpers recheck before opening the process or touching a root HWND.
+    struct CaptureProtectionIdentity
+    {
+        std::uint32_t requestedPid = 0, requestedTid = 0;
+        std::uint64_t requestedCreated = 0, rootHwnd = 0;
+        std::uint32_t rootPid = 0, rootTid = 0;
+        std::uint64_t rootCreated = 0;
+    };
+
     // SetWindowCaptureProtection 作用：
     // - 对给定 HWND 启用或取消防截图保护；
     // - 传入 hwndValue：窗口句柄整数值；
@@ -45,7 +56,9 @@ namespace ks::window
     // - 返回 CaptureProtectionResult，调用方负责展示结果。
     CaptureProtectionResult SetWindowCaptureProtection(
         std::uint64_t hwndValue,
-        bool enableProtection);
+        bool enableProtection,
+        const CaptureProtectionIdentity& expected = {},
+        const std::function<void()>& onSoftTimeout = {});
 
     // QueryWindowDisplayAffinity 作用：
     // - 尝试读取窗口当前 DisplayAffinity；

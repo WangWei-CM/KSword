@@ -7,6 +7,7 @@
 #include "../UI/IntegrityRiskPresentation.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncUiDispatcher.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
@@ -37,8 +38,12 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStringList>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include <QTableView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QItemSelectionModel>
+#include <QElapsedTimer>
+
 #include <QThreadPool>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -47,7 +52,25 @@
 
 #include <algorithm>
 #include <limits>
+#include <array>
+#include <memory>
+#include <functional>
 #include <string>
+
+struct HardwareEvidenceRow
+{
+    QStringList cells;
+    QStringList searchFields;
+    quint32 riskFlags = 0;
+    std::array<qulonglong, 4> numbers{};
+    quint32 evidenceClass = 0;
+};
+
+struct HardwareEvidenceSnapshot
+{
+    std::vector<ksword::ark::DriverIntegrityEvidenceEntry> entries;
+    std::vector<HardwareEvidenceRow> rows;
+};
 
 namespace
 {
@@ -258,7 +281,7 @@ namespace
     }
 
     void updateColumnPresetButtons(
-        QTableWidget* table,
+        QTableView* table,
         QPushButton* buttonA,
         QPushButton* buttonB,
         QPushButton* buttonC)
@@ -281,7 +304,7 @@ namespace
     }
 
     void applyColumnPresetToTable(
-        QTableWidget* table,
+        QTableView* table,
         const QVector<int>& columnGroup,
         const QString& presetText,
         QPushButton* buttonA,
@@ -296,7 +319,7 @@ namespace
             return;
         }
 
-        for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+        for (int columnIndexValue = 0; columnIndexValue < table->model()->columnCount(); ++columnIndexValue)
         {
             table->setColumnHidden(columnIndexValue, !containsColumnIndex(columnGroup, columnIndexValue));
         }
@@ -305,7 +328,7 @@ namespace
         ks::ui::RequestTableColumnAutoFit(table);
     }
 
-    int visibleColumnCount(QTableWidget* table)
+    int visibleColumnCount(QTableView* table)
     {
         // 输入：目标表格。
         // 处理：统计当前未隐藏列，防止手动菜单隐藏最后一列。
@@ -316,7 +339,7 @@ namespace
         }
 
         int count = 0;
-        for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+        for (int columnIndexValue = 0; columnIndexValue < table->model()->columnCount(); ++columnIndexValue)
         {
             if (!table->isColumnHidden(columnIndexValue))
             {
@@ -342,7 +365,7 @@ namespace
     }
 
     void installHeaderColumnMenu(
-        QTableWidget* table,
+        QTableView* table,
         QPushButton* buttonA,
         QPushButton* buttonB,
         QPushButton* buttonC)
@@ -361,12 +384,10 @@ namespace
         {
             QMenu menu(table);
             menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-            for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+            for (int columnIndexValue = 0; columnIndexValue < table->model()->columnCount(); ++columnIndexValue)
             {
-                const QTableWidgetItem* headerItem = table->horizontalHeaderItem(columnIndexValue);
-                const QString headerText = headerItem != nullptr
-                    ? headerItem->text()
-                    : QStringLiteral("Column %1").arg(columnIndexValue);
+                const QString headerText = table->model()->headerData(
+                    columnIndexValue, Qt::Horizontal).toString();
                 QAction* columnAction = menu.addAction(headerText);
                 columnAction->setCheckable(true);
                 columnAction->setChecked(!table->isColumnHidden(columnIndexValue));
@@ -395,7 +416,7 @@ namespace
     }
 
     void installColumnPresetControls(
-        QTableWidget* table,
+        QTableView* table,
         QPushButton* buttonA,
         QPushButton* buttonB,
         QPushButton* buttonC,
@@ -677,27 +698,18 @@ namespace
             evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER;
     }
 
-    bool entryMatchesFilter(
-        const ksword::ark::DriverIntegrityEvidenceEntry& row,
-        const QString& filterText)
+    QStringList evidenceSearchFields(const ksword::ark::DriverIntegrityEvidenceEntry& row,
+        const CpuEvidenceParsedDetail& parsedDetail, const QString& classWord, const QString& riskWord)
     {
-        // 输入：证据行和用户过滤文本。
-        // 处理：在 class/cpu/地址/owner/risk/detail 中做大小写不敏感匹配。
-        // 返回：true 表示应该显示。
-        if (filterText.isEmpty())
-        {
-            return true;
-        }
-        const CpuEvidenceParsedDetail parsedDetail = parseCpuEvidenceDetail(row);
-        const QStringList fields{
-            classText(row.evidenceClass),
+        return QStringList{
+            classWord,
             cpuVectorText(row),
             sourceMaskText(row.sourceMask),
             queryStatusText(row.entryStatus),
             hex64(row.objectAddress),
             hex64(row.targetAddress),
             wideToQString(row.ownerModule),
-            riskText(row.riskFlags),
+            riskWord,
             hex32(row.fieldMask),
             hex32(row.statusFlags),
             integrityStatusFlagText(row.statusFlags),
@@ -715,14 +727,6 @@ namespace
             parsedDetail.attributes,
             wideToQString(row.detail)
         };
-        for (const QString& field : fields)
-        {
-            if (field.contains(filterText, Qt::CaseInsensitive))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     ks::ui::FieldDocument detailText(const ksword::ark::DriverIntegrityEvidenceEntry& row)
@@ -752,55 +756,7 @@ namespace
         return text;
     }
 
-    class NumericItem final : public QTableWidgetItem
-    {
-    public:
-        NumericItem(const QString& displayText, const qulonglong numericValue)
-            : QTableWidgetItem(displayText)
-        {
-            // 输入：显示文本与排序数值。
-            // 处理：UserRole 保存数值，DisplayRole 保留原格式。
-            // 返回：构造函数无返回值。
-            setData(Qt::UserRole, QVariant::fromValue<qulonglong>(numericValue));
-            setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        }
-
-        bool operator<(const QTableWidgetItem& other) const override
-        {
-            // 输入：另一表格项。
-            // 处理：优先按 UserRole 数值排序。
-            // 返回：比较结果。
-            bool leftOk = false;
-            bool rightOk = false;
-            const qulonglong leftValue = data(Qt::UserRole).toULongLong(&leftOk);
-            const qulonglong rightValue = other.data(Qt::UserRole).toULongLong(&rightOk);
-            if (leftOk && rightOk)
-            {
-                return leftValue < rightValue;
-            }
-            return QTableWidgetItem::operator<(other);
-        }
-    };
-
-    QTableWidgetItem* textItem(const QString& text)
-    {
-        // 输入：显示文本。
-        // 处理：创建只读表格项。
-        // 返回：由 QTableWidget 接管生命周期。
-        QTableWidgetItem* item = new QTableWidgetItem(text);
-        item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        return item;
-    }
-
-    QTableWidgetItem* numericItem(const QString& text, const qulonglong value)
-    {
-        // 输入：显示文本和排序数值。
-        // 处理：创建 NumericItem。
-        // 返回：由 QTableWidget 接管生命周期。
-        return new NumericItem(text, value);
-    }
-
-    QString hardwareTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    QString hardwareTableCellText(QTableView* table, const int rowIndex, const int columnIndex)
     {
         // hardwareTableCellText：
         // - 输入：表格、行号、列号；
@@ -810,11 +766,10 @@ namespace
         {
             return QString();
         }
-        const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-        return item != nullptr ? item->text() : QString();
+        return table->model()->index(rowIndex, columnIndex).data().toString();
     }
 
-    void copyHardwareTableCurrentRow(QTableWidget* table)
+    void copyHardwareTableCurrentRow(QTableView* table)
     {
         // copyHardwareTableCurrentRow：
         // - 输入：R0 硬件证据表；
@@ -825,22 +780,22 @@ namespace
             return;
         }
 
-        const int rowIndex = table->currentRow();
-        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        const int rowIndex = table->currentIndex().row();
+        if (rowIndex < 0 || rowIndex >= table->model()->rowCount())
         {
             return;
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
         {
             fields.push_back(hardwareTableCellText(table, rowIndex, columnIndex));
         }
         QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
     }
 
-    void installHardwareTableCopyMenu(QTableWidget* table)
+    void installHardwareTableCopyMenu(QTableView* table)
     {
         // installHardwareTableCopyMenu：
         // - 输入：R0 硬件证据表；
@@ -852,12 +807,12 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
-                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->setCurrentIndex(clickedIndex);
                 table->selectRow(clickedIndex.row());
             }
 
@@ -868,7 +823,7 @@ namespace
                 QStringLiteral("复制当前行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(table->currentRow() >= 0);
+            copyRowAction->setEnabled(table->currentIndex().row() >= 0);
             if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
             {
                 copyHardwareTableCurrentRow(table);
@@ -885,10 +840,249 @@ namespace
         // integrityResult：CPU/MSR/IDT/GDT evidence 主结果。
         ksword::ark::DriverIntegrityResult integrityResult;
     };
+    struct EvidenceWords
+    {
+        QString languageId;
+        QHash<quint32, QString> classes;
+        QHash<quint32, QString> risks;
+    };
+
+    std::shared_ptr<const HardwareEvidenceSnapshot> buildEvidenceSnapshot(
+        const ksword::ark::DriverIntegrityResult& result, const EvidenceWords& words)
+    {
+        auto snapshot = std::make_shared<HardwareEvidenceSnapshot>();
+        for (const auto& row : result.entries)
+        {
+            if (!isHardwareCpuEvidenceClass(row.evidenceClass)) continue;
+            const CpuEvidenceParsedDetail parsedDetail = parseCpuEvidenceDetail(row);
+            const QString classWord = words.classes.value(row.evidenceClass);
+            const QString riskWord = words.risks.value(row.riskFlags);
+            const QString rawDetailText = wideToQString(row.detail).trimmed();
+            QStringList remarkParts;
+            if (!rawDetailText.isEmpty() && !isStructuredCpuEvidenceDetail(row, rawDetailText))
+                remarkParts << rawDetailText;
+            if (row.rangeState != 0U) remarkParts << QStringLiteral("rangeState=%1").arg(row.rangeState);
+            if (row.ordinal != 0U && row.ordinal != std::numeric_limits<std::uint32_t>::max())
+                remarkParts << QStringLiteral("ordinal=%1").arg(row.ordinal);
+            HardwareEvidenceRow display;
+            display.cells = QStringList{
+                classWord,
+                cpuVectorText(row),
+                sourceMaskText(row.sourceMask),
+                queryStatusText(row.entryStatus),
+                hex64(row.objectAddress),
+                hex64(row.targetAddress),
+                QStringLiteral("%1 %2")
+            .arg(wideToQString(row.ownerModule).isEmpty() ? QStringLiteral("<unknown>") : wideToQString(row.ownerModule))
+            .arg(hex64(row.ownerModuleBase)),
+                riskWord,
+                QString::number(row.confidence),
+                parsedDetail.cr0,
+                parsedDetail.cr4,
+                parsedDetail.efer,
+                parsedDetail.msrLstar,
+                parsedDetail.sysenterEip,
+                parsedDetail.idtrBase,
+                parsedDetail.idtrLimit,
+                parsedDetail.gdtrBase,
+                parsedDetail.gdtrLimit,
+                parsedDetail.selector,
+                parsedDetail.attributes,
+                hex32(row.fieldMask),
+                QStringLiteral("%1 (%2)")
+            .arg(hex32(row.statusFlags))
+            .arg(integrityStatusFlagText(row.statusFlags)),
+                QString::number(row.riskScore),
+                remarkParts.join(QStringLiteral("；"))
+            };
+            display.searchFields = evidenceSearchFields(row, parsedDetail, classWord, riskWord);
+            display.riskFlags = row.riskFlags;
+            display.evidenceClass = row.evidenceClass;
+            display.numbers = { row.objectAddress, row.targetAddress, row.confidence, row.riskScore };
+            snapshot->entries.push_back(row);
+            snapshot->rows.push_back(std::move(display));
+        }
+        return snapshot;
+    }
+
+    // Freeze the few rendered risk/class words on the GUI thread in bounded batches.
+    // Parsing/formatting and all row strings then run using values only.
+    class EvidencePreparation final : public QObject
+    {
+    public:
+        using Ready = std::function<void(R0EvidenceQueryBundle, std::shared_ptr<const HardwareEvidenceSnapshot>)>;
+        EvidencePreparation(QObject* owner, std::shared_ptr<ks::ui::AsyncUiDispatcher> dispatcher,
+            R0EvidenceQueryBundle bundle, Ready ready)
+            : QObject(owner), m_bundle(std::move(bundle)), m_ready(std::move(ready)),
+              m_dispatcher(std::move(dispatcher)) { pump(); }
+    private:
+        void pump()
+        {
+            const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+            if (m_words.languageId != languageId)
+            {
+                m_words = {};
+                m_words.languageId = languageId;
+                m_offset = 0;
+            }
+            QElapsedTimer budget;
+            budget.start();
+            int count = 0;
+            while (m_offset < m_bundle.integrityResult.entries.size())
+            {
+                const auto& row = m_bundle.integrityResult.entries[m_offset++];
+                if (isHardwareCpuEvidenceClass(row.evidenceClass))
+                {
+                    if (!m_words.classes.contains(row.evidenceClass))
+                        m_words.classes.insert(row.evidenceClass, classText(row.evidenceClass));
+                    if (!m_words.risks.contains(row.riskFlags))
+                        m_words.risks.insert(row.riskFlags, riskText(row.riskFlags));
+                }
+                if (++count == 64 || budget.elapsed() >= 4) break;
+            }
+            if (m_offset < m_bundle.integrityResult.entries.size())
+            {
+                QTimer::singleShot(0, this, [this]() { pump(); });
+                return;
+            }
+            const auto dispatcher = m_dispatcher;
+            auto* task = QRunnable::create([dispatcher, bundle = std::move(m_bundle),
+                words = std::move(m_words), ready = std::move(m_ready)]() mutable {
+                auto snapshot = buildEvidenceSnapshot(bundle.integrityResult, words);
+                dispatcher->post([bundle = std::move(bundle),
+                    snapshot = std::move(snapshot), ready = std::move(ready)]() mutable {
+                    ready(std::move(bundle), std::move(snapshot));
+                });
+            });
+            QThreadPool::globalInstance()->start(task);
+            deleteLater();
+        }
+        R0EvidenceQueryBundle m_bundle;
+        EvidenceWords m_words;
+        Ready m_ready;
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
+        std::size_t m_offset = 0;
+    };
+
+    class EvidenceModel final : public QAbstractTableModel
+    {
+    public:
+        explicit EvidenceModel(QObject* parent) : QAbstractTableModel(parent) {}
+        QStringList headers;
+        mutable QString cachedLanguageId;
+        mutable QHash<quint32, QString> classWords, riskWords;
+        QString word(const HardwareEvidenceRow& row, bool risk) const
+        {
+            const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+            if (cachedLanguageId != languageId)
+            {
+                cachedLanguageId = languageId;
+                classWords.clear();
+                riskWords.clear();
+            }
+            auto& cache = risk ? riskWords : classWords;
+            const quint32 key = risk ? row.riskFlags : row.evidenceClass;
+            auto found = cache.constFind(key);
+            if (found != cache.cend()) return found.value();
+            const QString value = risk ? riskText(key) : classText(key);
+            cache.insert(key, value);
+            return value;
+        }
+        void refreshLanguage()
+        {
+            cachedLanguageId.clear();
+            if (rowCount()) emit dataChanged(index(0,0), index(rowCount()-1,columnCount()-1), {Qt::DisplayRole});
+            emit headerDataChanged(Qt::Horizontal, 0, columnCount()-1);
+        }
+        std::shared_ptr<const HardwareEvidenceSnapshot> snapshot;
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() || !snapshot ? 0 : static_cast<int>(snapshot->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : columnIndex(R0EvidenceColumn::Count); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+        { return orientation == Qt::Horizontal && role == Qt::DisplayRole ? ks::i18n::displayText(headers.value(section)) : QVariant(); }
+        const HardwareEvidenceRow* rowAt(int row) const
+        { return snapshot && row >= 0 && row < rowCount() ? &snapshot->rows[static_cast<std::size_t>(row)] : nullptr; }
+        QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+        {
+            const auto* row = rowAt(index.row());
+            if (!index.isValid() || row == nullptr || index.column() < 0 || index.column() >= columnCount()) return {};
+            if (role == Qt::DisplayRole)
+            {
+                if (index.column() == columnIndex(R0EvidenceColumn::Class)) return word(*row, false);
+                if (index.column() == columnIndex(R0EvidenceColumn::Risk)) return word(*row, true);
+                return ks::i18n::sourceText(row->cells.value(index.column()));
+            }
+            if (role == Qt::TextAlignmentRole) return int(Qt::AlignVCenter | Qt::AlignLeft);
+            if (role == Qt::UserRole + 1) return QVariant::fromValue<qulonglong>(index.row());
+            if (role == Qt::UserRole)
+            {
+                const int column = index.column();
+                const int slot = column == columnIndex(R0EvidenceColumn::Object) ? 0
+                    : column == columnIndex(R0EvidenceColumn::Target) ? 1
+                    : column == columnIndex(R0EvidenceColumn::Confidence) ? 2
+                    : column == columnIndex(R0EvidenceColumn::RiskScore) ? 3 : -1;
+                return slot < 0 ? QVariant() : QVariant::fromValue(row->numbers[slot]);
+            }
+            // An invalid color role inherits the view palette. A valid NoBrush
+            // still replaces QPalette::Text with its default black in Qt's delegate.
+            if ((role == Qt::ForegroundRole || role == Qt::BackgroundRole)
+                && ks::ui::integrity::tierOf(row->riskFlags) == ks::ui::integrity::Tier::Clean)
+                return {};
+            return ks::ui::integrity::riskRoleData(row->riskFlags, role);
+        }
+        void setSnapshot(std::shared_ptr<const HardwareEvidenceSnapshot> value)
+        {
+            beginResetModel();
+            snapshot.swap(value);
+            endResetModel();
+            // Release a potentially large old string snapshot away from the event thread.
+            if (value) QThreadPool::globalInstance()->start(QRunnable::create([old = std::move(value)]() {}));
+        }
+    };
+
+    class EvidenceFilter final : public QSortFilterProxyModel
+    {
+    public:
+        using QSortFilterProxyModel::QSortFilterProxyModel;
+        QString query;
+        bool riskOnly = false;
+        void setValues(QString text, bool onlyRisk)
+        {
+            if (query == text && riskOnly == onlyRisk) return;
+            query = std::move(text);
+            riskOnly = onlyRisk;
+            invalidateFilter();
+        }
+    protected:
+        bool filterAcceptsRow(int sourceRow, const QModelIndex&) const override
+        {
+            const auto* row = static_cast<const EvidenceModel*>(sourceModel())->rowAt(sourceRow);
+            if (row == nullptr || (riskOnly && row->riskFlags == 0U)) return false;
+            if (query.isEmpty()) return true;
+            const auto* model = static_cast<const EvidenceModel*>(sourceModel());
+            if (model->word(*row, false).contains(query, Qt::CaseInsensitive)
+                || model->word(*row, true).contains(query, Qt::CaseInsensitive)) return true;
+            for (int index = 0; index < row->searchFields.size(); ++index)
+            {
+                // Class/risk words depend on the current language; all other raw fields are canonical.
+                if (index == 0 || index == 7) continue;
+                if (row->searchFields[index].contains(query, Qt::CaseInsensitive)) return true;
+            }
+            return false;
+        }
+        bool lessThan(const QModelIndex& left, const QModelIndex& right) const override
+        {
+            const QVariant a = left.data(Qt::UserRole), b = right.data(Qt::UserRole);
+            return a.isValid() && b.isValid() ? a.toULongLong() < b.toULongLong()
+                : QSortFilterProxyModel::lessThan(left, right);
+        }
+    };
+
 }
 
 HardwareR0EvidencePage::HardwareR0EvidencePage(QWidget* parent)
-    : QWidget(parent)
+    : QWidget(parent), m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
 {
     // 构造流程：先建 UI，再连接信号，最后延迟启动只读 R0 查询，避免阻塞 Dock 创建链路。
     initializeUi();
@@ -897,6 +1091,11 @@ HardwareR0EvidencePage::HardwareR0EvidencePage(QWidget* parent)
     {
         refreshEvidenceAsync(false);
     });
+}
+
+HardwareR0EvidencePage::~HardwareR0EvidencePage()
+{
+    m_dispatcher->close(); // close receiver admission before any QWidget child/member is destroyed
 }
 
 void HardwareR0EvidencePage::initializeUi()
@@ -973,11 +1172,17 @@ void HardwareR0EvidencePage::initializeUi()
     QSplitter* splitter = new QSplitter(Qt::Vertical, this);
     m_rootLayout->addWidget(splitter, 1);
 
-    m_evidenceTable = new ks::ui::VisibleTableWidget(splitter);
+    m_evidenceTable = new ks::ui::TableActionTableView(splitter);
+    auto* model = new EvidenceModel(m_evidenceTable);
+    auto* filter = new EvidenceFilter(m_evidenceTable);
+    m_evidenceModel = model;
+    m_filterModel = filter;
+    filter->setSourceModel(model);
+    m_evidenceTable->setModel(filter);
+    m_evidenceTable->setProperty("ks_i18n_preserve_model_data", true);
     // CPU/MSR/描述符证据需要跨次快照对比，保留完整操作栏。
     ks::ui::SetTableActionBarMode(m_evidenceTable, ks::ui::TableActionBarMode::Full);
-    m_evidenceTable->setColumnCount(columnIndex(R0EvidenceColumn::Count));
-    m_evidenceTable->setHorizontalHeaderLabels(QStringList{
+    model->headers = QStringList{
         QStringLiteral("类别"),
         QStringLiteral("CPU/Vector"),
         QStringLiteral("来源"),
@@ -1002,7 +1207,7 @@ void HardwareR0EvidencePage::initializeUi()
         QStringLiteral("StatusFlags"),
         QStringLiteral("RiskScore"),
         QStringLiteral("备注")
-        });
+        };
     m_evidenceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_evidenceTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_evidenceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1010,7 +1215,7 @@ void HardwareR0EvidencePage::initializeUi()
     m_evidenceTable->setSortingEnabled(true);
     m_evidenceTable->verticalHeader()->setVisible(false);
     m_evidenceTable->horizontalHeader()->setStyleSheet(buildHeaderStyle());
-    m_evidenceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_evidenceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_evidenceTable->horizontalHeader()->setSectionResizeMode(columnIndex(R0EvidenceColumn::Remark), QHeaderView::Stretch);
     installHardwareTableCopyMenu(m_evidenceTable);
     installColumnPresetControls(
@@ -1048,20 +1253,17 @@ void HardwareR0EvidencePage::initializeConnections()
     {
         refreshEvidenceAsync(true);
     });
-    connect(m_riskOnlyCheck, &QCheckBox::toggled, this, [this]()
-    {
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { rebuildEvidenceTable(); });
+    connect(m_riskOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        m_filterTimer->stop();
         rebuildEvidenceTable();
-        showSelectedEvidenceDetail();
     });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]()
-    {
-        rebuildEvidenceTable();
-        showSelectedEvidenceDetail();
-    });
-    connect(m_evidenceTable, &QTableWidget::itemSelectionChanged, this, [this]()
-    {
-        showSelectedEvidenceDetail();
-    });
+    connect(m_filterEdit, &QLineEdit::textChanged, m_filterTimer, qOverload<>(&QTimer::start));
+    connect(m_evidenceTable->selectionModel(), &QItemSelectionModel::selectionChanged,
+        this, [this]() { showSelectedEvidenceDetail(); });
 }
 
 void HardwareR0EvidencePage::refreshEvidenceAsync(const bool forceRefresh)
@@ -1091,7 +1293,8 @@ void HardwareR0EvidencePage::refreshEvidenceAsync(const bool forceRefresh)
         KswordTheme::PrimaryBlueHex);
 
     QPointer<HardwareR0EvidencePage> safeThis(this);
-    QRunnable* task = QRunnable::create([safeThis, ticket, flags, maxRows, idtVectors]() mutable
+    const auto dispatcher = m_dispatcher;
+    QRunnable* task = QRunnable::create([dispatcher, safeThis, ticket, flags, maxRows, idtVectors]() mutable
     {
         R0EvidenceQueryBundle bundle;
         const ksword::ark::DriverClient client;
@@ -1099,24 +1302,21 @@ void HardwareR0EvidencePage::refreshEvidenceAsync(const bool forceRefresh)
         bundle.dynDataResult = client.queryDynDataCapabilities();
         bundle.integrityResult = client.queryKernelCpuIntegrity(flags, maxRows, idtVectors);
 
-        if (safeThis == nullptr)
-        {
-            return;
-        }
-
-        QMetaObject::invokeMethod(safeThis.data(), [safeThis, ticket, bundle = std::move(bundle)]() mutable
+        dispatcher->post([safeThis, dispatcher, ticket, bundle = std::move(bundle)]() mutable
         {
             if (safeThis == nullptr)
             {
                 return;
             }
 
-            safeThis->applyEvidenceQueryResults(
-                ticket,
-                std::move(bundle.capabilityResult),
-                std::move(bundle.dynDataResult),
-                std::move(bundle.integrityResult));
-        }, Qt::QueuedConnection);
+            new EvidencePreparation(safeThis.data(), dispatcher, std::move(bundle),
+                [safeThis, ticket](R0EvidenceQueryBundle ready,
+                    std::shared_ptr<const HardwareEvidenceSnapshot> snapshot) mutable {
+                    if (safeThis == nullptr) return;
+                    safeThis->applyEvidenceQueryResults(ticket, std::move(ready.capabilityResult),
+                        std::move(ready.dynDataResult), std::move(ready.integrityResult), std::move(snapshot));
+                });
+        });
     });
     task->setAutoDelete(true);
     QThreadPool::globalInstance()->start(task);
@@ -1126,7 +1326,8 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
     const std::uint64_t ticket,
     ksword::ark::DriverCapabilitiesQueryResult capabilityResult,
     ksword::ark::DynDataCapabilitiesResult dynDataResult,
-    ksword::ark::DriverIntegrityResult integrityResult)
+    ksword::ark::DriverIntegrityResult integrityResult,
+    std::shared_ptr<const HardwareEvidenceSnapshot> snapshot)
 {
     if (m_refreshTicket.load() != ticket)
     {
@@ -1144,7 +1345,8 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
                 ticket,
                 capabilityResult = std::move(capabilityResult),
                 dynDataResult = std::move(dynDataResult),
-                integrityResult = std::move(integrityResult)]() mutable
+                integrityResult = std::move(integrityResult),
+                snapshot = std::move(snapshot)]() mutable
             {
                 if (!safeThis.isNull())
                 {
@@ -1152,7 +1354,7 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
                         ticket,
                         std::move(capabilityResult),
                         std::move(dynDataResult),
-                        std::move(integrityResult));
+                        std::move(integrityResult), std::move(snapshot));
                 }
             });
         return;
@@ -1167,15 +1369,11 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
     m_lastIntegrityResult = std::move(integrityResult);
     m_lastCapabilityResult = std::move(capabilityResult);
     m_lastDynDataResult = std::move(dynDataResult);
-    m_evidenceCache.clear();
-    m_evidenceCache.reserve(m_lastIntegrityResult.entries.size());
-    for (const auto& row : m_lastIntegrityResult.entries)
-    {
-        if (isHardwareCpuEvidenceClass(row.evidenceClass))
-        {
-            m_evidenceCache.push_back(row);
-        }
-    }
+    const QSignalBlocker selectionBlocker(m_evidenceTable->selectionModel());
+    m_evidenceSnapshot = std::move(snapshot);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
+    static_cast<EvidenceModel*>(m_evidenceModel)->setSnapshot(m_evidenceSnapshot);
+    ks::ui::RequestTableColumnAutoFit(m_evidenceTable); // once per accepted query, not per keystroke
     rebuildEvidenceTable();
     showSelectedEvidenceDetail();
 
@@ -1202,7 +1400,7 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
     const QString statusText =
         QStringLiteral("状态：%1，证据 %2/%3，CPU %4，模块 %5，%6，%7，Last=%8")
         .arg(queryStatusText(m_lastIntegrityResult.queryStatus))
-        .arg(m_evidenceCache.size())
+        .arg(m_evidenceSnapshot->entries.size())
         .arg(m_lastIntegrityResult.totalCount)
         .arg(m_lastIntegrityResult.cpuCount)
         .arg(m_lastIntegrityResult.moduleCount)
@@ -1214,99 +1412,16 @@ void HardwareR0EvidencePage::applyEvidenceQueryResults(
 
 void HardwareR0EvidencePage::rebuildEvidenceTable()
 {
-    // 输入：读取本地缓存和过滤控件。
-    // 处理：仅重绘表格，不触发任何 R0 调用。
-    // 返回：无。
-    if (m_evidenceTable == nullptr)
-    {
-        return;
-    }
-
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-
+    if (m_evidenceTable == nullptr) return;
+    const QPointer<HardwareR0EvidencePage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("hardware-r0-filter"),
+        {m_evidenceTable}, [guard]() { if (guard != nullptr) guard->rebuildEvidenceTable(); })) return;
     const bool riskOnly = m_riskOnlyCheck != nullptr && m_riskOnlyCheck->isChecked();
-    const QString filterText = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
-    std::vector<std::size_t> visibleIndexes;
-    visibleIndexes.reserve(m_evidenceCache.size());
-    for (std::size_t index = 0; index < m_evidenceCache.size(); ++index)
-    {
-        const auto& row = m_evidenceCache[index];
-        if (riskOnly && row.riskFlags == 0U)
-        {
-            continue;
-        }
-        if (!entryMatchesFilter(row, filterText))
-        {
-            continue;
-        }
-        visibleIndexes.push_back(index);
-    }
-
-    const QSignalBlocker blocker(m_evidenceTable);
-    m_evidenceTable->setSortingEnabled(false);
-    m_evidenceTable->setRowCount(static_cast<int>(visibleIndexes.size()));
-    for (int rowIndex = 0; rowIndex < static_cast<int>(visibleIndexes.size()); ++rowIndex)
-    {
-        const std::size_t cacheIndex = visibleIndexes[static_cast<std::size_t>(rowIndex)];
-        const auto& row = m_evidenceCache[cacheIndex];
-        const CpuEvidenceParsedDetail parsedDetail = parseCpuEvidenceDetail(row);
-        const QString rawDetailText = wideToQString(row.detail).trimmed();
-        QStringList remarkParts;
-        if (!rawDetailText.isEmpty() && !isStructuredCpuEvidenceDetail(row, rawDetailText))
-        {
-            remarkParts << rawDetailText;
-        }
-        if (row.rangeState != 0U)
-        {
-            remarkParts << QStringLiteral("rangeState=%1").arg(row.rangeState);
-        }
-        if (row.ordinal != 0U && row.ordinal != std::numeric_limits<std::uint32_t>::max())
-        {
-            remarkParts << QStringLiteral("ordinal=%1").arg(row.ordinal);
-        }
-        QTableWidgetItem* classItem = textItem(classText(row.evidenceClass));
-        classItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Class), classItem);
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cpu), textItem(cpuVectorText(row)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Source), textItem(sourceMaskText(row.sourceMask)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Status), textItem(queryStatusText(row.entryStatus)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Object), numericItem(hex64(row.objectAddress), row.objectAddress));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Target), numericItem(hex64(row.targetAddress), row.targetAddress));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Owner), textItem(
-            QStringLiteral("%1 %2")
-            .arg(wideToQString(row.ownerModule).isEmpty() ? QStringLiteral("<unknown>") : wideToQString(row.ownerModule))
-            .arg(hex64(row.ownerModuleBase))));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Risk), textItem(riskText(row.riskFlags)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Confidence), numericItem(QString::number(row.confidence), row.confidence));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cr0), textItem(parsedDetail.cr0));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cr4), textItem(parsedDetail.cr4));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Efer), textItem(parsedDetail.efer));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::MsrLstar), textItem(parsedDetail.msrLstar));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::SysenterEip), textItem(parsedDetail.sysenterEip));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::IdtrBase), textItem(parsedDetail.idtrBase));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::IdtrLimit), textItem(parsedDetail.idtrLimit));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::GdtrBase), textItem(parsedDetail.gdtrBase));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::GdtrLimit), textItem(parsedDetail.gdtrLimit));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Selector), textItem(parsedDetail.selector));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Attributes), textItem(parsedDetail.attributes));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::FieldMask), textItem(hex32(row.fieldMask)));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::StatusFlags), textItem(
-            QStringLiteral("%1 (%2)")
-            .arg(hex32(row.statusFlags))
-            .arg(integrityStatusFlagText(row.statusFlags))));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::RiskScore), numericItem(QString::number(row.riskScore), row.riskScore));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Remark), textItem(remarkParts.join(QStringLiteral("；"))));
-
-        // 整行高亮：带 HIDDEN_HOOK 的行整行标红并在 tooltip 里说明成因；此时排序已关闭，改颜色不会触发重排。
-        ks::ui::integrity::applyRiskRowHighlight(m_evidenceTable, rowIndex, row.riskFlags);
-    }
-
-    if (m_evidenceTable->rowCount() > 0 && m_evidenceTable->currentRow() < 0)
-    {
-        m_evidenceTable->setCurrentCell(0, columnIndex(R0EvidenceColumn::Class));
-    }
-    m_evidenceTable->setSortingEnabled(true);
-    ks::ui::RequestTableColumnAutoFit(m_evidenceTable);
+    const QString query = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
+    static_cast<EvidenceFilter*>(m_filterModel)->setValues(query, riskOnly);
+    if (!m_evidenceTable->currentIndex().isValid() && m_filterModel->rowCount() > 0)
+        m_evidenceTable->setCurrentIndex(m_filterModel->index(0, columnIndex(R0EvidenceColumn::Class)));
+    showSelectedEvidenceDetail();
 }
 
 void HardwareR0EvidencePage::showSelectedEvidenceDetail()
@@ -1319,10 +1434,10 @@ void HardwareR0EvidencePage::showSelectedEvidenceDetail()
         return;
     }
 
-    const int rowIndex = m_evidenceTable->currentRow();
+    const int rowIndex = m_evidenceTable->currentIndex().row();
     if (rowIndex < 0)
     {
-        if (m_evidenceCache.empty())
+        if ((!m_evidenceSnapshot || m_evidenceSnapshot->entries.empty()))
         {
             m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("尚未返回 R0 CPU/MSR/IDT/GDT 证据。")));
         }
@@ -1333,16 +1448,10 @@ void HardwareR0EvidencePage::showSelectedEvidenceDetail()
         return;
     }
 
-    QTableWidgetItem* classItem = m_evidenceTable->item(rowIndex, columnIndex(R0EvidenceColumn::Class));
-    if (classItem == nullptr)
-    {
-        m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前行缺少缓存索引。")));
-        return;
-    }
-
+    const QModelIndex classIndex = m_filterModel->index(rowIndex, columnIndex(R0EvidenceColumn::Class));
     bool ok = false;
-    const qulonglong cacheIndex = classItem->data(Qt::UserRole + 1).toULongLong(&ok);
-    if (!ok || cacheIndex >= static_cast<qulonglong>(m_evidenceCache.size()))
+    const qulonglong cacheIndex = classIndex.data(Qt::UserRole + 1).toULongLong(&ok);
+    if (!ok || cacheIndex >= static_cast<qulonglong>(m_evidenceSnapshot->entries.size()))
     {
         m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前行缓存索引无效。")));
         return;
@@ -1358,13 +1467,24 @@ void HardwareR0EvidencePage::showSelectedEvidenceDetail()
     text.field(QStringLiteral("SourceMask"), QStringLiteral("%1 (%2)").arg(QStringLiteral("%1").arg(sourceMaskText(m_lastIntegrityResult.sourceMask))).arg(QStringLiteral("%1").arg(hex32(m_lastIntegrityResult.sourceMask))));
     text.field(QStringLiteral("ResponseFieldFlags"), QStringLiteral("%1").arg(hex32(m_lastIntegrityResult.fieldFlags)));
     text.field(QStringLiteral("ResponseStatusFlags"), QStringLiteral("%1 (%2)").arg(QStringLiteral("%1").arg(integrityStatusFlagText(m_lastIntegrityResult.statusFlags))).arg(QStringLiteral("%1").arg(hex32(m_lastIntegrityResult.statusFlags))));
-    text.field(QStringLiteral("Total/Returned/Parsed"), QStringLiteral("%1/%2/%3").arg(QStringLiteral("%1").arg(m_lastIntegrityResult.totalCount)).arg(QStringLiteral("%1").arg(m_lastIntegrityResult.returnedCount)).arg(QStringLiteral("%1").arg(m_evidenceCache.size())));
+    text.field(QStringLiteral("Total/Returned/Parsed"), QStringLiteral("%1/%2/%3").arg(QStringLiteral("%1").arg(m_lastIntegrityResult.totalCount)).arg(QStringLiteral("%1").arg(m_lastIntegrityResult.returnedCount)).arg(QStringLiteral("%1").arg(m_evidenceSnapshot->entries.size())));
     text.field(QStringLiteral("CpuCount"), QStringLiteral("%1").arg(m_lastIntegrityResult.cpuCount));
     text.field(QStringLiteral("ModuleCount"), QStringLiteral("%1").arg(m_lastIntegrityResult.moduleCount));
     text.field(QStringLiteral("LastStatus"), QStringLiteral("%1").arg(ntStatusText(m_lastIntegrityResult.lastStatus)));
     text.field(QStringLiteral("驱动返回说明"), QStringLiteral("%1").arg(friendlyHardwareIoMessage(m_lastIntegrityResult.io.message)));
-    text.nodes += detailText(m_evidenceCache[static_cast<std::size_t>(cacheIndex)]).nodes;
+    text.nodes += detailText(m_evidenceSnapshot->entries[static_cast<std::size_t>(cacheIndex)]).nodes;
     m_detailEditor->setDocument(text);
+}
+
+void HardwareR0EvidencePage::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::LanguageChange && m_evidenceModel != nullptr)
+    {
+        static_cast<EvidenceModel*>(m_evidenceModel)->refreshLanguage();
+        m_filterModel->invalidate();
+        rebuildEvidenceTable();
+    }
 }
 
 void HardwareR0EvidencePage::setStatusText(const QString& text, const QString& colorText)

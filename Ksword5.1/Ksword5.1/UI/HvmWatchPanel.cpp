@@ -37,6 +37,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QTableWidget>
 #include "StructuredFieldView.h"
 #include <QVBoxLayout>
@@ -371,8 +372,10 @@ void HvmWatchPanel::refreshAsync()
         return;
     }
     m_queryInFlight = true;
+    const auto processes = m_processAttribution;
+    const quint64 processRevision = m_processAttributionRevision;
     QPointer<HvmWatchPanel> safeThis(this);
-    std::thread([safeThis]() {
+    std::thread([safeThis, processes, processRevision]() {
         const ksword::hvm::HvmWatchResult result = ksword::hvm::listWatches();
         /*
          * 顺手在同一次后台跳里读一次常驻状态。
@@ -382,13 +385,31 @@ void HvmWatchPanel::refreshAsync()
          * 查询之间常驻可以变，那时表格与状态灯会互相矛盾。
          */
         const ksword::hvm::HvmState state = ksword::hvm::queryState();
+        QVector<WatchEvidence> evidence;
+        if (result.ok) {
+            QVector<quint64> addresses;
+            for (const auto& entry : result.watches) addresses.append(entry.lastHitRip);
+            const auto attributed = ksword::hvm::attributeKernelAddresses(addresses);
+            evidence.reserve(result.watches.size());
+            for (int index = 0; index < result.watches.size(); ++index) {
+                WatchEvidence value;
+                value.entry = result.watches.at(index);
+                value.attribution = attributed.value(index);
+                value.label = ksword::hvm::watchLabel(value.entry);
+                if (value.entry.addressKind == KSWORD_ARK_HVM_WATCH_ADDRESS_VIRTUAL && value.entry.requestedAddress)
+                    value.mapping = ksword::hvm::translate(0, value.entry.requestedAddress);
+                value.sampledAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+                value.document = buildDetailDocument(value, processes, state.residentActive);
+                evidence.append(std::move(value));
+            }
+        }
         if (safeThis == nullptr)
         {
             return;
         }
         QMetaObject::invokeMethod(
             safeThis,
-            [safeThis, result, state]() {
+            [safeThis, result, state, evidence, processRevision]() {
                 if (safeThis == nullptr)
                 {
                     return;
@@ -399,6 +420,12 @@ void HvmWatchPanel::refreshAsync()
                 {
                     safeThis->m_statusLabel->setText(result.message);
                     return;
+                }
+                ++safeThis->m_evidenceRequest;
+                safeThis->m_evidence = evidence;
+                if (safeThis->m_processAttributionRevision != processRevision) {
+                    for (auto& value : safeThis->m_evidence)
+                        value.document = buildDetailDocument(value, safeThis->m_processAttribution, state.residentActive);
                 }
                 safeThis->applyWatches(result.watches);
                 // 常驻没跑时把这句话跟在条数后面：表里每一行的"命中 0"
@@ -437,6 +464,7 @@ QString HvmWatchPanel::describeWatchStateHere(const unsigned long state) const
 void HvmWatchPanel::applyWatches(
     const QVector<ksword::hvm::HvmWatchEntry>& watches)
 {
+    const QSignalBlocker blocker(m_table);
     m_table->setRowCount(watches.size());
     for (int row = 0; row < watches.size(); ++row)
     {
@@ -464,7 +492,8 @@ void HvmWatchPanel::applyWatches(
             entry.addressKind == KSWORD_ARK_HVM_WATCH_ADDRESS_VIRTUAL
                 ? text(QStringLiteral("虚拟 %1")).arg(hex64(entry.requestedAddress))
                 : text(QStringLiteral("物理 %1")).arg(hex64(entry.requestedAddress));
-        const QString targetLabel = ksword::hvm::watchLabel(entry);
+        const WatchEvidence* const prepared = evidenceFor(entry);
+        const QString targetLabel = prepared ? prepared->label : QString();
         auto* const targetItem = setCell(WatchColumnTarget,
             targetLabel.isEmpty() ? targetAddress : targetLabel);
         targetItem->setToolTip(targetLabel.isEmpty()
@@ -494,7 +523,7 @@ void HvmWatchPanel::applyWatches(
         if (entry.lastHitRip != 0ULL)
         {
             const ksword::hvm::HvmWatchAttribution attribution =
-                ksword::hvm::attributeKernelAddress(entry.lastHitRip);
+                prepared ? prepared->attribution : ksword::hvm::HvmWatchAttribution{};
             // 有导出符号就用 `module!Symbol+0x..`，没有才退回 `module.sys+0xRVA`。
             // 两种都是真话，区别只是精度；编一个最近的名字出来才是错的。
             //
@@ -519,15 +548,20 @@ void HvmWatchPanel::applyWatches(
     }
     m_table->resizeColumnsToContents();
     updateEnabledState();
+    ksword::hvm::HvmWatchEntry selected;
+    if (selectedWatch(&selected)) showDetail(selected);
 }
 
-void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
+ks::ui::FieldDocument HvmWatchPanel::buildDetailDocument(const WatchEvidence& evidence,
+    const QHash<quint64, ksword::hvm::HvmProcessAttribution>& processes, const bool residentActive)
 {
+    const auto& entry = evidence.entry;
     ks::ui::FieldDocument document;
+    document.field(ks::i18n::packedSourceText(QStringLiteral("Sample time")), evidence.sampledAt);
     document.section(QStringLiteral("目标"));
     // 标签存在 R3 这一侧（协议里没有这个字段），从别的页面右键进来时带上。
     // 没有标签时明说原因，不留一行空白让人以为是读失败了。
-    const QString label = ksword::hvm::watchLabel(entry);
+    const QString& label = evidence.label;
     document.field(QStringLiteral("标签"), QStringLiteral("%1")
         .arg(label.isEmpty()
             ? text(QStringLiteral("（未命名，在这一页直接添加的监视没有标签）"))
@@ -563,7 +597,7 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
         entry.requestedAddress != 0ULL)
     {
         const ksword::hvm::HvmMemoryResult current =
-            ksword::hvm::translate(0, entry.requestedAddress);
+            evidence.mapping;
         if (current.ok && current.physicalAddress != 0ULL)
         {
             const unsigned long long currentPage =
@@ -637,7 +671,7 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
 
         document.section(QStringLiteral("归因"));
         const ksword::hvm::HvmWatchAttribution attribution =
-            ksword::hvm::attributeKernelAddress(entry.lastHitRip);
+            evidence.attribution;
         if (attribution.resolved)
         {
             document.field(QStringLiteral("模块"), QStringLiteral("%1")
@@ -687,8 +721,8 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
         }
         else
         {
-            const auto cached = m_processAttribution.constFind(entry.lastHitCr3);
-            document.note((cached != m_processAttribution.constEnd()
+            const auto cached = processes.constFind(entry.lastHitCr3);
+            document.note((cached != processes.constEnd()
                 ? text(QStringLiteral("  进程            %1"))
                     .arg(ksword::hvm::describeProcessAttribution(*cached))
                 : text(QStringLiteral("  进程            尚未解析。点“解析命中进程”按 CR3 反查——这一步要逐个进程读页目录基址，所以不随选中行自动跑。"))));
@@ -697,7 +731,9 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
 
     document.section(QStringLiteral("HVM"));
     document.field(QStringLiteral("监视状态"), QStringLiteral("%1")
-        .arg(describeWatchStateHere(entry.state)));
+        .arg((entry.state == KSWORD_ARK_HVM_EPT_WATCH_STATE_ARMED && !residentActive
+            ? text(QStringLiteral("已武装（常驻未运行，还没有开始观察）"))
+            : ksword::hvm::describeWatchState(entry.state))));
     document.field(QStringLiteral("武装代次"), QStringLiteral("%1")
         .arg(entry.armedGeneration));
     /*
@@ -707,7 +743,7 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
      * 这套 EPT 指针，也就不会产生任何退出。此时把"命中 0"原样摆出来而不说明，
      * 用户读到的就是一条凭空的否定结论。
      */
-    if (!m_residentActive)
+    if (!residentActive)
     {
         document.field(QStringLiteral("是否在观察"), QStringLiteral("否 —— 常驻没有在运行。这条监视此刻不会产生任何命中，上面的命中计数只覆盖它武装过且常驻在跑的那些时间段。"));
     }
@@ -717,7 +753,36 @@ void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
     {
         document.field(QStringLiteral("现场归属"), QStringLiteral("这条监视已经重新武装过；上面那份命中现场属于**之前**某一轮，不是当前这一轮（当前这一轮还没有命中）。"));
     }
-    m_detail->setDocument(document);
+    return document;
+}
+
+const HvmWatchPanel::WatchEvidence* HvmWatchPanel::evidenceFor(const ksword::hvm::HvmWatchEntry& entry) const
+{
+    for (const auto& value : m_evidence)
+        if (value.entry.watchId == entry.watchId && value.entry.armedGeneration == entry.armedGeneration
+            && value.entry.physicalPage == entry.physicalPage && value.entry.requestedAddress == entry.requestedAddress
+            && value.entry.addressKind == entry.addressKind && value.entry.requestedLength == entry.requestedLength
+            && value.entry.requestedAccess == entry.requestedAccess
+            && value.entry.lastHitSequence == entry.lastHitSequence && value.entry.lastHitRip == entry.lastHitRip)
+            return &value;
+    return nullptr;
+}
+
+bool HvmWatchPanel::selectedIdentityMatches(const ksword::hvm::HvmWatchEntry& entry) const
+{
+    ksword::hvm::HvmWatchEntry selected;
+    return selectedWatch(&selected) && selected.watchId == entry.watchId
+        && selected.armedGeneration == entry.armedGeneration && selected.physicalPage == entry.physicalPage
+        && selected.requestedAddress == entry.requestedAddress && selected.addressKind == entry.addressKind
+        && selected.requestedLength == entry.requestedLength && selected.requestedAccess == entry.requestedAccess
+        && selected.lastHitSequence == entry.lastHitSequence
+        && selected.lastHitRip == entry.lastHitRip;
+}
+
+void HvmWatchPanel::showDetail(const ksword::hvm::HvmWatchEntry& entry)
+{
+    ++m_evidenceRequest; // Selection changes invalidate older memory/module reads.
+    if (const auto* value = evidenceFor(entry)) m_detail->setDocument(value->document);
 }
 
 void HvmWatchPanel::startAdd()

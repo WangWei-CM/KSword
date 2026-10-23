@@ -9,6 +9,8 @@
 // ============================================================
 
 #include <QColor>
+#include <QHash>
+#include <QList>
 #include <QIcon>
 #include <QObject>
 #include <QPointer>
@@ -81,9 +83,12 @@ namespace ks::ui
         // - 返回本片实际替换或还原的图标槽位数量。
         int runIconApplySlice(quint64 runGeneration, int* cacheHitCount);
 
-        // scheduleWidgetRefresh：运行期换图标、显示或重绘后排队补色。
-        // 入参为待更新控件；同一控件只排一次，销毁后自动放弃，默认色仍适配共享按钮。
-        void scheduleWidgetRefresh(QWidget* widgetPointer);
+        // 清洁Show只比较常量身份；真实主题、源图、动作、结构与DPR改变才排队。
+        bool needsWidgetRefreshForShow(QWidget* widgetPointer) const;
+        void rememberWidgetRefresh(QWidget* widgetPointer, const QList<QAction*>& actions);
+
+        // ChildAdded尚未完成QAction动态类型时，延后发现已登记宿主的直接动作。
+        void scheduleWidgetRefresh(QWidget* widgetPointer, bool forceDiscovery = false);
 
         // drainWidgetRefreshes 将运行期增量任务合并为有限分片，不为每个 Style/Show 开独立定时器。
         void drainWidgetRefreshes();
@@ -93,6 +98,23 @@ namespace ks::ui
         bool applyToAction(QAction* actionPointer, int* cacheHitCount);
         int applyToTabWidget(QTabWidget* tabWidgetPointer, int* cacheHitCount);
         QIcon themedIcon(const QIcon& sourceIcon, bool* cacheHitOut);
+
+        struct ActionRefreshWatch
+        {
+            QMetaObject::Connection changed;
+            QMetaObject::Connection destroyed;
+        };
+        struct WidgetRefreshState
+        {
+            quint64 generation = 0;
+            bool dirty = true;
+            qreal devicePixelRatio = 0;
+            qint64 buttonIconKey = 0;
+            qint64 windowIconKey = 0;
+            int tabCount = 0;
+            QHash<QAction*, ActionRefreshWatch> actions;
+        };
+        QHash<QWidget*, WidgetRefreshState> m_widgetRefreshStates;
 
         bool m_filterInstalled = false; // m_filterInstalled：全局事件过滤器是否已安装。
         bool m_customTintActive = false; // m_customTintActive：是否着色普通槽位；默认色仅管共享按钮。

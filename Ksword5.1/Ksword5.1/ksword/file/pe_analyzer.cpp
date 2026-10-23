@@ -18,6 +18,11 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <memory>
+#include <map>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -35,6 +40,22 @@ namespace ks::file
         constexpr std::uint32_t kMaxExportNames = 4096;
         constexpr std::uint64_t kMaxPeFileBytes = 512ULL * 1024ULL * 1024ULL;
 
+        struct PeAnalysisCancelled {};
+        thread_local const PeAnalysisOptions* activeOptions = nullptr;
+        thread_local unsigned cancellationProbeCount = 0;
+        struct ScopedPeAnalysisOptions
+        {
+            const PeAnalysisOptions* previous;
+            explicit ScopedPeAnalysisOptions(const PeAnalysisOptions& options) : previous(activeOptions) { activeOptions = &options; }
+            ~ScopedPeAnalysisOptions() { activeOptions = previous; }
+        };
+        void CheckPeAnalysisCancelled(bool force = false)
+        {
+            if (activeOptions && activeOptions->cancelled &&
+                (force || ((++cancellationProbeCount) % 256U) == 1U) && activeOptions->cancelled())
+                throw PeAnalysisCancelled{};
+        }
+
         // Collect semantic fields at the point where structures are decoded.
         // No report text is read back or split to manufacture the property tree.
         class ReportCollector
@@ -43,14 +64,17 @@ namespace ks::file
             explicit ReportCollector(PeAnalysisResult& result) : result_(result) {}
             void Section(std::wstring name)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Section, std::move(name), {}, 0 });
             }
             void Field(std::wstring name, std::wstring value, std::uint32_t depth = 0)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Field, std::move(name), std::move(value), depth });
             }
             void Note(std::wstring value, std::uint32_t depth = 0)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Note, {}, std::move(value), depth });
             }
         private:
@@ -139,6 +163,7 @@ namespace ks::file
             std::wstring output;
             for (const std::wstring& itemText : itemList)
             {
+                CheckPeAnalysisCancelled();
                 if (!output.empty())
                 {
                     output += L" | ";
@@ -228,6 +253,7 @@ namespace ks::file
             const std::size_t cappedEndOffset = std::min(fileBytes.size(), beginOffset + kMaxPeStringBytes);
             while (endOffset < cappedEndOffset && fileBytes[endOffset] != 0)
             {
+                CheckPeAnalysisCancelled();
                 ++endOffset;
             }
             return ks::str::Utf8ToUtf16(std::string(
@@ -243,6 +269,7 @@ namespace ks::file
             int length = 0;
             while (length < IMAGE_SIZEOF_SHORT_NAME && nameBytes[length] != '\0')
             {
+                CheckPeAnalysisCancelled();
                 ++length;
             }
             return std::string(nameBytes, nameBytes + length);
@@ -259,6 +286,7 @@ namespace ks::file
         {
             for (const IMAGE_SECTION_HEADER& sectionHeader : sectionList)
             {
+                CheckPeAnalysisCancelled();
                 const std::uint32_t sectionRva = sectionHeader.VirtualAddress;
                 if (rvaValue < sectionRva)
                 {
@@ -301,11 +329,13 @@ namespace ks::file
             std::array<std::uint32_t, 256> countList{};
             for (std::uint32_t index = 0; index < readableSize; ++index)
             {
+                if ((index % 65536U) == 0U) CheckPeAnalysisCancelled(true);
                 ++countList[fileBytes[static_cast<std::size_t>(rawOffsetValue) + index]];
             }
             double entropyValue = 0.0;
             for (std::uint32_t countValue : countList)
             {
+                CheckPeAnalysisCancelled();
                 if (countValue == 0) { continue; }
                 const double probability = static_cast<double>(countValue) / static_cast<double>(readableSize);
                 entropyValue -= probability * std::log2(probability);
@@ -333,17 +363,17 @@ namespace ks::file
                 return false;
             }
 
+            const auto close = [](void* handle) { ::CloseHandle(handle); };
+            const std::unique_ptr<void, decltype(close)> handleOwner(fileHandle, close);
             LARGE_INTEGER fileSize{};
             if (::GetFileSizeEx(fileHandle, &fileSize) == FALSE || fileSize.QuadPart < 0)
             {
                 const DWORD errorCode = ::GetLastError();
-                ::CloseHandle(fileHandle);
                 errorTextOut = L"GetFileSizeEx failed, error=" + std::to_wstring(errorCode);
                 return false;
             }
             if (static_cast<std::uint64_t>(fileSize.QuadPart) > kMaxPeFileBytes)
             {
-                ::CloseHandle(fileHandle);
                 errorTextOut = L"file is too large for interactive PE analysis";
                 return false;
             }
@@ -352,13 +382,13 @@ namespace ks::file
             std::size_t totalRead = 0;
             while (totalRead < fileBytesOut.size())
             {
+                CheckPeAnalysisCancelled(true);
                 const DWORD chunkSize = static_cast<DWORD>(std::min<std::size_t>(fileBytesOut.size() - totalRead, 1024U * 1024U));
                 DWORD bytesRead = 0;
                 if (::ReadFile(fileHandle, fileBytesOut.data() + totalRead, chunkSize, &bytesRead, nullptr) == FALSE)
                 {
                     const DWORD errorCode = ::GetLastError();
-                    ::CloseHandle(fileHandle);
-                    errorTextOut = L"ReadFile failed, error=" + std::to_wstring(errorCode);
+                        errorTextOut = L"ReadFile failed, error=" + std::to_wstring(errorCode);
                     return false;
                 }
                 if (bytesRead == 0)
@@ -367,7 +397,6 @@ namespace ks::file
                 }
                 totalRead += bytesRead;
             }
-            ::CloseHandle(fileHandle);
             fileBytesOut.resize(totalRead);
             return true;
         }
@@ -382,6 +411,7 @@ namespace ks::file
 
             for (int directoryIndex = 0; directoryIndex < IMAGE_NUMBEROF_DIRECTORY_ENTRIES; ++directoryIndex)
             {
+                CheckPeAnalysisCancelled();
                 const IMAGE_DATA_DIRECTORY& directoryEntry = directoryList[static_cast<std::size_t>(directoryIndex)];
                 report.Field(L"[" + std::to_wstring(directoryIndex) + L"] " + DataDirectoryName(directoryIndex), L"");
                 report.Field(L"RVA", Hex(directoryEntry.VirtualAddress), 1);
@@ -403,6 +433,7 @@ namespace ks::file
             }
             for (const auto& module : modules)
             {
+                CheckPeAnalysisCancelled();
                 report.Field(L"模块", ks::str::Utf8ToUtf16(module.dllName));
                 if (module.descriptorValid)
                 {
@@ -413,6 +444,7 @@ namespace ks::file
                     report.Note(ks::str::Utf8ToUtf16(module.diagnosticText), 1);
                 for (std::size_t index = 0; index < module.imports.size(); ++index)
                 {
+                    CheckPeAnalysisCancelled();
                     const auto& function = module.imports[index];
                     report.Field(L"#" + std::to_wstring(index),
                         function.importByOrdinal ? L"" : ks::str::Utf8ToUtf16(function.functionName), 1);
@@ -460,6 +492,7 @@ namespace ks::file
 
             for (std::uint32_t moduleIndex = 0; moduleIndex < kMaxImportDescriptors; ++moduleIndex)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_IMPORT_DESCRIPTOR descriptor{};
                 const std::uint64_t currentOffset =
                     static_cast<std::uint64_t>(descriptorOffset) +
@@ -516,6 +549,7 @@ namespace ks::file
                     : static_cast<std::uint32_t>(sizeof(std::uint32_t));
                 for (std::uint32_t importIndex = 0; importIndex < kMaxImportPerModule; ++importIndex)
                 {
+                    CheckPeAnalysisCancelled();
                     PeImportFunctionSummary function{};
                     function.dllName = module.dllName;
                     function.thunkRva = displayThunkRva + (importIndex * thunkWidth);
@@ -666,6 +700,7 @@ namespace ks::file
                 kMaxExportNames);
             for (std::uint32_t nameIndex = 0; nameIndex < displayCount; ++nameIndex)
             {
+                CheckPeAnalysisCancelled();
                 std::uint32_t nameRva = 0;
                 std::uint16_t ordinalIndex = 0;
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(nameArrayOffset) + nameIndex * sizeof(nameRva), nameRva) ||
@@ -768,6 +803,7 @@ namespace ks::file
             const std::uint32_t displayCount = std::min<std::uint32_t>(entryCount, 64U);
             for (std::uint32_t index = 0; index < displayCount; ++index)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_RESOURCE_DIRECTORY_ENTRY entry{};
                 const std::uint64_t entryOffset = static_cast<std::uint64_t>(resourceBaseOffset) +
                     sizeof(IMAGE_RESOURCE_DIRECTORY) + static_cast<std::uint64_t>(index) * sizeof(entry);
@@ -814,6 +850,7 @@ namespace ks::file
             while (consumedBytes <= relocDirectory.Size
                 && sizeof(IMAGE_BASE_RELOCATION) <= relocDirectory.Size - consumedBytes)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_BASE_RELOCATION block{};
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(relocOffset) + consumedBytes, block))
                 {
@@ -870,6 +907,7 @@ namespace ks::file
 
             for (std::uint32_t index = 0; index < std::min<std::uint32_t>(entryCount, 32U); ++index)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_DEBUG_DIRECTORY entry{};
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(debugOffset) + index * sizeof(entry), entry))
                 {
@@ -961,6 +999,7 @@ namespace ks::file
             }
             for (std::uint32_t index = 0; index < 64U; ++index)
             {
+                CheckPeAnalysisCancelled();
                 if (isPe64)
                 {
                     std::uint64_t callbackVa = 0;
@@ -1006,7 +1045,7 @@ namespace ks::file
         }
     }
 
-    PeAnalysisResult AnalyzePeBytes(
+    static PeAnalysisResult AnalyzePeBytesImpl(
         const std::vector<std::uint8_t>& fileBytes)
     {
         PeAnalysisResult result{};
@@ -1124,6 +1163,7 @@ namespace ks::file
                         directoryCapacity));
             for (std::uint32_t index = 0; index < count; ++index)
             {
+                CheckPeAnalysisCancelled();
                 dataDirectoryList[static_cast<std::size_t>(index)] = optionalHeader.DataDirectory[index];
             }
         }
@@ -1170,6 +1210,7 @@ namespace ks::file
                         directoryCapacity));
             for (std::uint32_t index = 0; index < count; ++index)
             {
+                CheckPeAnalysisCancelled();
                 dataDirectoryList[static_cast<std::size_t>(index)] = optionalHeader.DataDirectory[index];
             }
         }
@@ -1212,6 +1253,7 @@ namespace ks::file
         sectionList.reserve(fileHeader.NumberOfSections);
         for (std::uint16_t sectionIndex = 0; sectionIndex < fileHeader.NumberOfSections; ++sectionIndex)
         {
+            CheckPeAnalysisCancelled();
             IMAGE_SECTION_HEADER sectionHeader{};
             const std::uint64_t currentOffset = sectionTableOffset +
                 static_cast<std::uint64_t>(sectionIndex) * sizeof(IMAGE_SECTION_HEADER);
@@ -1246,7 +1288,8 @@ namespace ks::file
             summary.rawOffset = sectionHeader.PointerToRawData;
             summary.rawSize = sectionHeader.SizeOfRawData;
             summary.characteristics = sectionHeader.Characteristics;
-            summary.entropy = CalculateSectionEntropy(fileBytes, sectionHeader.PointerToRawData, sectionHeader.SizeOfRawData);
+            summary.entropy = activeOptions && activeOptions->importsOnly ? 0.0 :
+                CalculateSectionEntropy(fileBytes, sectionHeader.PointerToRawData, sectionHeader.SizeOfRawData);
             result.sections.push_back(summary);
         }
 
@@ -1267,12 +1310,17 @@ namespace ks::file
                 result.entryPointFileOffset)
             && result.entryPointFileOffset
                 < static_cast<std::uint64_t>(fileBytes.size());
+        if (activeOptions && activeOptions->decodedImports)
+            result.importModules = *activeOptions->decodedImports;
+        else
         result.importModules = CollectImportTable(
             fileBytes,
             isPe64,
             sizeOfHeadersValue,
             sectionList,
             dataDirectoryList[IMAGE_DIRECTORY_ENTRY_IMPORT]);
+
+        if (activeOptions && activeOptions->importsOnly) return result;
 
         ReportCollector report(result);
         report.Section(L"PE头");
@@ -1310,6 +1358,7 @@ namespace ks::file
 
         for (std::size_t sectionIndex = 0; sectionIndex < sectionList.size(); ++sectionIndex)
         {
+            CheckPeAnalysisCancelled();
             const IMAGE_SECTION_HEADER& sectionHeader = sectionList[sectionIndex];
             const PeSectionSummary& summary = result.sections[sectionIndex];
             report.Field(L"[" + std::to_wstring(sectionIndex) + L"]", ks::str::Utf8ToUtf16(summary.name));
@@ -1342,8 +1391,27 @@ namespace ks::file
         return result;
     }
 
+    PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes)
+    {
+        return AnalyzePeBytes(fileBytes, PeAnalysisOptions{});
+    }
+    PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes, const PeAnalysisOptions& options)
+    {
+        const ScopedPeAnalysisOptions scope(options);
+        try { CheckPeAnalysisCancelled(true); return AnalyzePeBytesImpl(fileBytes); }
+        catch (const PeAnalysisCancelled&) { PeAnalysisResult result; result.error = PeAnalysisError::Cancelled; return result; }
+    }
+
     PeAnalysisResult AnalyzePeFile(const std::wstring& filePath)
     {
+        return AnalyzePeFile(filePath, PeAnalysisOptions{});
+    }
+    PeAnalysisResult AnalyzePeFile(const std::wstring& filePath, const PeAnalysisOptions& options)
+    {
+        const ScopedPeAnalysisOptions scope(options);
+        try
+        {
+        CheckPeAnalysisCancelled(true);
         std::vector<std::uint8_t> fileBytes;
         std::wstring readErrorText;
         if (!ReadWholeFile(filePath, fileBytes, readErrorText))
@@ -1352,7 +1420,263 @@ namespace ks::file
             SetAnalysisError(result, L"PE解析失败：" + readErrorText, PeAnalysisError::ReadFailure);
             return result;
         }
-        return AnalyzePeBytes(fileBytes);
+        return AnalyzePeBytes(fileBytes, options);
+        }
+        catch (const PeAnalysisCancelled&) { PeAnalysisResult result; result.error = PeAnalysisError::Cancelled; return result; }
+    }
+
+    namespace
+    {
+        // Shared cache logic is source-agnostic; the native adapter below supplies exact versions.
+        struct PeAnalysisSource
+        {
+            std::wstring key;
+            std::uint64_t size = 0;
+            std::function<bool(std::vector<std::uint8_t>&, std::wstring&, const std::function<bool()>&)> read;
+            std::function<bool()> verify;
+        };
+        class SharedPeAnalysisCache
+        {
+            struct Client { std::uint64_t id; bool importsOnly; std::weak_ptr<std::atomic_bool> cancel; };
+            struct Entry
+            {
+                std::uint64_t size = 0, used = 0;
+                std::vector<Client> clients;
+                std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+                std::shared_ptr<const PeAnalysisResult> imports, full, failure;
+                bool reading = false, importing = false, completing = false;
+            };
+            struct Registration
+            {
+                SharedPeAnalysisCache* cache;
+                std::shared_ptr<Entry> entry;
+                std::uint64_t id;
+                ~Registration()
+                {
+                    std::lock_guard<std::mutex> lock(cache->mutex_);
+                    auto& clients = entry->clients;
+                    clients.erase(std::remove_if(clients.begin(), clients.end(), [this](const auto& value) { return value.id == id; }), clients.end());
+                    cache->changed_.notify_all();
+                }
+            };
+        public:
+            using Parser = std::function<PeAnalysisResult(const std::vector<std::uint8_t>&, const PeAnalysisOptions&)>;
+            explicit SharedPeAnalysisCache(std::uint64_t budget = kMaxPeFileBytes, Parser parser =
+                [](const auto& bytes, const auto& options) { return AnalyzePeBytes(bytes, options); })
+                : budget_(budget), parser_(std::move(parser)) {}
+
+            std::shared_ptr<const PeAnalysisResult> analyze(const PeAnalysisSource& source, bool importsOnly,
+                const std::shared_ptr<std::atomic_bool>& requestedCancel)
+            {
+                const auto cancel = requestedCancel ? requestedCancel : std::make_shared<std::atomic_bool>(false);
+                std::shared_ptr<Entry> entry;
+                std::uint64_t id = 0;
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    while (!cancel->load())
+                    {
+                        const auto found = entries_.find(source.key);
+                        const bool retryFailure = found != entries_.end() && found->second->clients.empty() &&
+                            (found->second->failure || (found->second->full && found->second->full->error == PeAnalysisError::ReadFailure) ||
+                                (found->second->imports && found->second->imports->error == PeAnalysisError::ReadFailure));
+                        if (found != entries_.end() && !retryFailure) { entry = found->second; break; }
+                        if (found != entries_.end()) eraseEntry(found);
+                        if (source.size > budget_) return failed(L"file is too large for interactive PE analysis");
+                        if (reserved_ + source.size <= budget_ && entries_.size() < 4)
+                        {
+                            entry = std::make_shared<Entry>(); entry->size = source.size;
+                            entries_.emplace(source.key, entry); reserved_ += source.size; break;
+                        }
+                        auto victim = entries_.end();
+                        for (auto it = entries_.begin(); it != entries_.end(); ++it)
+                            if (it->second->clients.empty() && !it->second->reading && !it->second->importing && !it->second->completing &&
+                                (victim == entries_.end() || it->second->used < victim->second->used)) victim = it;
+                        if (victim != entries_.end()) { eraseEntry(victim); continue; }
+                        changed_.wait_for(lock, std::chrono::milliseconds(10));
+                    }
+                    if (!entry) return cancelled();
+                    entry->used = ++clock_; id = ++nextClient_;
+                    entry->clients.push_back({id, importsOnly, cancel});
+                }
+                const Registration registration{this, entry, id};
+                for (;;)
+                {
+                    enum class Job { Read, Imports, Full } job;
+                    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+                    std::shared_ptr<const PeAnalysisResult> imports;
+                    {
+                        std::unique_lock<std::mutex> lock(mutex_);
+                        if (cancel->load()) return cancelled();
+                        if (entry->failure) return entry->failure;
+                        if (importsOnly && entry->imports) return entry->imports;
+                        if (entry->full) return entry->full;
+                        if (entry->imports && !entry->imports->success) return entry->imports;
+                        if (running_ >= 2) { changed_.wait_for(lock, std::chrono::milliseconds(10)); continue; }
+                        if (!entry->bytes && !entry->reading) { job = Job::Read; entry->reading = true; }
+                        else if (entry->bytes && !entry->imports && !entry->importing) { job = Job::Imports; entry->importing = true; }
+                        else if (entry->imports && !importsOnly && !entry->completing) { job = Job::Full; entry->completing = true; }
+                        else { changed_.wait_for(lock, std::chrono::milliseconds(10)); continue; }
+                        ++running_; bytes = entry->bytes; imports = entry->imports;
+                    }
+                    const auto noConsumers = [this, entry, fullOnly = job == Job::Full]()
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            for (const auto& client : entry->clients)
+                                if (!fullOnly || !client.importsOnly)
+                                    if (const auto token = client.cancel.lock(); token && !token->load()) return false;
+                            return true;
+                        };
+                    std::shared_ptr<const std::vector<std::uint8_t>> loaded;
+                    std::shared_ptr<const PeAnalysisResult> result;
+                    try
+                    {
+                        if (job == Job::Read)
+                        {
+                            auto value = std::make_shared<std::vector<std::uint8_t>>(); std::wstring error;
+                            if (source.read(*value, error, noConsumers)) loaded = std::move(value);
+                            else if (!error.empty()) result = failed(error);
+                        }
+                        else
+                        {
+                            PeAnalysisOptions options; options.importsOnly = job == Job::Imports;
+                            options.cancelled = noConsumers;
+                            if (job == Job::Full) options.decodedImports = &imports->importModules;
+                            result = std::make_shared<PeAnalysisResult>(parser_(*bytes, options));
+                        }
+                    }
+                    catch (...)
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        --running_;
+                        const auto failure = failed(L"ReadFile failed, error=" + std::to_wstring(ERROR_NOT_ENOUGH_MEMORY));
+                        if (job == Job::Read) { entry->reading = false; entry->failure = failure; }
+                        else if (job == Job::Imports) { entry->importing = false; entry->imports = failure; }
+                        else { entry->completing = false; entry->full = failure; }
+                        changed_.notify_all();
+                        continue;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        --running_;
+                        if (job == Job::Read) { entry->reading = false; if (loaded) entry->bytes = loaded; else if (result) entry->failure = result; }
+                        else if (job == Job::Imports) { entry->importing = false; if (result && result->error != PeAnalysisError::Cancelled) entry->imports = result; }
+                        else { entry->completing = false; if (result && result->error != PeAnalysisError::Cancelled) entry->full = entry->imports = result; }
+                        changed_.notify_all();
+                    }
+                }
+            }
+        private:
+            using Catalog = std::map<std::wstring, std::shared_ptr<Entry>>;
+            void eraseEntry(Catalog::iterator entry) { reserved_ -= entry->second->size; entries_.erase(entry); }
+            static std::shared_ptr<const PeAnalysisResult> cancelled()
+            { auto result = std::make_shared<PeAnalysisResult>(); result->error = PeAnalysisError::Cancelled; return result; }
+            static std::shared_ptr<const PeAnalysisResult> failed(const std::wstring& error)
+            { auto result = std::make_shared<PeAnalysisResult>(); SetAnalysisError(*result, L"PE解析失败：" + error, PeAnalysisError::ReadFailure); return result; }
+            std::mutex mutex_;
+            std::condition_variable changed_;
+            Catalog entries_;
+            std::uint64_t budget_, reserved_ = 0, clock_ = 0, nextClient_ = 0;
+            unsigned running_ = 0;
+            Parser parser_;
+        };
+        // End source-agnostic shared cache.
+        bool PeSourceVersion(HANDLE handle, std::wstring& key, std::uint64_t& size, const std::wstring& path)
+        {
+            FILE_BASIC_INFO basic{}; LARGE_INTEGER length{}; FILE_ID_INFO identity{};
+            if (!::GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) ||
+                !::GetFileSizeEx(handle, &length) || length.QuadPart < 0) return false;
+            key.clear();
+            if (::GetFileInformationByHandleEx(handle, FileIdInfo, &identity, sizeof(identity)))
+            {
+                key = L"id128:" + std::to_wstring(identity.VolumeSerialNumber);
+                for (unsigned char byte : identity.FileId.Identifier) key += L":" + std::to_wstring(byte);
+            }
+            else
+            {
+                BY_HANDLE_FILE_INFORMATION legacy{};
+                if (!::GetFileInformationByHandle(handle, &legacy)) return false;
+                key = L"id64:" + std::to_wstring(legacy.dwVolumeSerialNumber) + L":" +
+                    std::to_wstring((static_cast<std::uint64_t>(legacy.nFileIndexHigh) << 32U) | legacy.nFileIndexLow);
+            }
+            std::wstring resolved = path;
+            const DWORD needed = ::GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+            if (needed > 0)
+            {
+                std::vector<wchar_t> buffer(static_cast<std::size_t>(needed) + 1);
+                const DWORD copied = ::GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+                if (copied > 0 && copied < buffer.size()) resolved.assign(buffer.data(), copied);
+            }
+            key += L":path:" + std::to_wstring(resolved.size()) + L":" + resolved;
+            size = static_cast<std::uint64_t>(length.QuadPart);
+            key += L":" + std::to_wstring(size) + L":" + std::to_wstring(basic.LastWriteTime.QuadPart) + L":" + std::to_wstring(basic.ChangeTime.QuadPart);
+            return true;
+        }
+        bool OpenPeAnalysisSource(const std::wstring& path, PeAnalysisSource& source, std::wstring& error)
+        {
+            // Normal open follows the same target as the original PE file reader.
+            const HANDLE raw = ::CreateFileW(path.c_str(), GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (raw == INVALID_HANDLE_VALUE) { error = L"CreateFileW failed, error=" + std::to_wstring(::GetLastError()); return false; }
+            const auto handle = std::shared_ptr<void>(raw, [](void* value) { ::CloseHandle(value); });
+            if (!PeSourceVersion(raw, source.key, source.size, path))
+            { error = L"GetFileInformationByHandleEx failed, error=" + std::to_wstring(::GetLastError()); return false; }
+            if (source.size > kMaxPeFileBytes) { error = L"file is too large for interactive PE analysis"; return false; }
+            const auto originalKey = source.key; const auto originalSize = source.size;
+            source.read = [handle, originalKey, originalSize, path](std::vector<std::uint8_t>& bytes, std::wstring& failure, const std::function<bool()>& cancelled)
+                {
+                    if (cancelled()) return false;
+                    LARGE_INTEGER zero{};
+                    if (!::SetFilePointerEx(handle.get(), zero, nullptr, FILE_BEGIN))
+                    { failure = L"ReadFile failed, error=" + std::to_wstring(::GetLastError()); return false; }
+                    bytes.resize(static_cast<std::size_t>(originalSize));
+                    std::size_t offset = 0;
+                    while (offset < bytes.size())
+                    {
+                        if (cancelled()) return false;
+                        DWORD received = 0;
+                        const auto count = static_cast<DWORD>(std::min<std::size_t>(1024 * 1024, bytes.size() - offset));
+                        if (!::ReadFile(handle.get(), bytes.data() + offset, count, &received, nullptr))
+                        { failure = L"ReadFile failed, error=" + std::to_wstring(::GetLastError()); return false; }
+                        if (received == 0) { failure = L"ReadFile failed, error=" + std::to_wstring(ERROR_HANDLE_EOF); return false; }
+                        offset += received;
+                    }
+                    std::wstring after; std::uint64_t size = 0;
+                    if (!PeSourceVersion(handle.get(), after, size, path) || after != originalKey)
+                    { failure = L"ReadFile failed, error=" + std::to_wstring(ERROR_FILE_INVALID); return false; }
+                    return !cancelled();
+                };
+            source.verify = [handle, originalKey, path]()
+                {
+                    std::wstring current; std::uint64_t size = 0;
+                    if (!PeSourceVersion(handle.get(), current, size, path) || current != originalKey) return false;
+                    const HANDLE reopened = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (reopened == INVALID_HANDLE_VALUE) return false;
+                    const bool same = PeSourceVersion(reopened, current, size, path) && current == originalKey;
+                    ::CloseHandle(reopened); return same;
+                };
+            return true;
+        }
+        std::shared_ptr<const PeAnalysisResult> AnalyzePeSourceShared(SharedPeAnalysisCache& cache,
+            const PeAnalysisSource& source, bool importsOnly, const std::shared_ptr<std::atomic_bool>& cancel)
+        {
+            const auto result = cache.analyze(source, importsOnly, cancel);
+            if (cancel && cancel->load()) { auto value = std::make_shared<PeAnalysisResult>(); value->error = PeAnalysisError::Cancelled; return value; }
+            if (result->error == PeAnalysisError::Cancelled) return result;
+            if (!source.verify())
+            { auto value = std::make_shared<PeAnalysisResult>(); SetAnalysisError(*value, L"PE解析失败：ReadFile failed, error=" + std::to_wstring(ERROR_FILE_INVALID), PeAnalysisError::ReadFailure); return value; }
+            return result;
+        }
+    }
+    std::shared_ptr<const PeAnalysisResult> AnalyzePeFileShared(const std::wstring& path,
+        bool importsOnly, const std::shared_ptr<std::atomic_bool>& cancel)
+    {
+        if (cancel && cancel->load()) { auto value = std::make_shared<PeAnalysisResult>(); value->error = PeAnalysisError::Cancelled; return value; }
+        PeAnalysisSource source; std::wstring error;
+        if (!OpenPeAnalysisSource(path, source, error))
+        { auto value = std::make_shared<PeAnalysisResult>(); SetAnalysisError(*value, L"PE解析失败：" + error, PeAnalysisError::ReadFailure); return value; }
+        static SharedPeAnalysisCache cache;
+        return AnalyzePeSourceShared(cache, source, importsOnly, cancel);
     }
 
     std::wstring ExportPeAnalysisText(const PeAnalysisResult& analysis)
@@ -1360,6 +1684,7 @@ namespace ks::file
         std::wostringstream output;
         for (const PeReportEntry& entry : analysis.entries)
         {
+            CheckPeAnalysisCancelled();
             if (entry.kind == PeReportEntry::Kind::Section)
                 output << L"\n[" << entry.name << L"]\n";
             else

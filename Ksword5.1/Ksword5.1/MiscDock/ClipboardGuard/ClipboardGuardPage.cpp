@@ -4,6 +4,8 @@
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/VisibleTableWidget.h"
 #include "../../UI/FlatButtonTheme.h"
+#include "../../UI/TableInteractionSupport.h"
+#include "../../Internationalization/LanguageManager.h"
 #include "../../theme.h"
 
 #include <QAction>
@@ -17,6 +19,7 @@
 #include <QPushButton>
 #include "../../UI/SegmentedControl.h"
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -38,6 +41,58 @@ namespace ks::misc
 {
     namespace
     {
+        enum class ClipboardGuardBodyText
+        {
+            AddRule, RemoveRule, Refresh, GlobalMonitor, Status, EventTitle, PresetA, PresetB
+        };
+        struct ClipboardGuardBodyEntry
+        {
+            const char* target;
+            const char* source;
+            bool mnemonic;
+        };
+        // The real controls and cold search keep one source for text and targets.
+        constexpr ClipboardGuardBodyEntry kClipboardGuardBody[] = {
+            {"ks_clipboard_guard_add_rule", "添加进程规则", true},
+            {"ks_clipboard_guard_remove_rule", "删除规则", true},
+            {"ks_clipboard_guard_refresh", "刷新", true},
+            {"ks_clipboard_guard_global_monitor", "全局监控（记录所有进程的剪贴板访问）", true},
+            {"ks_clipboard_guard_status", "尚未加载策略。", false},
+            {"ks_clipboard_guard_event_title", "剪贴板访问事件：", false},
+            {"ks_clipboard_guard_preset_a", "A", true},
+            {"ks_clipboard_guard_preset_b", "B", true}
+        };
+        constexpr char kClipboardGuardRuleTableTarget[] = "ks_clipboard_guard_rule_table";
+        constexpr char kClipboardGuardEventTableTarget[] = "ks_clipboard_guard_event_table";
+        constexpr char kClipboardGuardEventActionsTarget[] = "ks_clipboard_guard_event_actions";
+        const ClipboardGuardBodyEntry& clipboardGuardBodyEntry(ClipboardGuardBodyText id)
+        {
+            return kClipboardGuardBody[static_cast<int>(id)];
+        }
+        QString clipboardGuardBodySource(ClipboardGuardBodyText id)
+        {
+            return QString::fromUtf8(clipboardGuardBodyEntry(id).source);
+        }
+        QString clipboardGuardBodyTarget(ClipboardGuardBodyText id)
+        {
+            return QString::fromLatin1(clipboardGuardBodyEntry(id).target);
+        }
+        QStringList ruleTableHeaders()
+        {
+            return {
+                QStringLiteral("目标"), QStringLiteral("匹配方式"), QStringLiteral("规则名"),
+                QStringLiteral("读"), QStringLiteral("写"), QStringLiteral("枚举"), QStringLiteral("启用")
+            };
+        }
+        QStringList eventTableHeaders()
+        {
+            return {
+                QStringLiteral("时间"), QStringLiteral("进程"), QStringLiteral("PID"), QStringLiteral("操作"),
+                QStringLiteral("格式"), QStringLiteral("结果"), QStringLiteral("TID"), QStringLiteral("会话"),
+                QStringLiteral("完整性"), QStringLiteral("发起进程"), QStringLiteral("序号")
+            };
+        }
+
         // buildToolButtonStyle：工具栏按钮统一外观，颜色取自当前主题。
         QString buildToolButtonStyle()
         {
@@ -49,8 +104,37 @@ namespace ks::misc
         }
     }
 
+    QVector<ks::ui::PageSearchBodyText> ClipboardGuardPage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(28);
+        const auto append = [&body](ClipboardGuardBodyText id)
+        {
+            const auto& entry = clipboardGuardBodyEntry(id);
+            body.append({ks::i18n::sourceText(clipboardGuardBodySource(id)),
+                clipboardGuardBodyTarget(id), {}, entry.mnemonic});
+        };
+        // Layout reparenting puts the rule panel's controls and table first,
+        // then the event panel's title, preset buttons and table descendants.
+        for (const auto id : {ClipboardGuardBodyText::AddRule, ClipboardGuardBodyText::RemoveRule,
+            ClipboardGuardBodyText::Refresh, ClipboardGuardBodyText::GlobalMonitor, ClipboardGuardBodyText::Status})
+            append(id);
+        for (const auto& header : ruleTableHeaders())
+            body.append({ks::i18n::sourceText(header), QString::fromLatin1(kClipboardGuardRuleTableTarget), {}, false});
+        for (const auto id : {ClipboardGuardBodyText::EventTitle, ClipboardGuardBodyText::PresetA, ClipboardGuardBodyText::PresetB})
+            append(id);
+        // Headers precede descendants in GlobalUiSearch, including the five
+        // event columns hidden by preset A. Both unactivated tables have no rows.
+        for (const auto& header : eventTableHeaders())
+            body.append({ks::i18n::sourceText(header), QString::fromLatin1(kClipboardGuardEventTableTarget), {}, false});
+        body += ks::ui::ColdCompactTableActionBody(QString::fromLatin1(kClipboardGuardEventActionsTarget));
+        return body;
+    }
+
     ClipboardGuardPage::ClipboardGuardPage(QWidget* const parent)
         : QWidget(parent)
+        , m_inbox(std::make_shared<ClipboardGuardInbox>())
+        , m_runtime(std::make_shared<ClipboardGuardRuntime>(m_inbox))
     {
         initializeUi();
         initializeConnections();
@@ -58,30 +142,19 @@ namespace ks::misc
 
     ClipboardGuardPage::~ClipboardGuardPage()
     {
-        // 必须最先等 m_scanThreadPool 排空：refreshProcessListAndSessionsAsync 提交
-        // 的后台任务会解引用 QPointer<ClipboardGuardPage>（非线程安全，只是靠"任务
-        // 存活期间对象不会开始析构"这个前提保证它读到的值不被并发修改）。这里不等的话，
-        // 任务里的 guardThis->ensureProcessProtected(...) 等调用可能正好撞上下面这些
-        // 成员已经开始销毁的过程，是一个真实的 use-after-free。
-        m_scanThreadPool.waitForDone();
+        if (m_processPollTimer) m_processPollTimer->stop();
+        if (m_uiFlushTimer) m_uiFlushTimer->stop();
+        // The registered value owner retains every session/lease until STOP,
+        // CancelSynchronousIo, reader join and pipe/session handle cleanup finish.
+        m_runtime->requestStop();
+        m_runtime.reset();
+    }
 
-        // 页面销毁前必须先让所有会话线程退场，否则线程回调里的 QPointer 判空
-        // 之外还会残留没有 join 的 std::thread，析构 std::thread 会直接 terminate。
-        std::vector<std::uint32_t> pidList;
-        {
-            std::lock_guard<std::mutex> lock(m_sessionsMutex);
-            for (const std::unique_ptr<Session>& sessionPointer : m_sessions)
-            {
-                if (sessionPointer != nullptr)
-                {
-                    pidList.push_back(sessionPointer->pid);
-                }
-            }
-        }
-        for (const std::uint32_t pidValue : pidList)
-        {
-            teardownSession(pidValue);
-        }
+    void ClipboardGuardPage::showEvent(QShowEvent* const event)
+    {
+        QWidget::showEvent(event);
+        m_statusUpdateClock.invalidate();
+        scheduleEventProjection();
     }
 
     void ClipboardGuardPage::notifyPageActivated()
@@ -118,15 +191,18 @@ namespace ks::misc
         m_toolbarLayout->setContentsMargins(0, 0, 0, 0);
         m_toolbarLayout->setSpacing(8);
 
-        m_addRuleButton = new QPushButton(QIcon(QStringLiteral(":/Icon/plus.svg")), QStringLiteral("添加进程规则"), this);
+        m_addRuleButton = new QPushButton(QIcon(QStringLiteral(":/Icon/plus.svg")), clipboardGuardBodySource(ClipboardGuardBodyText::AddRule), this);
+        m_addRuleButton->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::AddRule));
         m_addRuleButton->setToolTip(QStringLiteral("按进程名或完整路径新增一条剪贴板策略规则，规则会下发到驱动持久保存。"));
         m_addRuleButton->setStyleSheet(buildToolButtonStyle());
 
-        m_removeRuleButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("删除规则"), this);
+        m_removeRuleButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_clear.svg")), clipboardGuardBodySource(ClipboardGuardBodyText::RemoveRule), this);
+        m_removeRuleButton->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::RemoveRule));
         m_removeRuleButton->setToolTip(QStringLiteral("删除规则表里当前选中的一条规则。"));
         m_removeRuleButton->setStyleSheet(buildToolButtonStyle());
 
-        m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), this);
+        m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), clipboardGuardBodySource(ClipboardGuardBodyText::Refresh), this);
+        m_refreshButton->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::Refresh));
         m_refreshButton->setToolTip(QStringLiteral("立即重新扫描进程列表并按当前规则注入/移除保护，不必等待下一次自动轮询。"));
         m_refreshButton->setStyleSheet(buildToolButtonStyle());
 
@@ -134,14 +210,16 @@ namespace ks::misc
         // 进程；默认三个方向都只是"仅记录"，不新增任何拦截面，避免一勾选就
         // 打断全机复制粘贴。具体进程规则（PID/名称/路径）优先级更高，两者
         // 都命中时以具体规则的动作为准，见 findMatchingRule 的判定顺序。
-        m_globalMonitorCheck = new QCheckBox(QStringLiteral("全局监控（记录所有进程的剪贴板访问）"), this);
+        m_globalMonitorCheck = new QCheckBox(clipboardGuardBodySource(ClipboardGuardBodyText::GlobalMonitor), this);
+        m_globalMonitorCheck->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::GlobalMonitor));
         m_globalMonitorCheck->setToolTip(QStringLiteral(
             "注入到系统上几乎所有进程以观察剪贴板访问，事件表里能看到任意进程的读/写/枚举；"
             "默认只记录不拦截，需要拦截某个进程时仍然用规则表单独设置该进程的动作。"
             "注入的进程数量可能达到一两百个，会有一定性能开销。"));
 
         m_statusLabel = new QLabel(this);
-        m_statusLabel->setText(QStringLiteral("尚未加载策略。"));
+        m_statusLabel->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::Status));
+        m_statusLabel->setText(clipboardGuardBodySource(ClipboardGuardBodyText::Status));
 
         m_toolbarLayout->addWidget(m_addRuleButton);
         m_toolbarLayout->addWidget(m_removeRuleButton);
@@ -157,11 +235,10 @@ namespace ks::misc
 
         // ---- 规则表：PID/映像/规则名/读/写/枚举/启用 ----
         m_ruleTable = new QTableWidget(0, 7, this);
+        m_ruleTable->setObjectName(QString::fromLatin1(kClipboardGuardRuleTableTarget));
         // 规则表是小型配置选择器，不需要快照与冻结操作栏。
         ks::ui::SetTableActionBarMode(m_ruleTable, ks::ui::TableActionBarMode::None);
-        m_ruleTable->setHorizontalHeaderLabels({
-            QStringLiteral("目标"), QStringLiteral("匹配方式"), QStringLiteral("规则名"),
-            QStringLiteral("读"), QStringLiteral("写"), QStringLiteral("枚举"), QStringLiteral("启用") });
+        m_ruleTable->setHorizontalHeaderLabels(ruleTableHeaders());
         m_ruleTable->horizontalHeader()->setStretchLastSection(false);
         m_ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_ruleTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -182,7 +259,8 @@ namespace ks::misc
         QHBoxLayout* const eventTopLayout = new QHBoxLayout();
         eventTopLayout->setContentsMargins(0, 0, 0, 0);
         eventTopLayout->setSpacing(8);
-        auto* eventSectionTitle = new QLabel(QStringLiteral("剪贴板访问事件："), this);
+        auto* eventSectionTitle = new QLabel(clipboardGuardBodySource(ClipboardGuardBodyText::EventTitle), this);
+        eventSectionTitle->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::EventTitle));
         ks::ui::StylePrimarySectionTitle(eventSectionTitle);
         eventTopLayout->addWidget(eventSectionTitle);
 
@@ -190,8 +268,10 @@ namespace ks::misc
         QHBoxLayout* const presetLayout = new QHBoxLayout(m_columnPresetWidget);
         presetLayout->setContentsMargins(0, 0, 0, 0);
         presetLayout->setSpacing(0);
-        m_columnPresetAButton = new QPushButton(QStringLiteral("A"), m_columnPresetWidget);
-        m_columnPresetBButton = new QPushButton(QStringLiteral("B"), m_columnPresetWidget);
+        m_columnPresetAButton = new QPushButton(clipboardGuardBodySource(ClipboardGuardBodyText::PresetA), m_columnPresetWidget);
+        m_columnPresetBButton = new QPushButton(clipboardGuardBodySource(ClipboardGuardBodyText::PresetB), m_columnPresetWidget);
+        m_columnPresetAButton->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::PresetA));
+        m_columnPresetBButton->setObjectName(clipboardGuardBodyTarget(ClipboardGuardBodyText::PresetB));
         m_columnPresetAButton->setCheckable(true);
         m_columnPresetBButton->setCheckable(true);
         m_columnPresetAButton->setToolTip(QStringLiteral("列预设 A：概览（时间/进程/PID/操作/格式/结果）。"));
@@ -207,12 +287,11 @@ namespace ks::misc
 
         // ---- 事件表 ----
         m_eventTable = new QTableWidget(0, ColumnCount, this);
+        m_eventTable->setObjectName(QString::fromLatin1(kClipboardGuardEventTableTarget));
         // 剪贴板事件已有时间序列与业务右键操作，保留紧凑复制导出。
         ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Compact);
-        m_eventTable->setHorizontalHeaderLabels({
-            QStringLiteral("时间"), QStringLiteral("进程"), QStringLiteral("PID"), QStringLiteral("操作"),
-            QStringLiteral("格式"), QStringLiteral("结果"), QStringLiteral("TID"), QStringLiteral("会话"),
-            QStringLiteral("完整性"), QStringLiteral("发起进程"), QStringLiteral("序号") });
+        ks::ui::SetCompactTableSearchTargetPrefix(m_eventTable, QString::fromLatin1(kClipboardGuardEventActionsTarget));
+        m_eventTable->setHorizontalHeaderLabels(eventTableHeaders());
         m_eventTable->horizontalHeader()->setStretchLastSection(true);
         m_eventTable->horizontalHeader()->setSectionsMovable(true);
         m_eventTable->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);

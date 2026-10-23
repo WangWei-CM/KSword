@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -11,6 +12,9 @@
 
 #include "../UI/CodeEditorWidget.h"
 #include <QDir>
+#include "../UI/AsyncOperation.h"
+#include "../UI/AsyncUiDispatcher.h"
+#include "../UI/TableInteractionSupport.h"
 
 using namespace network_dock_detail;
 
@@ -402,9 +406,40 @@ namespace
 // - hosts 文件编辑。
 // ============================================================
 
+void NetworkDock::initializeVisibleDiagnosticPage()
+{
+    if (!isVisible() || m_sideTabWidget == nullptr)
+    {
+        return;
+    }
+
+    QWidget* const page = m_sideTabWidget->currentWidget();
+    // Set the one-shot gate before a query/editor load can send nested events.
+    if (page == m_routeTablePage && !m_routeInitialReadStarted)
+    {
+        m_routeInitialReadStarted = true;
+        refreshRouteTable();
+    }
+    else if (page == m_arpCachePage && !m_arpInitialReadStarted)
+    {
+        m_arpInitialReadStarted = true;
+        refreshArpCacheTable();
+    }
+    else if (page == m_dnsCachePage && !m_dnsInitialReadStarted)
+    {
+        m_dnsInitialReadStarted = true;
+        refreshDnsCacheTable();
+    }
+    else if (page == m_hostsFileEditorPage && !m_hostsInitialReadStarted)
+    {
+        m_hostsInitialReadStarted = true;
+        loadHostsFileEditor();
+    }
+}
+
 void NetworkDock::initializeRouteTableTab()
 {
-    m_routeTablePage = new QWidget(this);
+    if (m_routeTablePage == nullptr) m_routeTablePage = new QWidget(this);
     m_routeTableLayout = new QVBoxLayout(m_routeTablePage);
     m_routeTableLayout->setContentsMargins(6, 6, 6, 6);
     m_routeTableLayout->setSpacing(6);
@@ -468,13 +503,12 @@ void NetworkDock::initializeRouteTableTab()
     m_routeTable->horizontalHeader()->setStretchLastSection(true);
     installCopyCurrentRowMenu(m_routeTable);
     m_routeTableLayout->addWidget(m_routeTable, 1);
-    m_sideTabWidget->addTab(m_routeTablePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("路由表"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_routeTablePage, QStringLiteral("route"), QIcon(":/Icon/process_tree.svg"));
 
     connect(m_refreshRouteButton, &QPushButton::clicked, this, [this]() { refreshRouteTable(); });
     connect(m_addRouteButton, &QPushButton::clicked, this, [this]() { addRouteEntry(); });
     connect(m_editRouteButton, &QPushButton::clicked, this, [this]() { editSelectedRouteEntry(); });
     connect(m_removeRouteButton, &QPushButton::clicked, this, [this]() { deleteSelectedRouteEntry(); });
-    refreshRouteTable();
 }
 
 void NetworkDock::refreshRouteTable()
@@ -483,30 +517,88 @@ void NetworkDock::refreshRouteTable()
     {
         return;
     }
-    PMIB_IPFORWARD_TABLE2 routeTable = nullptr;
-    const DWORD queryStatus = GetIpForwardTable2(AF_UNSPEC, &routeTable);
-    if (queryStatus != NO_ERROR || routeTable == nullptr)
+    if (m_routeReadOperation == nullptr)
+    {
+        m_routeReadOperation = new ks::ui::AsyncOperation(this);
+    }
+    struct Result
+    {
+        DWORD status = NO_ERROR;
+        std::vector<RouteRecord> records;
+    };
+    m_routeReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            PMIB_IPFORWARD_TABLE2 nativeTable = nullptr;
+            result.status = GetIpForwardTable2(AF_UNSPEC, &nativeTable);
+            const auto release = [](MIB_IPFORWARD_TABLE2* table)
+            {
+                if (table != nullptr) FreeMibTable(table);
+            };
+            const std::unique_ptr<MIB_IPFORWARD_TABLE2, decltype(release)> table(nativeTable, release);
+            if (result.status != NO_ERROR || table == nullptr)
+            {
+                if (result.status == NO_ERROR) result.status = ERROR_INVALID_DATA;
+                return result;
+            }
+            result.records.reserve(table->NumEntries);
+            for (ULONG index = 0; index < table->NumEntries && !token.isCanceled(); ++index)
+            {
+                RouteRecord record = routeRecordFromNativeRow(table->Table[index]);
+                if (record.addressFamily == AF_INET || record.addressFamily == AF_INET6)
+                {
+                    result.records.push_back(std::move(record));
+                }
+            }
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_routeTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-route-read"), {m_routeTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_routeReadOperation->isCurrent(generation))
+                        {
+                            applyRouteTableRead(pending->records, pending->status);
+                        }
+                        m_routeReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyRouteTableRead(result.records, result.status);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyRouteTableRead({}, ERROR_NOT_ENOUGH_MEMORY);
+        });
+}
+
+void NetworkDock::applyRouteTableRead(const std::vector<RouteRecord>& records, const DWORD status)
+{
+    if (status != NO_ERROR)
     {
         if (m_routeStatusLabel != nullptr)
         {
-            m_routeStatusLabel->setText(QStringLiteral("状态：读取路由表失败，错误码=%1").arg(queryStatus));
+            m_routeStatusLabel->setText(QStringLiteral("状态：读取路由表失败，错误码=%1").arg(status));
         }
         return;
     }
 
-    m_routeRecordCache.clear();
-    m_routeRecordCache.reserve(routeTable->NumEntries);
+    m_routeRecordCache = records;
+    const bool updatesEnabled = m_routeTable->updatesEnabled();
     m_routeTable->setUpdatesEnabled(false);
     m_routeTable->setRowCount(0);
-    for (ULONG index = 0; index < routeTable->NumEntries; ++index)
+    for (std::size_t cacheIndex = 0; cacheIndex < m_routeRecordCache.size(); ++cacheIndex)
     {
-        const RouteRecord record = routeRecordFromNativeRow(routeTable->Table[index]);
-        if (record.addressFamily != AF_INET && record.addressFamily != AF_INET6)
-        {
-            continue;
-        }
-        const int cacheIndex = static_cast<int>(m_routeRecordCache.size());
-        m_routeRecordCache.push_back(record);
+        const RouteRecord& record = m_routeRecordCache[cacheIndex];
         const int row = m_routeTable->rowCount();
         m_routeTable->insertRow(row);
         const QStringList fields{
@@ -523,12 +615,11 @@ void NetworkDock::refreshRouteTable()
         for (int column = 0; column < fields.size(); ++column)
         {
             QTableWidgetItem* item = new QTableWidgetItem(fields.at(column));
-            item->setData(Qt::UserRole, cacheIndex);
+            item->setData(Qt::UserRole, static_cast<int>(cacheIndex));
             m_routeTable->setItem(row, column, item);
         }
     }
-    m_routeTable->setUpdatesEnabled(true);
-    FreeMibTable(routeTable);
+    m_routeTable->setUpdatesEnabled(updatesEnabled);
     if (m_routeStatusLabel != nullptr)
     {
         m_routeStatusLabel->setText(QStringLiteral("状态：路由项 %1").arg(m_routeRecordCache.size()));
@@ -537,6 +628,7 @@ void NetworkDock::refreshRouteTable()
 
 void NetworkDock::addRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     RouteRecord record;
     record.addressFamily = AF_INET;
     record.prefixLength = 24;
@@ -549,13 +641,6 @@ void NetworkDock::addRouteEntry()
     {
         return;
     }
-    MIB_IPFORWARD_ROW2 nativeRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("新增路由"), errorText);
-        return;
-    }
     if (isHighRiskRoute(record) && QMessageBox::question(
         this, QStringLiteral("新增高风险路由"),
         QStringLiteral("将新增以下路由：\n%1\n\n该路由可能影响系统网络连接，是否继续？").arg(routeSummaryText(record)),
@@ -563,45 +648,12 @@ void NetworkDock::addRouteEntry()
     {
         return;
     }
-    const DWORD createStatus = CreateIpForwardEntry2(&nativeRow);
-    if (createStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("新增系统路由"),
-            createStatus);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("新增路由"),
-                QStringLiteral("CreateIpForwardEntry2 失败，错误码=%1").arg(createStatus));
-        }
-        return;
-    }
-    if (persistent && !runNetshRouteCommand(QStringLiteral("add"), record, &errorText))
-    {
-        // privilegePromptHandled：活动路由仍需回滚，但权限提示后不再重复弹窗。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("持久化新增路由"),
-            errorText);
-        (void)DeleteIpForwardEntry2(&nativeRow);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("新增路由"),
-                QStringLiteral("持久化写入失败，已回滚活动路由。\n%1").arg(errorText));
-        }
-        return;
-    }
-    refreshRouteTable();
+    submitRouteMutation(0, {}, record, persistent);
 }
 
 void NetworkDock::editSelectedRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
     {
         QMessageBox::information(this, QStringLiteral("编辑路由"), QStringLiteral("请先选择一条路由。"));
@@ -630,90 +682,12 @@ void NetworkDock::editSelectedRouteEntry()
             return;
         }
     }
-    MIB_IPFORWARD_ROW2 originalRow{};
-    MIB_IPFORWARD_ROW2 targetRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(original, &originalRow, &errorText) || !routeRecordToNativeRow(target, &targetRow, &errorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("编辑路由"), errorText);
-        return;
-    }
-    DWORD operationStatus = NO_ERROR;
-    if (sameRouteIdentity(original, target))
-    {
-        operationStatus = SetIpForwardEntry2(&targetRow);
-    }
-    else
-    {
-        operationStatus = CreateIpForwardEntry2(&targetRow);
-        if (operationStatus == NO_ERROR)
-        {
-            operationStatus = DeleteIpForwardEntry2(&originalRow);
-        }
-    }
-    if (operationStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("编辑系统路由"),
-            operationStatus);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("编辑路由"),
-                QStringLiteral("更新活动路由失败，错误码=%1").arg(operationStatus));
-        }
-        return;
-    }
-    if (persistent)
-    {
-        if (!sameRouteIdentity(original, target))
-        {
-            (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
-            if (!runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
-            {
-                // privilegePromptHandled：页面继续刷新，但不叠加旧通用失败框。
-                const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("持久化编辑路由"),
-                    errorText);
-                if (!privilegePromptHandled)
-                {
-                    QMessageBox::warning(
-                        this,
-                        QStringLiteral("编辑路由"),
-                        QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
-                }
-            }
-        }
-        else if (!runNetshRouteCommand(QStringLiteral("set"), target, &errorText) &&
-                 !runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
-        {
-            // privilegePromptHandled：页面继续刷新，但不叠加旧通用失败框。
-            const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                this,
-                QStringLiteral("持久化编辑路由"),
-                errorText);
-            if (!privilegePromptHandled)
-            {
-                QMessageBox::warning(
-                    this,
-                    QStringLiteral("编辑路由"),
-                    QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
-            }
-        }
-    }
-    else
-    {
-        (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
-    }
-    refreshRouteTable();
+    submitRouteMutation(1, original, target, persistent);
 }
 
 void NetworkDock::deleteSelectedRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
     {
         QMessageBox::information(this, QStringLiteral("删除路由"), QStringLiteral("请先选择一条路由。"));
@@ -733,37 +707,130 @@ void NetworkDock::deleteSelectedRouteEntry()
     {
         return;
     }
-    MIB_IPFORWARD_ROW2 nativeRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
+    submitRouteMutation(2, record, {}, false);
+}
+
+
+void NetworkDock::submitRouteMutation(const int kind, RouteRecord original, RouteRecord target, const bool persistent)
+{
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
+    if (!m_routeMutationOperation) m_routeMutationOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<NetworkDock> guard(this);
+    const auto updateBusy = [guard]()
     {
-        QMessageBox::warning(this, QStringLiteral("删除路由"), errorText);
-        return;
-    }
-    const DWORD deleteStatus = DeleteIpForwardEntry2(&nativeRow);
-    if (deleteStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("删除系统路由"),
-            deleteStatus);
-        if (!privilegePromptHandled)
+        if (!guard) return;
+        const bool busy = guard->m_routeMutationOperation->isBusy();
+        for (auto* button : {guard->m_refreshRouteButton, guard->m_addRouteButton,
+            guard->m_editRouteButton, guard->m_removeRouteButton})
         {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("删除路由"),
-                QStringLiteral("DeleteIpForwardEntry2 失败，错误码=%1").arg(deleteStatus));
+            if (button) button->setEnabled(!busy);
+            if (!guard) return;
         }
-        return;
+        // A dropped delivery must still reconcile the authoritative system
+        // state. The accepted worker completes its transaction without GUI.
+        if (!busy) guard->refreshRouteTable();
+    };
+    m_routeMutationOperation->setStateChangedCallback(updateBusy);
+    struct Request { int kind; RouteRecord original; RouteRecord target; bool persistent; };
+    struct Result { DWORD status = NO_ERROR; QString title; QString scope; QString error; };
+    try
+    {
+        m_routeMutationOperation->submitTransaction<Request, Result>({kind, std::move(original), std::move(target), persistent},
+            [](const Request& request)
+            {
+                Result result;
+                const auto& original = request.original;
+                const auto& target = request.target;
+                MIB_IPFORWARD_ROW2 originalRow{};
+                MIB_IPFORWARD_ROW2 targetRow{};
+                result.title = request.kind == 0 ? QStringLiteral("新增路由")
+                    : request.kind == 1 ? QStringLiteral("编辑路由") : QStringLiteral("删除路由");
+                if ((request.kind != 0 && !routeRecordToNativeRow(original, &originalRow, &result.error))
+                    || (request.kind != 2 && !routeRecordToNativeRow(target, &targetRow, &result.error))) return result;
+                if (request.kind == 0)
+                {
+                    result.scope = QStringLiteral("新增系统路由");
+                    result.status = CreateIpForwardEntry2(&targetRow);
+                    if (result.status != NO_ERROR)
+                        result.error = QStringLiteral("CreateIpForwardEntry2 失败，错误码=%1").arg(result.status);
+                    else if (request.persistent && !runNetshRouteCommand(QStringLiteral("add"), target, &result.error))
+                    {
+                        // Finish the accepted rollback even after owner close;
+                        // cancellation only retires delivery, never half a route.
+                        (void)DeleteIpForwardEntry2(&targetRow);
+                        result.scope = QStringLiteral("持久化新增路由");
+                        result.error = QStringLiteral("持久化写入失败，已回滚活动路由。\n%1").arg(result.error);
+                    }
+                    return result;
+                }
+                if (request.kind == 2)
+                {
+                    result.scope = QStringLiteral("删除系统路由");
+                    result.status = DeleteIpForwardEntry2(&originalRow);
+                    if (result.status != NO_ERROR)
+                        result.error = QStringLiteral("DeleteIpForwardEntry2 失败，错误码=%1").arg(result.status);
+                    else (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                    return result;
+                }
+                result.scope = QStringLiteral("编辑系统路由");
+                const bool sameIdentity = sameRouteIdentity(original, target);
+                if (sameIdentity) result.status = SetIpForwardEntry2(&targetRow);
+                else
+                {
+                    result.status = CreateIpForwardEntry2(&targetRow);
+                    if (result.status == NO_ERROR) result.status = DeleteIpForwardEntry2(&originalRow);
+                }
+                if (result.status != NO_ERROR)
+                {
+                    result.error = QStringLiteral("更新活动路由失败，错误码=%1").arg(result.status);
+                    return result;
+                }
+                if (request.persistent)
+                {
+                    bool persisted = true;
+                    if (!sameIdentity)
+                    {
+                        (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                        persisted = runNetshRouteCommand(QStringLiteral("add"), target, &result.error);
+                    }
+                    else persisted = runNetshRouteCommand(QStringLiteral("set"), target, &result.error)
+                        || runNetshRouteCommand(QStringLiteral("add"), target, &result.error);
+                    if (!persisted)
+                    {
+                        result.scope = QStringLiteral("持久化编辑路由");
+                        result.error = QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(result.error);
+                    }
+                    else result.error.clear(); // A successful fallback supersedes its first error.
+                }
+                else (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                return result;
+            },
+            [guard](const Result& result, std::uint64_t)
+            {
+                if (!guard || result.error.isEmpty()) return true;
+                const bool handled = !result.scope.isEmpty() && (result.status != NO_ERROR
+                    ? ks::ui::promptForPrivilegeFailure(guard, result.scope, result.status)
+                    : ks::ui::promptForPrivilegeFailure(guard, result.scope, result.error));
+                if (guard && !handled) QMessageBox::warning(guard, result.title, result.error);
+                return true;
+            },
+            [guard](std::exception_ptr)
+            {
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑路由"),
+                    QStringLiteral("更新活动路由失败，错误码=%1").arg(ERROR_NOT_ENOUGH_MEMORY));
+            });
     }
-    (void)runNetshRouteCommand(QStringLiteral("delete"), record, nullptr);
-    refreshRouteTable();
+    catch (...)
+    {
+        updateBusy();
+        if (guard) QMessageBox::warning(guard, QStringLiteral("编辑路由"),
+            QStringLiteral("更新活动路由失败，错误码=%1").arg(ERROR_NOT_ENOUGH_MEMORY));
+    }
 }
 
 void NetworkDock::initializeArpCacheTab()
 {
-    m_arpCachePage = new QWidget(this);
+    if (m_arpCachePage == nullptr) m_arpCachePage = new QWidget(this);
     m_arpCacheLayout = new QVBoxLayout(m_arpCachePage);
     m_arpCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_arpCacheLayout->setSpacing(6);
@@ -833,12 +900,12 @@ void NetworkDock::initializeArpCacheTab()
     installCopyCurrentRowMenu(m_arpTable);
     m_arpCacheLayout->addWidget(m_arpTable, 1);
 
-    m_sideTabWidget->addTab(m_arpCachePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("ARP缓存"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_arpCachePage, QStringLiteral("arp"), QIcon(":/Icon/process_tree.svg"));
 }
 
 void NetworkDock::initializeDnsCacheTab()
 {
-    m_dnsCachePage = new QWidget(this);
+    if (m_dnsCachePage == nullptr) m_dnsCachePage = new QWidget(this);
     m_dnsCacheLayout = new QVBoxLayout(m_dnsCachePage);
     m_dnsCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_dnsCacheLayout->setSpacing(6);
@@ -902,12 +969,12 @@ void NetworkDock::initializeDnsCacheTab()
     installCopyCurrentRowMenu(m_dnsTable);
     m_dnsCacheLayout->addWidget(m_dnsTable, 1);
 
-    m_sideTabWidget->addTab(m_dnsCachePage, QIcon(":/Icon/process_list.svg"), QStringLiteral("DNS缓存"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_dnsCachePage, QStringLiteral("dns"), QIcon(":/Icon/process_list.svg"));
 }
 
 void NetworkDock::initializeAliveHostScanTab()
 {
-    m_aliveScanPage = new QWidget(this);
+    if (m_aliveScanPage == nullptr) m_aliveScanPage = new QWidget(this);
     m_aliveScanLayout = new QVBoxLayout(m_aliveScanPage);
     m_aliveScanLayout->setContentsMargins(0, 0, 0, 0);
     auto* workspace = new ks::ui::ParameterWorkspace(m_aliveScanPage, 360); // 扫描参数独立滚动。
@@ -979,12 +1046,12 @@ void NetworkDock::initializeAliveHostScanTab()
     workspace->results()->addWidget(m_aliveScanTable, 1);
     workspace->finish();
 
-    m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_aliveScanPage, QStringLiteral("alive-hosts"), QIcon(":/Icon/process_main.svg"));
 }
 
 void NetworkDock::initializeHostsFileEditorTab()
 {
-    m_hostsFileEditorPage = new QWidget(this);
+    if (m_hostsFileEditorPage == nullptr) m_hostsFileEditorPage = new QWidget(this);
     m_hostsFileEditorLayout = new QVBoxLayout(m_hostsFileEditorPage);
     m_hostsFileEditorLayout->setContentsMargins(0, 0, 0, 0);
     m_hostsFileEditorLayout->setSpacing(0);
@@ -993,6 +1060,11 @@ void NetworkDock::initializeHostsFileEditorTab()
     m_hostsFileEditor->setReadOnly(false);
     m_hostsFileEditorLayout->addWidget(m_hostsFileEditor, 1);
 
+    network_navigation_detail::AddTab(m_sideTabWidget, m_hostsFileEditorPage, QStringLiteral("hosts-editor"), QIcon(":/Icon/codeeditor_open.svg"));
+}
+
+void NetworkDock::loadHostsFileEditor()
+{
     QString windowsDirectory = qEnvironmentVariable("WINDIR").trimmed();
     if (windowsDirectory.isEmpty())
     {
@@ -1001,7 +1073,11 @@ void NetworkDock::initializeHostsFileEditorTab()
     const QString hostsFilePath = QDir(windowsDirectory)
         .absoluteFilePath(QStringLiteral("System32/drivers/etc/hosts"));
 
-    if (m_hostsFileEditor->openLocalFile(hostsFilePath))
+    const QPointer<NetworkDock> guard(this);
+    m_hostsFileEditor->openInitialLocalFileAsync(hostsFilePath, [guard, hostsFilePath](bool success)
+    {
+        if (!guard || guard->m_hostsFileEditor == nullptr) return;
+    if (success)
     {
         kLogEvent openHostsEvent;
         info << openHostsEvent
@@ -1011,13 +1087,13 @@ void NetworkDock::initializeHostsFileEditorTab()
     }
     else
     {
-        m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
+        guard->m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
         // hosts 正文必须保持原文；这里只翻译本程序生成的读取失败说明。
         const QString hostsReadFailureText =
             ks::i18n::sourceText(QStringLiteral("# hosts 文件读取失败。\n"))
             + ks::i18n::sourceText(QStringLiteral("# 目标路径: %1\n")).arg(hostsFilePath)
             + ks::i18n::sourceText(QStringLiteral("# 如需直接保存系统 hosts，请以管理员权限运行程序。"));
-        m_hostsFileEditor->setRawText(hostsReadFailureText);
+        guard->m_hostsFileEditor->setRawText(hostsReadFailureText);
 
         kLogEvent openHostsFailEvent;
         warn << openHostsFailEvent
@@ -1026,7 +1102,8 @@ void NetworkDock::initializeHostsFileEditorTab()
             << eol;
     }
 
-    m_sideTabWidget->addTab(m_hostsFileEditorPage, QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("hosts文件编辑"));
+    });
+
 }
 
 void NetworkDock::refreshArpCacheTable()
@@ -1035,62 +1112,95 @@ void NetworkDock::refreshArpCacheTable()
     {
         return;
     }
-
+    if (m_arpReadOperation == nullptr)
     {
-        kLogEvent event;
-        info << event
-            << "[NetworkDock] 开始刷新ARP缓存表。"
-            << eol;
+        m_arpReadOperation = new ks::ui::AsyncOperation(this);
     }
+    struct Result
+    {
+        bool success = false;
+        std::vector<QStringList> rows;
+    };
+    m_arpReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            ULONG tableSize = 0;
+            if (GetIpNetTable(nullptr, &tableSize, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+            {
+                return result;
+            }
+            std::vector<std::uint8_t> buffer(tableSize, 0);
+            PMIB_IPNETTABLE table = reinterpret_cast<PMIB_IPNETTABLE>(buffer.data());
+            if (token.isCanceled() || GetIpNetTable(table, &tableSize, FALSE) != NO_ERROR)
+            {
+                return result;
+            }
+            result.rows.reserve(table->dwNumEntries);
+            for (DWORD index = 0; index < table->dwNumEntries && !token.isCanceled(); ++index)
+            {
+                const MIB_IPNETROW& row = table->table[index];
+                result.rows.push_back({
+                    toQString(ks::network::FormatIpv4HostOrder(ntohl(row.dwAddr))),
+                    toQString(ks::network::FormatHardwareAddress(
+                        reinterpret_cast<const std::uint8_t*>(row.bPhysAddr),
+                        static_cast<std::size_t>(row.dwPhysAddrLen))),
+                    toQString(ks::network::ArpEntryTypeToString(row.dwType)),
+                    QString::number(row.dwIndex)
+                });
+            }
+            result.success = true;
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_arpTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-arp-read"), {m_arpTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_arpReadOperation->isCurrent(generation))
+                        {
+                            applyArpTableRead(pending->rows, pending->success);
+                        }
+                        m_arpReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyArpTableRead(result.rows, result.success);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyArpTableRead({}, false);
+        });
+}
 
-    ULONG tableSize = 0;
-    if (GetIpNetTable(nullptr, &tableSize, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+void NetworkDock::applyArpTableRead(const std::vector<QStringList>& rows, const bool success)
+{
+    if (!success)
     {
         m_arpStatusLabel->setText(QStringLiteral("状态：读取ARP缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] ARP缓存刷新失败：首次获取缓冲区大小失败。"
-            << eol;
         return;
     }
-
-    std::vector<std::uint8_t> buffer(tableSize, 0);
-    PMIB_IPNETTABLE netTable = reinterpret_cast<PMIB_IPNETTABLE>(buffer.data());
-    if (GetIpNetTable(netTable, &tableSize, FALSE) != NO_ERROR)
-    {
-        m_arpStatusLabel->setText(QStringLiteral("状态：读取ARP缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] ARP缓存刷新失败：GetIpNetTable读取失败。"
-            << eol;
-        return;
-    }
-
+    const bool updatesEnabled = m_arpTable->updatesEnabled();
+    m_arpTable->setUpdatesEnabled(false);
     m_arpTable->setRowCount(0);
-    for (DWORD index = 0; index < netTable->dwNumEntries; ++index)
+    for (const QStringList& fields : rows)
     {
-        const MIB_IPNETROW& row = netTable->table[index];
-        const QString ipText = toQString(ks::network::FormatIpv4HostOrder(ntohl(row.dwAddr)));
-        const QString macText = toQString(ks::network::FormatHardwareAddress(
-            reinterpret_cast<const std::uint8_t*>(row.bPhysAddr),
-            static_cast<std::size_t>(row.dwPhysAddrLen)));
-        const QString typeText = toQString(ks::network::ArpEntryTypeToString(row.dwType));
-
-        const int tableRow = m_arpTable->rowCount();
-        m_arpTable->insertRow(tableRow);
-        m_arpTable->setItem(tableRow, 0, new QTableWidgetItem(ipText));
-        m_arpTable->setItem(tableRow, 1, new QTableWidgetItem(macText));
-        m_arpTable->setItem(tableRow, 2, new QTableWidgetItem(typeText));
-        m_arpTable->setItem(tableRow, 3, new QTableWidgetItem(QString::number(row.dwIndex)));
+        const int row = m_arpTable->rowCount();
+        m_arpTable->insertRow(row);
+        for (int column = 0; column < fields.size(); ++column)
+        {
+            m_arpTable->setItem(row, column, new QTableWidgetItem(fields.at(column)));
+        }
     }
-
+    m_arpTable->setUpdatesEnabled(updatesEnabled);
     m_arpStatusLabel->setText(QString("状态：ARP缓存项 %1").arg(m_arpTable->rowCount()));
-
-    kLogEvent event;
-    info << event
-        << "[NetworkDock] ARP缓存刷新完成, rowCount="
-        << m_arpTable->rowCount()
-        << eol;
 }
 
 void NetworkDock::addArpCacheEntry()
@@ -1333,83 +1443,112 @@ void NetworkDock::refreshDnsCacheTable()
     {
         return;
     }
-
+    if (m_dnsReadOperation == nullptr)
     {
-        kLogEvent event;
-        info << event
-            << "[NetworkDock] 开始刷新DNS缓存表。"
-            << eol;
+        m_dnsReadOperation = new ks::ui::AsyncOperation(this);
     }
-
-    using DnsGetCacheDataTableFn = BOOL(WINAPI*)(PVOID);
-    struct DnsCacheEntryRecord
+    struct Result
     {
-        DnsCacheEntryRecord* next = nullptr;
-        PWSTR name = nullptr;
-        WORD type = 0;
-        WORD dataLength = 0;
-        DWORD flags = 0;
+        std::vector<QStringList> rows;
+        QString errorText;
     };
+    m_dnsReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            using DnsGetCacheDataTableFn = BOOL(WINAPI*)(PVOID);
+            struct DnsCacheEntryRecord
+            {
+                DnsCacheEntryRecord* next = nullptr;
+                PWSTR name = nullptr;
+                WORD type = 0;
+                WORD dataLength = 0;
+                DWORD flags = 0;
+            };
+            HMODULE module = GetModuleHandleW(L"dnsapi.dll");
+            if (module == nullptr) module = LoadLibraryW(L"dnsapi.dll");
+            if (module == nullptr)
+            {
+                result.errorText = QStringLiteral("状态：dnsapi.dll 不可用");
+                return result;
+            }
+            const auto query = reinterpret_cast<DnsGetCacheDataTableFn>(
+                GetProcAddress(module, "DnsGetCacheDataTable"));
+            if (query == nullptr)
+            {
+                result.errorText = QStringLiteral("状态：DnsGetCacheDataTable 不可用");
+                return result;
+            }
+            DnsCacheEntryRecord rootEntry{};
+            if (token.isCanceled()) return result;
+            if (query(&rootEntry) == FALSE)
+            {
+                result.errorText = QStringLiteral("状态：读取DNS缓存失败");
+                return result;
+            }
+            // Retain the existing native enumeration ownership contract; only
+            // copy the value rows before returning to the GUI controller.
+            for (DnsCacheEntryRecord* node = rootEntry.next;
+                node != nullptr && !token.isCanceled(); node = node->next)
+            {
+                result.rows.push_back({
+                    node->name != nullptr ? QString::fromWCharArray(node->name) : QStringLiteral("<null>"),
+                    QString::number(node->type),
+                    toQString(ks::network::FormatDnsFlags(node->flags))
+                });
+            }
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_dnsTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-dns-read"), {m_dnsTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_dnsReadOperation->isCurrent(generation))
+                        {
+                            applyDnsTableRead(pending->rows, pending->errorText);
+                        }
+                        m_dnsReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyDnsTableRead(result.rows, result.errorText);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyDnsTableRead({}, QStringLiteral("状态：读取DNS缓存失败"));
+        });
+}
 
-    HMODULE dnsapiModule = GetModuleHandleW(L"dnsapi.dll");
-    if (dnsapiModule == nullptr)
+void NetworkDock::applyDnsTableRead(
+    const std::vector<QStringList>& rows, const QString& errorText)
+{
+    if (!errorText.isEmpty())
     {
-        dnsapiModule = LoadLibraryW(L"dnsapi.dll");
-    }
-    if (dnsapiModule == nullptr)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：dnsapi.dll 不可用"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：dnsapi.dll不可用。"
-            << eol;
+        m_dnsStatusLabel->setText(errorText);
         return;
     }
-
-    auto dnsGetCacheDataTable = reinterpret_cast<DnsGetCacheDataTableFn>(
-        GetProcAddress(dnsapiModule, "DnsGetCacheDataTable"));
-    if (dnsGetCacheDataTable == nullptr)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：DnsGetCacheDataTable 不可用"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：DnsGetCacheDataTable不可用。"
-            << eol;
-        return;
-    }
-
-    DnsCacheEntryRecord rootEntry{};
-    const BOOL queryOk = dnsGetCacheDataTable(&rootEntry);
-    if (queryOk == FALSE)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：读取DNS缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：读取缓存表失败。"
-            << eol;
-        return;
-    }
-
+    const bool updatesEnabled = m_dnsTable->updatesEnabled();
+    m_dnsTable->setUpdatesEnabled(false);
     m_dnsTable->setRowCount(0);
-    int count = 0;
-    for (DnsCacheEntryRecord* node = rootEntry.next; node != nullptr; node = node->next)
+    for (const QStringList& fields : rows)
     {
         const int row = m_dnsTable->rowCount();
         m_dnsTable->insertRow(row);
-        const QString nameText = node->name != nullptr ? QString::fromWCharArray(node->name) : QStringLiteral("<null>");
-        m_dnsTable->setItem(row, 0, new QTableWidgetItem(nameText));
-        m_dnsTable->setItem(row, 1, new QTableWidgetItem(QString::number(node->type)));
-        m_dnsTable->setItem(row, 2, new QTableWidgetItem(toQString(ks::network::FormatDnsFlags(node->flags))));
-        ++count;
+        for (int column = 0; column < fields.size(); ++column)
+        {
+            m_dnsTable->setItem(row, column, new QTableWidgetItem(fields.at(column)));
+        }
     }
-
-    m_dnsStatusLabel->setText(QString("状态：DNS缓存项 %1").arg(count));
-
-    kLogEvent event;
-    info << event
-        << "[NetworkDock] DNS缓存刷新完成, rowCount="
-        << count
-        << eol;
+    m_dnsTable->setUpdatesEnabled(updatesEnabled);
+    m_dnsStatusLabel->setText(QString("状态：DNS缓存项 %1").arg(m_dnsTable->rowCount()));
 }
 
 void NetworkDock::removeDnsCacheEntry()
@@ -1656,10 +1795,8 @@ void NetworkDock::startAliveHostScan()
     m_aliveScanCancel.store(false);
     const std::shared_ptr<AliveScanTaskState> taskState = m_aliveScanTaskState;
     taskState->cancelRequested.store(false);
-    {
-        std::lock_guard<std::mutex> lock(taskState->mutex);
-        ++taskState->activeTaskCount;
-    }
+    if (!m_aliveScanDispatcher) m_aliveScanDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+    const auto dispatcher = m_aliveScanDispatcher;
     const int timeoutMs = m_aliveScanTimeoutSpin->value();
 
     {
@@ -1677,20 +1814,8 @@ void NetworkDock::startAliveHostScan()
     }
 
     QPointer<NetworkDock> guardThis(this);
-    auto* scanTask = QRunnable::create([guardThis, taskState, startIpHostOrder, endIpHostOrder, timeoutMs]()
+    auto* scanTask = QRunnable::create([guardThis, dispatcher, taskState, startIpHostOrder, endIpHostOrder, timeoutMs]()
         {
-            const auto finishAliveScanTask = [taskState]()
-            {
-                std::lock_guard<std::mutex> lock(taskState->mutex);
-                if (taskState->activeTaskCount > 0)
-                {
-                    --taskState->activeTaskCount;
-                }
-                if (taskState->activeTaskCount == 0)
-                {
-                    taskState->completion.notify_all();
-                }
-            };
             const std::uint64_t totalCount =
                 static_cast<std::uint64_t>(endIpHostOrder) - startIpHostOrder + 1;
             std::atomic<std::uint64_t> nextIpHostOrder{ startIpHostOrder };
@@ -1710,7 +1835,7 @@ void NetworkDock::startAliveHostScan()
             for (unsigned int workerIndex = 0; workerIndex < workerCount; ++workerIndex)
             {
                 workers.emplace_back([guardThis,
-                    taskState,
+                    dispatcher, taskState,
                     endIpHostOrder,
                     timeoutMs,
                     totalCount,
@@ -1729,7 +1854,7 @@ void NetworkDock::startAliveHostScan()
                         char sendData[] = "KSWORD";
                         while (true)
                         {
-                            if (guardThis == nullptr || taskState->cancelRequested.load())
+                            if (taskState->cancelRequested.load())
                             {
                                 break;
                             }
@@ -1771,8 +1896,7 @@ void NetworkDock::startAliveHostScan()
                                 ? (aliveCount.fetch_add(1) + 1)
                                 : aliveCount.load();
                             const QString ipText = toQString(ks::network::FormatIpv4HostOrder(currentIpHostOrder));
-                            QMetaObject::invokeMethod(
-                                guardThis,
+                            dispatcher->post(
                                 [guardThis, taskState, ipText, alive, rttMs, detailText, doneCount, totalCount, aliveNow]()
                                 {
                                     if (guardThis == nullptr || taskState->cancelRequested.load())
@@ -1793,8 +1917,7 @@ void NetworkDock::startAliveHostScan()
                                         .arg(totalCount)
                                         .arg(aliveNow));
                                     kPro.set(guardThis->m_aliveScanProgressPid, "ICMP探测中", 0, static_cast<float>(progressValue));
-                                },
-                                Qt::QueuedConnection);
+                                });
                         }
 
                         IcmpCloseHandle(icmpHandle);
@@ -1813,8 +1936,7 @@ void NetworkDock::startAliveHostScan()
             const std::uint64_t aliveCountValue = aliveCount.load();
             const std::uint32_t icmpHandleFailCountValue = icmpHandleFailCount.load();
 
-            QMetaObject::invokeMethod(
-                guardThis,
+            dispatcher->post(
                 [guardThis, taskState, totalCount, finishedCountValue, aliveCountValue, icmpHandleFailCountValue, workerCount]()
                 {
                     if (guardThis == nullptr)
@@ -1869,11 +1991,9 @@ void NetworkDock::startAliveHostScan()
                         << ", canceled="
                         << (canceled ? "true" : "false")
                         << eol;
-                },
-                Qt::QueuedConnection);
-            finishAliveScanTask();
+                });
         });
-    m_aliveScanThreadPool.start(scanTask);
+    QThreadPool::globalInstance()->start(scanTask);
 }
 
 void NetworkDock::stopAliveHostScan()
@@ -1888,17 +2008,11 @@ void NetworkDock::stopAliveHostScan()
         << eol;
 }
 
-void NetworkDock::cancelAndWaitForAliveHostScan()
+void NetworkDock::cancelAliveHostScan()
 {
     m_aliveScanCancel.store(true);
-    const std::shared_ptr<AliveScanTaskState> taskState = m_aliveScanTaskState;
-    taskState->cancelRequested.store(true);
-
-    std::unique_lock<std::mutex> lock(taskState->mutex);
-    taskState->completion.wait(lock, [taskState]()
-    {
-        return taskState->activeTaskCount == 0;
-    });
+    m_aliveScanTaskState->cancelRequested.store(true);
+    m_aliveScanRunning.store(false);
 }
 
 void NetworkDock::appendAliveHostRow(

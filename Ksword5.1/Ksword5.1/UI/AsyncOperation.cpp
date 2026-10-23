@@ -1,4 +1,5 @@
 #include "AsyncOperation.h"
+#include "AsyncCleanupRegistry.h"
 
 #include <QThread>
 #include <QPointer>
@@ -15,21 +16,40 @@ namespace ks::ui
         std::uint64_t generation = 0; // 请求创建后保持不变的代次。
         std::atomic_bool canceled{ false }; // 合作式查询取消门禁。
         std::atomic_bool settled{ false }; // 成功、取消和丢队列共用一次收尾。
+        std::atomic_bool workerFinished{ false }; // 事务关闭时不能提前释放worker所借值资源。
+        bool transaction = false; // 请求发布前写入，此后只读。
         AsyncOperation::Cleanup cleanup; // 只持值资源的最终回调。
+        std::shared_ptr<AsyncCleanupRegistry::Lease> shutdownLease;
+#if KSWORD_PERF_TRACE_ENABLED
+        PerfTraceContext traceContext;
+#endif
 
         // 所有终态竞争同一个 CAS；收尾不能把异常带入 Qt functor 析构。
         void settle(const AsyncOperationOutcome outcome)
         {
-            if (!settled.exchange(true) && cleanup)
+            if (!settled.exchange(true))
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                const PerfTraceContextScope context(traceContext);
+                PerfScope phase(traceContext.requestId ? "perf_async_cleanup" : nullptr, QString());
+#endif
+                // 收尾闭包本身也可能拥有最后一个值资源；其析构必须先于lease归还。
+                auto valueCleanup = std::move(cleanup);
                 try
                 {
-                    cleanup(outcome);
+                    if (valueCleanup) valueCleanup(outcome);
                 }
                 catch (...)
                 {
                     // 用户值资源收尾失败也不得重复执行或越过析构边界。
                 }
+                valueCleanup = {}; // 不把capture留到request/队列最后一个引用销毁。
+                shutdownLease.reset(); // 值收尾结束后才允许进程退出。
+#if KSWORD_PERF_TRACE_ENABLED
+                // Request settlement can precede a canceled query's actual
+                // worker return. Do not label this as presentation or ready.
+                RecordPerfAsyncTrace("perf_async_settled", traceContext, static_cast<qint64>(outcome));
+#endif
             }
         }
     };
@@ -44,25 +64,33 @@ namespace ks::ui
         std::shared_ptr<AsyncOperationRequestState> pending; // 最新合并待执行请求。
 
         // 接收器队列丢失时，当前请求与无法启动的 pending 均统一释放。
-        void drop(const std::shared_ptr<AsyncOperationRequestState>& request)
+        bool drop(const std::shared_ptr<AsyncOperationRequestState>& request)
         {
+            bool removedActive = false;
             std::shared_ptr<AsyncOperationRequestState> abandonedPending; // 锁外收尾。
+            auto outcome = AsyncOperationOutcome::DeliveryDropped;
             {
                 std::lock_guard<std::mutex> lock(mutex);
+                if (closed && request->transaction)
+                {
+                    outcome = AsyncOperationOutcome::OwnerClosed;
+                }
                 if (active == request)
                 {
                     active.reset();
+                    removedActive = true;
                     abandonedPending = std::move(pending);
                     ++generation;
                 }
             }
             request->canceled.store(true);
-            request->settle(AsyncOperationOutcome::DeliveryDropped);
+            request->settle(outcome);
             if (abandonedPending)
             {
                 abandonedPending->canceled.store(true);
                 abandonedPending->settle(AsyncOperationOutcome::DeliveryDropped);
             }
+            return removedActive; // 已有身份转换同时去重丢弃后的状态通知。
         }
     };
 
@@ -85,8 +113,15 @@ namespace ks::ui
         return m_request ? m_request->generation : 0;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    PerfTraceContext AsyncOperationToken::perfTraceContext() const noexcept
+    {
+        return m_request ? m_request->traceContext : PerfTraceContext{};
+    }
+#endif
+
     // 即使投递成功，Qt 稍后丢弃该 functor 时也会走同一状态收尾。
-    void AsyncOperationToken::deliver(std::any result, std::exception_ptr failure) const
+    void AsyncOperationToken::deliver(std::any result, std::exception_ptr failure) const noexcept
     {
         if (!m_request || !m_dispatcher)
         {
@@ -94,14 +129,44 @@ namespace ks::ui
         }
         const auto shared = m_shared; // 共享的非 UI 请求状态。
         const auto request = m_request; // 本次请求身份。
+        request->workerFinished.store(true);
+#if KSWORD_PERF_TRACE_ENABLED
+        const auto deliveryQueuedAtNs = PerfTraceNowNs();
+        RecordPerfAsyncTrace("perf_async_delivery_queued", request->traceContext);
+#endif
+        const auto dispatcher = m_dispatcher;
         AsyncOperation* const receiver = m_receiver; // 仅在排队回调中使用。
-        m_dispatcher->post([receiver, request, result = std::move(result), failure]()
+        const auto dropped = [shared, request, dispatcher, receiver]() noexcept
         {
-            receiver->complete(request, result, failure);
-        }, [shared, request]()
+            bool removedActive = false;
+            try { removedActive = shared->drop(request); } catch (...) {}
+            if (!removedActive) return;
+            // 仅经同一生命周期门禁恢复UI；通知自身失败/被丢弃不递归重排。
+            try { dispatcher->post([receiver]()
+            {
+                receiver->reconcileDroppedJobs();
+                receiver->notifyStateChanged();
+            }); } catch (...) {}
+        };
+        try
         {
-            shared->drop(request);
-        });
+            m_dispatcher->post([receiver, request, result = std::move(result), failure
+#if KSWORD_PERF_TRACE_ENABLED
+                , deliveryQueuedAtNs
+#endif
+            ]()
+            {
+#if KSWORD_PERF_TRACE_ENABLED
+                RecordPerfAsyncTrace("perf_async_delivery_latency", request->traceContext, -1, deliveryQueuedAtNs);
+#endif
+                receiver->complete(request, result, failure);
+            }, dropped);
+        }
+        catch (...)
+        {
+            // 业务worker已结束；投递分配失败不是业务失败，也不得逃出Qt runnable。
+            dropped();
+        }
     }
 
     AsyncOperation::AsyncOperation(QObject* owner)
@@ -127,6 +192,11 @@ namespace ks::ui
         reconcileDroppedJobs();
         auto request = std::make_shared<AsyncOperationRequestState>(); // 新请求的值状态。
         request->cleanup = std::move(cleanup);
+        request->transaction = job.transaction;
+#if KSWORD_PERF_TRACE_ENABLED
+        request->traceContext = BeginPerfAsyncTrace();
+#endif
+        auto rejection = AsyncOperationOutcome::OwnerClosed;
         std::shared_ptr<AsyncOperationRequestState> replaced; // 旧 pending 的收尾对象。
         std::shared_ptr<AsyncOperationRequestState> deferred; // worker 已结束的旧请求。
         bool launch = false; // 本次请求是否立即启动。
@@ -135,6 +205,19 @@ namespace ks::ui
             if (m_shared->closed)
             {
                 request->canceled.store(true);
+            }
+            else if ((job.transaction && (m_shared->active || m_shared->pending))
+                || (m_shared->active && m_shared->active->transaction))
+            {
+                // 事务不排latest pending；普通查询也不能使已接受事务失效。
+                request->canceled.store(true);
+                rejection = AsyncOperationOutcome::BusyRejected;
+            }
+            else if (job.transaction &&
+                !(request->shutdownLease = AsyncCleanupRegistry::global().acquire()))
+            {
+                request->canceled.store(true);
+                rejection = AsyncOperationOutcome::BusyRejected;
             }
             else
             {
@@ -168,9 +251,13 @@ namespace ks::ui
         // cleanup 可调用其他有锁值资源，必须在请求状态锁外执行。
         if (!request->generation)
         {
-            request->settle(AsyncOperationOutcome::OwnerClosed);
+            request->settle(rejection);
             return 0;
         }
+#if KSWORD_PERF_TRACE_ENABLED
+        RecordPerfAsyncTrace(request->transaction ? "perf_async_transaction_admitted" : "perf_async_query_admitted",
+            request->traceContext, static_cast<qint64>(request->generation));
+#endif
         for (const auto& oldRequest : { replaced, deferred })
         {
             if (oldRequest)
@@ -180,8 +267,16 @@ namespace ks::ui
             }
         }
         const QPointer<AsyncOperation> guard(this); // 状态回调可同步关闭或销毁所属对象。
-        notifyStateChanged();
-        if (!guard.isNull() && launch)
+        if (launch && request->transaction)
+        {
+            // 接受返回前先交线程池；状态通知可同步close/删除控制器。
+            launchActive();
+        }
+        if (!guard.isNull())
+        {
+            notifyStateChanged();
+        }
+        if (!guard.isNull() && launch && !request->transaction)
         {
             launchActive();
         }
@@ -204,6 +299,7 @@ namespace ks::ui
         }
         catch (...)
         {
+            request->workerFinished.store(true); // 构造/排队失败时没有worker再负责deliver。
             if (!guard.isNull() && m_active && m_active->request == request)
             {
                 complete(request, {}, std::current_exception());
@@ -215,6 +311,10 @@ namespace ks::ui
     void AsyncOperation::complete(const std::shared_ptr<AsyncOperationRequestState>& request,
         const std::any& result, std::exception_ptr failure)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        const PerfTraceContextScope context(request->traceContext);
+        PerfScope phase(request->traceContext.requestId ? "perf_async_ui_commit" : nullptr, QString());
+#endif
         Q_ASSERT(QThread::currentThread() == thread());
         reconcileDroppedJobs();
         if (!m_active || m_active->request != request)
@@ -238,6 +338,9 @@ namespace ks::ui
             }
             if (!committed && isCurrent(request->generation))
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                RecordPerfAsyncTrace("perf_async_apply_deferred", request->traceContext);
+#endif
                 m_active->awaitingCommit = true;
                 return;
             }
@@ -321,6 +424,10 @@ namespace ks::ui
         std::shared_ptr<AsyncOperationRequestState> pending; // 尚未启动的请求。
         {
             std::lock_guard<std::mutex> lock(m_shared->mutex);
+            if (m_shared->active && m_shared->active->transaction)
+            {
+                return; // 已接受事务不能被查询取消入口中断或丢弃最终回执。
+            }
             ++m_shared->generation;
             active = m_shared->active;
             pending = std::move(m_shared->pending);
@@ -362,7 +469,10 @@ namespace ks::ui
             if (request)
             {
                 request->canceled.store(true);
-                request->settle(AsyncOperationOutcome::OwnerClosed);
+                if (!request->transaction || request->workerFinished.load())
+                {
+                    request->settle(AsyncOperationOutcome::OwnerClosed);
+                }
             }
         }
     }

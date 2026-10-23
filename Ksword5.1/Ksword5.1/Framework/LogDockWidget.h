@@ -47,6 +47,7 @@ public:
     void refreshNow();
 
 protected:
+    void changeEvent(QEvent* event) override;
     // 隐藏时不重建表格，重新显示前读取日志管理器保存的最新完整历史。
     void showEvent(QShowEvent* event) override;
 
@@ -226,6 +227,7 @@ private:
     QTimer* m_refreshTimer = nullptr;                         // 定时刷新器。
 
     // ======== 刷新与过滤状态 ========
+    ks::log::RecentSnapshotToken m_recentSnapshotToken; // Query identity and last matching record.
     std::size_t m_lastRevision = 0;           // 上次渲染时的日志 revision。
 
     bool m_isTracking = false;                // 当前是否处于“按 GUID 追踪”模式。

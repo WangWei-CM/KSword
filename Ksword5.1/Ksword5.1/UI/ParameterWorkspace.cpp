@@ -217,6 +217,42 @@ namespace
         bool m_forwarding = false;
     };
 
+    // 仅用于参数滚动正文：矩形、零圆角且由本模块对每个像素实填。
+    // 外部卡片仍承担8px圆角，不能把这个契约扩散到普通面板或透明画布。
+    class ParameterScrollCanvas final : public QWidget
+    {
+    public:
+        explicit ParameterScrollCanvas(QWidget* parent)
+            : QWidget(parent), m_surface(ks::ui::MainWindowSurfaceColors().content)
+        {
+            setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+        }
+        void setSurface(const QColor& surface)
+        {
+            const bool changed = m_surface != surface;
+            m_surface = surface;
+            setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+            if (changed) update();
+        }
+    protected:
+        bool event(QEvent* event) override
+        {
+            const bool handled = QWidget::event(event);
+            if (event->type() == QEvent::Polish || event->type() == QEvent::StyleChange)
+            {
+                setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+            }
+            return handled;
+        }
+        void paintEvent(QPaintEvent*) override
+        {
+            QPainter painter(this);
+            painter.fillRect(rect(), m_surface);
+        }
+    private:
+        QColor m_surface;
+    };
+
     // 参数框架的色块自身无描边，只在操作区与正文之间留一条低对比度分隔线。
     void bindWorkspaceSurface(QWidget* widget, bool footer = false, bool canvas = false)
     {
@@ -226,17 +262,24 @@ namespace
         ks::ui::BindWidgetTheme(widget, [target, footer, canvas]()
         {
             if (!target) return;
-            const QColor surface = ks::ui::MainWindowSurfaceColors().content;
+            const bool transparent = ks::ui::UsesTransparentMainSurface(target);
+            const QColor surface = transparent && canvas ? QColor(Qt::transparent)
+                : ks::ui::MainControlSurfaceColor(ks::ui::MainWindowSurfaceColors().content, target);
             const QColor divider = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
             const QString style = QStringLiteral(
                 "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:%2px;%3}")
-                .arg(surface.name()).arg(canvas ? 0 : 8).arg(footer
+                .arg(surface.name(QColor::HexArgb)).arg(canvas ? 0 : 8).arg(footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
                     : QString());
             target->setProperty("ksword_parameter_surface_style_block", style); // 完整中性容器块供按钮所有权识别。
             if (target->styleSheet() != style)
             {
                 target->setStyleSheet(style); // 语言/重复palette通知不重写同一面板底色。
+            }
+            if (auto* scrollCanvas = dynamic_cast<ParameterScrollCanvas*>(target.data()))
+            {
+                // 与原有实底QSS使用同一颜色源；alpha不满时自动退出opaque快路径。
+                scrollCanvas->setSurface(surface);
             }
         });
     }
@@ -278,7 +321,7 @@ namespace
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(fill);
+            painter.setBrush(ks::ui::MainControlSurfaceColor(fill, this));
             painter.drawRoundedRect(rect(), 5, 5);
 
             // 折角约 4×7 逻辑像素，低于正文的视觉权重，并跟随展开方向旋转。
@@ -399,7 +442,7 @@ namespace ks::ui
         m_scroll->setWidgetResizable(true);
         m_scroll->setFrameShape(QFrame::NoFrame);
         m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        auto* form = new QWidget(m_scroll);
+        auto* form = new ParameterScrollCanvas(m_scroll);
         form->setProperty("ksword_parameter_body", true); // 默认组框据此选择分区结构，而非把结果卡片也当参数。
         form->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         form->setMinimumWidth(0);
@@ -593,13 +636,15 @@ namespace ks::ui
                     || qobject_cast<QAbstractSpinBox*>(edit->parentWidget())) continue;
                 NormalizeToolbarControl(edit);
                 // 搜索、参数输入和数值框使用同一编辑层；这里只拥有紧凑表单的横向留白。
-                const QString geometry = QStringLiteral(
-                    "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}");
-                if (!edit->styleSheet().contains(geometry))
-                {
-                    edit->setStyleSheet(edit->styleSheet() + geometry); // 重复finish不累加同一几何规则。
-                }
                 BindLineEditTheme(edit);
+                const QString current = edit->styleSheet();
+                const QString geometry = WithParameterInputGeometry(current);
+                if (current != geometry)
+                {
+                    edit->setProperty("ksword_parameter_input_padding", true);
+                    if (!RequestStandaloneInputThemeGeometry(edit))
+                        edit->setStyleSheet(geometry); // 已准备/自定义拥有者保留原即时几何。
+                }
                 StyleStandaloneInput(edit);
             }
         }

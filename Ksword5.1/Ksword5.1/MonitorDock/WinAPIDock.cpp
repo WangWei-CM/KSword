@@ -1,4 +1,6 @@
+#include "MonitorCanonicalExport.h"
 #include "WinAPIDock.h"
+#include "MonitorEventFilterProjection.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../UI/ThemeItemForeground.h"
 
@@ -36,7 +38,9 @@ WinAPIDock::WinAPIDock(QWidget* parent)
     kLogEvent initEvent;
     info << initEvent << "[WinAPIDock] 开始初始化 WinAPI 监控页。" << eol;
 
+    m_sessionOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
+    initializeEventProjection();
     initializeConnections();
     updateActionState();
     updateStatusLabel();
@@ -62,6 +66,11 @@ void WinAPIDock::changeEvent(QEvent* event)
 
 WinAPIDock::~WinAPIDock()
 {
+    if (m_eventExport) m_eventExport->close();
+    if (m_eventFilterProjection) m_eventFilterProjection->close();
+    if (m_sessionOperation) m_sessionOperation->close();
+    if (m_coverageDispatcher) m_coverageDispatcher->close();
+    ++m_coverageFilterTicket;
     stopMonitoringInternal(true);
 
     if (m_uiFlushTimer != nullptr)
@@ -82,6 +91,7 @@ void WinAPIDock::notifyPageActivated()
         || ((nowMs - m_lastProcessRefreshMs) >= 5000);
 
     m_hasActivatedOnce = true;
+    if (m_coverageDirty) QTimer::singleShot(0, this, [this]() { updateCoverageView(); });
     if (shouldRefresh)
     {
         refreshProcessListAsync();
@@ -222,11 +232,11 @@ void WinAPIDock::updateActionState()
 {
     std::uint32_t currentPidValue = 0;
     const bool hasPid = currentSelectedPid(&currentPidValue);
-    const bool running = m_pipeRunning.load();
+    const bool running = m_pipeRunning.load() || (m_sessionOperation && m_sessionOperation->isBusy());
     for (QCheckBox* check : {m_hookFileCheck, m_hookRegistryCheck, m_hookNetworkCheck,
             m_hookProcessCheck, m_hookLoaderCheck, m_hookClipboardCheck, m_autoInjectChildCheck})
         if (check) check->setEnabled(!running);
-    const bool hasEvents = m_eventTable != nullptr && m_eventTable->rowCount() > 0;
+    const bool hasEvents = m_eventArchive.size() > 0;
 
     if (m_processRefreshButton != nullptr)
     {
@@ -334,12 +344,9 @@ void WinAPIDock::updateActionState()
     }
     if (m_terminateHookButton != nullptr)
     {
-        m_terminateHookButton->setEnabled(hasPid);
+        m_terminateHookButton->setEnabled(hasPid && (!running || currentPidValue == m_currentSessionPid));
     }
-    if (m_exportButton != nullptr)
-    {
-        m_exportButton->setEnabled(hasEvents);
-    }
+    updateEventExportAction();
     if (m_clearEventButton != nullptr)
     {
         m_clearEventButton->setEnabled(hasEvents && !running);
@@ -353,14 +360,19 @@ void WinAPIDock::updateStatusLabel()
         return;
     }
 
-    const int eventCount = m_eventTable != nullptr ? m_eventTable->rowCount() : 0;
+    const int eventCount = static_cast<int>(m_eventArchive.size());
     const QString pidText = m_currentSessionPid == 0
         ? QStringLiteral("-")
         : QString::number(m_currentSessionPid);
 
     if (m_pipeRunning.load())
     {
-        if (m_pipeConnected.load())
+        if (m_stopping)
+        {
+            m_sessionStatusLabel->setText(QStringLiteral("停止监控"));
+            ks::ui::ApplyStatusRole(m_sessionStatusLabel, ks::ui::StatusRole::Warning);
+        }
+        else if (m_pipeConnected.load())
         {
             QString text;
             ks::ui::StatusRole role = ks::ui::StatusRole::Warning;

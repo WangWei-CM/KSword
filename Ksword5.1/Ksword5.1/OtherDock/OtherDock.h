@@ -10,15 +10,23 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QSet>
 #include <QVector>
 
+#include <memory>
+
 #include <atomic>      // std::atomic_bool：控制后台枚举线程互斥刷新。
 #include <vector>      // std::vector：窗口快照容器。
 
 // Qt 前置声明：降低头文件编译耦合。
+namespace ks::ui { class AsyncOperation; }
+namespace ks::windowlist { struct Snapshot; class SnapshotModel; }
+namespace ks::desktoplist { struct Snapshot; }
+namespace ks::window { struct WindowOperationProgress; }
+class QEvent;
 class QCheckBox;
 class CodeEditorWidget;
 class QComboBox;
@@ -27,11 +35,13 @@ class QPushButton;
 class QSplitter;
 class QSpinBox;
 class QTableWidget;
+class QTableView;
+class QAbstractItemModel;
 class QTabWidget;
 class QStatusBar;
 class QTextEdit;
 class QTimer;
-class QTreeWidget;
+class QTreeView;
 class QTreeWidgetItem;
 class QLabel;
 class QVBoxLayout;
@@ -49,10 +59,16 @@ class OtherDock : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const OtherDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
+    enum class PageScope { Main, WindowListOnly };
+
     // 构造函数：
     // - 作用：初始化窗口列表页与工具栏，并触发首轮枚举。
     // - 参数 parent：Qt 父控件。
     explicit OtherDock(QWidget* parent = nullptr);
+    OtherDock(QWidget* parent, PageScope scope, const QVector<quint32>& processIds);
 
     // 析构函数：
     // - 作用：停止自动刷新定时器，确保后台流程退出安全。
@@ -104,14 +120,19 @@ public:
     {
         QString windowStationName;          // 创建时所在窗口站名称。
         QString desktopName;                // 桌面对象名称。
+        std::shared_ptr<void> handleLease;   // 值worker复制租约，最后持有者关闭保留桌面。
         void* desktopHandle = nullptr;      // HDESK 句柄，头文件内用 void* 避免传播 Windows.h。
         std::uint32_t desiredAccess = 0;    // 创建时请求的 DESKTOP_* 访问掩码。
         bool privateAccess = false;         // 是否使用“其他进程不可访问”的私有 DACL。
         bool inheritableHandle = false;     // 返回句柄是否允许子进程继承。
     };
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     // ===================== UI 初始化 ======================
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
     void initializeUi();
     void initializeConnections();
     void applyViewMode();
@@ -119,15 +140,18 @@ private:
     // ===================== 列表刷新 ======================
     void refreshWindowListAsync(bool reportProgress = true);
     void rebuildWindowTreeFromSnapshot();
-    bool passFilter(const WindowInfo& info) const;
     void updateStatusBar();
     void updatePreviewPanel(const WindowInfo* info);
+    void scheduleWindowSelectionUi();
     // refreshDesktopList：
     // - 作用：刷新“桌面管理”页中的窗口站/桌面清单；
     // - 调用：初始化界面后、点击刷新按钮后、切换成功后调用；
     // - 传入：无；
     // - 传出：无，结果直接写入 m_desktopTable 与 m_desktopStatusLabel。
     void refreshDesktopList();
+    void initializeDesktopTableModel();
+    void publishDesktopSnapshot();
+    void refreshDesktopPresentation();
 
     // switchToSelectedDesktop：
     // - 作用：切换到表格中当前选中的桌面；
@@ -165,12 +189,12 @@ private:
     // - 传出：无，结果通过日志、消息框和列表刷新反馈。
     void setCaptureProtectionForSelectedWindows(bool protectedState);
 
-    // setCaptureProtectionForWindow：
-    // - 作用：对指定窗口快照执行防截图保护操作；
-    // - 调用：选区批量操作；批量时只记日志，完成后统一反馈。
-    // - 传入 info：目标窗口快照；
-    // - 传入 protectedState：true=启用，false=取消。
-    bool setCaptureProtectionForWindow(const WindowInfo& info, bool protectedState, bool showFeedback = true);
+    // Accepted actions use one serial value transaction; UI close never cancels
+    // a remote call or releases its still-executing code/parameter allocation.
+    void initializeWindowTransactions();
+    bool windowTransactionBusy() const;
+    void sendTestMessagesForWindows(const std::vector<WindowInfo>& windows);
+    void submitWindowTransaction(const std::vector<WindowInfo>& windows, bool protection, bool testMessage);
 
     // handleWindowPickerRelease：
     // - 作用：处理“准星拖拽拾取”释放事件，定位鼠标下窗口并弹出详情；
@@ -181,6 +205,7 @@ private:
 
 private:
     // 顶层布局与工具栏。
+    PageScope m_pageScope = PageScope::Main;
     QVBoxLayout* m_rootLayout = nullptr;          // 根布局。
     QWidget* m_toolBarWidget = nullptr;           // 顶部工具栏容器。
     QHBoxLayout* m_toolBarLayout = nullptr;       // 顶部工具栏布局。
@@ -209,7 +234,7 @@ private:
 
     // 窗口列表页：左树右预览。
     QSplitter* m_mainSplitter = nullptr;          // 左右分割器。
-    QTreeWidget* m_windowTree = nullptr;          // 窗口树/列表。
+    QTreeView* m_windowTree = nullptr;          // 窗口树/列表。
     QWidget* m_previewWidget = nullptr;           // 右侧预览容器。
     QVBoxLayout* m_previewLayout = nullptr;       // 右侧预览布局。
     QLabel* m_thumbnailLabel = nullptr;           // 窗口缩略图。
@@ -223,7 +248,14 @@ private:
     QPushButton* m_desktopRefreshButton = nullptr;// 刷新桌面列表按钮。
     QPushButton* m_desktopSwitchButton = nullptr; // 切换到选中桌面按钮。
     QPushButton* m_desktopCreateButton = nullptr; // 新建桌面按钮，详细参数在弹窗中设置。
-    QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
+    QTableView* m_desktopTable = nullptr;
+    QAbstractItemModel* m_desktopSourceModel = nullptr;
+    QAbstractItemModel* m_desktopDisplayModel = nullptr;
+    ks::ui::AsyncOperation* m_desktopOperation = nullptr;
+    ks::ui::AsyncOperation* m_desktopPresentationOperation = nullptr;
+    std::shared_ptr<const ks::desktoplist::Snapshot> m_desktopSnapshot;
+    bool m_desktopLoaded = false;
+    bool m_desktopProjectionDirty = false;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
     QLabel* m_desktopStatusLabel = nullptr;       // 桌面状态提示标签。
     std::vector<CreatedDesktopRecord> m_createdDesktopHandles; // 本进程创建并保留的桌面句柄记录。
 
@@ -234,14 +266,30 @@ private:
     QLabel* m_systemLabel = nullptr;              // 系统窗口数。
     QLabel* m_selectedLabel = nullptr;            // 当前选中项信息。
 
+    ks::ui::AsyncOperation* m_windowActionOperation = nullptr;
+    QTimer* m_windowActionTimer = nullptr;
+    std::shared_ptr<ks::window::WindowOperationProgress> m_windowActionProgress;
+
+    // 缩略图节拍独立于窗口清单采样；像素缩放只携值进入后台。
+    QTimer* m_previewTimer = nullptr;
+    ks::ui::AsyncOperation* m_previewScaleOperation = nullptr;
+    QString m_previewIdentity;
+    QByteArray m_previewSummaryKey;
+    QSize m_previewSize;
+    qreal m_previewDpr = 0;
+    bool m_previewCaptureDue = true;
+    bool m_selectionUiQueued = false;
+
     // 自动刷新定时器。
     QTimer* m_autoRefreshTimer = nullptr;         // 定时刷新控制。
 
     // 数据缓存。
-    std::vector<WindowInfo> m_windowSnapshot;     // 当前窗口快照。
-    std::vector<WindowInfo> m_previousSnapshot;   // 上一轮窗口快照。
-    std::vector<WindowInfo> m_exitedOneRound;     // 退出窗口保留一轮。
-    std::vector<quint64> m_newWindowHandles;      // 新增窗口句柄列表（用于高亮）。
+    std::shared_ptr<const ks::windowlist::Snapshot> m_windowState;
+    ks::windowlist::SnapshotModel* m_windowModel = nullptr;
+    ks::ui::AsyncOperation* m_windowRefreshOperation = nullptr;
+    ks::ui::AsyncOperation* m_windowProjectionOperation = nullptr;
+    QTimer* m_windowFilterTimer = nullptr;
+    bool m_windowProjectionDirty = true;
     QSet<quint32> m_externalProcessIdFilterSet;   // 进程页跨视图 PID 筛选。
     int m_refreshProgressPid = 0;                 // 刷新任务进度卡片 PID。
     std::atomic_bool m_refreshRunning{ false };   // 后台刷新进行中标志。

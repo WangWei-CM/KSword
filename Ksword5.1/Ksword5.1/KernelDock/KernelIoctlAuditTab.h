@@ -6,12 +6,17 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <array>
+#include <memory>
 #include <vector>
 
 class QLabel;
 class QLineEdit;
 class QPoint;
-class QTableWidget;
+class QTableView;
+class QShowEvent;
+class QEvent;
+class QTimer;
 class QTabWidget;
 class QPushButton;
 
@@ -31,7 +36,13 @@ public:
     // - 重复调用保持幂等，不影响工具栏的手动刷新。
     void requestInitialRefresh();
 
+protected:
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
+
 private:
+    class AuditModel;
+    class AuditFilter;
     struct DriverRow
     {
         QString driverName;
@@ -96,29 +107,30 @@ private:
     void applySnapshot(Snapshot snapshot);
     void populateTables();
     void applyFilter();
-    void showCopyMenu(QTableWidget* table, const QPoint& position);
+    void showCopyMenu(QTableView* table, const QPoint& position);
     static QString hex64(std::uint64_t value);
     static QString hex32(std::uint32_t value);
     static QString majorFunctionName(std::uint32_t value);
-    static QString tableRowText(QTableWidget* table, int row, bool includeHeader);
+    static QString tableRowText(QTableView* table, int row, bool includeHeader, bool sourceRows = false);
 
     QTabWidget* m_innerTabs = nullptr;
     QWidget* m_driverPage = nullptr;
     QWidget* m_devicePage = nullptr;
     QWidget* m_dispatchPage = nullptr;
     QWidget* m_registryPage = nullptr;
-    QTableWidget* m_driverTable = nullptr;
-    QTableWidget* m_deviceTable = nullptr;
-    QTableWidget* m_dispatchTable = nullptr;
-    QTableWidget* m_registryTable = nullptr;
+    QTableView* m_driverTable = nullptr;
+    QTableView* m_deviceTable = nullptr;
+    QTableView* m_dispatchTable = nullptr;
+    QTableView* m_registryTable = nullptr;
     QPushButton* m_refreshButton = nullptr;
     QLineEdit* m_filterEdit = nullptr;
     QPushButton* m_clearFilterButton = nullptr;
     QLabel* m_statusLabel = nullptr;
-    std::vector<DriverRow> m_driverRows;
-    std::vector<DeviceRow> m_deviceRows;
-    std::vector<DispatchRow> m_dispatchRows;
-    std::vector<ksword::ark::IoctlRegistryEntry> m_registryRows;
+    std::shared_ptr<const Snapshot> m_snapshot;
+    std::array<AuditModel*, 4> m_models{};
+    std::array<AuditFilter*, 4> m_filters{};
+    std::array<bool, 4> m_columnsSized{};
+    QTimer* m_filterTimer = nullptr;
     std::uint32_t m_queryFailureCount = 0;
     std::uint32_t m_partialDriverCount = 0;
     std::uint32_t m_registryTotal = 0;

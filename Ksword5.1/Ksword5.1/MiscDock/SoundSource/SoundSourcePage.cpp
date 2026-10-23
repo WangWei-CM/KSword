@@ -3,6 +3,8 @@
 #include "../../UI/VisibleTableWidget.h"
 #include "../../UI/FlatButtonTheme.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/TableInteractionSupport.h"
+#include "../../Internationalization/LanguageManager.h"
 
 #include "../../theme.h"
 
@@ -20,6 +22,8 @@
 #include <QRunnable>
 #include <QSet>
 #include <QShowEvent>
+#include <QSignalBlocker>
+#include <QItemSelectionModel>
 #include <QTableWidget>
 #include <QThreadPool>
 #include <QTimer>
@@ -40,7 +44,45 @@
 namespace
 {
     constexpr int kAutoRefreshIntervalMs = 1500;
+    constexpr int kSoundSourceIdentityRole = Qt::UserRole + 73;
     constexpr std::int64_t kRecentAudibleRetentionMs = 5000;
+
+    enum class SoundSourceBodyText
+    {
+        Title, AutoRefresh, ShowSilent, OverviewPreset, AudioPreset, KernelPreset,
+        Summary, Status
+    };
+    struct SoundSourceBodyEntry
+    {
+        const char* target;
+        const char* source;
+        bool mnemonic;
+    };
+    // Controls keep their original source text; cold search translates these
+    // same definitions through the existing compatibility translation path.
+    constexpr SoundSourceBodyEntry kSoundSourceBody[] = {
+        {"ks_sound_source_title", "声音来源", false},
+        {"ks_sound_source_auto_refresh", "自动刷新", true},
+        {"ks_sound_source_show_silent", "显示静默会话", true},
+        {"ks_sound_source_overview_preset", "A", true},
+        {"ks_sound_source_audio_preset", "B", true},
+        {"ks_sound_source_kernel_preset", "C", true},
+        {"ks_sound_source_summary", "尚未采样声音来源。", false},
+        {"ks_sound_source_status", "等待刷新", false}
+    };
+    constexpr char kSoundSourceTableTarget[] = "ks_sound_source_table";
+    const SoundSourceBodyEntry& soundSourceBodyEntry(SoundSourceBodyText id)
+    {
+        return kSoundSourceBody[static_cast<int>(id)];
+    }
+    QString soundSourceBodySource(SoundSourceBodyText id)
+    {
+        return QString::fromUtf8(soundSourceBodyEntry(id).source);
+    }
+    QString soundSourceBodyTarget(SoundSourceBodyText id)
+    {
+        return QString::fromLatin1(soundSourceBodyEntry(id).target);
+    }
 
     enum SoundSourceColumn
     {
@@ -137,6 +179,28 @@ namespace
 
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> SoundSourcePage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(31);
+        // Layout reparenting leaves the overview controls first, then the
+        // root-owned status label before the table, despite its footer position.
+        for (const auto& entry : kSoundSourceBody)
+        {
+            body.append({ks::i18n::sourceText(QString::fromUtf8(entry.source)),
+                QString::fromLatin1(entry.target), {}, entry.mnemonic});
+        }
+        // GlobalUiSearch reads every horizontal header before table descendants,
+        // including columns hidden by the initial A preset. No rows exist yet.
+        for (const auto& header : tableHeaders())
+        {
+            body.append({ks::i18n::sourceText(header),
+                QString::fromLatin1(kSoundSourceTableTarget), {}, false});
+        }
+        body += ks::ui::ColdCompactTableActionBody(QStringLiteral("ks_sound_source_actions"));
+        return body;
+    }
+
     SoundSourcePage::SoundSourcePage(
         const std::uint32_t processIdFilter,
         const std::uint64_t expectedCreationTime100ns,
@@ -154,6 +218,10 @@ namespace ks::misc
     void SoundSourcePage::showEvent(QShowEvent* const event)
     {
         QWidget::showEvent(event);
+        if (m_tableDirty)
+        {
+            rebuildTable();
+        }
         if (m_autoRefreshCheck != nullptr &&
             m_autoRefreshCheck->isChecked() &&
             m_refreshTimer != nullptr)
@@ -184,6 +252,14 @@ namespace ks::misc
              event->type() == QEvent::ApplicationPaletteChange))
         {
             applyThemeStyle();
+            rebuildTable();
+        }
+        if (event != nullptr &&
+            (event->type() == QEvent::FontChange ||
+             event->type() == QEvent::ApplicationFontChange))
+        {
+            m_columnsSized = false;
+            rebuildTable();
         }
     }
 
@@ -203,9 +279,10 @@ namespace ks::misc
 
         m_titleLabel = new QLabel(
             m_processIdFilter == 0U
-                ? QStringLiteral("声音来源")
+                ? soundSourceBodySource(SoundSourceBodyText::Title)
                 : QStringLiteral("当前进程的声音来源"),
             this);
+        m_titleLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Title));
         m_titleLabel->setToolTip(
             QStringLiteral("R3 采样 Core Audio 会话峰值、状态、音量与端点；R0 多源交叉核验会话 PID，只佐证进程身份，不读取或修改音频流。"));
         overviewLayout->addWidget(m_titleLabel);
@@ -217,13 +294,15 @@ namespace ks::misc
         m_refreshButton->setToolTip(QStringLiteral("立即重新采样声音来源，并重试 R0 证据"));
         toolbarLayout->addWidget(m_refreshButton);
 
-        m_autoRefreshCheck = new QCheckBox(QStringLiteral("自动刷新"), this);
+        m_autoRefreshCheck = new QCheckBox(soundSourceBodySource(SoundSourceBodyText::AutoRefresh), this);
+        m_autoRefreshCheck->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::AutoRefresh));
         m_autoRefreshCheck->setChecked(true);
         m_autoRefreshCheck->setToolTip(
             QStringLiteral("页面可见时每 1.5 秒执行一次短时峰值采样"));
         toolbarLayout->addWidget(m_autoRefreshCheck);
 
-        m_showSilentCheck = new QCheckBox(QStringLiteral("显示静默会话"), this);
+        m_showSilentCheck = new QCheckBox(soundSourceBodySource(SoundSourceBodyText::ShowSilent), this);
+        m_showSilentCheck->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::ShowSilent));
         m_showSilentCheck->setChecked(false);
         m_showSilentCheck->setToolTip(
             QStringLiteral("显示当前未检测到波形的全部输出音频会话"));
@@ -238,15 +317,18 @@ namespace ks::misc
         m_overviewPresetButton = new QToolButton(this);
         m_audioPresetButton = new QToolButton(this);
         m_kernelPresetButton = new QToolButton(this);
+        m_overviewPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::OverviewPreset));
+        m_audioPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::AudioPreset));
+        m_kernelPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::KernelPreset));
         const QList<QToolButton*> presetButtons = {
             m_overviewPresetButton,
             m_audioPresetButton,
             m_kernelPresetButton
         };
         const QStringList presetNames = {
-            QStringLiteral("A"),
-            QStringLiteral("B"),
-            QStringLiteral("C")
+            soundSourceBodySource(SoundSourceBodyText::OverviewPreset),
+            soundSourceBodySource(SoundSourceBodyText::AudioPreset),
+            soundSourceBodySource(SoundSourceBodyText::KernelPreset)
         };
         const QStringList presetTooltips = {
             QStringLiteral("A：发声进程概览"),
@@ -271,17 +353,21 @@ namespace ks::misc
         overviewLayout->addLayout(toolbarLayout);
 
         m_summaryLabel = new QLabel(
-            QStringLiteral("尚未采样声音来源。"),
+            soundSourceBodySource(SoundSourceBodyText::Summary),
             this);
+        m_summaryLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Summary));
         m_summaryLabel->setWordWrap(true);
         overviewLayout->addWidget(m_summaryLabel);
 
-        m_statusLabel = new QLabel(QStringLiteral("等待刷新"), this);
+        m_statusLabel = new QLabel(soundSourceBodySource(SoundSourceBodyText::Status), this);
+        m_statusLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Status));
         m_statusLabel->setWordWrap(true);
 
         m_table = new QTableWidget(this);
+        m_table->setObjectName(QString::fromLatin1(kSoundSourceTableTarget));
         // 音频会话短周期峰值已有专用列视图，保留复制导出，收拢快照条。
         ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
+        ks::ui::SetCompactTableSearchTargetPrefix(m_table, QStringLiteral("ks_sound_source_actions"));
         m_table->setColumnCount(ColumnCount);
         m_table->setHorizontalHeaderLabels(tableHeaders());
         m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -305,6 +391,12 @@ namespace ks::misc
 
     void SoundSourcePage::initializeConnections()
     {
+        // The global one-shot header sorter can reorder items even while sortingEnabled is false.
+        // After the first explicit header order, let Qt retain that order across value updates.
+        connect(m_table->horizontalHeader(), &QHeaderView::sortIndicatorChanged,
+            this, [this](int, Qt::SortOrder) {
+                if (!m_table->isSortingEnabled()) m_table->setSortingEnabled(true);
+            });
         connect(m_refreshButton, &QToolButton::clicked, this, [this]()
         {
             requestRefresh(true);
@@ -499,6 +591,12 @@ namespace ks::misc
 
     void SoundSourcePage::rebuildTable()
     {
+        m_tableDirty = true;
+        if (!isVisible())
+        {
+            return;
+        }
+        m_tableDirty = false;
         const bool showSilentSessions =
             m_showSilentCheck != nullptr && m_showSilentCheck->isChecked();
         std::vector<const SoundSourceRecord*> visibleRecords;
@@ -512,7 +610,64 @@ namespace ks::misc
             }
         }
 
-        m_table->setRowCount(static_cast<int>(visibleRecords.size()));
+        QStringList nextKeys;
+        for (const SoundSourceRecord* record : visibleRecords)
+        {
+            nextKeys.push_back(recordKey(*record));
+        }
+        QStringList currentKeys;
+        for (int row = 0; row < m_table->rowCount(); ++row)
+        {
+            const QTableWidgetItem* anchor = m_table->item(row, ColumnVerdict);
+            currentKeys.push_back(anchor ? anchor->data(kSoundSourceIdentityRole).toString() : QString());
+        }
+        const bool structureChanged = nextKeys != currentKeys;
+        QSet<QString> selectedKeys;
+        QString currentKey;
+        const int currentColumn = m_table->currentColumn();
+        for (const QModelIndex& index : m_table->selectionModel()->selectedRows())
+        {
+            const QTableWidgetItem* anchor = m_table->item(index.row(), ColumnVerdict);
+            if (anchor) selectedKeys.insert(anchor->data(kSoundSourceIdentityRole).toString());
+        }
+        if (const QTableWidgetItem* anchor = m_table->item(m_table->currentRow(), ColumnVerdict))
+        {
+            currentKey = anchor->data(kSoundSourceIdentityRole).toString();
+        }
+        const bool restoreSorting = m_table->isSortingEnabled();
+        const int sortColumn = m_table->horizontalHeader()->sortIndicatorSection();
+        const Qt::SortOrder sortOrder = m_table->horizontalHeader()->sortIndicatorOrder();
+        m_table->setSortingEnabled(false);
+        const QSignalBlocker tableSignals(m_table);
+        const bool updatesEnabled = m_table->updatesEnabled();
+        m_table->setUpdatesEnabled(false);
+        if (structureChanged)
+        {
+            // Reorder existing session items rather than deleting and allocating 21 cells per tick.
+            QHash<QString, QList<QTableWidgetItem*>> oldRows;
+            for (int row = 0; row < m_table->rowCount(); ++row)
+            {
+                QList<QTableWidgetItem*> cells;
+                for (int column = 0; column < ColumnCount; ++column)
+                {
+                    cells.push_back(m_table->takeItem(row, column));
+                }
+                oldRows.insert(currentKeys.value(row), cells);
+            }
+            m_table->setRowCount(static_cast<int>(visibleRecords.size()));
+            for (int row = 0; row < nextKeys.size(); ++row)
+            {
+                const QList<QTableWidgetItem*> cells = oldRows.take(nextKeys.at(row));
+                for (int column = 0; column < cells.size(); ++column)
+                {
+                    m_table->setItem(row, column, cells.at(column));
+                }
+            }
+            for (const auto& cells : oldRows)
+            {
+                qDeleteAll(cells);
+            }
+        }
         for (int rowIndex = 0; rowIndex < static_cast<int>(visibleRecords.size()); ++rowIndex)
         {
             const SoundSourceRecord& record = *visibleRecords[static_cast<std::size_t>(rowIndex)];
@@ -563,24 +718,70 @@ namespace ks::misc
 
             for (int columnIndex = 0; columnIndex < ColumnCount; ++columnIndex)
             {
-                auto* item = new QTableWidgetItem(values.at(columnIndex));
-                item->setToolTip(values.at(columnIndex));
-                if (record.currentlyAudible)
+                QTableWidgetItem* item = m_table->item(rowIndex, columnIndex);
+                if (item == nullptr)
                 {
-                    item->setBackground(KswordTheme::SuccessBackgroundColor());
+                    item = new QTableWidgetItem;
+                    if (columnIndex == ColumnPid)
+                    {
+                        item->setTextAlignment(Qt::AlignCenter);
+                    }
+                    m_table->setItem(rowIndex, columnIndex, item);
                 }
-                else if (record.recentlyAudible)
+                if (columnIndex == ColumnVerdict
+                    && item->data(kSoundSourceIdentityRole).toString() != nextKeys.at(rowIndex))
                 {
-                    item->setBackground(KswordTheme::WarningBackgroundColor());
+                    item->setData(kSoundSourceIdentityRole, nextKeys.at(rowIndex));
                 }
-                if (columnIndex == ColumnPid)
+                const QString& value = values.at(columnIndex);
+                if (item->text() != value)
                 {
-                    item->setTextAlignment(Qt::AlignCenter);
+                    item->setText(value);
+                    item->setToolTip(value);
                 }
-                m_table->setItem(rowIndex, columnIndex, item);
+                const QBrush background = record.currentlyAudible
+                    ? QBrush(KswordTheme::SuccessBackgroundColor())
+                    : record.recentlyAudible
+                        ? QBrush(KswordTheme::WarningBackgroundColor())
+                        : QBrush();
+                if (item->background() != background)
+                {
+                    item->setBackground(background);
+                }
             }
         }
-        m_table->resizeColumnsToContents();
+        if (restoreSorting && sortColumn >= 0)
+        {
+            m_table->horizontalHeader()->setSortIndicator(sortColumn, sortOrder);
+            m_table->setSortingEnabled(true);
+        }
+        if (structureChanged || restoreSorting)
+        {
+            m_table->clearSelection();
+            m_table->selectionModel()->clearCurrentIndex();
+            for (int row = 0; row < m_table->rowCount(); ++row)
+            {
+                const QTableWidgetItem* anchor = m_table->item(row, ColumnVerdict);
+                const QString key = anchor ? anchor->data(kSoundSourceIdentityRole).toString() : QString();
+                if (selectedKeys.contains(key))
+                {
+                    m_table->selectionModel()->select(
+                        m_table->model()->index(row, 0),
+                        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                }
+                if (!currentKey.isEmpty() && key == currentKey)
+                {
+                    m_table->setCurrentCell(row, std::max(0, currentColumn),
+                        QItemSelectionModel::NoUpdate);
+                }
+            }
+        }
+        if (!m_columnsSized && !visibleRecords.empty())
+        {
+            m_table->resizeColumnsToContents();
+            m_columnsSized = true;
+        }
+        m_table->setUpdatesEnabled(updatesEnabled);
     }
 
     void SoundSourcePage::updateSummary(const SoundSourceScanResult& result)
@@ -796,6 +997,7 @@ namespace ks::misc
         {
             sessionKey = QStringLiteral("pid:%1").arg(record.processId);
         }
-        return record.endpointId + QStringLiteral("|") + sessionKey;
+        return record.endpointId + QStringLiteral("|") + sessionKey
+            + QStringLiteral("|%1|%2").arg(record.processId).arg(record.creationTime100ns);
     }
 }

@@ -14,6 +14,7 @@
 #include "../Features/Registry/RegistryFeature.h"
 #include "../Features/Window/WindowFeature.h"
 #include "../Ui/Controls.h"
+#include "../Ui/AsyncTask.h"
 #include "../Ui/EntityNavigation.h"
 #include "../Ui/EvidenceSession.h"
 #include "../Ui/EvidenceSessionView.h"
@@ -64,6 +65,12 @@ constexpr int kHandleModuleCommandId = 40012;
 constexpr UINT kMsgQueryDriverStatus = WM_APP + 101;
 constexpr UINT kMsgDockActivated = WM_APP + 102;
 constexpr UINT kMsgMaterializeDock = WM_APP + 103;
+constexpr UINT kMsgDriverCompleted = WM_APP + 106;
+constexpr UINT kMsgEvidenceExportCompleted = WM_APP + 105;
+constexpr UINT_PTR kCloseTimerId = 0x4C54;
+constexpr UINT kCloseRetryId = 30991;
+constexpr UINT kCloseCancelId = 30992;
+constexpr ULONGLONG kCloseBudgetMs = 30000;
 constexpr wchar_t kWorkspaceRegistryPath[] = L"Software\\KSwordDEV\\KswordARKLight\\Workspace";
 constexpr wchar_t kWorkspaceRegistryValue[] = L"State";
 
@@ -418,9 +425,8 @@ LRESULT CALLBACK MainWindow::NavigationPaletteProc(HWND hwnd, UINT msg, WPARAM w
 LRESULT MainWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        if (!driverLease_.acquire()) {
-            ::OutputDebugStringW(L"[KswordARKLight] Driver lease registration unavailable; automatic driver stop is disabled for safety.\r\n");
-        }
+        driverTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<DriverControlResult>>(hwnd, kMsgDriverCompleted);
+        evidenceExportTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<EvidenceExportOutcome>>(hwnd, kMsgEvidenceExportCompleted);
         createMenuBar();
         createCommandInput();
         createChildControls();
@@ -432,16 +438,25 @@ LRESULT MainWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         ::PostMessageW(hwnd_, kMsgQueryDriverStatus, 0, 0);
         layout();
         return 0;
+    case kMsgEvidenceExportCompleted:
+        if (evidenceExportTask_) evidenceExportTask_->consume(hwnd, wParam, lParam);
+        return 0;
+    case kMsgDriverCompleted:
+        if (driverTask_) driverTask_->consume(hwnd, wParam, lParam);
+        return 0;
     case kMsgQueryDriverStatus:
         queryDriverStatusDeferred();
         return 0;
     case kMsgDockActivated:
+        if (closePhase_ != ClosePhase::Open) return 0;
         queueDockMaterialization(static_cast<int>(wParam));
         return 0;
     case kMsgMaterializeDock:
+        if (closePhase_ != ClosePhase::Open) return 0;
         materializeDockForDockIndex(static_cast<int>(wParam));
         return 0;
     case Ksword::Ui::kEntityNavigationMessage:
+        if (closePhase_ != ClosePhase::Open) return 0;
         if (lParam != 0) {
             return routeNavigation(*reinterpret_cast<const Ksword::Core::NavigationRequest*>(lParam)) ? 1 : 0;
         }
@@ -472,8 +487,17 @@ LRESULT MainWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         layout();
         ::InvalidateRect(hwnd_, nullptr, TRUE);
         return 0;
+    case WM_CLOSE:
+        beginClosing();
+        return 0;
+    case WM_TIMER:
+        if (wParam == kCloseTimerId) { pollClosing(); return 0; }
+        break;
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
+        if (id == kCloseRetryId) { retryClosing(); return 0; }
+        if (id == kCloseCancelId) { cancelClosing(); return 0; }
+        if (closePhase_ != ClosePhase::Open) return 0;
         if (id >= kWindowMenuDockBaseId && id < kWindowMenuDockBaseId + static_cast<int>(modules_.size())) {
             toggleModuleDock(id - kWindowMenuDockBaseId);
             return 0;
@@ -544,8 +568,10 @@ LRESULT MainWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_ERASEBKGND:
         return 1;
     case WM_DESTROY:
+        ::KillTimer(hwnd, kCloseTimerId);
+        if (driverTask_) driverTask_->cancel();
+        if (evidenceExportTask_) evidenceExportTask_->cancel();
         persistWorkspaceState();
-        stopDriverOnExit();
         if (navigationPalette_) {
             ::DestroyWindow(navigationPalette_);
             navigationPalette_ = nullptr;
@@ -791,6 +817,10 @@ void MainWindow::activateNavigationPaletteSelection() {
 
 void MainWindow::createChildControls() {
     statusText_ = Ksword::Ui::CreateText(hwnd_, kStatusTextId, L"Ready", 0, 0, 900, kStatusHeight);
+    closeRetryButton_ = Ksword::Ui::CreateButton(hwnd_, kCloseRetryId, L"重试 / Retry", 0, 0, 90, 26);
+    closeCancelButton_ = Ksword::Ui::CreateButton(hwnd_, kCloseCancelId, L"取消退出 / Cancel", 0, 0, 130, 26);
+    ::ShowWindow(closeRetryButton_, SW_HIDE);
+    ::ShowWindow(closeCancelButton_, SW_HIDE);
 
     RECT dockBounds{ 0, 0, 900, 700 };
     dockManager_->create(hwnd_, dockBounds);
@@ -1327,42 +1357,74 @@ void MainWindow::exportEvidence(const int commandId) {
         return;
     }
 
-    std::wstring text;
+    if (!evidenceExportTask_ || evidenceExportTask_->running()) return;
+    const auto snapshot = session.sharedSnapshot();
     const wchar_t* name = L"ksword-arklight-evidence.json";
     const wchar_t* title = L"导出证据会话";
     const wchar_t* filter = L"JSON (*.json)\0*.json\0All Files (*.*)\0*.*\0";
     const wchar_t* extension = L"json";
     if (commandId == kEvidenceTsvPrivacyMenuId) {
-        text = session.exportTsv(Ksword::Ui::EvidenceRedaction::Privacy);
         name = L"ksword-arklight-evidence.tsv";
         filter = L"TSV (*.tsv)\0*.tsv\0All Files (*.*)\0*.*\0";
         extension = L"tsv";
     } else if (commandId == kEvidenceDiffMenuId) {
-        if (session.size() < 2U) {
+        if (snapshot.size() < 2U) {
             if (statusText_) {
                 ::SetWindowTextW(statusText_, L"至少需要两次证据采集才能生成差异。");
             }
             return;
         }
-        text = Ksword::Ui::RenderEvidenceDiff(session.latestDiff());
         name = L"ksword-arklight-evidence-diff.txt";
         filter = L"Text (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
         extension = L"txt";
-    } else {
-        text = session.exportJson(commandId == kEvidenceJsonRawMenuId
-            ? Ksword::Ui::EvidenceRedaction::None
-            : Ksword::Ui::EvidenceRedaction::Privacy);
     }
+    Ksword::Ui::TextExportDestination destination;
     std::wstring error;
-    const Ksword::Ui::SaveTextFileResult result = Ksword::Ui::SaveUtf8TextFileWithDialog(
-        hwnd_, name, title, filter, extension, text, &error);
-    if (statusText_) {
-        if (result == Ksword::Ui::SaveTextFileResult::Saved) {
-            ::SetWindowTextW(statusText_, L"证据会话已导出。");
-        } else if (result == Ksword::Ui::SaveTextFileResult::Failed) {
+    const auto selection = Ksword::Ui::ChooseTextExportDestination(
+        hwnd_, name, title, filter, extension, destination, &error);
+    if (selection != Ksword::Ui::SaveTextFileResult::Saved) {
+        if (selection == Ksword::Ui::SaveTextFileResult::Failed && statusText_) {
             ::SetWindowTextW(statusText_, error.c_str());
         }
+        return;
     }
+    const std::wstring format = extension;
+    const std::wstring source = title;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    for (int command = kEvidenceJsonPrivacyMenuId; command <= kEvidenceDiffMenuId; ++command) {
+        ::EnableMenuItem(evidenceMenu_, command, MF_BYCOMMAND | MF_GRAYED);
+    }
+    evidenceExportTask_->request(
+        [snapshot, commandId, destination, format, source, lease] {
+            std::wstring text;
+            if (commandId == kEvidenceTsvPrivacyMenuId) {
+                text = Ksword::Ui::EvidenceSession::exportTsvSnapshot(snapshot, Ksword::Ui::EvidenceRedaction::Privacy);
+            } else if (commandId == kEvidenceDiffMenuId) {
+                text = Ksword::Ui::RenderEvidenceDiff(Ksword::Ui::BuildEvidenceDiff(
+                    snapshot[snapshot.size() - 2]->text, snapshot.back()->text));
+            } else {
+                text = Ksword::Ui::EvidenceSession::exportJsonSnapshot(snapshot,
+                    commandId == kEvidenceJsonRawMenuId ? Ksword::Ui::EvidenceRedaction::None : Ksword::Ui::EvidenceRedaction::Privacy);
+            }
+            EvidenceExportOutcome outcome;
+            outcome.saved = Ksword::Ui::WriteUtf8TextToDestination(destination, text, source, format,
+                &outcome.error) == Ksword::Ui::SaveTextFileResult::Saved;
+            return outcome;
+        },
+        [this](std::uint64_t, std::optional<EvidenceExportOutcome>&& result, std::exception_ptr error) {
+            for (int command = kEvidenceJsonPrivacyMenuId; command <= kEvidenceDiffMenuId; ++command) {
+                ::EnableMenuItem(evidenceMenu_, command, MF_BYCOMMAND | MF_ENABLED);
+            }
+            if (closePhase_ != ClosePhase::Open || !statusText_) return;
+            if (error || !result) {
+                ::SetWindowTextW(statusText_, std::to_wstring(ERROR_UNHANDLED_EXCEPTION).c_str());
+            } else if (result->saved) {
+                ::SetWindowTextW(statusText_, L"证据会话已导出。");
+            } else {
+                ::SetWindowTextW(statusText_, result->error.c_str());
+            }
+        });
 }
 
 void MainWindow::toggleModuleDock(int moduleIndex) {
@@ -1410,13 +1472,24 @@ void MainWindow::layout() {
     const int width = rc.right - rc.left;
     const int height = rc.bottom - rc.top;
 
-    ::MoveWindow(statusText_, 0, height - kStatusHeight, width, kStatusHeight, TRUE);
+    const bool closing = closePhase_ != ClosePhase::Open;
+    const bool narrowClosing = closing && width < 600;
+    const int footerHeight = closing ? (narrowClosing ? 66 : 40) : kStatusHeight;
+    ::MoveWindow(statusText_, closing ? 6 : 0, height - footerHeight + (closing ? (narrowClosing ? 4 : 10) : 0),
+        std::max(0, width - (closing ? (narrowClosing ? 12 : 250) : 0)), kStatusHeight, TRUE);
+    if (closing) {
+        const int buttonY = height - 33;
+        const int retryWidth = std::min(90, std::max(0, (width - 18) * 2 / 5));
+        const int cancelWidth = std::min(136, std::max(0, width - 18 - retryWidth));
+        ::MoveWindow(closeRetryButton_, std::max(6, width - retryWidth - cancelWidth - 12), buttonY, retryWidth, 26, TRUE);
+        ::MoveWindow(closeCancelButton_, std::max(6, width - cancelWidth - 6), buttonY, cancelWidth, 26, TRUE);
+    }
 
     RECT dockBounds{
         0,
         0,
         width,
-        height - kStatusHeight
+        height - footerHeight
     };
     dockManager_->layout(dockBounds);
     if (dockManager_->hwnd()) {
@@ -1460,12 +1533,7 @@ void MainWindow::refreshDriverText(const Ksword::Core::DriverRuntimeStatus& stat
 }
 
 void MainWindow::queryDriverStatusDeferred() {
-    driverStatus_ = Ksword::Core::QueryDriverStatus();
-    driverStatusKnown_ = true;
-    refreshDriverText(driverStatus_);
-    if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) {
-        requestProcessDockRefreshIfLoaded();
-    }
+    beginDriverTask(false);
 }
 
 void MainWindow::requestProcessDockRefreshIfLoaded() {
@@ -1497,70 +1565,273 @@ void MainWindow::handleUiAccessButtonClicked() {
         ::SetWindowTextW(statusText_, L"UIAccess is already enabled.");
         return;
     }
-
-    if (!Ksword::Core::IsRunningAsAdmin()) {
-        ::SetWindowTextW(statusText_, L"UIAccess needs Admin first; requesting elevation.");
-        if (Ksword::Core::RelaunchElevated()) {
-            ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
-        } else {
-            ::MessageBoxW(hwnd_, L"Admin elevation launch failed or was canceled.", L"UIAccess", MB_ICONWARNING | MB_OK);
-        }
-        return;
-    }
-
-    std::wstring detail;
-    if (!Ksword::Core::LaunchSelfWithSystemUiAccessToken(&detail)) {
-        ::MessageBoxW(hwnd_, detail.c_str(), L"UIAccess fallback failed", MB_ICONWARNING | MB_OK);
-        refreshPrivilegeText();
-        return;
-    }
-
-    ::SetWindowTextW(statusText_, L"UIAccess instance started; exiting current process.");
-    ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    // Keep only the intent until old sessions, accepted work and the final
+    // driver lease have finished. A replacement cannot start new capture while
+    // this instance still owns a later STOP transaction.
+    runtimeRelaunch_ = Ksword::Core::IsRunningAsAdmin()
+        ? RuntimeRelaunch::UiAccess : RuntimeRelaunch::Elevated;
+    beginClosing();
 }
 
 void MainWindow::installDriverFromButton() {
-    Ksword::Core::DriverRuntimeStatus current = driverStatusKnown_ ? driverStatus_ : Ksword::Core::QueryDriverStatus();
-    driverStatusKnown_ = true;
-    driverStatus_ = current;
-    if (current.serviceRunning || current.controlDeviceOpen) {
-        driverStatus_ = Ksword::Core::StopDriverService();
-        if (!driverStatus_.serviceRunning && !driverStatus_.controlDeviceOpen) {
-            driverLease_.observeExplicitStop();
-        }
-        refreshDriverText(driverStatus_);
-        if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) {
-            ::MessageBoxW(hwnd_, driverStatus_.message.c_str(), L"KswordARKLight R0 Driver", MB_ICONWARNING | MB_OK);
-        }
-        return;
-    }
+    beginDriverTask(true);
+}
 
-    driverStatus_ = Ksword::Core::InstallAndStartDriver();
-    driverLease_.observeStartTransition(
-        current.serviceRunning || current.controlDeviceOpen,
-        driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen);
-    refreshDriverText(driverStatus_);
-    if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) {
-        requestProcessDockRefreshIfLoaded();
-    }
-    if (!driverStatus_.serviceRunning && !driverStatus_.controlDeviceOpen) {
-        ::MessageBoxW(hwnd_, driverStatus_.message.c_str(), L"KswordARKLight R0 Driver", MB_ICONWARNING | MB_OK);
-    }
+void MainWindow::beginDriverTask(const bool toggle) {
+    if (!driverTask_ || driverTask_->running()) return;
+    const auto lifetime = driverLifetime_;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    const auto pending = Ksword::Ui::HoldPendingOperation(lifetime);
+    if (mainMenu_) ::EnableMenuItem(mainMenu_, kDriverMenuId, MF_BYCOMMAND | MF_GRAYED);
+    driverTask_->request(
+        [lifetime, toggle, lease, pending] {
+            std::lock_guard lock(lifetime->mutex);
+            DriverControlResult result;
+            if (!lifetime->lease.registered() && !lifetime->lease.acquire()) {
+                ::OutputDebugStringW(L"[KswordARKLight] Driver lease registration unavailable; automatic driver stop is disabled for safety.\r\n");
+            }
+            const auto before = Ksword::Core::QueryDriverStatus();
+            if (!toggle) {
+                result.status = before;
+                return result;
+            }
+            const bool wasRunning = before.serviceRunning || before.controlDeviceOpen;
+            if (wasRunning) {
+                result.status = Ksword::Core::StopDriverService();
+                if (!result.status.serviceRunning && !result.status.controlDeviceOpen) {
+                    lifetime->lease.observeExplicitStop();
+                }
+            } else {
+                result.status = Ksword::Core::InstallAndStartDriver();
+                lifetime->lease.observeStartTransition(false,
+                    result.status.serviceRunning || result.status.controlDeviceOpen);
+            }
+            const bool nowRunning = result.status.serviceRunning || result.status.controlDeviceOpen;
+            result.showWarning = wasRunning == nowRunning;
+            return result;
+        },
+        [this](std::uint64_t, std::optional<DriverControlResult>&& result, std::exception_ptr error) {
+            if (mainMenu_) ::EnableMenuItem(mainMenu_, kDriverMenuId, MF_BYCOMMAND | MF_ENABLED);
+            if (error || !result) {
+                driverStatusKnown_ = false;
+                if (closePhase_ != ClosePhase::Open) return;
+                ::MessageBoxW(hwnd_, std::to_wstring(ERROR_UNHANDLED_EXCEPTION).c_str(),
+                    L"KswordARKLight R0 Driver", MB_ICONWARNING | MB_OK);
+                return;
+            }
+            driverStatus_ = std::move(result->status);
+            driverStatusKnown_ = true;
+            refreshDriverText(driverStatus_);
+            if (driverStatus_.serviceRunning || driverStatus_.controlDeviceOpen) requestProcessDockRefreshIfLoaded();
+            if (result->showWarning && closePhase_ == ClosePhase::Open) {
+                ::MessageBoxW(hwnd_, driverStatus_.message.c_str(), L"KswordARKLight R0 Driver", MB_ICONWARNING | MB_OK);
+            }
+        });
 }
 
 void MainWindow::stopDriverOnExit() {
-    if (!driverLease_.releaseRequestsStop()) {
-        ::OutputDebugStringW(L"[KswordARKLight] Driver remains running: it was pre-existing or another Light lease is active.\r\n");
-        return;
-    }
-    const Ksword::Core::DriverRuntimeStatus current = Ksword::Core::QueryDriverStatus();
-    if (!current.serviceRunning && !current.controlDeviceOpen) {
-        return;
-    }
+    const auto lifetime = driverLifetime_;
+    driverExitCleanup_ = Ksword::Ui::RunBackgroundRetirement([lifetime] {
+        lifetime->finalSucceeded = false;
+        try {
+            std::unique_lock lock(lifetime->mutex);
+            lifetime->idle.wait(lock, [&] { return lifetime->pending.load(std::memory_order_acquire) == 0; });
+            if (!lifetime->finalReleaseChecked) {
+                lifetime->finalStopRequired = lifetime->lease.releaseRequestsStop();
+                lifetime->finalReleaseChecked = true;
+            }
+            lifetime->finalSucceeded = true;
+            if (lifetime->finalStopRequired) {
+                lifetime->finalStatus = Ksword::Core::QueryDriverStatus();
+                if (lifetime->finalStatus.serviceRunning || lifetime->finalStatus.controlDeviceOpen) {
+                    lifetime->finalStatus = Ksword::Core::StopDriverService();
+                }
+                lifetime->finalSucceeded = !lifetime->finalStatus.serviceRunning && !lifetime->finalStatus.controlDeviceOpen;
+            }
+        } catch (...) {
+            lifetime->finalSucceeded = false;
+            ::OutputDebugStringW(L"[KswordARKLight] Final driver cleanup attempt raised an exception.\r\n");
+        }
+        // The attempt is complete even on a real SCM failure. The visible
+        // coordinator presents that receipt and requires Retry or Cancel.
+        return true;
+    });
+}
 
-    driverStatus_ = Ksword::Core::StopDriverService();
-    driverStatusKnown_ = true;
-    ::OutputDebugStringW((L"[KswordARKLight] Exit driver stop: " + driverStatus_.message + L"\r\n").c_str());
+void MainWindow::setClosingStatus(const std::wstring& text) {
+    if (closingStatus_ == text) return;
+    closingStatus_ = text;
+    if (statusText_) ::SetWindowTextW(statusText_, text.c_str());
+}
+
+bool MainWindow::notifyPageRetirement(const UINT message) {
+    struct Context { UINT message; bool ready = true; } context{message};
+    // Dock content may be reparented into a floating top-level host. The stable
+    // slot identities, rather than IsChild(main), cover every materialized page.
+    for (const auto& slot : dockSlots_) {
+        if (!slot.page || !::IsWindow(slot.page)) continue;
+        if (::SendMessageW(slot.page, message, 0, 0) != 0) context.ready = false;
+        ::EnumChildWindows(slot.page, [](HWND child, LPARAM data) -> BOOL {
+            auto& current = *reinterpret_cast<Context*>(data);
+            if (::SendMessageW(child, current.message, 0, 0) != 0) current.ready = false;
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&context));
+    }
+    return context.ready;
+}
+
+void MainWindow::beginClosing() {
+    if (closePhase_ != ClosePhase::Open) return;
+    closePhase_ = ClosePhase::RetiringPages;
+    closeCancelRequested_ = false;
+    closeStartedMs_ = ::GetTickCount64();
+    closingStatus_.clear();
+    Ksword::Ui::BackgroundWorkRegistry::global().beginClosing();
+    hideNavigationPalette(false);
+    ::SetWindowTextW(hwnd_, L"KswordARKLight — 正在退出 / Closing");
+    ::ShowWindow(closeRetryButton_, SW_SHOW);
+    ::ShowWindow(closeCancelButton_, SW_SHOW);
+    ::EnableWindow(closeRetryButton_, FALSE);
+    disabledForClosing_.clear();
+    const auto disable = [this](const HWND target) {
+        if (target && ::IsWindowEnabled(target)) {
+            disabledForClosing_.push_back(target);
+            ::EnableWindow(target, FALSE);
+        }
+    };
+    if (dockManager_) disable(dockManager_->hwnd());
+    disable(commandEdit_);
+    for (const auto& slot : dockSlots_) disable(slot.page);
+    // Changes sampling admission and schedules cleanup without destroying any
+    // page or reparenting a floating dock.
+    notifyPageRetirement(Ksword::Ui::kBeginNativeRetirementMessage);
+    Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+    setClosingStatus(L"正在完成已接受操作并停止采集… / Finishing accepted work and stopping capture…");
+    layout();
+    ::SetTimer(hwnd_, kCloseTimerId, 150, nullptr);
+}
+
+void MainWindow::pollClosing() {
+    if (closeFinalizing_) return;
+    if (closePhase_ == ClosePhase::Open) return;
+    auto& registry = Ksword::Ui::BackgroundWorkRegistry::global();
+    registry.retry();
+    if (closePhase_ == ClosePhase::RetiringPages) {
+        const bool pagesReady = notifyPageRetirement(Ksword::Ui::kPollNativeRetirementMessage);
+        const bool mainReady = (!driverTask_ || !driverTask_->running()) &&
+            (!evidenceExportTask_ || !evidenceExportTask_->running());
+        if (pagesReady && mainReady && registry.pending() == 0) {
+            closePhase_ = ClosePhase::ReleasingDriver;
+            closeStartedMs_ = ::GetTickCount64();
+            setClosingStatus(L"正在释放驱动租约… / Releasing the driver lease…");
+            stopDriverOnExit();
+        }
+    } else if (driverExitCleanup_ && driverExitCleanup_->complete()) {
+        bool success = false;
+        { std::lock_guard lock(driverLifetime_->mutex); success = driverLifetime_->finalSucceeded; }
+        if (closeCancelRequested_) { restoreAfterCancelledClose(); return; }
+        if (success) {
+            // ShellExecuteEx/UIAccess may pump modal/COM messages. No timer,
+            // close command or Cancel may reenter the final launch/destroy.
+            closeFinalizing_ = true;
+            ::KillTimer(hwnd_, kCloseTimerId);
+            if (runtimeRelaunch_ != RuntimeRelaunch::None) {
+                std::wstring detail;
+                const auto intent = runtimeRelaunch_;
+                runtimeRelaunch_ = RuntimeRelaunch::None;
+                const bool launched = intent == RuntimeRelaunch::Elevated
+                    ? Ksword::Core::RelaunchElevated()
+                    : Ksword::Core::LaunchSelfWithSystemUiAccessToken(&detail);
+                runtimeRelaunch_ = RuntimeRelaunch::None;
+                if (!launched) {
+                    restoreAfterCancelledClose();
+                    if (intent == RuntimeRelaunch::Elevated) {
+                        ::MessageBoxW(hwnd_, L"Admin elevation launch failed or was canceled.", L"UIAccess", MB_ICONWARNING | MB_OK);
+                    } else {
+                        ::MessageBoxW(hwnd_, detail.c_str(), L"UIAccess fallback failed", MB_ICONWARNING | MB_OK);
+                    }
+                    return;
+                }
+            }
+            // No work can be admitted, every page/owned session is retired,
+            // and the final driver transaction has returned its real receipt.
+            ::KillTimer(hwnd_, kCloseTimerId);
+            ::DestroyWindow(hwnd_);
+            return;
+        }
+        ::EnableWindow(closeRetryButton_, TRUE);
+        setClosingStatus(L"驱动停止失败；可重试或取消退出。 / Driver stop failed; Retry or Cancel.");
+        return;
+    }
+    if (::GetTickCount64() - closeStartedMs_ >= kCloseBudgetMs) {
+        ::EnableWindow(closeRetryButton_, TRUE);
+        setClosingStatus(closeCancelRequested_
+            ? L"正在等待已接受操作完成后取消退出… / Cancel will finish after accepted work…"
+            : L"清理仍在进行；可重试或取消退出。 / Cleanup is still pending; Retry or Cancel.");
+    }
+}
+
+void MainWindow::retryClosing() {
+    if (closeFinalizing_) return;
+    if (closePhase_ == ClosePhase::Open) return;
+    closeStartedMs_ = ::GetTickCount64();
+    Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+    if (closePhase_ == ClosePhase::ReleasingDriver && driverExitCleanup_ && driverExitCleanup_->complete()) {
+        stopDriverOnExit();
+    }
+    ::EnableWindow(closeRetryButton_, FALSE);
+    setClosingStatus(L"正在重试清理… / Retrying cleanup…");
+}
+
+void MainWindow::cancelClosing() {
+    if (closeFinalizing_) return;
+    runtimeRelaunch_ = RuntimeRelaunch::None;
+    if (closePhase_ == ClosePhase::Open) return;
+    if (closePhase_ == ClosePhase::ReleasingDriver && driverExitCleanup_ && !driverExitCleanup_->complete()) {
+        if (Ksword::Ui::BackgroundWorkRegistry::global().withdrawUnstarted(driverExitCleanup_)) {
+            // Resource exhaustion prevented admission to a worker; the final
+            // lease has not been released and no transaction is interrupted.
+            closePhase_ = ClosePhase::RetiringPages;
+            driverExitCleanup_.reset();
+            restoreAfterCancelledClose();
+            return;
+        }
+        closeCancelRequested_ = true;
+        setClosingStatus(L"驱动操作已接受；完成后取消退出。 / Accepted driver work will finish before Cancel.");
+        return;
+    }
+    restoreAfterCancelledClose();
+}
+
+void MainWindow::restoreAfterCancelledClose() {
+    closeFinalizing_ = false;
+    runtimeRelaunch_ = RuntimeRelaunch::None;
+    const bool releasedDriver = closePhase_ == ClosePhase::ReleasingDriver;
+    ::KillTimer(hwnd_, kCloseTimerId);
+    closePhase_ = ClosePhase::Open;
+    closeCancelRequested_ = false;
+    Ksword::Ui::BackgroundWorkRegistry::global().cancelClosing();
+    // Session owners reopen local controls only after their STOP completes.
+    // This message never requests START or changes a canonical result.
+    notifyPageRetirement(Ksword::Ui::kCancelNativeRetirementMessage);
+    for (const HWND target : disabledForClosing_) {
+        if (::IsWindow(target)) ::EnableWindow(target, TRUE);
+    }
+    disabledForClosing_.clear();
+    ::ShowWindow(closeRetryButton_, SW_HIDE);
+    ::ShowWindow(closeCancelButton_, SW_HIDE);
+    ::SetWindowTextW(hwnd_, L"KswordARKLight");
+    if (statusText_) ::SetWindowTextW(statusText_, L"已取消退出；采集不会自动恢复。 / Exit canceled; capture will not restart automatically.");
+    closingStatus_.clear();
+    layout();
+    if (releasedDriver) {
+        // The previous final lease has been released. Register a fresh one on
+        // the background query before admitting later driver toggle actions.
+        driverLifetime_ = std::make_shared<DriverControlLifetime>();
+        driverExitCleanup_.reset();
+        beginDriverTask(false);
+    }
 }
 
 void MainWindow::paint(HDC dc) {

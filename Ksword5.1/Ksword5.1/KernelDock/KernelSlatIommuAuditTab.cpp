@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelSlatIommuAuditTab.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -189,11 +190,8 @@ void KernelSlatIommuAuditTab::initializeUi()
     m_probeTable->horizontalHeader()->setSectionResizeMode(
         QHeaderView::ResizeToContents);
     m_probeTable->horizontalHeader()->setStretchLastSection(true);
-    evidenceTabs->addTab(
-        m_probeTable,
-        kernelText(
-            "kernel.slat_iommu.probe.tab",
-            QStringLiteral("EPT/NPT 交叉视图")));
+    ksword::kernel_navigation::addTab(evidenceTabs, m_probeTable,
+        "slat.probes");
 
     m_iommuTable = new ks::ui::VisibleTableWidget(evidenceTabs);
     // 固件表与接口能力摘要变化少，保留紧凑复制导出入口。
@@ -216,11 +214,8 @@ void KernelSlatIommuAuditTab::initializeUi()
     m_iommuTable->horizontalHeader()->setSectionResizeMode(
         QHeaderView::ResizeToContents);
     m_iommuTable->horizontalHeader()->setStretchLastSection(true);
-    evidenceTabs->addTab(
-        m_iommuTable,
-        kernelText(
-            "kernel.slat_iommu.iommu.tab",
-            QStringLiteral("IOMMU / DMAR / IVRS")));
+    ksword::kernel_navigation::addTab(evidenceTabs, m_iommuTable,
+        "slat.iommu");
 
     m_detailEdit = new ks::ui::StructuredFieldView(splitter);
 

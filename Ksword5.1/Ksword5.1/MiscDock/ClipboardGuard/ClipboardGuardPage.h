@@ -15,9 +15,13 @@
 #include "../../Framework.h"
 #include "../../MonitorDock/WinApiMonitorProtocol.h"
 #include "../../ArkDriverClient/ArkDriverClient.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QString>
-#include <QThreadPool>
+#include <QElapsedTimer>
+#include "../../UI/AsyncCleanupRegistry.h"
+#include <condition_variable>
+#include <optional>
 #include <QWidget>
 
 #include <atomic>
@@ -37,6 +41,7 @@ class QLineEdit;
 class QMenu;
 class QPoint;
 class QPushButton;
+class QShowEvent;
 class QTableWidget;
 class QTableWidgetItem;
 class QTimer;
@@ -99,11 +104,90 @@ namespace ks::misc
         quint64 seq = 0;
     };
 
+    // Value-only ingress survives the widget until pipe cleanup finishes.
+    struct ClipboardGuardInbox
+    {
+        static constexpr std::size_t PendingCapacity = 8000;
+        void push(ClipboardGuardEventRow row);
+        std::vector<ClipboardGuardEventRow> take(std::size_t limit);
+        QString processName(quint32 pid);
+        void replaceNames(std::unordered_map<quint32, QString> names);
+        void noteAgentDropped(quint64 session, quint64 count);
+        void finishSessionDrops(quint64 session);
+        struct Counts { std::uint64_t received = 0, dropped = 0, agentDropped = 0; std::size_t pending = 0; };
+        Counts counts() const;
+        mutable std::mutex mutex;
+        std::deque<ClipboardGuardEventRow> pendingRows;
+        std::unordered_map<quint32, QString> processNames;
+        std::unordered_map<quint64, quint64> agentDropped;
+        std::unordered_map<quint32, std::uint64_t> residentAgentCreationTimes;
+        std::uint64_t received = 0;
+        std::uint64_t dropped = 0;
+        std::uint64_t completedAgentDropped = 0;
+    };
+
+    // Dedicated value owner; no QWidget/QPointer/GUI callback crosses its worker.
+    class ClipboardGuardRuntime final : public std::enable_shared_from_this<ClipboardGuardRuntime>
+    {
+    public:
+        explicit ClipboardGuardRuntime(std::shared_ptr<ClipboardGuardInbox> inbox);
+        ~ClipboardGuardRuntime() = default;
+        bool requestScan(std::vector<ClipboardGuardRule> rules, QString agentBasePath);
+        void requestStop();
+        bool hasFinished() const { return m_finished.load(); }
+        bool hasStarted() const { return m_started.load(); }
+        struct Summary { std::size_t ruleCount = 0, protectedCount = 0; int failureCount = 0; QString lastError; bool stopping = false; };
+        Summary summary() const;
+    private:
+        struct Session
+        {
+            ks::winapi_monitor::SessionLease lease;
+            std::uint32_t pid = 0;
+            QString sessionId;
+            std::uint64_t creationTime100ns = 0;
+            quint32 readAction = 0;
+            quint32 writeAction = 0;
+            quint32 enumAction = 0;
+            std::unique_ptr<std::thread> pipeThread;
+            std::atomic_bool stopFlag{ false };
+            std::atomic_bool pipeThreadExited{ false };
+            std::atomic_bool hooksInstalled{ false };
+            std::atomic<std::uintptr_t> pipeHandleValue{ 0 };
+        };
+
+        struct ScanRequest { std::vector<ClipboardGuardRule> rules; QString agentBasePath; };
+        void run();
+        void scan(const ScanRequest& request);
+        static const ClipboardGuardRule* findMatchingRuleIn(const std::vector<ClipboardGuardRule>& rules,
+            const ks::process::ProcessRecord& processRecord);
+        bool ensureProcessProtected(const ks::process::ProcessRecord& processRecord,
+            const ClipboardGuardRule& matchedRule, QString* errorTextOut);
+        bool writeSessionConfigForPid(std::uint32_t pid, const ClipboardGuardRule& rule,
+            const QString& sessionId, QString* errorTextOut) const;
+        static void writeStopFlag(std::uint32_t pid);
+        void teardownSession(std::uint32_t pid);
+        void startPipeReadThreadForPid(std::uint32_t pid, std::uint64_t creationTime,
+            const QString& sessionId, const ClipboardGuardRule& rule, ks::winapi_monitor::SessionLease lease);
+        const std::shared_ptr<ClipboardGuardInbox> m_inbox;
+        std::vector<std::unique_ptr<Session>> m_sessions;
+        mutable std::mutex m_sessionsMutex;
+        mutable std::mutex m_queueMutex;
+        std::condition_variable m_wake;
+        std::optional<ScanRequest> m_pending;
+        Summary m_summary;
+        QString m_agentBasePath;
+        std::atomic_bool m_stopRequested{ false }, m_started{ false }, m_finished{ false };
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> m_cleanupLease;
+    };
+
     class ClipboardGuardPage final : public QWidget
     {
         Q_OBJECT
 
     public:
+        // Searchable body of the unactivated initial page, without creating UI.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
         explicit ClipboardGuardPage(QWidget* parent = nullptr);
         ~ClipboardGuardPage() override;
 
@@ -128,6 +212,9 @@ namespace ks::misc
             ColumnSeq,
             ColumnCount
         };
+
+    protected:
+        void showEvent(QShowEvent* event) override;
 
     private:
         // ---- ClipboardGuardPage.cpp：UI 骨架、A/B 列组 ----
@@ -165,46 +252,13 @@ namespace ks::misc
         void syncRulesToDriver();
         void loadRulesFromDriver();
         void refreshProcessListAndSessionsAsync();
-        // findMatchingRule 作用：
-        // - 按"更具体优先"的顺序找规则：PID/映像名/映像路径三种具体规则任意命中就
-        //   立即返回；都不命中时才退回到 targetKind=ALL 的全局规则（如果启用了）；
-        //   一个进程被具体规则和全局规则同时覆盖时，具体规则的读/写/枚举动作生效，
-        //   不会被全局规则的"仅记录"覆盖掉。
-        const ClipboardGuardRule* findMatchingRule(const ks::process::ProcessRecord& processRecord) const;
-        // findMatchingRuleIn：findMatchingRule 的无状态版本，供后台线程用一份
-        // 规则快照做匹配，不直接触碰只能在 UI 线程读写的 m_rules。
-        static const ClipboardGuardRule* findMatchingRuleIn(
-            const std::vector<ClipboardGuardRule>& rules, const ks::process::ProcessRecord& processRecord);
-        // ensureProcessProtected 现在可能在后台线程（QThreadPool）被调用，因此不再
-        // 直接触碰 m_statusLabel 等 UI 控件；失败信息改为写进 errorTextOut，由调用方
-        // 统一汇总后再排回 UI 线程展示。
-        bool ensureProcessProtected(
-            const ks::process::ProcessRecord& processRecord, const ClipboardGuardRule& matchedRule, QString* errorTextOut = nullptr);
-        void teardownSession(std::uint32_t pid);
-        void startPipeReadThreadForPid(std::uint32_t pid, const QString& sessionId, const ClipboardGuardRule& rule, ks::winapi_monitor::SessionLease lease);
-        void enqueuePendingRow(ClipboardGuardEventRow rowValue);
         void flushPendingRows();
+        void scheduleEventProjection();
+        void trimRetainedEventRows();
         void appendEventRow(const ClipboardGuardEventRow& rowValue);
-        bool writeSessionConfigForPid(std::uint32_t pid, const ClipboardGuardRule& matchedRule,
-            const QString& sessionId, QString* errorTextOut) const;
-        QString resolveProcessNameForPid(quint32 pid);
+        void updateRuntimeStatus();
 
     private:
-        struct Session
-        {
-            ks::winapi_monitor::SessionLease lease;
-            std::uint32_t pid = 0;
-            QString sessionId;
-            quint32 readAction = 0;
-            quint32 writeAction = 0;
-            quint32 enumAction = 0;
-            std::unique_ptr<std::thread> pipeThread;
-            std::atomic_bool stopFlag{ false };
-            std::atomic_bool pipeThreadExited{ false };
-            std::atomic_bool hooksInstalled{ false };
-            std::atomic<std::uintptr_t> pipeHandleValue{ 0 };
-        };
-
         // ---- 布局 ----
         QVBoxLayout* m_rootLayout = nullptr;
         QHBoxLayout* m_toolbarLayout = nullptr;
@@ -226,32 +280,20 @@ namespace ks::misc
         std::vector<ClipboardGuardRule> m_rules;
         quint32 m_nextLocalRuleId = 1;
 
-        // ---- 会话（每个受管进程一个命名管道读取线程）----
-        std::vector<std::unique_ptr<Session>> m_sessions;
-        std::mutex m_sessionsMutex;
-        // 只由串行扫描线程访问；PID 必须连同创建时间核对，防止 PID 复用后
-        // 把新进程误认为仍驻留着上一进程的 Agent。
-        std::unordered_map<quint32, std::uint64_t> m_residentAgentCreationTimes;
-
-        std::deque<ClipboardGuardEventRow> m_pendingRows;
-        std::mutex m_pendingMutex;
-        static constexpr std::size_t kPendingRowCapacity = 8000;
+        const std::shared_ptr<ClipboardGuardInbox> m_inbox;
+        std::shared_ptr<ClipboardGuardRuntime> m_runtime;
+        std::uint64_t m_evictedRows = 0;
+        // One value slice survives budget yields; never capture accepted rows in
+        // a latest-wins UI callback. Anchors belong to this existing table only.
+        std::deque<ClipboardGuardEventRow> m_projectionRows;
+        std::deque<QTableWidgetItem*> m_retainedEventAnchors;
+        bool m_projectionScheduled = false;
+        QElapsedTimer m_statusUpdateClock;
+        static constexpr int kProjectionBudgetMs = 4;
+        static constexpr int kRetainedEventRows = 6000;
         static constexpr std::size_t kUiFlushRowLimit = 160;
         QTimer* m_uiFlushTimer = nullptr;
         QTimer* m_processPollTimer = nullptr;
-        std::atomic_bool m_processScanInFlight{ false };
-        // m_scanThreadPool：本页面私有的线程池，专门跑 refreshProcessListAndSessionsAsync
-        // 的匹配/注入/会话回收任务。用私有池而不是 QThreadPool::globalInstance()，
-        // 是因为析构函数需要 waitForDone() 确保没有任务还在访问 this 才能继续销毁——
-        // 后台任务里会解引用 QPointer<ClipboardGuardPage>，QPointer 本身不是线程安全的，
-        // 必须靠"任务存活期间对象绝不会开始析构"这个前提来保证它读到的值不会被并发修改。
-        // 用全局线程池就无法只等待属于本页面的任务，会等到不相关的任务。
-        QThreadPool m_scanThreadPool;
-
-        // m_processNameCache 在后台扫描线程里整表重建、由 UI 线程（命名管道事件回调）
-        // 读取，两侧不在同一线程，必须靠这把锁保护，否则并发读写 unordered_map 是未定义行为。
-        std::unordered_map<quint32, QString> m_processNameCache;
-        std::mutex m_processNameCacheMutex;
 
         ksword::ark::DriverClient m_driverClient;
     };

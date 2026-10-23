@@ -12,8 +12,14 @@ namespace ksword::memwb
     // 构造：记下暂存总量上限，其余成员取头文件里的默认初值。
     // 入参：maxPendingBytes 暂存总量上限。
     MemoryDiffOverlay::MemoryDiffOverlay(std::uint64_t maxPendingBytes)
-        : maxPendingBytes_(maxPendingBytes)
+        : state_(std::make_shared<State>())
     {
+        state_->maxPendingBytes_ = maxPendingBytes;
+    }
+
+    void MemoryDiffOverlay::Detach()
+    {
+        if (state_.use_count() != 1) state_ = std::make_shared<State>(*state_);
     }
 
     // 判断区间终点是否能用 uint64 表示。
@@ -32,19 +38,19 @@ namespace ksword::memwb
     bool MemoryDiffOverlay::InWindow(std::uint64_t address) const
     {
         // 没有基线时窗口为空。
-        if (!hasBaseline_)
+        if (!state_->hasBaseline_)
         {
             return false;
         }
 
-        // 先比较起点再做减法，避免 address < baseAddress_ 时回绕。
-        if (address < baseAddress_)
+        // 先比较起点再做减法，避免 address < state_->baseAddress_ 时回绕。
+        if (address < state_->baseAddress_)
         {
             return false;
         }
 
         // 偏移小于窗口长度才算在内。
-        return address - baseAddress_ < baseline_.size();
+        return address - state_->baseAddress_ < state_->baseline_.size();
     }
 
     // 载入基线的共用实现。
@@ -70,46 +76,38 @@ namespace ksword::memwb
         }
 
         // 判断是不是"同一目标同一窗口"的重读：身份、基址、长度三者必须全部相同。
-        const bool sameTarget = hasBaseline_
-            && identityKey == identityKey_
-            && baseAddress == baseAddress_
-            && bytes.size() == baseline_.size();
+        const bool sameTarget = state_->hasBaseline_
+            && identityKey == state_->identityKey_
+            && baseAddress == state_->baseAddress_
+            && bytes.size() == state_->baseline_.size();
 
         // 身份串是否变了（首次载入没有旧身份，补丁本来就是空的，不算变）。
-        const bool identityChanged = hasBaseline_ && identityKey != identityKey_;
+        const bool identityChanged = state_->hasBaseline_ && identityKey != state_->identityKey_;
 
-        // 同一目标：被顶替下来的旧基线成为"上次读取"；否则上次读取作废。
+        // A new identity must not first clone a worker's potentially large
+        // old patch map only to throw it away. Build the replacement directly.
+        auto next = std::make_shared<State>();
+        next->maxPendingBytes_ = state_->maxPendingBytes_;
+        next->identityKey_ = identityKey;
+        next->baseAddress_ = baseAddress;
+        next->baseline_ = std::move(bytes);
+        next->validMask_ = std::move(validMask);
+        next->hasBaseline_ = true;
+        next->selfWritten_.assign(next->baseline_.size(), 0);
+        const bool exclusive = state_.use_count() == 1;
         if (sameTarget)
         {
-            previous_ = std::move(baseline_);
-            previousMask_ = std::move(validMask_);
-            hasPrevious_ = true;
+            next->previous_ = exclusive ? std::move(state_->baseline_) : state_->baseline_;
+            next->previousMask_ = exclusive ? std::move(state_->validMask_) : state_->validMask_;
+            next->hasPrevious_ = true;
         }
-        else
+        if (keepPatches && !identityChanged)
         {
-            previous_.clear();
-            previousMask_.clear();
-            hasPrevious_ = false;
+            next->patches_ = exclusive ? std::move(state_->patches_) : state_->patches_;
+            next->pendingBytes_ = state_->pendingBytes_;
         }
-
-        // 装入新基线。
-        identityKey_ = identityKey;
-        baseAddress_ = baseAddress;
-        baseline_ = std::move(bytes);
-        validMask_ = std::move(validMask);
-        hasBaseline_ = true;
-
-        // "自己写入"标记只对紧随其后的那一次读取有意义，新读取一到就清掉，
-        // 之后目标上再出现的差异才是真正的外部变化。
-        selfWritten_.assign(baseline_.size(), 0);
-
-        // 新目标 / 新快照语义要连补丁一起清空；重读语义保留补丁。
-        // 例外：重读时身份串变了（换进程、换通道、重新附加）就已经不是同一目标，
-        // 补丁是按绝对地址存的，留着会被写进另一个目标，所以同样清空。
-        if (!keepPatches || identityChanged)
-        {
-            DiscardAll();
-        }
+        state_.swap(next);
+        ++mutationSerial_;
 
         return BaselineLoadStatus::Ok;
     }
@@ -136,7 +134,7 @@ namespace ksword::memwb
 
     // 找到覆盖 address 的补丁块。
     // 入参：address 绝对地址；offsetInBlock 输出块内偏移，没找到时置 0。
-    // 返回：块的迭代器；没有覆盖它的块时返回 patches_.end()。
+    // 返回：块的迭代器；没有覆盖它的块时返回 state_->patches_.end()。
     std::map<std::uint64_t, DiffBlock>::const_iterator MemoryDiffOverlay::FindPatch(
         std::uint64_t address,
         std::uint64_t& offsetInBlock) const
@@ -144,10 +142,10 @@ namespace ksword::memwb
         offsetInBlock = 0;
 
         // 第一个起点大于 address 的块的前一个，才可能覆盖 address。
-        const auto next = patches_.upper_bound(address);
-        if (next == patches_.begin())
+        const auto next = state_->patches_.upper_bound(address);
+        if (next == state_->patches_.begin())
         {
-            return patches_.end();
+            return state_->patches_.end();
         }
 
         // 候选块起点 <= address，再看 address 有没有落在它的长度之内。
@@ -155,7 +153,7 @@ namespace ksword::memwb
         const std::uint64_t offset = address - candidate->first;
         if (offset >= candidate->second.after.size())
         {
-            return patches_.end();
+            return state_->patches_.end();
         }
 
         offsetInBlock = offset;
@@ -172,20 +170,20 @@ namespace ksword::memwb
         }
 
         // 窗口内但没读到，同样没有。
-        const std::uint64_t index = address - baseAddress_;
-        if (validMask_[static_cast<std::size_t>(index)] == 0)
+        const std::uint64_t index = address - state_->baseAddress_;
+        if (state_->validMask_[static_cast<std::size_t>(index)] == 0)
         {
             return std::nullopt;
         }
 
-        return baseline_[static_cast<std::size_t>(index)];
+        return state_->baseline_[static_cast<std::size_t>(index)];
     }
 
     // 上次读取里的值。
     std::optional<std::uint8_t> MemoryDiffOverlay::PreviousByte(std::uint64_t address) const
     {
         // 没有上次读取，或它与当前基线尺寸不符：不提供任何比对依据。
-        if (!hasPrevious_ || previous_.size() != baseline_.size())
+        if (!state_->hasPrevious_ || state_->previous_.size() != state_->baseline_.size())
         {
             return std::nullopt;
         }
@@ -195,13 +193,13 @@ namespace ksword::memwb
             return std::nullopt;
         }
 
-        const std::uint64_t index = address - baseAddress_;
-        if (previousMask_[static_cast<std::size_t>(index)] == 0)
+        const std::uint64_t index = address - state_->baseAddress_;
+        if (state_->previousMask_[static_cast<std::size_t>(index)] == 0)
         {
             return std::nullopt;
         }
 
-        return previous_[static_cast<std::size_t>(index)];
+        return state_->previous_[static_cast<std::size_t>(index)];
     }
 
     // 单字节变化种类，优先级见头文件。
@@ -212,7 +210,7 @@ namespace ksword::memwb
         // 1. Pending：有补丁且补丁值不同于基线；基线未知时当作不同。
         std::uint64_t offsetInBlock = 0;
         const auto patch = FindPatch(address, offsetInBlock);
-        if (patch != patches_.end())
+        if (patch != state_->patches_.end())
         {
             const std::uint8_t staged = patch->second.after[static_cast<std::size_t>(offsetInBlock)];
             if (!current.has_value() || *current != staged)
@@ -222,7 +220,7 @@ namespace ksword::memwb
         }
 
         // 2. SelfWritten：自己刚写入的，优先于外部变化，否则每次写入都会被报成篡改。
-        if (InWindow(address) && selfWritten_[static_cast<std::size_t>(address - baseAddress_)] != 0)
+        if (InWindow(address) && state_->selfWritten_[static_cast<std::size_t>(address - state_->baseAddress_)] != 0)
         {
             return ByteChangeKind::SelfWritten;
         }
@@ -248,7 +246,7 @@ namespace ksword::memwb
     {
         std::uint64_t offsetInBlock = 0;
         const auto patch = FindPatch(address, offsetInBlock);
-        if (patch != patches_.end())
+        if (patch != state_->patches_.end())
         {
             return patch->second.after[static_cast<std::size_t>(offsetInBlock)];
         }
@@ -281,34 +279,34 @@ namespace ksword::memwb
         const std::uint64_t endExclusive = address + length;
 
         // 第一层：基线与请求区间的交集。没读到的字节保持无效，不拿缓冲里的垃圾值充数。
-        if (hasBaseline_)
+        if (state_->hasBaseline_)
         {
-            const std::uint64_t windowEnd = baseAddress_ + baseline_.size();
-            const std::uint64_t lo = address > baseAddress_ ? address : baseAddress_;
+            const std::uint64_t windowEnd = state_->baseAddress_ + state_->baseline_.size();
+            const std::uint64_t lo = address > state_->baseAddress_ ? address : state_->baseAddress_;
             const std::uint64_t hi = endExclusive < windowEnd ? endExclusive : windowEnd;
             for (std::uint64_t at = lo; at < hi; ++at)
             {
-                const std::size_t source = static_cast<std::size_t>(at - baseAddress_);
-                if (validMask_[source] == 0)
+                const std::size_t source = static_cast<std::size_t>(at - state_->baseAddress_);
+                if (state_->validMask_[source] == 0)
                 {
                     continue;
                 }
 
                 const std::size_t target = static_cast<std::size_t>(at - address);
-                result.bytes[target] = baseline_[source];
+                result.bytes[target] = state_->baseline_[source];
                 result.validMask[target] = 1;
             }
         }
 
         // 第二层：补丁覆盖在上面，覆盖处视为有效。
         // 从可能压住 address 的那个块开始，向后走到起点不小于区间终点为止。
-        auto patch = patches_.upper_bound(address);
-        if (patch != patches_.begin())
+        auto patch = state_->patches_.upper_bound(address);
+        if (patch != state_->patches_.begin())
         {
             --patch;
         }
 
-        for (; patch != patches_.end() && patch->first < endExclusive; ++patch)
+        for (; patch != state_->patches_.end() && patch->first < endExclusive; ++patch)
         {
             // 第一个候选块可能整个在请求区间之前：此时 hi <= lo，下面的循环一次也不会执行。
             const DiffBlock& block = patch->second;
@@ -330,8 +328,8 @@ namespace ksword::memwb
     std::vector<DiffBlock> MemoryDiffOverlay::DiffBlocks() const
     {
         std::vector<DiffBlock> blocks;
-        blocks.reserve(patches_.size());
-        for (const auto& entry : patches_)
+        blocks.reserve(state_->patches_.size());
+        for (const auto& entry : state_->patches_)
         {
             blocks.push_back(entry.second);
         }
@@ -342,48 +340,48 @@ namespace ksword::memwb
     // 是否存在暂存补丁。
     bool MemoryDiffOverlay::HasPendingPatches() const
     {
-        return !patches_.empty();
+        return !state_->patches_.empty();
     }
 
     // 暂存补丁总字节数。
     std::uint64_t MemoryDiffOverlay::PendingByteCount() const
     {
-        return pendingBytes_;
+        return state_->pendingBytes_;
     }
 
     // 是否已载入过基线。
     bool MemoryDiffOverlay::HasBaseline() const
     {
-        return hasBaseline_;
+        return state_->hasBaseline_;
     }
 
     // 是否存在上次读取。
     bool MemoryDiffOverlay::HasPreviousRead() const
     {
-        return hasPrevious_;
+        return state_->hasPrevious_;
     }
 
     // 当前基线身份串。
     const std::string& MemoryDiffOverlay::IdentityKey() const
     {
-        return identityKey_;
+        return state_->identityKey_;
     }
 
     // 当前窗口起始地址。
     std::uint64_t MemoryDiffOverlay::BaseAddress() const
     {
-        return baseAddress_;
+        return state_->baseAddress_;
     }
 
     // 当前窗口字节数。
     std::uint64_t MemoryDiffOverlay::BaselineSize() const
     {
-        return static_cast<std::uint64_t>(baseline_.size());
+        return static_cast<std::uint64_t>(state_->baseline_.size());
     }
 
     // 本实例的暂存总量上限。
     std::uint64_t MemoryDiffOverlay::MaxPendingBytes() const
     {
-        return maxPendingBytes_;
+        return state_->maxPendingBytes_;
     }
 }

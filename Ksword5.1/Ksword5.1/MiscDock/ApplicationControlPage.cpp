@@ -7,7 +7,10 @@
 #include "../UI/ToolbarMetrics.h"
 #include "ApplicationControlPage.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/BudgetedPlainTextTransfer.h"
 
 #include "../UI/CodeEditorWidget.h"
 
@@ -17,6 +20,12 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QShowEvent>
+#include <QEvent>
+#include <QTimer>
+#include "../Internationalization/LanguageManager.h"
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -43,6 +52,7 @@
 #include <QMetaObject>
 #include <QMetaType>
 #include <QProcess>
+#include <QProgressDialog>
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -57,11 +67,160 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <functional>
+#include <memory>
 #include <thread>
 #include <utility>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kApplicationControlPageNavigation[] = {
+    {"applocker", "", "", "AppLocker", true},
+    {"wdac", "", "", "WDAC / Code Integrity", false},
+    {"defender", "", "", "Defender / ASR", false},
+    {"platform", "", "", "平台安全", false},
+    {"events", "", "", "事件日志", false},
+    {"file", "", "", "文件诊断", false}
+};
+}
+
 namespace
 {
+    // The model retains an immutable typed snapshot, never one item per cell.
+    // EditRole and UserRole remain canonical so translated text cannot become a mutation key.
+    class ControlValueTableModel final : public QAbstractTableModel
+    {
+    public:
+        ControlValueTableModel(QStringList headers, ks::i18n::SourceTextSnapshot translator, QObject* parent)
+            : QAbstractTableModel(parent), m_headers(std::move(headers)), m_translator(std::move(translator))
+        {
+            setProperty("ks_i18n_preserve_model_data", true);
+        }
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_count; }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_headers.size()); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && section >= 0 && section < m_headers.size() && role == Qt::DisplayRole)
+                return m_translator.sourceText(m_headers.at(section));
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() >= m_count || index.column() >= m_headers.size() || !m_cell)
+                return {};
+            if (role == Qt::UserRole && index.column() == 0 && m_identity) return m_identity(index.row());
+            if (role == Qt::EditRole) return m_cell(index.row(), index.column());
+            if (role == Qt::DisplayRole) return m_translator.sourceText(m_cell(index.row(), index.column()));
+            return {};
+        }
+        void replaceSnapshot(int count, std::function<QString(int,int)> cell,
+            std::function<QVariant(int)> identity = {})
+        {
+            beginResetModel();
+            m_count = count;
+            m_cell = std::move(cell);
+            m_identity = std::move(identity);
+            endResetModel();
+        }
+        void retranslate(ks::i18n::SourceTextSnapshot translator)
+        {
+            m_translator = std::move(translator);
+            if (!m_headers.isEmpty()) emit headerDataChanged(Qt::Horizontal, 0, static_cast<int>(m_headers.size()) - 1);
+            if (m_count > 0) emit dataChanged(index(0,0), index(m_count - 1, columnCount() - 1), {Qt::DisplayRole});
+        }
+    private:
+        QStringList m_headers;
+        ks::i18n::SourceTextSnapshot m_translator;
+        int m_count = 0;
+        std::function<QString(int,int)> m_cell;
+        std::function<QVariant(int)> m_identity;
+    };
+
+    class ControlEventProxy final : public QSortFilterProxyModel
+    {
+    public:
+        using QSortFilterProxyModel::QSortFilterProxyModel;
+        void setVerdict(QString verdict)
+        {
+            if (m_verdict == verdict) return;
+            m_verdict = std::move(verdict);
+            invalidateFilter();
+        }
+    protected:
+        bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+        {
+            return m_verdict.isEmpty() || sourceModel()->index(row, 3, parent).data(Qt::EditRole).toString()
+                .compare(m_verdict, Qt::CaseInsensitive) == 0;
+        }
+    private:
+        QString m_verdict;
+    };
+
+    QSortFilterProxyModel* attachControlModel(QTableView* table, QAbstractItemModel* source, bool eventFilter = false)
+    {
+        QSortFilterProxyModel* proxy = eventFilter
+            ? static_cast<QSortFilterProxyModel*>(new ControlEventProxy(table))
+            : new QSortFilterProxyModel(table);
+        proxy->setDynamicSortFilter(false);
+        proxy->setSourceModel(source);
+        table->setProperty("ks_i18n_preserve_model_data", true);
+        table->setModel(proxy);
+        return proxy;
+    }
+
+    struct WdacXmlReadResult
+    {
+        bool ok = false;
+        QString xml;
+    };
+    struct WdacXmlSaveRequest
+    {
+        QString sourcePath;
+        QStringList xmlParts;
+    };
+    struct WdacXmlSaveResult
+    {
+        enum class Status { Saved, InvalidXml, WriteFailed } status = Status::WriteFailed;
+        QString parserError;
+    };
+
+    WdacXmlReadResult readWdacXmlValue(const QString& sourcePath, const ks::ui::AsyncOperationToken& token)
+    {
+        if (token.isCanceled()) return {};
+        QFile sourceFile(sourcePath);
+        if (!sourceFile.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+        const QByteArray bytes = sourceFile.readAll();
+        if (sourceFile.error() != QFileDevice::NoError || token.isCanceled()) return {};
+        return {true, QString::fromUtf8(bytes)};
+    }
+
+    WdacXmlSaveResult saveWdacXmlValue(const WdacXmlSaveRequest& request)
+    {
+        const QString xml = request.xmlParts.join(QString()).trimmed();
+        QXmlStreamReader reader(xml);
+        QString root;
+        while (!reader.atEnd())
+        {
+            reader.readNext();
+            if (root.isEmpty() && reader.isStartElement()) root = reader.name().toString();
+        }
+        if (reader.hasError() || root.compare(QStringLiteral("SiPolicy"), Qt::CaseInsensitive) != 0)
+            return {WdacXmlSaveResult::Status::InvalidXml, reader.hasError() ? reader.errorString() : QString()};
+
+        const QByteArray bytes = xml.toUtf8(); // Exactly one encoding of the complete validated document.
+        QSaveFile output(request.sourcePath);
+        output.setDirectWriteFallback(false); // Failure must leave the old source intact.
+        if (!output.open(QIODevice::WriteOnly | QIODevice::Text)) return {};
+        qint64 written = 0;
+        while (written < bytes.size())
+        {
+            const qint64 count = output.write(bytes.constData() + written, bytes.size() - written);
+            if (count <= 0) { output.cancelWriting(); return {}; }
+            written += count;
+        }
+        if (!output.commit()) return {};
+        return {WdacXmlSaveResult::Status::Saved, {}};
+    }
+
     // makeReadOnlyItem：
     // - 创建只读表格项；
     // - text 为单元格文本；
@@ -392,6 +551,46 @@ namespace
         return QStringLiteral("事件");
     }
 
+    struct AppLockerXmlReadResult
+    {
+        bool ok = false;
+        QString xml;
+        QString diagnostic;
+    };
+    struct AppLockerXmlPrepared
+    {
+        bool valid = false;
+        QString parserError;
+        QString script;
+    };
+
+    AppLockerXmlPrepared prepareAppLockerXmlValue(const QStringList& original, const ks::ui::AsyncOperationToken& token)
+    {
+        if (token.isCanceled()) return {};
+        const QString xml = original.join(QString()).trimmed();
+        QXmlStreamReader reader(xml);
+        QString root;
+        while (!reader.atEnd())
+        {
+            reader.readNext();
+            if (root.isEmpty() && reader.isStartElement()) root = reader.name().toString();
+            if (token.isCanceled()) return {};
+        }
+        if (reader.hasError() || root.compare(QStringLiteral("AppLockerPolicy"), Qt::CaseInsensitive) != 0)
+            return {false, reader.hasError() ? reader.errorString() : QString(), {}};
+        const QString encoded = QString::fromLatin1(xml.toUtf8().toBase64());
+        if (token.isCanceled()) return {};
+        const QString script = appLockerPowerShellPrelude() + QStringLiteral(
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+            "try {"
+            "  $xml=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%1'));"
+            "  Set-AppLockerPolicy -XmlPolicy $xml -ErrorAction Stop;"
+            "  Write-Output '__OK__'"
+            "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
+            .arg(encoded);
+        return {true, {}, script};
+    }
+
     // collectElementSummary：
     // - 递归收集 XML 元素名称与属性摘要；
     // - reader 必须位于 StartElement 上；
@@ -463,7 +662,7 @@ namespace
     }
 
     // selectTableContextRow：同步右键命中的行，空白区域返回 -1。
-    int selectTableContextRow(QTableWidget* table, const QPoint& localPosition)
+    int selectTableContextRow(QTableView* table, const QPoint& localPosition)
     {
         if (table == nullptr)
         {
@@ -485,14 +684,16 @@ namespace
     }
 
     // tableCellText：安全读取表格单元格的显示文本。
-    QString tableCellText(const QTableWidget* table, const int row, const int column)
+    QString tableCellText(const QTableView* table, const int row, const int column)
     {
         if (table == nullptr || row < 0 || column < 0)
         {
             return QString();
         }
-        const QTableWidgetItem* item = table->item(row, column);
-        return item != nullptr ? item->text().trimmed() : QString();
+        if (table->model() == nullptr) return {};
+        const QModelIndex index = table->model()->index(row, column);
+        const QVariant raw = index.data(Qt::EditRole);
+        return (raw.isValid() ? raw : index.data(Qt::DisplayRole)).toString().trimmed();
     }
 }
 
@@ -501,8 +702,81 @@ namespace ks::misc
     ApplicationControlPage::ApplicationControlPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_appLockerXmlRead = new ks::ui::AsyncOperation(this);
+        m_appLockerXmlPrepare = new ks::ui::AsyncOperation(this);
+        m_wdacXmlRead = new ks::ui::AsyncOperation(this);
+        m_wdacXmlSave = new ks::ui::AsyncOperation(this);
+        const QPointer<ApplicationControlPage> guard(this);
+        m_appLockerXmlRead->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_appLockerReadPending || guard->m_appLockerXmlRead->isBusy()) return;
+            guard->m_appLockerReadPending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("无法读取本地 AppLocker 策略。\n%1").arg(QStringLiteral("未返回额外错误信息。")));
+        });
+        m_appLockerXmlPrepare->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_appLockerPreparePending || guard->m_appLockerXmlPrepare->isBusy()) return;
+            guard->m_appLockerPreparePending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("策略验证未能完成，未提交更改。请重试。"));
+        });
+        m_wdacXmlRead->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_wdacReadPending || guard->m_wdacXmlRead->isBusy()) return;
+            guard->m_wdacReadPending = false;
+            const QString path = guard->m_wdacIoPath;
+            guard->finishWdacLoadingDialog();
+            if (!guard) return;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(path));
+        });
+        m_wdacXmlSave->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_wdacSavePending || guard->m_wdacXmlSave->isBusy()) return;
+            guard->m_wdacSavePending = false;
+            const QString path = guard->m_wdacIoPath;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                QStringLiteral("保存结果未能回传，请重新读取源 XML 核对实际结果：%1").arg(path));
+        });
         initializeUi();
         refreshAsync();
+    }
+
+    ApplicationControlPage::~ApplicationControlPage()
+    {
+        // Closing the GUI gate does not cancel an already accepted atomic save.
+        if (m_appLockerXmlRead) m_appLockerXmlRead->close();
+        if (m_appLockerXmlPrepare) m_appLockerXmlPrepare->close();
+        if (m_wdacXmlRead) m_wdacXmlRead->close();
+        if (m_wdacXmlSave) m_wdacXmlSave->close();
+    }
+
+    void ApplicationControlPage::finishWdacLoadingDialog()
+    {
+        const auto dialog = m_wdacLoadingDialog;
+        m_wdacLoadingDialog.clear();
+        if (!dialog) return;
+        QObject::disconnect(dialog.data(), nullptr, this, nullptr);
+        dialog->close();
+        if (dialog) dialog->deleteLater();
+    }
+
+    void ApplicationControlPage::setPolicyEditorBusy(bool busy)
+    {
+        if (m_policyEditorBusy == busy) return;
+        m_policyEditorBusy = busy;
+        m_pendingMutationCount = std::max(0, m_pendingMutationCount + (busy ? 1 : -1));
+        const bool idle = m_pendingMutationCount == 0;
+        const QPointer<ApplicationControlPage> guard(this);
+        if (m_refreshButton) m_refreshButton->setEnabled(idle && !m_refreshInFlight);
+        if (!guard) return;
+        if (m_exportButton) m_exportButton->setEnabled(idle && !m_refreshInFlight);
+        if (!guard) return;
+        if (m_appLockerEditButton) m_appLockerEditButton->setEnabled(idle && m_appLockerModuleAvailable);
+        if (!guard) return;
+        if (m_wdacEditButton) m_wdacEditButton->setEnabled(idle);
+        if (!guard) return;
+        if (m_defenderEditButton) m_defenderEditButton->setEnabled(idle);
     }
 
     void ApplicationControlPage::initializeUi()
@@ -538,6 +812,17 @@ namespace ks::misc
         ks::ui::StyleJoinedResultTabs(m_tabWidget, m_toolbarWidget);
         m_rootLayout->addWidget(m_tabWidget, 1);
 
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        m_appLockerModel = new ControlValueTableModel({QStringLiteral("规则集合"), QStringLiteral("Action"),
+            QStringLiteral("User"), QStringLiteral("SID"), QStringLiteral("条件类型"),
+            QStringLiteral("路径 / 发布者 / Hash"), QStringLiteral("描述"), QStringLiteral("风险")}, translator, this);
+        m_policyFileModel = new ControlValueTableModel({QStringLiteral("文件路径"), QStringLiteral("存在"),
+            QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("策略数量"), QStringLiteral("说明")}, translator, this);
+        m_eventModel = new ControlValueTableModel({QStringLiteral("时间"), QStringLiteral("事件 ID"),
+            QStringLiteral("级别"), QStringLiteral("判定"), QStringLiteral("消息")}, translator, this);
+        m_defenderModel = new ControlValueTableModel({QStringLiteral("字段"), QStringLiteral("值"), QStringLiteral("说明")}, translator, this);
+        m_platformModel = new ControlValueTableModel({QStringLiteral("字段"), QStringLiteral("值"), QStringLiteral("说明")}, translator, this);
+
         m_appLockerPage = buildAppLockerPage();
         m_wdacPage = buildWdacPage();
         m_defenderPage = buildDefenderPage();
@@ -545,12 +830,12 @@ namespace ks::misc
         m_eventPage = buildEventLogPage();
         m_fileDiagnosisPage = buildFileDiagnosisPage();
 
-        m_tabWidget->addTab(m_appLockerPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("AppLocker"));
-        m_tabWidget->addTab(m_wdacPage, QIcon(QStringLiteral(":/Icon/disk_storage.svg")), QStringLiteral("WDAC / Code Integrity"));
-        m_tabWidget->addTab(m_defenderPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("Defender / ASR"));
-        m_tabWidget->addTab(m_platformPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("平台安全"));
-        m_tabWidget->addTab(m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("事件日志"));
-        m_tabWidget->addTab(m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("文件诊断"));
+        m_navigationTabs.add(kApplicationControlPageNavigation[0], m_tabWidget, m_appLockerPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[1], m_tabWidget, m_wdacPage, QIcon(QStringLiteral(":/Icon/disk_storage.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[2], m_tabWidget, m_defenderPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[3], m_tabWidget, m_platformPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[4], m_tabWidget, m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[5], m_tabWidget, m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
         // 明确登记本页的普通操作，不改策略权限、启用状态与写入确认。
         for (QPushButton* button : { m_refreshButton, m_exportButton, m_appLockerEditButton,
@@ -560,6 +845,7 @@ namespace ks::misc
                 ks::ui::FlatButtonAppearance::Solid);
         }
 
+        connect(m_tabWidget, &QTabWidget::currentChanged, this, [this]() { presentVisibleSnapshot(); });
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
         connect(m_exportButton, &QPushButton::clicked, this, [this]() { exportCurrentTableTsv(); });
     }
@@ -588,7 +874,8 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_appLockerTable = new ks::ui::VisibleTableWidget(page);
+        m_appLockerTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_appLockerTable, m_appLockerModel);
         // 执行规则增删值得保存前后策略，保留快照对比。
         ks::ui::SetTableActionBarMode(m_appLockerTable, ks::ui::TableActionBarMode::Full);
         initializeTable(m_appLockerTable, true);
@@ -598,7 +885,7 @@ namespace ks::misc
         layout->addWidget(actionRow, 0);
         layout->addWidget(m_appLockerTable, 1);
         connect(m_appLockerEditButton, &QPushButton::clicked, this, [this]() { editAppLockerPolicy(); });
-        connect(m_appLockerTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_appLockerTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showAppLockerContextMenu(localPosition);
         });
         return page;
@@ -626,13 +913,15 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_policyFileTable = new ks::ui::VisibleTableWidget(page);
+        m_policyFileTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_policyFileTable, m_policyFileModel);
         // 活动 WDAC 策略列表需要对比部署前后状态。
         ks::ui::SetTableActionBarMode(m_policyFileTable, ks::ui::TableActionBarMode::Full);
         initializeTable(m_policyFileTable, true);
         m_policyFileTable->setContextMenuPolicy(Qt::CustomContextMenu);
 
-        m_codeIntegrityEventTable = new ks::ui::VisibleTableWidget(page);
+        m_codeIntegrityEventTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_codeIntegrityEventTable, m_eventModel);
         // WDAC 页的附属事件流水保留复制导出，避免两条完整操作栏。
         ks::ui::SetTableActionBarMode(m_codeIntegrityEventTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_codeIntegrityEventTable, true);
@@ -642,7 +931,7 @@ namespace ks::misc
         layout->addWidget(m_policyFileTable, 1);
         layout->addWidget(m_codeIntegrityEventTable, 1);
         connect(m_wdacEditButton, &QPushButton::clicked, this, [this]() { editWdacPolicy(); });
-        connect(m_policyFileTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_policyFileTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showWdacContextMenu(localPosition);
         });
         return page;
@@ -670,7 +959,8 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_defenderTable = new ks::ui::VisibleTableWidget(page);
+        m_defenderTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_defenderTable, m_defenderModel);
         // Defender 配置摘要已有编辑入口，收拢快照动作。
         ks::ui::SetTableActionBarMode(m_defenderTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_defenderTable, true);
@@ -680,7 +970,7 @@ namespace ks::misc
         layout->addWidget(actionRow, 0);
         layout->addWidget(m_defenderTable, 1);
         connect(m_defenderEditButton, &QPushButton::clicked, this, [this]() { editDefenderSetting(); });
-        connect(m_defenderTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_defenderTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showDefenderContextMenu(localPosition);
         });
         return page;
@@ -699,7 +989,8 @@ namespace ks::misc
         m_platformSummary->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("CI / VBS / Hyper-V / Driver Trust / BAM 摘要会在后台刷新后显示。")));
         m_platformSummary->setMaximumHeight(160);
 
-        m_platformTable = new ks::ui::VisibleTableWidget(page);
+        m_platformTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_platformTable, m_platformModel);
         // 平台安全键值摘要已有统一导出，不需要独立快照栏。
         ks::ui::SetTableActionBarMode(m_platformTable, ks::ui::TableActionBarMode::None);
         initializeTable(m_platformTable, true);
@@ -733,6 +1024,8 @@ namespace ks::misc
             QStringLiteral("事件"),
             QStringLiteral("读取失败")
             });
+        for (int item = 0; item < m_eventVerdictFilterCombo->count(); ++item)
+            m_eventVerdictFilterCombo->setItemData(item, item == 0 ? QString() : m_eventVerdictFilterCombo->itemText(item));
         m_eventVerdictFilterCombo->setToolTip(QStringLiteral("按 Code Integrity 判定分类筛选事件。"));
 
         m_eventLimitCombo = new QComboBox(filterRow);
@@ -758,7 +1051,8 @@ namespace ks::misc
         m_eventSummary->setDocument(m_eventSummaryDocument);
         m_eventSummary->setMaximumHeight(150);
 
-        m_eventTable = new ks::ui::VisibleTableWidget(page);
+        m_eventTable = new ks::ui::TableActionTableView(page);
+        m_eventProxy = attachControlModel(m_eventTable, m_eventModel, true);
         // 事件本身是时间序列，保留复制导出并收拢重复快照。
         ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_eventTable, true);
@@ -769,7 +1063,7 @@ namespace ks::misc
         layout->addWidget(m_eventSummary, 0);
         layout->addWidget(m_eventTable, 1);
 
-        connect(m_eventVerdictFilterCombo, &QComboBox::currentTextChanged, this, [this]() {
+        connect(m_eventVerdictFilterCombo, &QComboBox::currentIndexChanged, this, [this]() {
             rebuildEventTable();
         });
         connect(m_eventLimitCombo, &QComboBox::currentTextChanged, this, [this]() {
@@ -834,7 +1128,7 @@ namespace ks::misc
         return page;
     }
 
-    void ApplicationControlPage::initializeTable(QTableWidget* table, const bool stretchLastColumn)
+    void ApplicationControlPage::initializeTable(QTableView* table, const bool stretchLastColumn)
     {
         if (table == nullptr)
         {
@@ -854,7 +1148,7 @@ namespace ks::misc
 
     }
 
-    QTableWidget* ApplicationControlPage::currentExportTable() const
+    QTableView* ApplicationControlPage::currentExportTable() const
     {
         if (m_tabWidget == nullptr)
         {
@@ -1031,136 +1325,181 @@ namespace ks::misc
 
     void ApplicationControlPage::editAppLockerPolicy()
     {
-        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerEditButton == nullptr)
-        {
-            return;
-        }
-
-        m_appLockerEditButton->setEnabled(false);
-        const QPointer<ApplicationControlPage> guardThis(this);
-        std::thread([guardThis]() {
-            const QString queryScript = appLockerPowerShellPrelude() + QStringLiteral(
-                "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
-                "try {"
-                "  $xml=[string](Get-AppLockerPolicy -Local -Xml -ErrorAction Stop);"
-                "  if([string]::IsNullOrWhiteSpace($xml)){Write-Output '__NO_POLICY__'} else {Write-Output '__OK__'; Write-Output $xml}"
-                "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }");
-            QString errorText;
-            const QString outputText = runPowerShellCaptureText(queryScript, 15000, &errorText);
-
-            QMetaObject::invokeMethod(qApp, [guardThis, outputText, errorText]() {
-                if (guardThis.isNull())
-                {
-                    return;
-                }
-                if (guardThis->m_appLockerEditButton != nullptr)
-                {
-                    guardThis->m_appLockerEditButton->setEnabled(
-                        guardThis->m_appLockerModuleAvailable && guardThis->m_pendingMutationCount == 0);
-                }
-
-                QString policyXml;
-                if (outputText.contains(QStringLiteral("__OK__")))
-                {
-                    policyXml = outputText.section(QChar::LineFeed, 1);
-                }
-                else if (outputText.contains(QStringLiteral("__NO_POLICY__")))
-                {
-                    policyXml = QStringLiteral("<AppLockerPolicy Version=\"1\">\n</AppLockerPolicy>\n");
-                }
-                else
-                {
-                    QString diagnosticText = outputText;
-                    diagnosticText.remove(QStringLiteral("__ERROR__"));
-                    diagnosticText = diagnosticText.trimmed();
-                    if (!errorText.trimmed().isEmpty())
-                    {
-                        diagnosticText = diagnosticText.isEmpty()
-                            ? errorText.trimmed()
-                            : QStringLiteral("%1\n%2").arg(diagnosticText, errorText.trimmed());
-                    }
-                    QMessageBox::warning(
-                        guardThis.data(),
-                        QStringLiteral("编辑 AppLocker 策略"),
-                        QStringLiteral("无法读取本地 AppLocker 策略。\n%1")
-                            .arg(diagnosticText.isEmpty() ? QStringLiteral("未返回额外错误信息。") : diagnosticText));
-                    return;
-                }
-
-                QDialog dialog(guardThis.data());
-                dialog.setWindowTitle(QStringLiteral("编辑 AppLocker 策略 XML"));
-                ks::ui::StyleSecondaryWindow(&dialog);
-                dialog.resize(960, 680);
-                auto* layout = new QVBoxLayout(&dialog);
-                ks::ui::StyleSecondaryContentLayout(layout);
-                auto* hintLabel = new QLabel(
-                    QStringLiteral("仅编辑本地策略。保存将以 Replace 模式写回并覆盖当前本地 AppLocker 策略，组策略下发的规则仍由组策略管理。"),
-                    &dialog);
-                hintLabel->setWordWrap(true);
-                hintLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-                auto* editor = new CodeTextEdit(&dialog);
-                editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-                editor->setPlainText(policyXml);
-                editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-                auto* buttonBox = new QDialogButtonBox(&dialog);
-                QPushButton* applyButton = buttonBox->addButton(QStringLiteral("保存并应用"), QDialogButtonBox::AcceptRole);
-                buttonBox->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
-                layout->addWidget(hintLabel);
-                layout->addWidget(editor, 1);
-                // XML 编辑保持独立滚动，保存操作放在带细分界线的固定底栏。
-                ks::ui::StyleSecondaryButtonBox(buttonBox);
-                ks::ui::StyleSecondaryFooter(buttonBox);
-                layout->addWidget(buttonBox);
-                QObject::connect(applyButton, &QPushButton::clicked, &dialog, &QDialog::accept);
-                QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-                if (dialog.exec() != QDialog::Accepted)
-                {
-                    return;
-                }
-
-                const QString editedXml = editor->toPlainText().trimmed();
-                QXmlStreamReader xmlReader(editedXml);
-                QString rootElementName;
-                while (!xmlReader.atEnd())
-                {
-                    xmlReader.readNext();
-                    if (rootElementName.isEmpty() && xmlReader.isStartElement())
-                    {
-                        rootElementName = xmlReader.name().toString();
-                    }
-                }
-                if (xmlReader.hasError() || rootElementName.compare(QStringLiteral("AppLockerPolicy"), Qt::CaseInsensitive) != 0)
-                {
-                    QMessageBox::warning(
-                        guardThis.data(),
-                        QStringLiteral("编辑 AppLocker 策略"),
-                        QStringLiteral("策略 XML 无效。根元素必须为 AppLockerPolicy。%1")
-                            .arg(xmlReader.hasError() ? QStringLiteral("\n%1").arg(xmlReader.errorString()) : QString()));
-                    return;
-                }
-
-                if (QMessageBox::warning(
-                    guardThis.data(),
-                    QStringLiteral("确认应用 AppLocker 策略"),
-                    QStringLiteral("将覆盖当前本地 AppLocker 策略。错误策略可能导致应用或脚本无法启动。是否继续？"),
-                    QMessageBox::Yes | QMessageBox::Cancel,
-                    QMessageBox::Cancel) != QMessageBox::Yes)
-                {
-                    return;
-                }
-
-                const QString encodedXml = QString::fromLatin1(editedXml.toUtf8().toBase64());
-                const QString applyScript = appLockerPowerShellPrelude() + QStringLiteral(
+        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        const QPointer<ApplicationControlPage> guard(this);
+        setPolicyEditorBusy(true);
+        if (!guard) return;
+        m_appLockerReadPending = true;
+        const auto failed = [guard](std::exception_ptr) {
+            if (!guard) return;
+            guard->m_appLockerReadPending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("无法读取本地 AppLocker 策略。\n%1").arg(QStringLiteral("未返回额外错误信息。")));
+        };
+        const auto ticket = m_appLockerXmlRead->submit<int, AppLockerXmlReadResult>(0,
+            [](const int&, const ks::ui::AsyncOperationToken& token) -> AppLockerXmlReadResult {
+                if (token.isCanceled()) return {};
+                const QString queryScript = appLockerPowerShellPrelude() + QStringLiteral(
                     "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
                     "try {"
-                    "  $xml=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%1'));"
-                    "  Set-AppLockerPolicy -XmlPolicy $xml -ErrorAction Stop;"
-                    "  Write-Output '__OK__'"
-                    "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
-                    .arg(encodedXml);
-                guardThis->runPowerShellMutationAsync(QStringLiteral("应用 AppLocker 策略"), applyScript);
-            }, Qt::QueuedConnection);
-        }).detach();
+                    "  $xml=[string](Get-AppLockerPolicy -Local -Xml -ErrorAction Stop);"
+                    "  if([string]::IsNullOrWhiteSpace($xml)){Write-Output '__NO_POLICY__'} else {Write-Output '__OK__'; Write-Output $xml}"
+                    "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }");
+                QString errorText;
+                const QString outputText = runPowerShellCaptureText(queryScript, 15000, &errorText);
+
+
+                if (token.isCanceled()) return {};
+                if (outputText.contains(QStringLiteral("__OK__")))
+                    return {true, outputText.section(QChar::LineFeed, 1), {}};
+                if (outputText.contains(QStringLiteral("__NO_POLICY__")))
+                    return {true, QStringLiteral("<AppLockerPolicy Version=\"1\">\n</AppLockerPolicy>\n"), {}};
+                QString diagnostic = outputText;
+                diagnostic.remove(QStringLiteral("__ERROR__"));
+                diagnostic = diagnostic.trimmed();
+                if (!errorText.trimmed().isEmpty())
+                    diagnostic = diagnostic.isEmpty() ? errorText.trimmed() : QStringLiteral("%1\n%2").arg(diagnostic, errorText.trimmed());
+                return {false, {}, diagnostic};
+            },
+            [guard](const AppLockerXmlReadResult& result, std::uint64_t) {
+                if (!guard) return true;
+                guard->m_appLockerReadPending = false;
+                if (!result.ok)
+                {
+                    guard->setPolicyEditorBusy(false);
+                    if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                        QStringLiteral("无法读取本地 AppLocker 策略。\n%1")
+                            .arg(result.diagnostic.isEmpty() ? QStringLiteral("未返回额外错误信息。") : result.diagnostic));
+                    return true;
+                }
+                guard->showAppLockerPolicyEditor(result.xml);
+                return true;
+            }, failed);
+        if (ticket == 0) failed({});
+    }
+
+    void ApplicationControlPage::showAppLockerPolicyEditor(const QString& originalXml)
+    {
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("编辑 AppLocker 策略 XML"));
+        ks::ui::StyleSecondaryWindow(dialog);
+        dialog->resize(960, 680);
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* hint = new QLabel(QStringLiteral("仅编辑本地策略。保存将以 Replace 模式写回并覆盖当前本地 AppLocker 策略，组策略下发的规则仍由组策略管理。"), dialog);
+        hint->setWordWrap(true);
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* editor = new CodeTextEdit(dialog);
+        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
+        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* transfer = new ks::ui::BudgetedPlainTextTransfer(editor);
+        auto* transferStatus = new QLabel(QStringLiteral("正在加载…"), dialog);
+        auto* buttons = new QDialogButtonBox(dialog);
+        auto* apply = buttons->addButton(QStringLiteral("保存并应用"), QDialogButtonBox::AcceptRole);
+        buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
+        layout->addWidget(hint);
+        layout->addWidget(transferStatus);
+        layout->addWidget(editor, 1);
+        ks::ui::StyleSecondaryButtonBox(buttons);
+        ks::ui::StyleSecondaryFooter(buttons);
+        layout->addWidget(buttons);
+
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        const QPointer<ApplicationControlPage> guard(this);
+        const QPointer<QDialog> safeDialog(dialog);
+        const QPointer<ks::ui::BudgetedPlainTextTransfer> safeTransfer(transfer);
+        const QPointer<QLabel> safeTransferStatus(transferStatus);
+        auto acceptedParts = std::make_shared<QStringList>();
+        auto snapshotReady = std::make_shared<bool>(false);
+        connect(dialog, &QDialog::finished, this, [guard, safeTransfer, acceptedParts, snapshotReady](int code) {
+            if (!guard) return;
+            if (code != QDialog::Accepted || !*snapshotReady)
+            {
+                if (safeTransfer) safeTransfer->cancel();
+                if (!guard) return;
+                guard->setPolicyEditorBusy(false);
+                return;
+            }
+            const QStringList xml = std::move(*acceptedParts); // Worker joins all complete frozen parts.
+            guard->m_appLockerPreparePending = true;
+            const auto failed = [guard](std::exception_ptr) {
+                if (!guard) return;
+                guard->m_appLockerPreparePending = false;
+                guard->setPolicyEditorBusy(false);
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                    QStringLiteral("策略验证未能完成，未提交更改。请重试。"));
+            };
+            const auto ticket = guard->m_appLockerXmlPrepare->submit<QStringList, AppLockerXmlPrepared>(xml, prepareAppLockerXmlValue,
+                [guard](const AppLockerXmlPrepared& result, std::uint64_t) {
+                    if (!guard) return true;
+                    guard->m_appLockerPreparePending = false;
+                    if (!result.valid)
+                    {
+                        guard->setPolicyEditorBusy(false);
+                        if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                            QStringLiteral("策略 XML 无效。根元素必须为 AppLockerPolicy。%1")
+                                .arg(result.parserError.isEmpty() ? QString() : QStringLiteral("\n%1").arg(result.parserError)));
+                        return true;
+                    }
+                    if (QMessageBox::warning(guard, QStringLiteral("确认应用 AppLocker 策略"),
+                        QStringLiteral("将覆盖当前本地 AppLocker 策略。错误策略可能导致应用或脚本无法启动。是否继续？"),
+                        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+                    {
+                        if (guard) guard->setPolicyEditorBusy(false);
+                        return true;
+                    }
+                    if (!guard) return true;
+                    // Existing accepted mutation is not latest-only. The script contains the exact validated XML.
+                    guard->runPowerShellMutationAsync(QStringLiteral("应用 AppLocker 策略"), result.script);
+                    if (guard) guard->setPolicyEditorBusy(false);
+                    return true;
+                }, failed);
+            if (ticket == 0) failed({});
+        });
+
+        const auto setActionsEnabled = [safeDialog, apply](bool enabled) {
+            if (!safeDialog) return;
+            for (QPushButton* button : {apply})
+            {
+                if (!safeDialog) return;
+                button->setEnabled(enabled);
+            }
+        };
+        const auto documentFailed = [guard, safeDialog]() {
+            if (safeDialog) safeDialog->reject();
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("文档处理未完成，未提交更改。请重试。"));
+        };
+        const auto startSnapshot = [safeDialog, safeTransfer, safeTransferStatus, acceptedParts, snapshotReady,
+            setActionsEnabled, documentFailed](bool deploy) {
+            if (!safeDialog || !safeTransfer || safeTransfer->isBusy()) return;
+            Q_UNUSED(deploy);
+            *snapshotReady = false;
+            setActionsEnabled(false);
+            if (!safeDialog || !safeTransfer) return;
+            if (safeTransferStatus) { safeTransferStatus->setText(QStringLiteral("正在处理…")); safeTransferStatus->show(); }
+            if (!safeDialog || !safeTransfer) return;
+            if (!safeTransfer->snapshot([safeDialog, acceptedParts, snapshotReady, documentFailed](bool ok, QStringList parts) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                *acceptedParts = std::move(parts);
+                *snapshotReady = true;
+                safeDialog->accept();
+            })) documentFailed();
+        };
+        connect(apply, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(false); });
+        setActionsEnabled(false);
+        dialog->open();
+        if (!safeDialog || !safeTransfer) return;
+        if (!safeTransfer->load(originalXml,
+            [safeDialog, safeTransferStatus, setActionsEnabled, documentFailed](bool ok, QStringList) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                if (safeTransferStatus) safeTransferStatus->hide();
+                if (safeDialog) setActionsEnabled(true);
+            })) documentFailed();
     }
 
     void ApplicationControlPage::addAppLockerRule()
@@ -1185,12 +1524,11 @@ namespace ks::misc
         QString initialPathText;
         if (!isNewRule)
         {
-            if (row >= m_appLockerTable->rowCount())
+            if (row >= m_appLockerTable->model()->rowCount())
             {
                 return;
             }
-            const QTableWidgetItem* idItem = m_appLockerTable->item(row, 0);
-            ruleId = idItem != nullptr ? idItem->data(Qt::UserRole).toString().trimmed() : QString();
+            ruleId = m_appLockerTable->model()->index(row, 0).data(Qt::UserRole).toString().trimmed();
             if (ruleId.isEmpty())
             {
                 QMessageBox::information(this, QStringLiteral("编辑 AppLocker 规则"), QStringLiteral("当前规则没有可写入的本地规则 ID，可能由组策略下发。"));
@@ -1354,13 +1692,12 @@ namespace ks::misc
 
     void ApplicationControlPage::deleteAppLockerRule()
     {
-        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerTable == nullptr || m_appLockerTable->currentRow() < 0)
+        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerTable == nullptr || m_appLockerTable->currentIndex().row() < 0)
         {
             return;
         }
-        const int row = m_appLockerTable->currentRow();
-        const QTableWidgetItem* idItem = m_appLockerTable->item(row, 0);
-        const QString ruleId = idItem != nullptr ? idItem->data(Qt::UserRole).toString().trimmed() : QString();
+        const int row = m_appLockerTable->currentIndex().row();
+        const QString ruleId = m_appLockerTable->model()->index(row, 0).data(Qt::UserRole).toString().trimmed();
         if (ruleId.isEmpty())
         {
             QMessageBox::information(this, QStringLiteral("删除 AppLocker 规则"), QStringLiteral("当前规则没有可写入的本地规则 ID，可能由组策略下发。"));
@@ -1391,109 +1728,192 @@ namespace ks::misc
 
     void ApplicationControlPage::editWdacPolicy(const QString& requestedSourcePath)
     {
-        if (m_pendingMutationCount > 0)
-        {
-            return;
-        }
-
+        if (m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        const QPointer<ApplicationControlPage> guard(this);
         QString sourcePath = requestedSourcePath;
         if (sourcePath.isEmpty())
-        {
-            sourcePath = QFileDialog::getOpenFileName(
-                this,
-                QStringLiteral("选择 WDAC 源策略 XML"),
-                QString(),
+            sourcePath = QFileDialog::getOpenFileName(this, QStringLiteral("选择 WDAC 源策略 XML"), QString(),
                 QStringLiteral("WDAC 策略 XML (*.xml);;所有文件 (*.*)"));
-        }
-        if (sourcePath.isEmpty())
-        {
-            return;
-        }
-
-        QFile sourceFile(sourcePath);
-        if (!sourceFile.open(QIODevice::ReadOnly | QIODevice::Text))
-        {
-            QMessageBox::warning(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
-            return;
-        }
-        const QString originalXml = QString::fromUtf8(sourceFile.readAll());
-        sourceFile.close();
-
-        QDialog dialog(this);
-        dialog.setWindowTitle(QStringLiteral("编辑 WDAC 源策略 XML"));
-        ks::ui::StyleSecondaryWindow(&dialog);
-        dialog.resize(960, 680);
-        auto* layout = new QVBoxLayout(&dialog);
-        ks::ui::StyleSecondaryContentLayout(layout);
-        auto* hintLabel = new QLabel(
-            QStringLiteral("保存仅更新所选 XML 源文件。选择“保存并部署”会调用 ConfigCI 编译为 CIP，再由 CiTool 更新系统策略。部署前请在测试环境验证策略。"),
-            &dialog);
-        hintLabel->setWordWrap(true);
-        hintLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        auto* editor = new CodeTextEdit(&dialog);
-        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-        editor->setPlainText(originalXml);
-        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-        auto* buttonBox = new QDialogButtonBox(&dialog);
-        QPushButton* saveButton = buttonBox->addButton(QStringLiteral("保存源 XML"), QDialogButtonBox::AcceptRole);
-        QPushButton* deployButton = buttonBox->addButton(QStringLiteral("保存并部署"), QDialogButtonBox::ActionRole);
-        buttonBox->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
-        bool deployRequested = false;
-        layout->addWidget(hintLabel);
-        layout->addWidget(editor, 1);
-        // XML 编辑保持独立滚动，保存操作放在带细分界线的固定底栏。
-        ks::ui::StyleSecondaryButtonBox(buttonBox);
-        ks::ui::StyleSecondaryFooter(buttonBox);
-        layout->addWidget(buttonBox);
-        QObject::connect(saveButton, &QPushButton::clicked, &dialog, &QDialog::accept);
-        QObject::connect(deployButton, &QPushButton::clicked, &dialog, [&dialog, &deployRequested]() {
-            deployRequested = true;
-            dialog.accept();
+        if (!guard || sourcePath.isEmpty() || m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        // Freeze path resolution on the GUI thread before the asynchronous IO.
+        sourcePath = QDir::current().absoluteFilePath(sourcePath);
+        m_wdacIoPath = sourcePath;
+        setPolicyEditorBusy(true);
+        if (!guard) return;
+        m_wdacReadPending = true;
+        auto* progress = new QProgressDialog(QStringLiteral("正在加载…"), QStringLiteral("取消"), 0, 0, this);
+        progress->setWindowTitle(QStringLiteral("编辑 WDAC 策略"));
+        progress->setAutoClose(false);
+        progress->setAutoReset(false);
+        progress->setMinimumDuration(0);
+        progress->setWindowModality(Qt::NonModal);
+        m_wdacLoadingDialog = progress;
+        const QPointer<QProgressDialog> loading(progress);
+        connect(progress, &QProgressDialog::canceled, this, [guard, loading]() {
+            if (!guard || !guard->m_wdacReadPending || guard->m_wdacLoadingDialog != loading) return;
+            guard->m_wdacReadPending = false;
+            guard->m_wdacXmlRead->cancel();
+            if (!guard) return;
+            guard->finishWdacLoadingDialog();
+            if (guard) guard->setPolicyEditorBusy(false);
         });
-        QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        if (dialog.exec() != QDialog::Accepted)
-        {
-            return;
-        }
+        progress->show();
+        if (!guard) return;
+        const auto failed = [guard, sourcePath](std::exception_ptr) {
+            if (!guard) return;
+            guard->m_wdacReadPending = false;
+            guard->finishWdacLoadingDialog();
+            if (!guard) return;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
+        };
+        const auto ticket = m_wdacXmlRead->submit<QString, WdacXmlReadResult>(sourcePath, readWdacXmlValue,
+            [guard, sourcePath](const WdacXmlReadResult& result, std::uint64_t) {
+                if (!guard) return true;
+                guard->m_wdacReadPending = false;
+                guard->finishWdacLoadingDialog();
+                if (!guard) return true;
+                if (!result.ok)
+                {
+                    guard->setPolicyEditorBusy(false);
+                    if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
+                    return true;
+                }
+                guard->showWdacPolicyEditor(sourcePath, result.xml);
+                return true;
+            }, failed);
+        if (ticket == 0) failed({});
+    }
 
-        const QString editedXml = editor->toPlainText().trimmed();
-        QXmlStreamReader xmlReader(editedXml);
-        QString rootElementName;
-        while (!xmlReader.atEnd())
-        {
-            xmlReader.readNext();
-            if (rootElementName.isEmpty() && xmlReader.isStartElement())
+    void ApplicationControlPage::showWdacPolicyEditor(const QString& sourcePath, const QString& originalXml)
+    {
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("编辑 WDAC 源策略 XML"));
+        ks::ui::StyleSecondaryWindow(dialog);
+        dialog->resize(960, 680);
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* hint = new QLabel(QStringLiteral("保存仅更新所选 XML 源文件。选择“保存并部署”会调用 ConfigCI 编译为 CIP，再由 CiTool 更新系统策略。部署前请在测试环境验证策略。"), dialog);
+        hint->setWordWrap(true);
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* editor = new CodeTextEdit(dialog);
+        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
+        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* transfer = new ks::ui::BudgetedPlainTextTransfer(editor);
+        auto* transferStatus = new QLabel(QStringLiteral("正在加载…"), dialog);
+        auto* buttons = new QDialogButtonBox(dialog);
+        auto* save = buttons->addButton(QStringLiteral("保存源 XML"), QDialogButtonBox::AcceptRole);
+        auto* deploy = buttons->addButton(QStringLiteral("保存并部署"), QDialogButtonBox::ActionRole);
+        buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
+        layout->addWidget(hint);
+        layout->addWidget(transferStatus);
+        layout->addWidget(editor, 1);
+        ks::ui::StyleSecondaryButtonBox(buttons);
+        ks::ui::StyleSecondaryFooter(buttons);
+        layout->addWidget(buttons);
+        auto deployRequested = std::make_shared<bool>(false); // GUI callbacks only.
+
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        const QPointer<ApplicationControlPage> guard(this);
+        const QPointer<QDialog> safeDialog(dialog);
+        const QPointer<ks::ui::BudgetedPlainTextTransfer> safeTransfer(transfer);
+        const QPointer<QLabel> safeTransferStatus(transferStatus);
+        auto acceptedParts = std::make_shared<QStringList>();
+        auto snapshotReady = std::make_shared<bool>(false);
+        connect(dialog, &QDialog::finished, this, [guard, safeTransfer, acceptedParts, snapshotReady, deployRequested, sourcePath](int code) {
+            if (!guard) return;
+            if (code != QDialog::Accepted || !*snapshotReady)
             {
-                rootElementName = xmlReader.name().toString();
+                if (safeTransfer) safeTransfer->cancel();
+                if (!guard) return;
+                guard->setPolicyEditorBusy(false);
+                return;
             }
-        }
-        if (xmlReader.hasError() || rootElementName.compare(QStringLiteral("SiPolicy"), Qt::CaseInsensitive) != 0)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("编辑 WDAC 策略"),
-                QStringLiteral("策略 XML 无效。根元素必须为 SiPolicy。%1")
-                    .arg(xmlReader.hasError() ? QStringLiteral("\n%1").arg(xmlReader.errorString()) : QString()));
-            return;
-        }
+            // Only a completed immutable document snapshot can be accepted for atomic save.
+            WdacXmlSaveRequest request{sourcePath, std::move(*acceptedParts)};
+            const bool shouldDeploy = *deployRequested;
+            guard->m_wdacSavePending = true;
+            const auto failed = [guard, sourcePath](std::exception_ptr) {
+                if (!guard) return;
+                guard->m_wdacSavePending = false;
+                guard->setPolicyEditorBusy(false);
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                    QStringLiteral("保存结果未能回传，请重新读取源 XML 核对实际结果：%1").arg(sourcePath));
+            };
+            const auto ticket = guard->m_wdacXmlSave->submitTransaction<WdacXmlSaveRequest, WdacXmlSaveResult>(
+                std::move(request), saveWdacXmlValue,
+                [guard, sourcePath, shouldDeploy](const WdacXmlSaveResult& result, std::uint64_t) {
+                    if (!guard) return true;
+                    guard->m_wdacSavePending = false;
+                    if (result.status == WdacXmlSaveResult::Status::Saved && shouldDeploy)
+                    {
+                        guard->deploySavedWdacPolicy(sourcePath); // Second confirmation only after successful atomic save.
+                        return true;
+                    }
+                    guard->setPolicyEditorBusy(false);
+                    if (!guard) return true;
+                    if (result.status == WdacXmlSaveResult::Status::InvalidXml)
+                        QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                            QStringLiteral("策略 XML 无效。根元素必须为 SiPolicy。%1")
+                                .arg(result.parserError.isEmpty() ? QString() : QStringLiteral("\n%1").arg(result.parserError)));
+                    else if (result.status == WdacXmlSaveResult::Status::WriteFailed)
+                        QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法保存：%1").arg(sourcePath));
+                    else QMessageBox::information(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("已保存源 XML：%1").arg(sourcePath));
+                    return true;
+                }, failed);
+            if (ticket == 0) failed({});
+        });
 
-        QSaveFile outputFile(sourcePath);
-        if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text) ||
-            outputFile.write(editedXml.toUtf8()) != editedXml.toUtf8().size() ||
-            !outputFile.commit())
-        {
-            QMessageBox::warning(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法保存：%1").arg(sourcePath));
-            return;
-        }
+        const auto setActionsEnabled = [safeDialog, save, deploy](bool enabled) {
+            if (!safeDialog) return;
+            for (QPushButton* button : {save, deploy})
+            {
+                if (!safeDialog) return;
+                button->setEnabled(enabled);
+            }
+        };
+        const auto documentFailed = [guard, safeDialog]() {
+            if (safeDialog) safeDialog->reject();
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                QStringLiteral("文档处理未完成，未提交更改。请重试。"));
+        };
+        const auto startSnapshot = [safeDialog, safeTransfer, safeTransferStatus, acceptedParts, snapshotReady,
+            setActionsEnabled, documentFailed, deployRequested](bool deploy) {
+            if (!safeDialog || !safeTransfer || safeTransfer->isBusy()) return;
+            *deployRequested = deploy;
+            *snapshotReady = false;
+            setActionsEnabled(false);
+            if (!safeDialog || !safeTransfer) return;
+            if (safeTransferStatus) { safeTransferStatus->setText(QStringLiteral("正在处理…")); safeTransferStatus->show(); }
+            if (!safeDialog || !safeTransfer) return;
+            if (!safeTransfer->snapshot([safeDialog, acceptedParts, snapshotReady, documentFailed](bool ok, QStringList parts) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                *acceptedParts = std::move(parts);
+                *snapshotReady = true;
+                safeDialog->accept();
+            })) documentFailed();
+        };
+        connect(save, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(false); });
+        connect(deploy, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(true); });
+        setActionsEnabled(false);
+        dialog->open();
+        if (!safeDialog || !safeTransfer) return;
+        if (!safeTransfer->load(originalXml,
+            [safeDialog, safeTransferStatus, setActionsEnabled, documentFailed](bool ok, QStringList) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                if (safeTransferStatus) safeTransferStatus->hide();
+                if (safeDialog) setActionsEnabled(true);
+            })) documentFailed();
+    }
 
-        if (!deployRequested)
-        {
-            QMessageBox::information(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("已保存源 XML：%1").arg(sourcePath));
-            return;
-        }
-
+    void ApplicationControlPage::deploySavedWdacPolicy(const QString& sourcePath)
+    {
         const QFileInfo sourceInfo(sourcePath);
         const QString binaryPath = sourceInfo.dir().absoluteFilePath(sourceInfo.completeBaseName() + QStringLiteral(".cip"));
+        const QPointer<ApplicationControlPage> guard(this);
         if (QMessageBox::warning(
             this,
             QStringLiteral("确认部署 WDAC 策略"),
@@ -1501,8 +1921,10 @@ namespace ks::misc
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes)
         {
+            if (guard) setPolicyEditorBusy(false);
             return;
         }
+        if (!guard) return;
 
         const QString encodedSourcePath = QString::fromLatin1(sourcePath.toUtf8().toBase64());
         const QString encodedBinaryPath = QString::fromLatin1(binaryPath.toUtf8().toBase64());
@@ -1521,6 +1943,7 @@ namespace ks::misc
             "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
             .arg(encodedSourcePath, encodedBinaryPath);
         runPowerShellMutationAsync(QStringLiteral("部署 WDAC 策略"), deployScript);
+        if (guard) setPolicyEditorBusy(false);
     }
 
     void ApplicationControlPage::addWdacPolicy()
@@ -1603,17 +2026,15 @@ namespace ks::misc
 
     void ApplicationControlPage::editDefenderSetting()
     {
-        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentRow() < 0)
+        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentIndex().row() < 0)
         {
             QMessageBox::information(this, QStringLiteral("编辑 Defender 配置"), QStringLiteral("请先在表格中选中要编辑的配置项。"));
             return;
         }
 
-        const int selectedRow = m_defenderTable->currentRow();
-        const QTableWidgetItem* nameItem = m_defenderTable->item(selectedRow, 0);
-        const QTableWidgetItem* valueItem = m_defenderTable->item(selectedRow, 1);
-        const QString settingName = nameItem != nullptr ? nameItem->text().trimmed() : QString();
-        const QString currentValue = valueItem != nullptr ? valueItem->text().trimmed() : QString();
+        const int selectedRow = m_defenderTable->currentIndex().row();
+        const QString settingName = tableCellText(m_defenderTable, selectedRow, 0);
+        const QString currentValue = tableCellText(m_defenderTable, selectedRow, 1);
 
         enum class DefenderSettingKind { ControlledFolderAccess, PuaProtection, NetworkProtection, AsrRule, RealTimeProtection };
         DefenderSettingKind settingKind{};
@@ -1845,12 +2266,12 @@ namespace ks::misc
 
     void ApplicationControlPage::deleteDefenderSetting()
     {
-        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentRow() < 0)
+        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentIndex().row() < 0)
         {
             return;
         }
 
-        const int row = m_defenderTable->currentRow();
+        const int row = m_defenderTable->currentIndex().row();
         const QString settingName = tableCellText(m_defenderTable, row, 0);
         QString mutationScript;
         QString operationName;
@@ -1914,59 +2335,41 @@ namespace ks::misc
         runPowerShellMutationAsync(operationName, mutationScript);
     }
 
-    QString ApplicationControlPage::tableToTsv(QTableWidget* table, const bool selectedOnly) const
+    QString ApplicationControlPage::tableToTsv(QTableView* table, const bool selectedOnly) const
     {
-        if (table == nullptr)
-        {
-            return QString();
-        }
-
-        QStringList lines;
-        QStringList headerValues;
-        for (int column = 0; column < table->columnCount(); ++column)
-        {
-            QTableWidgetItem* headerItem = table->horizontalHeaderItem(column);
-            headerValues.push_back(headerItem != nullptr ? headerItem->text() : QStringLiteral("Column %1").arg(column + 1));
-        }
-        lines.push_back(headerValues.join(QStringLiteral("\t")));
-
+        if (table == nullptr || table->model() == nullptr) return {};
+        const QAbstractItemModel* model = table->model();
+        QStringList lines, headers;
+        for (int column = 0; column < model->columnCount(); ++column)
+            headers.push_back(model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
+        lines.push_back(headers.join(QStringLiteral("\t")));
         QVector<int> rowIndexes;
         if (selectedOnly && table->selectionModel() != nullptr)
         {
-            const QModelIndexList selectedRows = table->selectionModel()->selectedRows();
-            rowIndexes.reserve(selectedRows.size());
-            for (const QModelIndex& index : selectedRows)
-            {
-                rowIndexes.push_back(index.row());
-            }
+            const QModelIndexList rows = table->selectionModel()->selectedRows();
+            rowIndexes.reserve(rows.size());
+            for (const QModelIndex& index : rows) rowIndexes.push_back(index.row());
         }
         else
         {
-            rowIndexes.reserve(table->rowCount());
-            for (int row = 0; row < table->rowCount(); ++row)
-            {
-                rowIndexes.push_back(row);
-            }
+            rowIndexes.reserve(model->rowCount());
+            for (int row = 0; row < model->rowCount(); ++row) rowIndexes.push_back(row);
         }
-
-        for (const int row : rowIndexes)
+        for (int row : rowIndexes)
         {
+            if (ks::ui::IsTableRowExcludedByFilter(table, row)) continue;
             QStringList values;
-            values.reserve(table->columnCount());
-            for (int column = 0; column < table->columnCount(); ++column)
-            {
-                QTableWidgetItem* item = table->item(row, column);
-                values.push_back(item != nullptr ? item->text() : QString());
-            }
+            values.reserve(model->columnCount());
+            for (int column = 0; column < model->columnCount(); ++column)
+                values.push_back(model->index(row, column).data(Qt::DisplayRole).toString());
             lines.push_back(values.join(QStringLiteral("\t")));
         }
-
         return lines.join(QStringLiteral("\n"));
     }
 
     void ApplicationControlPage::exportCurrentTableTsv()
     {
-        QTableWidget* const table = currentExportTable();
+        QTableView* const table = currentExportTable();
         if (table == nullptr)
         {
             QMessageBox::information(this, QStringLiteral("导出 TSV"), QStringLiteral("当前页没有可导出的表格。"));
@@ -2475,6 +2878,13 @@ namespace ks::misc
 
     void ApplicationControlPage::refreshAsync()
     {
+        // Read-only refresh is replaceable state: one running collection and one latest request.
+        if (m_refreshInFlight)
+        {
+            m_refreshPending = true;
+            return;
+        }
+        m_refreshInFlight = true;
         if (m_refreshButton != nullptr)
         {
             m_refreshButton->setEnabled(false);
@@ -3010,222 +3420,155 @@ namespace ks::misc
         {
             return;
         }
-
-        const QList<QTableView*> applicationControlTables = {
-            m_appLockerTable,
-            m_policyFileTable,
-            m_codeIntegrityEventTable,
-            m_defenderTable,
-            m_platformTable,
-            m_eventTable
-        };
-        if (ks::ui::IsTableUiCommitBlockedByContextMenu(applicationControlTables))
+        m_refreshInFlight = false;
+        if (m_refreshPending)
         {
-            const QPointer<ApplicationControlPage> safeThis(this);
-            ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                this,
-                QStringLiteral("application-control-refresh-apply"),
-                applicationControlTables,
-                [safeThis,
-                    refreshGeneration,
-                    statusText = std::move(statusText),
-                    appLockerSummary = std::move(appLockerSummary),
-                    wdacSummary = std::move(wdacSummary),
-                    defenderSummary = std::move(defenderSummary),
-                    platformSummary = std::move(platformSummary),
-                    eventSummary = std::move(eventSummary),
-                    appLockerModuleAvailable,
-                    appLockerRules = std::move(appLockerRules),
-                    policyFiles = std::move(policyFiles),
-                    events = std::move(events),
-                    defenderRows = std::move(defenderRows),
-                    platformRows = std::move(platformRows)]() mutable
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->applyRefreshResult(
-                            refreshGeneration,
-                            std::move(statusText),
-                            std::move(appLockerSummary),
-                            std::move(wdacSummary),
-                            std::move(defenderSummary),
-                            std::move(platformSummary),
-                            std::move(eventSummary),
-                            appLockerModuleAvailable,
-                            std::move(appLockerRules),
-                            std::move(policyFiles),
-                            std::move(events),
-                            std::move(defenderRows),
-                            std::move(platformRows));
-                    }
-                });
+            m_refreshPending = false;
+            refreshAsync();
             return;
         }
 
-        m_appLockerRules = std::move(appLockerRules);
+        auto snapshot = std::make_shared<RefreshSnapshot>();
+        snapshot->appLockerSummary = std::move(appLockerSummary);
+        snapshot->wdacSummary = std::move(wdacSummary);
+        snapshot->defenderSummary = std::move(defenderSummary);
+        snapshot->platformSummary = std::move(platformSummary);
+        snapshot->eventSummary = std::move(eventSummary);
+        snapshot->appLockerRules = std::move(appLockerRules);
+        snapshot->policyFiles = std::move(policyFiles);
+        snapshot->events = std::move(events);
+        snapshot->defenderRows = std::move(defenderRows);
+        snapshot->platformRows = std::move(platformRows);
+        m_appLockerRules = snapshot->appLockerRules; // Implicit shared value for file diagnosis.
+        m_snapshot = std::move(snapshot);
+        m_projectionDirty.fill(true);
         m_appLockerModuleAvailable = appLockerModuleAvailable;
+        const QPointer<ApplicationControlPage> guard(this);
+        if (m_statusLabel) m_statusLabel->setText(QStringLiteral("状态: %1").arg(statusText));
+        if (!guard) return;
+        if (m_appLockerEditButton) m_appLockerEditButton->setEnabled(m_appLockerModuleAvailable && m_pendingMutationCount == 0);
+        if (!guard) return;
+        if (m_refreshButton) m_refreshButton->setEnabled(m_pendingMutationCount == 0);
+        if (!guard) return;
+        if (m_exportButton) m_exportButton->setEnabled(m_pendingMutationCount == 0);
+        if (!guard) return;
+        presentVisibleSnapshot();
+    }
 
-        if (m_statusLabel != nullptr)
-        {
-            m_statusLabel->setText(QStringLiteral("状态: %1").arg(statusText));
-        }
+    void ApplicationControlPage::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        presentVisibleSnapshot();
+    }
 
-        if (m_appLockerSummary != nullptr)
+    void ApplicationControlPage::changeEvent(QEvent* event)
+    {
+        QWidget::changeEvent(event);
+        if (event->type() != QEvent::LanguageChange) return;
+        const QPointer<ApplicationControlPage> guard(this);
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        for (QAbstractTableModel* model : {m_appLockerModel, m_policyFileModel, m_eventModel, m_defenderModel, m_platformModel})
         {
-            m_appLockerSummary->setDocument(appLockerSummary);
+            static_cast<ControlValueTableModel*>(model)->retranslate(translator);
+            if (!guard) return;
         }
-        if (m_appLockerEditButton != nullptr)
-        {
-            m_appLockerEditButton->setEnabled(m_appLockerModuleAvailable && m_pendingMutationCount == 0);
-        }
-        if (m_wdacSummary != nullptr)
-        {
-            m_wdacSummary->setDocument(wdacSummary);
-        }
-        if (m_defenderSummary != nullptr)
-        {
-            m_defenderSummary->setDocument(defenderSummary);
-        }
-        if (m_platformSummary != nullptr)
-        {
-            m_platformSummary->setDocument(platformSummary);
-        }
-        if (m_eventSummary != nullptr)
-        {
-            m_eventSummaryDocument = eventSummary;
-            m_eventSummary->setDocument(eventSummary);
-        }
+        m_projectionDirty[4] = true;
+        presentVisibleSnapshot();
+    }
 
-        QVector<QStringList> appLockerRows;
-        QVector<QVariant> appLockerRuleIds;
-        appLockerRows.reserve(m_appLockerRules.size());
-        appLockerRuleIds.reserve(m_appLockerRules.size());
-        for (const AppLockerRuleRecord& record : m_appLockerRules)
-        {
-            appLockerRows.push_back(QStringList{
-                record.collectionText,
-                record.actionText,
-                record.userText,
-                record.sidText,
-                record.conditionTypeText,
-                record.conditionText,
-                record.descriptionText,
-                record.riskText
-            });
-            appLockerRuleIds.push_back(record.idText);
-        }
-        fillTable(
-            m_appLockerTable,
-            QStringList{
-                QStringLiteral("规则集合"),
-                QStringLiteral("Action"),
-                QStringLiteral("User"),
-                QStringLiteral("SID"),
-                QStringLiteral("条件类型"),
-                QStringLiteral("路径 / 发布者 / Hash"),
-                QStringLiteral("描述"),
-                QStringLiteral("风险")
-            },
-            appLockerRows,
-            appLockerRuleIds);
+    void ApplicationControlPage::presentVisibleSnapshot()
+    {
+        if (!isVisible() || !m_snapshot || !m_tabWidget) return;
+        const int branch = m_tabWidget->currentIndex();
+        if (branch < 0 || branch >= 5 || !m_projectionDirty[branch]) return;
+        if (m_projectionBusy) { m_projectionRequested = true; return; }
+        const QPointer<ApplicationControlPage> guard(this);
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+            QStringLiteral("application-control-visible-snapshot"),
+            {m_appLockerTable, m_policyFileTable, m_codeIntegrityEventTable, m_defenderTable, m_platformTable, m_eventTable},
+            [guard]() { if (guard) guard->presentVisibleSnapshot(); })) return;
 
-        QVector<QStringList> policyRows;
-        policyRows.reserve(policyFiles.size());
-        for (const PolicyFileRecord& record : policyFiles)
+        m_projectionBusy = true;
+        m_projectionRequested = false;
+        m_projectionDirty[branch] = false; // A nested acceptance marks it dirty again.
+        const auto snapshot = m_snapshot; // Pin the exact accepted values through synchronous model/view callbacks.
+        const auto current = [guard, snapshot, branch]() {
+            return guard && guard->m_snapshot == snapshot && guard->m_tabWidget->currentIndex() == branch;
+        };
+        const auto finish = [guard, snapshot, branch]() {
+            if (!guard) return;
+            if (guard->m_snapshot != snapshot || guard->m_tabWidget->currentIndex() != branch)
+                guard->m_projectionDirty[branch] = true;
+            guard->m_projectionBusy = false;
+            if (guard->m_projectionRequested)
+                QTimer::singleShot(0, guard, [guard]() { if (guard) guard->presentVisibleSnapshot(); });
+        };
+        const auto events = [this, snapshot]() {
+            if (m_eventModelSnapshot.lock() == snapshot) return;
+            m_eventModelSnapshot = snapshot;
+            const auto rows = snapshot->events;
+            static_cast<ControlValueTableModel*>(m_eventModel)->replaceSnapshot(static_cast<int>(snapshot->events.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.timeText; case 1: return item.idText;
+                    case 2: return item.levelText; case 3: return item.verdictText; default: return item.messageText; }
+                });
+        };
+        if (branch == 0)
         {
-            policyRows.push_back(QStringList{
-                record.pathText,
-                record.existsText,
-                record.sizeText,
-                record.modifiedText,
-                record.countText,
-                record.detailText
-            });
+            const auto rows = snapshot->appLockerRules;
+            static_cast<ControlValueTableModel*>(m_appLockerModel)->replaceSnapshot(static_cast<int>(snapshot->appLockerRules.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.collectionText; case 1: return item.actionText;
+                    case 2: return item.userText; case 3: return item.sidText; case 4: return item.conditionTypeText;
+                    case 5: return item.conditionText; case 6: return item.descriptionText; default: return item.riskText; }
+                }, [rows](int row) { return QVariant(rows.at(row).idText); });
+            if (!current()) { finish(); return; }
+            m_appLockerSummary->setDocument(snapshot->appLockerSummary);
         }
-        fillTable(
-            m_policyFileTable,
-            QStringList{
-                QStringLiteral("文件路径"),
-                QStringLiteral("存在"),
-                QStringLiteral("大小"),
-                QStringLiteral("修改时间"),
-                QStringLiteral("策略数量"),
-                QStringLiteral("说明")
-            },
-            policyRows);
-
-        m_eventRows = std::move(events);
-
-        QVector<QStringList> eventRows;
-        eventRows.reserve(m_eventRows.size());
-        for (const EventRecord& record : m_eventRows)
+        else if (branch == 1)
         {
-            eventRows.push_back(QStringList{
-                record.timeText,
-                record.idText,
-                record.levelText,
-                record.verdictText,
-                record.messageText
-            });
+            const auto rows = snapshot->policyFiles;
+            static_cast<ControlValueTableModel*>(m_policyFileModel)->replaceSnapshot(static_cast<int>(snapshot->policyFiles.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.pathText; case 1: return item.existsText;
+                    case 2: return item.sizeText; case 3: return item.modifiedText; case 4: return item.countText; default: return item.detailText; }
+                });
+            if (!current()) { finish(); return; }
+            events();
+            if (!current()) { finish(); return; }
+            m_wdacSummary->setDocument(snapshot->wdacSummary);
         }
-        fillTable(
-            m_codeIntegrityEventTable,
-            QStringList{
-                QStringLiteral("时间"),
-                QStringLiteral("事件 ID"),
-                QStringLiteral("级别"),
-                QStringLiteral("判定"),
-                QStringLiteral("消息")
-            },
-            eventRows);
-        rebuildEventTable();
-
-        QVector<QStringList> defenderRowsTable;
-        defenderRowsTable.reserve(defenderRows.size());
-        for (const KeyValueRecord& record : defenderRows)
+        else if (branch == 2 || branch == 3)
         {
-            defenderRowsTable.push_back(QStringList{
-                record.nameText,
-                record.valueText,
-                record.detailText
-            });
+            const bool defender = branch == 2;
+            const auto rows = defender ? snapshot->defenderRows : snapshot->platformRows;
+            static_cast<ControlValueTableModel*>(defender ? m_defenderModel : m_platformModel)->replaceSnapshot(static_cast<int>(rows.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    return column == 0 ? item.nameText : column == 1 ? item.valueText : item.detailText;
+                });
+            if (!current()) { finish(); return; }
+            (defender ? m_defenderSummary : m_platformSummary)->setDocument(defender ? snapshot->defenderSummary : snapshot->platformSummary);
         }
-        fillTable(
-            m_defenderTable,
-            QStringList{
-                QStringLiteral("字段"),
-                QStringLiteral("值"),
-                QStringLiteral("说明")
-            },
-            defenderRowsTable);
-
-        QVector<QStringList> platformRowsTable;
-        platformRowsTable.reserve(platformRows.size());
-        for (const KeyValueRecord& record : platformRows)
+        else
         {
-            platformRowsTable.push_back(QStringList{
-                record.nameText,
-                record.valueText,
-                record.detailText
-            });
+            events();
+            if (!current()) { finish(); return; }
+            const QString verdict = m_eventVerdictFilterCombo->currentData().toString();
+            static_cast<ControlEventProxy*>(m_eventProxy)->setVerdict(verdict);
+            if (!current()) { finish(); return; }
+            auto summary = snapshot->eventSummary;
+            if (!verdict.isEmpty())
+            {
+                summary.field(QStringLiteral("筛选"), m_eventVerdictFilterCombo->currentText());
+                summary.field(QStringLiteral("显示 / 总数"), QStringLiteral("%1 / %2").arg(m_eventProxy->rowCount()).arg(snapshot->events.size()));
+            }
+            m_eventSummary->setDocument(summary);
         }
-        fillTable(
-            m_platformTable,
-            QStringList{
-                QStringLiteral("字段"),
-                QStringLiteral("值"),
-                QStringLiteral("说明")
-            },
-            platformRowsTable);
-
-        if (m_refreshButton != nullptr)
-        {
-            m_refreshButton->setEnabled(true);
-        }
-        if (m_exportButton != nullptr)
-        {
-            m_exportButton->setEnabled(true);
-        }
+        finish();
     }
 
     int ApplicationControlPage::selectedEventLimit() const
@@ -3244,72 +3587,8 @@ namespace ks::misc
 
     void ApplicationControlPage::rebuildEventTable()
     {
-        const QPointer<ApplicationControlPage> safeThis(this);
-        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("application-control-event-filter-rebuild"),
-            {m_eventTable},
-            [safeThis]()
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->rebuildEventTable();
-                }
-            }))
-        {
-            return;
-        }
-
-        const QString selectedVerdictText = m_eventVerdictFilterCombo != nullptr
-            ? m_eventVerdictFilterCombo->currentText()
-            : QStringLiteral("全部分类");
-
-        QVector<QStringList> visibleRows;
-        visibleRows.reserve(m_eventRows.size());
-        for (const EventRecord& record : m_eventRows)
-        {
-            const bool matched =
-                selectedVerdictText == QStringLiteral("全部分类") ||
-                record.verdictText.compare(selectedVerdictText, Qt::CaseInsensitive) == 0;
-            if (!matched)
-            {
-                continue;
-            }
-
-            visibleRows.push_back(QStringList{
-                record.timeText,
-                record.idText,
-                record.levelText,
-                record.verdictText,
-                record.messageText
-            });
-        }
-
-        fillTable(
-            m_eventTable,
-            QStringList{
-                QStringLiteral("时间"),
-                QStringLiteral("事件 ID"),
-                QStringLiteral("级别"),
-                QStringLiteral("判定"),
-                QStringLiteral("消息")
-            },
-            visibleRows);
-
-        if (m_eventSummary != nullptr)
-        {
-            auto baseSummary = m_eventSummaryDocument;
-            if (selectedVerdictText == QStringLiteral("全部分类"))
-            {
-                m_eventSummary->setDocument(baseSummary);
-            }
-            else
-            {
-                baseSummary.field(QStringLiteral("筛选"), selectedVerdictText);
-                baseSummary.field(QStringLiteral("显示 / 总数"), QStringLiteral("%1 / %2").arg(visibleRows.size()).arg(m_eventRows.size()));
-                m_eventSummary->setDocument(baseSummary);
-            }
-        }
+        m_projectionDirty[4] = true;
+        presentVisibleSnapshot();
     }
 
     QString ApplicationControlPage::buildPathMatchHint(
@@ -3551,3 +3830,17 @@ namespace ks::misc
         }
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::ApplicationControlPage::navigationCatalog(const ApplicationControlPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kApplicationControlPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ApplicationControlPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kApplicationControlPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ApplicationControlPage>(QStringLiteral("misc.app_control")); }

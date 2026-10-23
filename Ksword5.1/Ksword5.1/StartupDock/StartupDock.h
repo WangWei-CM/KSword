@@ -9,17 +9,23 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "../ksword/startup/startup.h"
 
 #include <QHash>
 #include <QIcon>
+#include <QPersistentModelIndex>
+#include <QSet>
+#include <QVector>
 #include <QWidget>
 
 #include <atomic>   // std::atomic_bool：后台刷新运行状态。
+#include <array>
 #include <cstddef>  // std::size_t：分批落表进度坐标。
 #include <cstdint>  // std::uint32_t：PID、状态值与标识字段。
 #include <deque>    // std::deque：按枚举完成顺序缓存阶段结果。
 #include <memory>   // std::unique_ptr：后台线程对象托管。
+#include <functional>
 #include <thread>   // std::thread：后台枚举线程。
 #include <vector>   // std::vector：启动项缓存与分页表格重建。
 
@@ -31,6 +37,7 @@ class QLineEdit;
 class QPushButton;
 class QEvent;
 class QShowEvent;
+class QHideEvent;
 class QTabWidget;
 class QTableWidget;
 class QTableWidgetItem;
@@ -39,11 +46,16 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
 
+namespace ks::ui { class AsyncOperation; }
+
 class StartupDock final : public QWidget
 {
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const StartupDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：初始化 UI、连接交互并执行首轮刷新。
     // - 参数 parent：Qt 父控件。
@@ -59,6 +71,7 @@ protected:
     // - 避免主窗口启动阶段被启动项全量扫描阻塞。
     void showEvent(QShowEvent* event) override;
     void changeEvent(QEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 public:
     // StartupCategory：
@@ -124,22 +137,45 @@ public:
     static int toStartupColumn(StartupColumn column);
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     struct TableRebuildTarget
     {
         StartupCategory category = StartupCategory::All;
         QTableWidget* tableWidget = nullptr;
-        std::vector<int> visibleEntryIndexList;
+        std::deque<int> visibleEntryIndexList;
         std::size_t nextRowIndex = 0;
+        int baseRow = 0;
     };
 
     struct RegistryGroupRebuildTarget
     {
         QString locationText;
-        std::vector<int> totalEntryIndexList;
-        std::vector<int> visibleEntryIndexList;
+        std::deque<int> totalEntryIndexList;
+        std::deque<int> visibleEntryIndexList;
         QTreeWidgetItem* groupItem = nullptr;
         std::size_t nextEntryIndex = 0;
         bool initialized = false;
+    };
+
+    struct ProjectionPreparation
+    {
+        enum class Phase { Clear, Catalog, Scan, Groups, Ready };
+        Phase phase = Phase::Clear;
+        std::size_t nextEntry = 0, nextGroup = 0;
+        qsizetype nextCatalog = 0;
+        QStringList catalog;
+        std::deque<QString> locations;
+        QSet<QString> knownLocations;
+        QHash<QString, std::deque<int>> total, visible;
+        bool hideEmptyPaths = false;
+    };
+
+    struct RegistryProjectionGroup
+    {
+        QTreeWidgetItem* item = nullptr;
+        std::size_t total = 0;
+        std::size_t visible = 0;
     };
 
     struct RefreshStageResult
@@ -147,6 +183,8 @@ private:
         std::size_t stageIndex = 0;
         std::size_t stageCount = 0;
         std::vector<StartupEntry> entryList;
+        QVector<StartupEntry> canonicalRows;
+        std::size_t appendedCount = 0;
     };
 
     // ===================== 初始化 =====================
@@ -159,14 +197,18 @@ private:
     // ===================== 枚举与刷新 =====================
     void refreshAllStartupEntries();
     void requestAsyncRefresh(bool forceRefresh);
-    void enqueueRefreshStageResult(
-        std::size_t stageIndex,
-        std::size_t stageCount,
-        std::vector<StartupEntry> entryList);
+    struct StartupRefreshSession;
+    void drainRefreshSession();
+    void enqueueRefreshStageResult(RefreshStageResult stageResult);
     void processNextRefreshStageResult();
     void markBackendEnumerationCompleted();
     void completeRefreshAfterUiCommit();
-    void rebuildAllTables(bool processesRefreshStage = false);
+    void rebuildAllTables(bool processesRefreshStage = false, bool invalidateProjection = true, int appendFrom = -1);
+    void ensureCurrentCategoryProjection();
+    bool isCategoryProjectionReady(StartupCategory category) const;
+    void scheduleFilterRefresh();
+    bool continueProjectionPreparation();
+    void retireProjectionIndices();
     void continueIncrementalTableRebuild();
     void finishIncrementalTableRebuild();
     void initializeRegistryTreeGroup(RegistryGroupRebuildTarget* target);
@@ -189,11 +231,18 @@ private:
     void openSelectedFileProperties(StartupCategory category, QTableWidget* tableWidget);
     void openSelectedRegistryLocation(StartupCategory category, QTableWidget* tableWidget);
     void copySelectedRow(StartupCategory category, QTableWidget* tableWidget);
+    using StartupKnownActionResults = std::vector<std::pair<std::size_t, ks::startup::ActionResult>>;
+    void submitStartupAction(std::vector<ks::startup::StartupEntry> entries, bool remove, bool enabled,
+        const QString& title, const QStringList& targets, std::function<void(const StartupKnownActionResults&)> completion);
+    void reconcileStartupActionReceipt();
+    void reportUnknownStartupAction();
     void setStartupEntryEnabled(StartupEntry entry, bool enabled);
     void setStartupEntriesEnabled(std::vector<StartupEntry> entryList, bool enabled);
     void deleteStartupEntry(StartupEntry entry);
     void deleteStartupEntries(std::vector<StartupEntry> entryList);
     void exportCurrentView();
+    void reconcileExportReceipt();
+    void settleExportReceipt(const QString& errorText);
     void applyFilterAndRefresh();
 
     // ===================== 工具 =====================
@@ -205,6 +254,11 @@ private:
     QTableWidget* currentCategoryTable() const;
     StartupCategory currentCategory() const;
     QIcon resolveEntryIcon(const StartupEntry& entry);
+    static QString entryIconKey(const StartupEntry& entry);
+    void trackEntryIcon(const StartupEntry& entry, const QPersistentModelIndex& index);
+    void reconcileEntryIconBatch();
+    void scheduleEntryIconDrain();
+    void drainEntryIcons();
     void appendEntryRow(QTableWidget* tableWidget, int rowIndex, const StartupEntry& entry, int entryIndex);
     void appendRegistryTreeLeaf(QTreeWidgetItem* parentItem, const StartupEntry& entry, int entryIndex);
 
@@ -246,12 +300,37 @@ private:
     QTableWidget* m_hiddenTable = nullptr;    // m_hiddenTable：隐藏项表。
 
     // ===================== 数据缓存 =====================
-    std::vector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
+    QVector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
+    QString m_exportReceiptPath;
+    std::unique_ptr<ks::ui::AsyncOperation> m_iconOperation;
+    QHash<QString, QString> m_pendingIconPaths;
+    QStringList m_activeIconKeys;
+    QSet<QString> m_requestedIconKeys;
+    QHash<QString, QVector<QPersistentModelIndex>> m_iconWaiters;
+    bool m_iconDrainScheduled = false;
     QHash<QString, QIcon> m_iconCache;        // m_iconCache：路径到图标缓存。
     QTimer* m_refreshTimer = nullptr;         // m_refreshTimer：自动刷新定时器。
+    QTimer* m_filterRefreshTimer = nullptr;
+    bool m_filterRefreshPending = false;
+    bool m_projectionInvalidationPending = false;
+    quint64 m_projectionRevision = 1;
+    std::array<quint64, 9> m_renderedProjectionRevision{};
+    std::array<std::size_t, 9> m_renderedCanonicalCounts{};
+    std::array<int, 9> m_renderedRowCounts{};
+    QHash<QString, RegistryProjectionGroup> m_registryProjectionGroups;
+    QHash<QString, qsizetype> m_registryProjectionGroupOrder;
+    qsizetype m_registryProjectionNextOrder = 0;
+    int m_renderedRegistryGroupCount = 0;
+    bool m_appendRegistryProjection = false;
+    StartupCategory m_projectionBuildCategory = StartupCategory::All;
+    quint64 m_projectionBuildRevision = 0;
+    bool m_projectionBuildActive = false;
     QTimer* m_tableRebuildTimer = nullptr;    // m_tableRebuildTimer：分时落表调度器。
+    std::shared_ptr<ProjectionPreparation> m_projectionPreparation;
     std::vector<TableRebuildTarget> m_tableRebuildTargets; // m_tableRebuildTargets：待分批填充的表格。
-    std::vector<RegistryGroupRebuildTarget> m_registryRebuildTargets; // m_registryRebuildTargets：待分批填充的注册表分组。
+    std::deque<RegistryGroupRebuildTarget> m_registryRebuildTargets; // m_registryRebuildTargets：待分批填充的注册表分组。
     std::size_t m_tableRebuildTargetIndex = 0; // m_tableRebuildTargetIndex：当前表格任务索引。
     std::size_t m_registryRebuildTargetIndex = 0; // m_registryRebuildTargetIndex：当前注册表分组索引。
     std::size_t m_tableRebuildCompletedUnits = 0; // m_tableRebuildCompletedUnits：已完成落表工作量。
@@ -272,7 +351,17 @@ private:
     std::atomic_bool m_refreshQueued{ false };     // m_refreshQueued：刷新过程中是否又收到新请求。
     std::atomic_bool m_startupActionInProgress{ false }; // m_startupActionInProgress：可逆启停动作是否进行中。
     std::atomic_bool m_destroying{ false };        // m_destroying：析构已开始，后台线程不再投递 UI 回调。
-    std::unique_ptr<std::thread> m_refreshThread;  // m_refreshThread：后台枚举线程对象。
-    std::unique_ptr<std::thread> m_actionThread;   // m_actionThread：受管理的启动项修改工作线程。
+    std::unique_ptr<ks::ui::AsyncOperation> m_refreshOperation;
+    std::shared_ptr<StartupRefreshSession> m_refreshSession;
+    QTimer* m_refreshDrainTimer = nullptr;
+    enum class RefreshTerminalState { None, Stopped, Failed };
+    RefreshTerminalState m_refreshTerminalState = RefreshTerminalState::None;
+    bool m_currentRefreshSucceeded = false;
+    QString refreshStatusText(const QString& status) const;
+    QString refreshSummaryText() const;  // m_refreshThread：后台枚举线程对象。
+    std::unique_ptr<ks::ui::AsyncOperation> m_actionOperation;
+    bool m_actionPendingReceipt = false;
+    QString m_actionReceiptTitle;
+    QStringList m_actionReceiptTargets;   // m_actionThread：受管理的启动项修改工作线程。
     int m_progressPid = 0;                         // m_progressPid：启动项枚举进度任务 PID。
 };

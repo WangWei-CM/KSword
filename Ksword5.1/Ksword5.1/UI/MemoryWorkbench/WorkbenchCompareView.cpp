@@ -454,21 +454,39 @@ namespace ks::ui
 
     void WorkbenchCompareView::setBytesProvider(IWorkbenchBytesProvider* provider)
     {
+        m_snapshotRevision.reset();
+        m_snapshotRowsReady = false;
         m_provider = provider;
         rebuildRows();
     }
 
     void WorkbenchCompareView::setWindow(const std::uint64_t address, const std::uint64_t length)
     {
+        m_snapshotRevision.reset();
+        m_snapshotRowsReady = false;
         m_address = address;
         m_length = length;
         m_hasWindow = true;
         rebuildRows();
     }
 
+    void WorkbenchCompareView::setSnapshotWindow(const std::uint64_t address,
+        const std::uint64_t length, const std::uint64_t revision)
+    {
+        if (m_snapshotRowsReady && m_hasWindow && m_address == address
+            && m_length == length && m_snapshotRevision == revision) return;
+        m_address = address;
+        m_length = length;
+        m_hasWindow = true;
+        m_snapshotRevision = revision;
+        rebuildRows();
+    }
+
     // reset：回到"尚未定位"——窗口清零、hasWindow 置假，rebuildRows 显示占位文案并清空模型。
     void WorkbenchCompareView::reset()
     {
+        m_snapshotRevision.reset();
+        m_snapshotRowsReady = false;
         m_address = 0;
         m_length = 0;
         m_hasWindow = false;
@@ -535,6 +553,8 @@ namespace ks::ui
     void WorkbenchCompareView::rebuildRows()
     {
         const QPointer<WorkbenchCompareView> alive(this); // 模型 reset 通知可以关闭所属宿主。
+        const auto generation = ++m_rebuildGeneration;
+        m_snapshotRowsReady = false;
         const Mode activeMode = mode();
         const bool isPendingMode = activeMode == Mode::Pending;
         m_totalChanged = 0;
@@ -542,26 +562,29 @@ namespace ks::ui
         if (m_provider == nullptr || !m_hasWindow)
         {
             m_model->setWindow(WorkbenchByteWindow(), isPendingMode, {});
-            if (!alive) return;
+            if (!alive || generation != m_rebuildGeneration) return;
             m_status->setText(m_provider == nullptr
                 ? QStringLiteral("尚未接入数据源。")
                 : QStringLiteral("尚未定位；跟随十六进制页的当前窗口。"));
+            m_snapshotRowsReady = m_snapshotRevision.has_value();
             return;
         }
         if (activeMode == Mode::ExternalChange && !m_provider->HasPreviousRead())
         {
             // 沿用旧文案（MemoryEditorWidget.cpp:746），一字不改。
             m_model->setWindow(WorkbenchByteWindow(), isPendingMode, {});
-            if (!alive) return;
+            if (!alive || generation != m_rebuildGeneration) return;
             m_status->setText(QStringLiteral("没有上次相同目标和范围的读取可供对比。"));
+            m_snapshotRowsReady = m_snapshotRevision.has_value();
             return;
         }
         // 范围预算与单次读取预算分别检查；超限不能退化成只比较前一部分。
         if (m_length > kMaxWindowBytes || (m_length && m_length - 1 > UINT64_MAX - m_address))
         {
             m_model->setWindow(WorkbenchByteWindow(), isPendingMode, {});
-            if (!alive) return;
+            if (!alive || generation != m_rebuildGeneration) return;
             m_status->setText(ks::i18n::sourceText(QStringLiteral("比较范围无效或超过 64 MiB；未执行比较，请缩小捕获范围。")));
+            m_snapshotRowsReady = m_snapshotRevision.has_value();
             return;
         }
         QVector<CompareGroupSummary> groups;
@@ -602,7 +625,7 @@ namespace ks::ui
             offset += available ? available : requested;
         }
         m_model->setRange(m_provider, m_address, m_length, isPendingMode, groups);
-        if (!alive) return;
+        if (!alive || generation != m_rebuildGeneration) return;
         if (m_compared < m_length)
         {
             m_status->setText(ks::i18n::sourceText(QStringLiteral("比较未完成：已比较 %1/%2 字节；已确认 %3 字节变化，共 %4 行。"))
@@ -613,5 +636,6 @@ namespace ks::ui
             m_status->setText(ks::i18n::sourceText(QStringLiteral("完整比较 %1 字节；%2 字节变化；共 %3 行；悬停可查看逐字节明细。"))
                 .arg(m_length).arg(m_totalChanged).arg(groups.size()));
         }
+        m_snapshotRowsReady = m_snapshotRevision.has_value();
     }
 }

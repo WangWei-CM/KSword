@@ -1,4 +1,6 @@
 #include "StructuredFieldView.h"
+#include "FieldTreeModel.h"
+#include "PageNavigationCatalog.h"
 #include "./PageControlStyle.h"
 #include "./ToolbarMetrics.h"
 #include "../Internationalization/LanguageManager.h"
@@ -32,6 +34,10 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeView>
+#include <QElapsedTimer>
+#include <QThreadPool>
+#include <QCoreApplication>
 #include <QVBoxLayout>
 #include <QtMath>
 
@@ -44,29 +50,17 @@ namespace ks::ui
     {
         enum PropertyRole { KindRole = Qt::UserRole + 176, KeyRole, RowRole, ValueRole };
 
-        // 文档模式只比较规范字段，不触及控件；相同采样快照无需再次通知卡片展开/筛选。
-        bool sameFieldNodes(const QVector<FieldNode>& first, const QVector<FieldNode>& second)
+        void retireFieldProjection(std::shared_ptr<const FieldTreeProjection> snapshot,
+            QHash<QString, bool> expansion = {})
         {
-            if (first.size() != second.size())
-            {
-                return false;
-            }
-            for (qsizetype index = 0; index < first.size(); ++index)
-            {
-                const FieldNode& left = first.at(index); // 当前快照的规范节点。
-                const FieldNode& right = second.at(index); // 调用方提交的对应节点。
-                if (left.kind != right.kind || left.name != right.name || left.value != right.value
-                    || left.translateValue != right.translateValue || left.translateName != right.translateName
-                    || left.initiallyExpanded != right.initiallyExpanded
-                    || left.status != right.status || left.summaryLabel != right.summaryLabel
-                    || left.reportRole != right.reportRole || left.reportedCount != right.reportedCount
-                    || left.preferredScope != right.preferredScope
-                    || !sameFieldNodes(left.children, right.children))
-                {
-                    return false;
-                }
-            }
-            return true;
+            if (snapshot || !expansion.isEmpty())
+                QThreadPool::globalInstance()->start([snapshot = std::move(snapshot), expansion = std::move(expansion)]() mutable
+                    { snapshot.reset(); expansion.clear(); });
+        }
+
+        void retireFieldSelection(std::shared_ptr<FieldTreeSelection> selection)
+        {
+            if (selection) QThreadPool::globalInstance()->start([selection = std::move(selection)]() mutable { selection.reset(); });
         }
 
         bool writeDocumentText(const FieldDocument& document, const QString& filePath, QString* error)
@@ -90,6 +84,30 @@ namespace ks::ui
         QString translated(const QString& source)
         {
             return ks::i18n::sourceText(source);
+        }
+
+        enum class InitialSearchText { Search, Sections, Tree, Copy, Name, Value };
+        struct InitialSearchEntry
+        {
+            const char* source;
+            const char* suffix;
+            bool mnemonic;
+        };
+        constexpr InitialSearchEntry kInitialSearchTexts[] = {
+            {"搜索属性", "_search", false},
+            {"分区", "_style", false},
+            {"树形", "_style", false},
+            {"复制全部", "_copy", true},
+            {"属性", "_tree", false},
+            {"值", "_tree", false}
+        };
+        QString initialSearchText(InitialSearchText text)
+        {
+            return translated(QString::fromUtf8(kInitialSearchTexts[static_cast<int>(text)].source));
+        }
+        QString initialSearchTarget(const QString& prefix, InitialSearchText text)
+        {
+            return prefix + QLatin1String(kInitialSearchTexts[static_cast<int>(text)].suffix);
         }
 
         void walkItems(QTreeWidgetItem* parent,
@@ -134,10 +152,24 @@ namespace ks::ui
             return height;
         }
 
+        class FieldTreeView final : public QTreeView
+        {
+        public:
+            using QTreeView::QTreeView;
+            std::function<void()> clearLogicalSelection;
+        protected:
+            QItemSelectionModel::SelectionFlags selectionCommand(const QModelIndex& index, const QEvent* event) const override
+            {
+                const auto command = QTreeView::selectionCommand(index, event);
+                if (command.testFlag(QItemSelectionModel::Clear) && clearLogicalSelection) clearLogicalSelection();
+                return command;
+            }
+        };
+
         class PropertyDelegate final : public QStyledItemDelegate
         {
         public:
-            explicit PropertyDelegate(QTreeWidget* tree) : QStyledItemDelegate(tree), m_tree(tree) {}
+            explicit PropertyDelegate(QTreeView* tree) : QStyledItemDelegate(tree), m_tree(tree) {}
             bool sections = true;
 
             void paint(QPainter* painter, const QStyleOptionViewItem& supplied,
@@ -219,8 +251,32 @@ namespace ks::ui
             }
 
         private:
-            QTreeWidget* m_tree;
+            QTreeView* m_tree;
         };
+    }
+
+    QVector<PageSearchBodyText> StructuredFieldView::coldSearchBody(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return {};
+        QVector<PageSearchBodyText> body;
+        body.reserve(6);
+        for (int index = 0; index < 6; ++index)
+        {
+            const auto text = static_cast<InitialSearchText>(index);
+            body.append({initialSearchText(text), initialSearchTarget(targetPrefix, text), {},
+                kInitialSearchTexts[index].mnemonic});
+        }
+        return body;
+    }
+
+    void StructuredFieldView::setSearchTargetPrefix(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return;
+        m_search->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Search));
+        if (m_style) m_style->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Sections));
+        m_copy->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Copy));
+        if (m_tree) m_tree->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Name));
+        if (m_valueTree) m_valueTree->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Name));
     }
 
     StructuredFieldView::StructuredFieldView(QWidget* parent) : QWidget(parent)
@@ -311,6 +367,352 @@ namespace ks::ui
         setPresentation(sessionPresentation());
     }
 
+    StructuredFieldView::~StructuredFieldView()
+    {
+        retireFieldSelection(std::move(m_valueSelection));
+        retireFieldProjection({}, std::move(m_valueExpansion));
+        if (m_valueCancel) m_valueCancel->store(true, std::memory_order_relaxed);
+        if (m_valueModel)
+        {
+            auto old = m_valueModel->takeSnapshotForDisposal();
+            if (old) QThreadPool::globalInstance()->start([old = std::move(old)]() mutable { old.reset(); });
+        }
+    }
+
+    void StructuredFieldView::setValueModelProjection()
+    {
+        if (m_documentOnly || m_valueTree) return;
+        m_deferHiddenProjection = true;
+        m_valueSelection = std::make_shared<FieldTreeSelection>();
+        QTreeWidget* obsolete = m_tree;
+        m_tree = nullptr;
+        obsolete->viewport()->removeEventFilter(this);
+        delete obsolete;
+        auto* valueTree = new FieldTreeView(this);
+        m_valueTree = valueTree;
+        valueTree->clearLogicalSelection = [this]
+        {
+            if (m_valueApplying || !m_valueTree->isVisible()) return;
+            auto old = std::move(m_valueSelection);
+            m_valueSelection = std::make_shared<FieldTreeSelection>();
+            retireFieldSelection(std::move(old));
+            m_valueClearPending = true;
+            // ClearAndSelect can leave the same physical range and emit no delta.
+            // Flush after Qt applies the command, or synchronously before copy.
+            QTimer::singleShot(0, this, [this] { flushValueSelection(); });
+        };
+        m_valueTree->setProperty("ks_i18n_preserve_model_data", true);
+        m_valueTree->setProperty("ks_preserve_table_presentation", true);
+        m_valueTree->setHeaderHidden(true);
+        m_valueTree->setFrameShape(QFrame::NoFrame);
+        m_valueTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        m_valueTree->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_valueTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_valueTree->setWordWrap(true);
+        m_valueTree->setUniformRowHeights(false);
+        m_valueTree->setTextElideMode(Qt::ElideNone);
+        m_valueTree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        m_valueTree->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        m_valueTree->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_valueTree->setItemDelegate(new PropertyDelegate(m_valueTree));
+        m_valueModel = new FieldTreeModel(this);
+        m_valueTree->setModel(m_valueModel);
+        m_valueTree->viewport()->installEventFilter(this);
+        m_valueTree->header()->setMinimumSectionSize(48);
+        m_valueTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+        m_valueTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+        static_cast<QVBoxLayout*>(layout())->addWidget(m_valueTree, 1);
+        m_valueLoading = new QLabel(this);
+        m_valueLoading->setAlignment(Qt::AlignCenter);
+        m_valueLoading->setWordWrap(true);
+        static_cast<QVBoxLayout*>(layout())->addWidget(m_valueLoading, 1);
+        m_valueLoading->hide();
+        connect(m_valueTree, &QTreeView::customContextMenuRequested, this,
+            [this](const QPoint& position) { showValueCopyMenu(position); });
+        const auto recordExpansion = [this](const QModelIndex& index, bool expanded)
+        {
+            if (!m_valueApplying && !m_valueSearchActive)
+                m_valueExpansion.insert(index.data(KeyRole).toString(), expanded);
+        };
+        connect(m_valueTree, &QTreeView::expanded, this,
+            [recordExpansion](const QModelIndex& index) { recordExpansion(index, true); });
+        connect(m_valueTree, &QTreeView::collapsed, this,
+            [recordExpansion](const QModelIndex& index) { recordExpansion(index, false); });
+        connect(m_valueTree->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value)
+        {
+            if (!m_valueApplying && m_valueTree->isVisible()) m_valueScroll = value;
+        });
+        connect(m_valueTree->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            [this](const QModelIndex& current)
+        {
+            if (!m_valueApplying && m_valueTree->isVisible() && current.isValid())
+            { m_valueSelected = current.data(KeyRole).toString(); m_valueColumn = current.column(); }
+        });
+        connect(m_valueTree->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+            [this](const QItemSelection& selected, const QItemSelection& deselected)
+        {
+            if (m_valueApplying || !m_valueTree->isVisible() || !m_valueSelection) return;
+            const auto apply = [this](const QItemSelection& ranges, bool state)
+            {
+                for (const auto& range : ranges)
+                    for (int row = range.top(); row <= range.bottom(); ++row)
+                        m_valueSelection->setSelected(m_valueModel->index(row, 0, range.parent()).data(KeyRole).toString(), state);
+            };
+            apply(deselected, false);
+            apply(selected, true);
+        });
+        connect(m_valueModel, &QAbstractItemModel::rowsInserted, this,
+            [this](const QModelIndex& parent, int first, int last)
+        {
+            for (int row = first; row <= last; ++row)
+                m_valueRows.append(m_valueModel->index(row, 0, parent));
+            prepareValueRows();
+        });
+        auto* shortcut = new QShortcut(QKeySequence::Copy, m_valueTree);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut, &QShortcut::activated, this, [this]
+        {
+            const QString selected = selectedText();
+            copyText(selected.isEmpty() ? plainText() : selected);
+        });
+        auto* selectAll = new QShortcut(QKeySequence::SelectAll, m_valueTree);
+        selectAll->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(selectAll, &QShortcut::activated, this, [this]
+        {
+            if (m_valueModel->rowCount() == 0) return;
+            auto old = std::move(m_valueSelection);
+            m_valueSelection = std::make_shared<FieldTreeSelection>();
+            m_valueSelection->selectAll(m_valueModel->snapshot(), m_valueExpansion, m_valueSearchActive);
+            m_valueClearPending = false;
+            retireFieldSelection(std::move(old));
+            m_valueApplying = true;
+            m_valueTree->selectAll();
+            m_valueApplying = false;
+        });
+        applyPresentation();
+        scheduleValueProjection();
+    }
+
+    void StructuredFieldView::scheduleValueProjection()
+    {
+        if (!m_valueTree || m_documentOnly) return;
+        flushValueSelection();
+        if (m_valueCancel) m_valueCancel->store(true, std::memory_order_relaxed);
+        const quint64 ticket = ++m_valueTicket;
+        m_valueRows.clear();
+        m_valueRowCursor = 0;
+        m_valueRootNext = m_valueRootTotal = 0;
+        if (shouldDeferHiddenTree())
+        { m_hiddenTreeDirty = true; return; }
+        m_hiddenTreeDirty = false;
+        m_hiddenTreeLayoutDirty = false;
+        const QModelIndex selected = m_valueTree->currentIndex();
+        if (selected.isValid() && !m_valueRestoreSelection)
+        {
+            m_valueSelected = selected.data(KeyRole).toString();
+            m_valueColumn = selected.column();
+            m_valueScroll = m_valueTree->verticalScrollBar()->value();
+        }
+        m_valueRestoreSelection = false;
+        m_title->setText(translated(m_document.title));
+        m_title->setVisible(!m_document.title.isEmpty());
+        m_valueLoading->setText(ks::i18n::text(QStringLiteral("shared.fields.loading"), QStringLiteral("正在准备字段...")));
+        m_valueTree->hide(); // pending values/language are never presented as the completed new snapshot
+        m_valueLoading->show();
+        const FieldDocument document = m_document;
+        const QString query = m_search->text();
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        const auto previous = m_valueModel->snapshot();
+        const auto expansion = m_valueExpansion;
+        const auto selection = std::make_shared<FieldTreeSelection>(*m_valueSelection);
+        const auto cancelled = std::make_shared<std::atomic_bool>(false);
+        m_valueCancel = cancelled;
+        const QPointer<StructuredFieldView> guard(this);
+        QThreadPool::globalInstance()->start([document, query, translator, previous, expansion, selection, cancelled, guard, ticket]
+        {
+            auto projection = PrepareFieldTreeProjection(document,
+                [translator](const QString& source) { return translator.sourceText(source); }, query, previous, cancelled);
+            if (!projection) return;
+            selection->retain(*projection);
+            if (cancelled->load(std::memory_order_relaxed)) return;
+            QHash<QString, bool> keptExpansion;
+            for (auto it = expansion.cbegin(); it != expansion.cend(); ++it)
+                if (projection->keys.contains(it.key())) keptExpansion.insert(it.key(), it.value());
+            QMetaObject::invokeMethod(QCoreApplication::instance(),
+                [guard, projection = std::move(projection), keptExpansion = std::move(keptExpansion), selection = selection, ticket]() mutable
+            {
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket)
+                { retireFieldProjection(std::move(projection), std::move(keptExpansion)); retireFieldSelection(std::move(selection)); return; }
+                if (guard->shouldDeferHiddenTree())
+                { guard->m_hiddenTreeDirty = true; retireFieldProjection(std::move(projection), std::move(keptExpansion)); retireFieldSelection(std::move(selection)); return; }
+                const bool prepare = [&]
+                {
+                    const auto before = guard->m_valueModel->snapshot();
+                    return !guard->m_valuePrepared || !projection->sameStructure
+                        || projection->base.lock() != before || !before || before->query != projection->query;
+                }();
+                guard->m_valueApplying = true;
+                guard->m_valueRows.clear();
+                guard->m_valueRowCursor = 0;
+                auto old = guard->m_valueModel->applySnapshot(std::move(projection));
+                retireFieldProjection(std::move(old));
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket)
+                { retireFieldProjection({}, std::move(keptExpansion)); retireFieldSelection(std::move(selection)); return; }
+                retireFieldProjection({}, std::move(guard->m_valueExpansion));
+                guard->m_valueExpansion = std::move(keptExpansion);
+                retireFieldSelection(std::move(guard->m_valueSelection));
+                guard->m_valueSelection = std::move(selection);
+                guard->m_valueApplying = false;
+                guard->m_valueRows.clear();
+                guard->m_valueRowCursor = 0;
+                guard->m_valueRootNext = 0;
+                guard->m_valueRootTotal = prepare ? guard->m_valueModel->rowCount() : 0;
+                if (prepare) guard->m_valuePrepared = false;
+                guard->applyPresentation();
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
+                if (prepare) guard->consumeValueRows(ticket); // unchanged topology never rescans expanded rows
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
+                guard->m_valueLoading->hide();
+                guard->m_valueTree->show();
+            }, Qt::QueuedConnection);
+        });
+    }
+
+    void StructuredFieldView::prepareValueRows()
+    {
+        if (m_valueRowsPending || !m_valueTree) return;
+        m_valueRowsPending = true;
+        const quint64 ticket = m_valueTicket;
+        QTimer::singleShot(0, this, [this, ticket]
+        {
+            m_valueRowsPending = false;
+            consumeValueRows(ticket);
+        });
+    }
+
+    void StructuredFieldView::consumeValueRows(quint64 ticket)
+    {
+        const QPointer<StructuredFieldView> alive(this);
+        if (!m_valueTree || shouldDeferHiddenTree()) return;
+        if (ticket != m_valueTicket)
+        { if (!m_valueRows.isEmpty() || m_valueRootNext < m_valueRootTotal) prepareValueRows(); return; }
+        QElapsedTimer elapsed;
+        elapsed.start();
+        m_valueApplying = true;
+        while (m_valueRowCursor < m_valueRows.size() || m_valueRootNext < m_valueRootTotal)
+        {
+            if (m_valueRowCursor == m_valueRows.size())
+            {
+                m_valueRows.clear();
+                m_valueRowCursor = 0;
+                const int last = std::min(m_valueRootNext + 128, m_valueRootTotal);
+                while (m_valueRootNext < last)
+                    m_valueRows.append(m_valueModel->index(m_valueRootNext++, 0));
+            }
+            const QPersistentModelIndex index = m_valueRows.at(m_valueRowCursor++);
+            if (!index.isValid()) continue;
+            if (valueRowSelected(index.data(KeyRole).toString()))
+                m_valueTree->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+            if (!alive || ticket != m_valueTicket) return;
+            const auto kind = static_cast<FieldNode::Kind>(index.data(KindRole).toInt());
+            m_valueTree->setFirstColumnSpanned(index.row(), index.parent(), kind != FieldNode::Kind::Field);
+            if (m_valueModel->hasChildren(index))
+            {
+                const QString key = index.data(KeyRole).toString();
+                if (!m_valueSearchActive && !m_valueExpansion.contains(key))
+                    m_valueExpansion.insert(key, index.data(FieldTreeInitiallyExpandedRole).toBool());
+                const bool expanded = m_valueSearchActive || m_valueExpansion.value(key, false);
+                m_valueTree->setExpanded(index, expanded);
+                if (!alive || ticket != m_valueTicket) return;
+                if (expanded)
+                {
+                    const int count = m_valueModel->rowCount(index);
+                    for (int row = 0; row < count; ++row)
+                        m_valueRows.append(m_valueModel->index(row, 0, index));
+                }
+            }
+            if (elapsed.nsecsElapsed() >= 4000000) break;
+        }
+        m_valueApplying = false;
+        const QModelIndex selected = m_valueModel->indexForKey(m_valueSelected);
+        if (selected.isValid())
+            m_valueTree->selectionModel()->setCurrentIndex(selected.siblingAtColumn(std::clamp(m_valueColumn, 0, 1)),
+                QItemSelectionModel::NoUpdate);
+        if (!alive || ticket != m_valueTicket) return;
+        if (m_valueRowCursor < m_valueRows.size() || m_valueRootNext < m_valueRootTotal) prepareValueRows();
+        else
+        {
+            m_valueRows.clear();
+            m_valueRowCursor = 0;
+            m_valuePrepared = true;
+            m_valueTree->verticalScrollBar()->setValue(m_valueScroll);
+            if (!alive || ticket != m_valueTicket) return;
+            if (m_valueRestoreHorizontalScroll)
+            {
+                m_valueRestoreHorizontalScroll = false;
+                m_valueTree->horizontalScrollBar()->setValue(m_valueHorizontalScroll);
+            }
+        }
+    }
+
+    void StructuredFieldView::updateValueColumns()
+    {
+        if (!m_valueTree) return;
+        if (shouldDeferHiddenTree()) { m_hiddenTreeLayoutDirty = true; return; }
+        const int width = m_valueTree->viewport()->width();
+        const int key = std::min(std::clamp(width / 3, 112, 260), std::max(64, width - 80));
+        if (m_valueTree->columnWidth(0) != key) m_valueTree->setColumnWidth(0, key);
+        m_valueTree->header()->setStretchLastSection(true);
+    }
+
+    void StructuredFieldView::flushValueSelection() const
+    {
+        if (!m_valueClearPending || !m_valueTree) return;
+        m_valueClearPending = false;
+        auto replacement = std::make_shared<FieldTreeSelection>();
+        for (const QModelIndex& row : m_valueTree->selectionModel()->selectedRows())
+            replacement->setSelected(row.data(KeyRole).toString(), true);
+        auto old = std::move(m_valueSelection);
+        m_valueSelection = std::move(replacement);
+        retireFieldSelection(std::move(old));
+    }
+
+    bool StructuredFieldView::valueRowSelected(const QString& key) const
+    {
+        flushValueSelection();
+        return m_valueSelection && m_valueSelection->contains(key);
+    }
+
+    void StructuredFieldView::showValueCopyMenu(const QPoint& position)
+    {
+        if (!m_valueTree) return;
+        const QModelIndex clicked = m_valueTree->indexAt(position);
+        if (clicked.isValid() && !m_valueTree->selectionModel()->isSelected(clicked)) m_valueTree->setCurrentIndex(clicked);
+        const auto snapshot = captureCopy(clicked);
+        const QString selected = selectedText();
+        QMenu menu;
+        menu.setPalette(palette());
+        menu.setFont(font());
+        connect(this, &QObject::destroyed, &menu, &QMenu::close);
+        auto* value = menu.addAction(translated(QStringLiteral("复制值")));
+        auto* row = menu.addAction(translated(QStringLiteral("复制整行")));
+        auto* selection = menu.addAction(translated(QStringLiteral("复制选中项")));
+        menu.addSeparator();
+        auto* all = menu.addAction(translated(QStringLiteral("复制全部")));
+        value->setEnabled(snapshot.hasRow);
+        row->setEnabled(snapshot.hasRow);
+        selection->setEnabled(!selected.isEmpty());
+        all->setEnabled(!snapshot.all.isEmpty());
+        const QPoint global = m_valueTree->viewport()->mapToGlobal(position);
+        const QPointer<StructuredFieldView> guard(this);
+        const auto chosen = menu.exec(global);
+        if (!guard) return;
+        if (chosen == value) copyText(snapshot.value);
+        else if (chosen == row) copyText(snapshot.row);
+        else if (chosen == selection) copyText(selected);
+        else if (chosen == all) copyText(snapshot.all);
+    }
+
     // 卡片详情保留原报告对象和工具信号，但不再同时维护第二份隐藏树模型。
     void StructuredFieldView::setDocumentOnly()
     {
@@ -319,6 +721,23 @@ namespace ks::ui
             return;
         }
         m_documentOnly = true;
+        m_valueClearPending = false;
+        retireFieldSelection(std::move(m_valueSelection));
+        retireFieldProjection({}, std::move(m_valueExpansion));
+        m_valueRows.clear();
+        ++m_valueTicket;
+        if (m_valueCancel) m_valueCancel->store(true, std::memory_order_relaxed);
+        delete m_valueTree;
+        m_valueTree = nullptr;
+        if (m_valueModel)
+        {
+            auto old = m_valueModel->takeSnapshotForDisposal();
+            if (old) QThreadPool::globalInstance()->start([old = std::move(old)]() mutable { old.reset(); });
+            delete m_valueModel;
+            m_valueModel = nullptr;
+        }
+        delete m_valueLoading;
+        m_valueLoading = nullptr;
         m_hiddenTreeDirty = false;
         m_hiddenTreeLayoutDirty = false;
         m_presentation = Presentation::Sections;
@@ -337,14 +756,39 @@ namespace ks::ui
         m_title->hide();
     }
 
+    void StructuredFieldView::setHiddenProjectionDeferred(const bool enabled)
+    {
+        if (m_deferHiddenProjection == enabled) return;
+        m_deferHiddenProjection = enabled;
+        if (!enabled)
+        {
+            // 恢复同步策略时立即补齐模型，不能把隐藏阶段的旧树暴露给 tree() 用户。
+            if (m_hiddenTreeDirty) rebuild();
+            else if (m_hiddenTreeLayoutDirty)
+            {
+                m_hiddenTreeLayoutDirty = false;
+                applyPresentation();
+            }
+        }
+    }
+
     void StructuredFieldView::setDocument(const FieldDocument& document)
     {
-        if (m_documentOnly && m_document.title == document.title
-            && sameFieldNodes(m_document.nodes, document.nodes))
+        if (m_document.title == document.title
+            && (m_document.nodes.isSharedWith(document.nodes)
+                || (!m_valueTree && m_document.nodes == document.nodes)))
         {
             return;
         }
-        m_document = document;
+        if (m_valueTree)
+        {
+            // 新值模型的比较和旧大文档释放都在 worker；隐藏页只交换隐式共享规范值。
+            FieldDocument retired = std::move(m_document);
+            m_document = document;
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() mutable
+                { retired = {}; });
+        }
+        else m_document = document;
         ++m_documentRevision;
         if (!m_documentOnly)
         {
@@ -363,6 +807,11 @@ namespace ks::ui
 
     void StructuredFieldView::rebuild()
     {
+        if (m_valueTree)
+        {
+            scheduleValueProjection();
+            return;
+        }
         if (m_documentOnly || !m_tree)
         {
             return;
@@ -461,6 +910,13 @@ namespace ks::ui
 
     QString StructuredFieldView::exportItems(const bool selectedOnly) const
     {
+        if (m_valueTree)
+        {
+            if (!selectedOnly) return plainText();
+            flushValueSelection();
+            const auto snapshot = m_valueModel->snapshot();
+            return snapshot && m_valueSelection ? m_valueSelection->text(*snapshot) : QString();
+        }
         if (m_documentOnly || !m_tree)
         {
             return selectedOnly ? QString() : plainText();
@@ -479,7 +935,8 @@ namespace ks::ui
     {
         FieldCopySnapshot snapshot;
         snapshot.all = plainText();
-        if (m_tree && clicked.isValid() && clicked.model() == m_tree->model())
+        if (clicked.isValid() && ((m_tree && clicked.model() == m_tree->model())
+            || (m_valueTree && clicked.model() == m_valueTree->model())))
         {
             snapshot.hasRow = true;
             snapshot.value = clicked.data(ValueRole).toString();
@@ -493,6 +950,26 @@ namespace ks::ui
 
     void StructuredFieldView::applySearch()
     {
+        if (m_valueTree)
+        {
+            const bool active = !m_search->text().trimmed().isEmpty();
+            if (active && !m_valueSearchActive)
+            {
+                m_valueBeforeSearchSelected = m_valueTree->currentIndex().data(KeyRole).toString();
+                m_valueBeforeSearchColumn = std::max(0, m_valueTree->currentIndex().column());
+                m_valueBeforeSearchScroll = m_valueTree->verticalScrollBar()->value();
+            }
+            else if (!active && m_valueSearchActive)
+            {
+                m_valueRestoreSelection = true;
+                m_valueSelected = m_valueBeforeSearchSelected;
+                m_valueColumn = m_valueBeforeSearchColumn;
+                m_valueScroll = m_valueBeforeSearchScroll;
+            }
+            m_valueSearchActive = active;
+            scheduleValueProjection();
+            return;
+        }
         if (m_documentOnly || !m_tree)
         {
             return; // 搜索信号仍由同一输入发出，筛选由唯一卡片宿主处理。
@@ -548,6 +1025,17 @@ namespace ks::ui
 
     void StructuredFieldView::applyPresentation()
     {
+        if (m_valueTree)
+        {
+            if (shouldDeferHiddenTree()) { m_hiddenTreeLayoutDirty = true; return; }
+            const bool sections = m_presentation == Presentation::Sections;
+            m_valueTree->setRootIsDecorated(!sections);
+            m_valueTree->setIndentation(sections ? 14 : 20);
+            m_valueTree->setAlternatingRowColors(!sections);
+            static_cast<PropertyDelegate*>(m_valueTree->itemDelegate())->sections = sections;
+            updateValueColumns();
+            return;
+        }
         if (m_documentOnly || !m_tree)
         {
             return;
@@ -573,6 +1061,7 @@ namespace ks::ui
 
     void StructuredFieldView::updateColumns()
     {
+        if (m_valueTree) { updateValueColumns(); return; }
         if (m_documentOnly || !m_tree)
         {
             return;
@@ -638,18 +1127,18 @@ namespace ks::ui
         }
         m_export->setToolTip(translated(QStringLiteral("导出文本")));
         m_export->setAccessibleName(translated(QStringLiteral("导出文本")));
-        m_search->setPlaceholderText(translated(QStringLiteral("搜索属性")));
-        m_search->setAccessibleName(translated(QStringLiteral("搜索属性")));
+        m_search->setPlaceholderText(initialSearchText(InitialSearchText::Search));
+        m_search->setAccessibleName(initialSearchText(InitialSearchText::Search));
         if (m_style)
         {
-            m_style->setItemText(0, translated(QStringLiteral("分区")));
-            m_style->setItemText(1, translated(QStringLiteral("树形")));
+            m_style->setItemText(0, initialSearchText(InitialSearchText::Sections));
+            m_style->setItemText(1, initialSearchText(InitialSearchText::Tree));
             m_style->setAccessibleName(translated(QStringLiteral("显示样式")));
         }
-        m_copy->setText(translated(QStringLiteral("复制全部")));
+        m_copy->setText(initialSearchText(InitialSearchText::Copy));
         if (m_tree)
         {
-            m_tree->setHeaderLabels({translated(QStringLiteral("属性")), translated(QStringLiteral("值"))});
+            m_tree->setHeaderLabels({initialSearchText(InitialSearchText::Name), initialSearchText(InitialSearchText::Value)});
         }
     }
 
@@ -661,7 +1150,7 @@ namespace ks::ui
             updateTranslations();
             rebuild();
         }
-        else if (!m_documentOnly && m_tree &&
+        else if (!m_documentOnly && (m_tree || m_valueTree) &&
             (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange ||
                 event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange))
         {
@@ -671,8 +1160,9 @@ namespace ks::ui
                 return; // QApplication换肤仍广播到隐藏旧树，但不触发其全文测量和doItemsLayout。
             }
             updateColumns();
-            m_tree->doItemsLayout();
-            m_tree->viewport()->update();
+            QTreeView* view = m_valueTree ? m_valueTree : m_tree;
+            view->doItemsLayout();
+            view->viewport()->update();
         }
     }
 
@@ -697,12 +1187,13 @@ namespace ks::ui
     bool StructuredFieldView::shouldDeferHiddenTree() const
     {
         // 切页Show后的业务currentChanged槽也可能提交新文档；排队fallback前仍不重建待淘汰树。
-        return !m_documentOnly && m_tree && (!isVisible() || m_treeShowPending) && belongsToSharedDetail();
+        return !m_documentOnly && (m_tree || m_valueTree) && (!isVisible() || m_treeShowPending)
+            && (m_deferHiddenProjection || belongsToSharedDetail());
     }
 
     void StructuredFieldView::flushDeferredTree()
     {
-        if (m_documentOnly || !m_tree || !isVisible()
+        if (m_documentOnly || (!m_tree && !m_valueTree) || !isVisible()
             || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
         {
             return;
@@ -719,13 +1210,14 @@ namespace ks::ui
     void StructuredFieldView::showEvent(QShowEvent* event)
     {
         QWidget::showEvent(event);
-        if (m_documentOnly || !m_tree || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
+        if (m_valueTree && (!m_valueRows.isEmpty() || m_valueRootNext < m_valueRootTotal)) prepareValueRows();
+        if (m_documentOnly || (!m_tree && !m_valueTree) || (!m_hiddenTreeDirty && !m_hiddenTreeLayoutDirty))
         {
             return;
         }
         if (!belongsToSharedDetail())
         {
-            flushDeferredTree(); // 普通视图和专业工作台保留原有同步显示语义。
+            flushDeferredTree(); // 显式普通页在首帧前同步消费最新快照；专业工作台仍按原契约。
             return;
         }
         if (m_treeShowPending)
@@ -743,6 +1235,7 @@ namespace ks::ui
     void StructuredFieldView::resizeEvent(QResizeEvent* event)
     {
         QWidget::resizeEvent(event);
+        if (m_valueTree) { updateValueColumns(); return; }
         if (m_documentOnly || !m_tree)
         {
             return;
@@ -758,6 +1251,8 @@ namespace ks::ui
 
     bool StructuredFieldView::eventFilter(QObject* watched, QEvent* event)
     {
+        if (m_valueTree && watched == m_valueTree->viewport() && event->type() == QEvent::Resize)
+        { updateValueColumns(); return QWidget::eventFilter(watched, event); }
         // The layout gives the tree its final geometry after the parent's
         // resizeEvent. Refresh from that actual viewport width on the next
         // event turn, once Qt has finished its own resize/layout work.

@@ -1,10 +1,29 @@
 #include "../Framework.h"
 #include "./MainSurfaceStyle.h"
+#include "./FlatButtonTheme.h"
 #include "../theme.h"
 #include <QWidget>
 
 namespace ks::ui
 {
+    namespace { int controlBackgroundOpacityPercent = 75; }
+
+    int MainDataSurfaceAlpha() { return (controlBackgroundOpacityPercent * 255 + 50) / 100; }
+
+    void SetMainDataSurfaceOpacityPercent(int percent)
+    {
+        percent = qBound(0, percent, 100);
+        if (controlBackgroundOpacityPercent == percent) return;
+        controlBackgroundOpacityPercent = percent;
+        ++KswordTheme::ThemeSeedGeneration; // Existing color/QSS caches include this generation.
+    }
+
+    QColor MainControlSurfaceColor(QColor color, const QWidget* widget)
+    {
+        if (UsesTransparentMainSurface(widget)) color.setAlpha(MainDataSurfaceAlpha());
+        return color;
+    }
+
     MainSurfaceColors MainWindowSurfaceColors()
     {
         // 固定层级只依赖主题种子；同主题的所有按钮/表格复用同一求值结果。
@@ -55,7 +74,7 @@ namespace ks::ui
     {
         // 主底板继续透出背景；数据区保留轻透衬底，避免文字直接压在任意壁纸/桌面上。
         QColor surface = color;
-        if (transparent) surface.setAlpha(224);
+        if (transparent) surface.setAlpha(MainDataSurfaceAlpha());
         return surface.name(transparent ? QColor::HexArgb : QColor::HexRgb);
     }
 
@@ -65,8 +84,8 @@ namespace ks::ui
         if (transparentContent)
         {
             // 只为数据面补可读性，不给普通QWidget/Stack/页根铺底，不改变窗口透明度。
-            const QColor backgrounds[] = {KswordTheme::BlendColors(colors.content, QColor(Qt::black), 31),
-                KswordTheme::BlendColors(colors.content, QColor(Qt::white), 31)};
+            const QColor backgrounds[] = {KswordTheme::BlendColors(colors.content, QColor(Qt::black), 255 - MainDataSurfaceAlpha()),
+                KswordTheme::BlendColors(colors.content, QColor(Qt::white), 255 - MainDataSurfaceAlpha())};
             const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(
                 KswordTheme::TextPrimaryColor(), backgrounds, 2, 4.5);
             return QStringLiteral(R"qss(
@@ -95,6 +114,6 @@ namespace ks::ui
             "ads--CDockWidget QFrame#card,ads--CDockWidget QWidget#card{"
             "background:%2;border-color:%5;border-radius:8px;}")
             .arg(colors.canvas.name(), colors.content.name(), text.name(),
-                colors.alternate.name(), colors.border.name());
+                colors.alternate.name(), colors.border.name()) + BuildSharedMainSurfaceButtonStyle();
     }
 }

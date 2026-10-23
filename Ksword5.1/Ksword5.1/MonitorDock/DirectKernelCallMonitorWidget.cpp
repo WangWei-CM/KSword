@@ -1,3 +1,5 @@
+#include "MonitorTableExport.h"
+#include "MonitorEventFilterProjection.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/VisibleTableWidget.h"
@@ -177,30 +179,7 @@ namespace
         return normalized;
     }
 
-    bool textMatch(
-        const QString& sourceText,
-        const QString& patternText,
-        const bool useRegex,
-        const Qt::CaseSensitivity caseSensitivity)
-    {
-        if (patternText.trimmed().isEmpty())
-        {
-            return true;
-        }
 
-        if (!useRegex)
-        {
-            return sourceText.contains(patternText, caseSensitivity);
-        }
-
-        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-        if (caseSensitivity == Qt::CaseInsensitive)
-        {
-            options |= QRegularExpression::CaseInsensitiveOption;
-        }
-        const QRegularExpression regex(patternText, options);
-        return regex.isValid() && regex.match(sourceText).hasMatch();
-    }
 
     std::optional<std::uint32_t> tryReadSyscallNumberFromStub(
         const unsigned char* functionPointer, const std::size_t length)
@@ -347,6 +326,8 @@ DirectKernelCallMonitorWidget::DirectKernelCallMonitorWidget(QWidget* parent)
 
 DirectKernelCallMonitorWidget::~DirectKernelCallMonitorWidget()
 {
+    if (m_tableExport) m_tableExport->close();
+    if (m_eventFilterProjection) m_eventFilterProjection->close();
     stopCaptureInternal(true);
     if (m_uiUpdateTimer != nullptr)
     {
@@ -1115,7 +1096,7 @@ void DirectKernelCallMonitorWidget::updateActionState()
     }
     if (m_exportButton != nullptr)
     {
-        m_exportButton->setEnabled(hasRows);
+        updateExportAction();
     }
 }
 
@@ -2030,6 +2011,8 @@ void DirectKernelCallMonitorWidget::appendEventRow(const CapturedEventRow& rowVa
     m_eventTable->setItem(row, EventColumnCallAddress, createReadOnlyItem(rowValue.callAddressText));
     m_eventTable->setItem(row, EventColumnEventName, createReadOnlyItem(rowValue.eventName));
     m_eventTable->setItem(row, EventColumnDetail, createReadOnlyItem(rowValue.detailText));
+    if (!m_eventFilterProjection) applyFilter();
+    m_eventFilterProjection->trackRow(row);
 }
 
 void DirectKernelCallMonitorWidget::scheduleFilterApply()
@@ -2042,83 +2025,38 @@ void DirectKernelCallMonitorWidget::scheduleFilterApply()
 
 void DirectKernelCallMonitorWidget::applyFilter()
 {
-    if (m_eventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString processFilter = m_processFilterEdit != nullptr ? m_processFilterEdit->text() : QString();
-    const QString serviceFilter = m_serviceFilterEdit != nullptr ? m_serviceFilterEdit->text() : QString();
-    const QString detailFilter = m_detailFilterEdit != nullptr ? m_detailFilterEdit->text() : QString();
-    const QString globalFilter = m_globalFilterEdit != nullptr ? m_globalFilterEdit->text() : QString();
-    const bool useRegex = m_regexCheck != nullptr && m_regexCheck->isChecked();
-    const bool invertMatch = m_invertCheck != nullptr && m_invertCheck->isChecked();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_caseCheck != nullptr && m_caseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    const bool hasTextFilter = !processFilter.trimmed().isEmpty()
-        || !serviceFilter.trimmed().isEmpty()
-        || !detailFilter.trimmed().isEmpty()
-        || !globalFilter.trimmed().isEmpty();
-    const bool requiresFiltering = hasTextFilter || invertMatch;
-    if (!requiresFiltering)
-    {
-        if (m_filterActive)
-        {
-            for (int row = 0; row < m_eventTable->rowCount(); ++row)
-            {
-                m_eventTable->setRowHidden(row, false);
-            }
-        }
-        m_filterActive = false;
-        if (m_filterStatusLabel != nullptr)
-        {
-            m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2")
-                .arg(m_eventTable->rowCount())
-                .arg(m_eventTable->rowCount()));
-            ks::ui::ApplyStatusRole(m_filterStatusLabel,
-                m_eventTable->rowCount() > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-        }
-        return;
-    }
-
-    m_filterActive = true;
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        QTableWidgetItem* timeItem = m_eventTable->item(row, EventColumnTime100ns);
-        const QString processText = timeItem != nullptr ? timeItem->data(kRoleProcessSearchText).toString() : QString();
-        const QString serviceText = timeItem != nullptr ? timeItem->data(kRoleServiceSearchText).toString() : QString();
-        const QString globalText = timeItem != nullptr ? timeItem->data(kRoleGlobalSearchText).toString() : QString();
-        const QString detailText = m_eventTable->item(row, EventColumnDetail) != nullptr
-            ? m_eventTable->item(row, EventColumnDetail)->text()
-            : QString();
-
-        bool matched = textMatch(processText, processFilter, useRegex, caseSensitivity)
-            && textMatch(serviceText, serviceFilter, useRegex, caseSensitivity)
-            && textMatch(detailText, detailFilter, useRegex, caseSensitivity)
-            && textMatch(globalText, globalFilter, useRegex, caseSensitivity);
-        if (invertMatch)
-        {
-            matched = !matched;
-        }
-
-        m_eventTable->setRowHidden(row, !matched);
-        if (matched)
-        {
-            ++visibleCount;
-        }
-    }
-
-    if (m_filterStatusLabel != nullptr)
-    {
-        m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visibleCount).arg(m_eventTable->rowCount()));
-        ks::ui::ApplyStatusRole(m_filterStatusLabel,
-            visibleCount > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-    }
+    if (!m_eventTable) return;
+    if (!m_eventFilterProjection)
+        m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                const auto* time = m_eventTable->item(row, EventColumnTime100ns);
+                values.fields = {time ? time->data(kRoleProcessSearchText).toString() : QString(),
+                    time ? time->data(kRoleServiceSearchText).toString() : QString(),
+                    m_eventTable->item(row, EventColumnDetail) ? m_eventTable->item(row, EventColumnDetail)->text() : QString(),
+                    time ? time->data(kRoleGlobalSearchText).toString() : QString()};
+                for (int column = 0; column < EventColumnCount; ++column)
+                    values.exportCells.push_back(m_eventTable->item(row, column) ? m_eventTable->item(row, column)->text() : QString());
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                if (m_filterStatusLabel)
+                {
+                    m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visible).arg(total));
+                    ks::ui::ApplyStatusRole(m_filterStatusLabel, pending ? ks::ui::StatusRole::Info
+                        : visible > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
+                }
+                updateActionState();
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_processFilterEdit ? m_processFilterEdit->text() : QString(),
+        m_serviceFilterEdit ? m_serviceFilterEdit->text() : QString(),
+        m_detailFilterEdit ? m_detailFilterEdit->text() : QString(),m_globalFilterEdit ? m_globalFilterEdit->text() : QString()};
+    spec.fieldIndexes = {0,1,2,3};
+    spec.regex = m_regexCheck && m_regexCheck->isChecked();
+    spec.invert = m_invertCheck && m_invertCheck->isChecked();
+    spec.sensitivity = m_caseCheck && m_caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void DirectKernelCallMonitorWidget::clearFilter()
@@ -2162,58 +2100,81 @@ void DirectKernelCallMonitorWidget::clearFilter()
     applyFilter();
 }
 
+void DirectKernelCallMonitorWidget::updateExportAction()
+{
+    if (!m_exportButton) return;
+    const bool preparing = m_tableExport && m_tableExport->isPreparing();
+    const bool busy = m_tableExport && m_tableExport->isBusy();
+    m_exportButton->setEnabled(preparing || (!busy && m_eventTable && m_eventTable->rowCount() > 0));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_exportButton->setText(preparing ? language.text(QStringLiteral("monitor.export.cancel_preparation"), QStringLiteral("取消导出准备"))
+        : language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")));
+    m_exportButton->setToolTip(language.text(preparing ? QStringLiteral("monitor.export.preparing_hint") : busy ? QStringLiteral("monitor.export.in_progress") : QStringLiteral("monitor.export.ready_hint"),
+        preparing ? QStringLiteral("正在准备完整导出；再次点击可取消准备。") : busy ? QStringLiteral("导出进行中") : QStringLiteral("导出当前结果范围")));
+}
+
 void DirectKernelCallMonitorWidget::exportVisibleRowsToTsv()
 {
-    if (m_eventTable == nullptr || m_eventTable->rowCount() == 0)
+    const QPointer<DirectKernelCallMonitorWidget> guard(this);
+    if (m_tableExport) m_tableExport->reconcile();
+    if (!guard) return;
+    if (m_tableExport && m_tableExport->isPreparing()) { m_tableExport->cancelPreparation(); return; }
+    if (m_tableExport && m_tableExport->isBusy()) return;
+    if (!m_eventTable || !m_eventTable->model()) return;
+    if (m_eventTable->model()->rowCount() == 0) { QMessageBox::information(this, QStringLiteral("导出直接内核调用事件"), QStringLiteral("当前没有可导出的事件。")); return; }
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出直接内核调用事件"), QStringLiteral("direct-kernel-call-events.tsv"), QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*.*)"));
+    if (!guard || path.trimmed().isEmpty() || (m_tableExport && m_tableExport->isBusy())) return;
+    try {
+    if (!m_tableExport)
     {
-        QMessageBox::information(this, QStringLiteral("导出"), QStringLiteral("当前没有可导出的事件。"));
-        return;
+        m_tableExport = new ks::monitor::MonitorCanonicalExport(this);
+        m_tableExport->setStateChangedCallback([guard]() { if (guard) guard->updateExportAction(); });
     }
+    applyFilter();
+    if (!guard) return;
+    ks::monitor::MonitorCachedTableExportSnapshot values;
+    values.rows = m_eventFilterProjection->retainedRowsInDisplayOrder();
+    values.businessFilter = m_eventFilterProjection->currentCompiledFilter();
+    values.archiveRevision = m_eventFilterProjection->retainedRowsRevision();
+    values.search = ks::ui::CaptureTableSearchResultFilterSpec(m_eventTable);
+    values.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    values.wmi = false;
+    for (int column = 0; column < m_eventTable->columnCount(); ++column) {
+        const auto header = m_eventTable->horizontalHeaderItem(column);
+        values.headers.push_back(header ? values.language.displayText(header->text()) : QString());
+    }
+    const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(std::move(values));
+    if (!guard) return;
+    const bool started = m_tableExport->start(snapshot, QStringLiteral("monitor/retained-table/DirectKernelCallMonitorWidget"), path, QString(),
+        [guard](const ks::monitor::CanonicalExportOutcome& result) {
+            if (!guard) return;
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+            auto& language = ks::i18n::LanguageManager::instance();
+            const QString title = language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出"));
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                QMessageBox::information(guard, title, QStringLiteral("当前没有可导出的事件。")); return;
+            }
+            if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                QMessageBox::warning(guard, title, language.text(QStringLiteral("monitor.export.not_accepted"),
+                    QStringLiteral("未开始写入文件，请重试导出。"))); return;
+            }
+            const auto& receipt = result.receipt;
+            if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                    language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+            }
+            if (!receipt.succeeded()) QMessageBox::warning(guard, title,
+                language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
 
-    const QString filePath = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出直接内核调用事件"),
-        QStringLiteral("direct-kernel-call-events.tsv"),
-        QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*.*)"));
-    if (filePath.isEmpty())
-    {
-        return;
+        }, ks::monitor::CanonicalExportFormat::FlatTsv, false);
+    if (!guard) return;
+    if (!started) QMessageBox::information(this, ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")),
+        ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, ks::i18n::sourceText(QStringLiteral("导出")),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-
-    QFile outputFile(filePath);
-    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    {
-        QMessageBox::warning(this, QStringLiteral("导出"), QStringLiteral("无法写入文件：%1").arg(filePath));
-        return;
-    }
-
-    QTextStream stream(&outputFile);
-    QStringList headerList;
-    for (int column = 0; column < m_eventTable->columnCount(); ++column)
-    {
-        headerList << m_eventTable->horizontalHeaderItem(column)->text();
-    }
-    stream << headerList.join(QChar(u'\t')) << QChar(u'\n');
-
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        if (m_eventTable->isRowHidden(row))
-        {
-            continue;
-        }
-        QStringList cellList;
-        for (int column = 0; column < m_eventTable->columnCount(); ++column)
-        {
-            QString text = m_eventTable->item(row, column) != nullptr
-                ? m_eventTable->item(row, column)->text()
-                : QString();
-            text.replace(QChar(u'\t'), QChar(u' '));
-            text.replace(QChar(u'\n'), QChar(u' '));
-            cellList << text;
-        }
-        stream << cellList.join(QChar(u'\t')) << QChar(u'\n');
-    }
-    outputFile.close();
+    if (guard) updateExportAction();
 }
 
 void DirectKernelCallMonitorWidget::showEventContextMenu(const QPoint& position)

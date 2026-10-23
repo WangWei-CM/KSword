@@ -32,6 +32,14 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPlainTextEdit>
+#include <QElapsedTimer>
+#include <QEvent>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QScrollBar>
+#include <QTimer>
+#include <algorithm>
+#include <utility>
 #include "../UI/CodeTextEdit.h"
 #include <QPointer>
 #include <QPushButton>
@@ -47,6 +55,104 @@
 
 namespace
 {
+    // The accepted I/O result is complete before this presentation-only loader
+    // starts. Keep the entire formatted text; hidden pages defer document work.
+    class IrpOutputTextLoader final : public QObject
+    {
+    public:
+        explicit IrpOutputTextLoader(QPlainTextEdit* editor)
+            : QObject(editor), m_editor(editor), m_timer(this), m_toolTip(editor->toolTip())
+        {
+            setObjectName(QStringLiteral("ks_irp_output_text_loader"));
+            m_timer.setSingleShot(true);
+            editor->installEventFilter(this);
+            editor->setUndoRedoEnabled(false);
+            connect(&m_timer, &QTimer::timeout, this, [this]() { slice(); });
+        }
+
+        void load(QString text)
+        {
+            m_timer.stop();
+            m_text = std::move(text);
+            m_offset = 0;
+            m_clearing = true;
+            m_pending = true;
+            m_editor->setEnabled(false); // A partial document cannot be copied/exported.
+            m_editor->setToolTip(ks::i18n::sourceText(QStringLiteral("正在加载...")));
+            if (m_editor->isVisible()) m_timer.start(0);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (watched == m_editor && event->type() == QEvent::Show && m_pending)
+                m_timer.start(0);
+            if (watched == m_editor && event->type() == QEvent::Hide)
+                m_timer.stop();
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        void slice()
+        {
+            if (!m_pending || !m_editor->isVisible()) return;
+            QElapsedTimer budget;
+            budget.start();
+            // Each Qt edit is bounded as well as the number of edits per turn.
+            do
+            {
+                QTextCursor cursor(m_editor->document());
+                cursor.movePosition(QTextCursor::End);
+                if (m_clearing)
+                {
+                    const int count = std::min(16384, cursor.position());
+                    if (count > 0)
+                    {
+                        cursor.setPosition(cursor.position() - count, QTextCursor::KeepAnchor);
+                        cursor.removeSelectedText();
+                    }
+                    else m_clearing = false;
+                }
+                else if (m_offset < m_text.size())
+                {
+                    const qsizetype count = std::min<qsizetype>(16384, m_text.size() - m_offset);
+                    cursor.insertText(m_text.mid(m_offset, count));
+                    m_offset += count;
+                }
+                else
+                {
+                    m_pending = false;
+                    m_text.clear();
+                    cursor.movePosition(QTextCursor::Start);
+                    m_editor->setTextCursor(cursor);
+                    m_editor->horizontalScrollBar()->setValue(0);
+                    m_editor->verticalScrollBar()->setValue(0);
+                    m_editor->document()->setModified(false);
+                    m_editor->setToolTip(m_toolTip);
+                    m_editor->setEnabled(true);
+                    return;
+                }
+            } while (budget.elapsed() < 4);
+            m_timer.start(0);
+        }
+
+        QPlainTextEdit* m_editor = nullptr; // Owned by the same exact editor.
+        QTimer m_timer;
+        QString m_text;
+        QString m_toolTip;
+        qsizetype m_offset = 0;
+        bool m_clearing = false;
+        bool m_pending = false;
+    };
+
+    void loadIrpOutputText(QPlainTextEdit* editor, const QString& text)
+    {
+        auto* loader = static_cast<IrpOutputTextLoader*>(editor->findChild<QObject*>(
+            QStringLiteral("ks_irp_output_text_loader"), Qt::FindDirectChildrenOnly));
+        if (loader == nullptr) loader = new IrpOutputTextLoader(editor);
+        loader->load(text);
+    }
+
     // IrpOperationPresetId：把常见文件动作映射为一组可审阅的 IRP 参数。
     // 预设只填充界面，不直接执行；写语义的确认复选框仍由用户亲自勾选。
     enum IrpOperationPresetId
@@ -1356,9 +1462,11 @@ void FileDock::submitConstructedIrp()
         const ksword::ark::FileIrpSubmitResult result =
             ksword::ark::DriverClient().submitFileIrp(params);
 
+        const QString outputText = FileDock::formatHexDump(
+            result.io.ok ? result.outputData : std::vector<std::uint8_t>{});
         kPro.set(progressPid, "整理结果", 0, 80.0f);
         dispatcher->post(
-            [safeThis, result, progressPid, majorFunction, ntPath]() {
+            [safeThis, result, outputText, progressPid, majorFunction, ntPath]() {
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
@@ -1392,8 +1500,7 @@ void FileDock::submitConstructedIrp()
                         QString::number(result.io.win32Error));
                     appendRow(QStringLiteral("诊断"),
                         QString::fromStdString(result.io.message));
-                    safeThis->m_irpOutputHexEdit->setPlainText(
-                        FileDock::formatHexDump({}));
+                    loadIrpOutputText(safeThis->m_irpOutputHexEdit, outputText);
                     kPro.set(progressPid, "提交失败", 0, 100.0f);
                     return;
                 }
@@ -1453,8 +1560,7 @@ void FileDock::submitConstructedIrp()
                         .arg(result.targetDeviceFlags, 8, 16, QChar('0')).toUpper());
 
                 table->resizeColumnToContents(0);
-                safeThis->m_irpOutputHexEdit->setPlainText(
-                    FileDock::formatHexDump(result.outputData));
+                loadIrpOutputText(safeThis->m_irpOutputHexEdit, outputText);
 
                 const bool semanticOk =
                     result.status == KSWORD_ARK_FILE_IRP_STATUS_OK &&

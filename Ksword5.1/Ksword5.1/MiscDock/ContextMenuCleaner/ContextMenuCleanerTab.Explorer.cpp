@@ -213,7 +213,7 @@ namespace
 // - 只展示第三方或当前用户注册的 Explorer 命名空间；
 // - Windows 内置 CLSID、Windows 目录 Server 和 Microsoft/OneDrive 组件被保护并隐藏；
 // - 删除目标是 NameSpace 容器中的单个 CLSID 子树，不删除应用自身 CLSID 类注册。
-QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateExplorerHomeEntries() const
+QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateExplorerHomeEntries()
 {
     std::vector<NamespaceLocation> locations;
     appendBaseLocations(

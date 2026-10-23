@@ -1,5 +1,6 @@
 #include "../Ksword5.1/Ksword5.1/UI/MemoryEditHistory.Core.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <random>
@@ -117,5 +118,71 @@ int main()
         require(restored && *restored == snapshots[i], "random redo equals reference snapshot");
         randomCurrent = *restored;
     }
+    History spanHistory;
+    auto spanBefore = History::Bytes(4096, 0);
+    auto spanAfter = spanBefore;
+    spanAfter[4093] = 1; spanAfter[4095] = 2;
+    require(spanHistory.recordRange(spanBefore.data(), spanAfter.data(), spanAfter.size(), 4093, 3)
+        == History::RecordResult::Recorded, "range edit records absolute tail offsets");
+    require(spanHistory.undo(spanAfter) == spanBefore, "range undo checks full snapshot identity and tail bytes");
+    require(spanHistory.redo(spanBefore) == spanAfter, "range redo preserves unchanged bytes outside span");
+    require(spanHistory.recordRange(spanAfter.data(), spanAfter.data(), spanAfter.size(), 4096, 1)
+        == History::RecordResult::InvalidInput, "invalid range cannot wrap");
+    require(spanHistory.recordRange(spanAfter.data(), spanAfter.data(), spanAfter.size(), 4096, 0)
+        == History::RecordResult::Unchanged, "empty end span preserves history");
+    require(spanHistory.recordRange(nullptr, spanAfter.data(), spanAfter.size(), 0, 1)
+        == History::RecordResult::InvalidInput, "range null source rejects without changing history");
+    History randomRanges(2U * 1024U * 1024U, 256);
+    std::vector<History::Bytes> rangeSnapshots{History::Bytes(4096, 0)};
+    for (unsigned transaction = 0; transaction < 128; ++transaction)
+    {
+        auto next = rangeSnapshots.back();
+        const auto offset = random() % next.size();
+        const auto count = (std::min)(static_cast<std::size_t>(1 + random() % 64), next.size() - offset);
+        for (auto at = offset; at < offset + count; ++at)
+            if (at == offset || (random() & 1U)) next[at] ^= static_cast<std::uint8_t>(1 + random() % 255);
+        require(randomRanges.recordRange(rangeSnapshots.back().data(), next.data(), next.size(), offset, count)
+            == History::RecordResult::Recorded, "random sparse span records one transaction");
+        rangeSnapshots.push_back(std::move(next));
+    }
+    auto rangeCurrent = rangeSnapshots.back();
+    for (std::size_t at = rangeSnapshots.size() - 1; at; --at)
+    {
+        const auto restored = randomRanges.undo(rangeCurrent);
+        require(restored && *restored == rangeSnapshots[at - 1], "random range undo equals full reference snapshot");
+        rangeCurrent = *restored;
+    }
+    for (std::size_t at = 1; at < rangeSnapshots.size(); ++at)
+    {
+        const auto restored = randomRanges.redo(rangeCurrent);
+        require(restored && *restored == rangeSnapshots[at], "random range redo equals full reference snapshot");
+        rangeCurrent = *restored;
+    }
+    History::DifferenceSummary summary;
+    auto baseline = History::Bytes(257, 0);
+    auto observed = baseline;
+    for (unsigned transaction = 0; transaction < 4000; ++transaction)
+    {
+        auto next = observed;
+        const auto offset = random() % next.size();
+        const auto count = (std::min)(static_cast<std::size_t>(1 + random() % 32), next.size() - offset);
+        for (auto at = offset; at < offset + count; ++at)
+            next[at] = static_cast<std::uint8_t>(random() % 3);
+        const auto incremental = History::updateDifferenceSummary(summary, baseline.data(), observed.data(),
+            next.data(), next.size(), offset, count);
+        History::DifferenceSummary reference;
+        for (std::size_t at = 0; at < next.size(); ++at)
+        {
+            if (next[at] == baseline[at]) continue;
+            ++reference.bytes;
+            if (!at || next[at - 1] == baseline[at - 1]) ++reference.runs;
+        }
+        require(incremental && incremental->bytes == reference.bytes && incremental->runs == reference.runs,
+            "incremental run/byte summary equals independent full scan after merge/split/tail edits");
+        summary = *incremental;
+        observed = std::move(next);
+    }
+    require(!History::updateDifferenceSummary(summary, baseline.data(), observed.data(), observed.data(),
+        observed.size(), observed.size(), 1), "summary rejects overflowing span");
     std::cout << "PASS: " << checks << " memory history checks\n";
 }

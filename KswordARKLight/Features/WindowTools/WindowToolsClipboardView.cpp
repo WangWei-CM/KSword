@@ -5,6 +5,7 @@
 #include "WindowToolsCommon.h"
 #include "../../Core/EntityRef.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/AsyncTask.h"
 #include "../../Ui/EntityNavigation.h"
 #include "../../Ui/ExportUtil.h"
 #include "../../Ui/FilterBar.h"
@@ -43,6 +44,8 @@ constexpr UINT kMenuCopyPreview = 67603;
 constexpr UINT kMenuRefresh = 67604;
 constexpr UINT kMenuOpenOwnerProcess = 67605;
 constexpr UINT kMenuOpenClipboardProcess = 67606;
+constexpr UINT kMsgClipboardSnapshot = WM_APP + 678;
+constexpr UINT kMsgClipboardPreview = WM_APP + 679;
 
 constexpr int kGap = 6;
 constexpr int kRowHeight = 24;
@@ -86,6 +89,11 @@ struct ClipboardViewState final {
     HWND previewEdit = nullptr;
     Ksword::Ui::VirtualListView formatList;
     ClipboardSnapshot snapshot;
+    UINT pendingPreviewFormat = 0;
+    bool suppressPreviewRequests = false;
+    std::uint64_t snapshotGeneration = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ClipboardSnapshot>> snapshotTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ClipboardSnapshot>> previewTask;
     std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
     std::wstring statusText = L"点击刷新读取当前剪贴板内容。";
 };
@@ -195,6 +203,84 @@ int SelectedModelIndex(const ClipboardViewState& state) {
     return modelIndex < state.snapshot.formats.size() ? static_cast<int>(modelIndex) : -1;
 }
 
+void ShowPreviewForSelection(ClipboardViewState& state);
+void RefreshClipboard(ClipboardViewState& state);
+void BuildRows(ClipboardViewState& state);
+void ApplyFilter(ClipboardViewState& state);
+
+void RequestFormatPreview(ClipboardViewState& state, const UINT format) {
+    if (!state.previewTask) {
+        return;
+    }
+    state.pendingPreviewFormat = format;
+    const DWORD sequence = state.snapshot.sequenceNumber;
+    const std::uint64_t generation = state.snapshotGeneration;
+    state.previewTask->request(
+        [sequence, format] {
+            ClipboardSnapshot snapshot;
+            if (::GetClipboardSequenceNumber() != sequence) {
+                snapshot.changed = true;
+                return snapshot;
+            }
+            ClipboardCaptureOptions options;
+            options.ownerDescriptions = false;
+            options.materializeFormat = format;
+            options.textFormat = format;
+            options.previews = format == CF_UNICODETEXT || format == CF_TEXT;
+            // This thread never owns a clipboard window or transfers clipboard
+            // ownership. A synchronous delayed-render call can outlive selection;
+            // cancellation suppresses projection and never claims to interrupt it.
+            return CaptureClipboardSnapshot(nullptr, options);
+        },
+        [&state, sequence, generation, format](std::uint64_t, std::optional<ClipboardSnapshot>&& result, std::exception_ptr error) {
+            if (generation != state.snapshotGeneration) {
+                return;
+            }
+            if (error || !result) {
+                return;
+            }
+            if (result->changed || result->sequenceNumber != sequence || ::GetClipboardSequenceNumber() != sequence) {
+                RefreshClipboard(state);
+                return;
+            }
+            const int selected = SelectedModelIndex(state);
+            if (selected < 0 || state.snapshot.formats[static_cast<std::size_t>(selected)].format != format) {
+                return;
+            }
+            state.pendingPreviewFormat = 0;
+            auto& info = state.snapshot.formats[static_cast<std::size_t>(selected)];
+            info.dataRequested = true;
+            info.dataError = result->openError;
+            for (const auto& captured : result->formats) {
+                if (captured.format == format) {
+                    info = captured;
+                    break;
+                }
+            }
+            if (result->textFormat == format && result->textEvidence.attempted) {
+                info.preview = std::move(result->text);
+                if (result->textEvidence.truncated) {
+                    info.preview += L"\r\n\r\n[预览已截断，仅显示前 " +
+                        std::to_wstring(kPreviewCharLimit) + L" 个字符]";
+                }
+            }
+            state.suppressPreviewRequests = true;
+            BuildRows(state);
+            ApplyFilter(state);
+            for (std::size_t row = 0; row < state.formatList.visibleIndexes().size(); ++row) {
+                const auto modelIndex = state.formatList.visibleIndexes()[row];
+                if (state.snapshot.formats[modelIndex].format == format) {
+                    ListView_SetItemState(state.formatList.hwnd(), -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                    ListView_SetItemState(state.formatList.hwnd(), static_cast<int>(row),
+                        LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    break;
+                }
+            }
+            state.suppressPreviewRequests = false;
+            ShowPreviewForSelection(state);
+        });
+}
+
 void ShowPreviewForSelection(ClipboardViewState& state) {
     if (!state.previewEdit) {
         return;
@@ -204,7 +290,10 @@ void ShowPreviewForSelection(ClipboardViewState& state) {
         ::SetWindowTextW(state.previewEdit, L"在上方选择一个剪贴板格式。\r\n仅 CF_UNICODETEXT 与 CF_TEXT 可以显示文本预览。");
         return;
     }
-    const ClipboardFormatInfo& info = state.snapshot.formats[static_cast<std::size_t>(index)];
+    ClipboardFormatInfo& info = state.snapshot.formats[static_cast<std::size_t>(index)];
+    if (!state.suppressPreviewRequests && !info.dataRequested && !IsHandleBackedFormat(info.format) && state.pendingPreviewFormat != info.format) {
+        RequestFormatPreview(state, info.format);
+    }
     if (!info.preview.empty()) {
         ::SetWindowTextW(state.previewEdit, info.preview.c_str());
         return;
@@ -275,23 +364,45 @@ void BuildRows(ClipboardViewState& state) {
         rows.push_back(std::move(row));
     }
     auto shared = std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>(std::move(rows));
-    state.formatList.setRows(*shared);
+    state.formatList.setSharedRows(shared);
     state.filterRows = std::move(shared);
 }
 
 void RefreshClipboard(ClipboardViewState& state) {
-    state.snapshot = CaptureClipboardSnapshot(state.hwnd);
-    BuildRows(state);
-    ShowOwnerDetail(state);
-    ApplyFilter(state);
-    if (!state.snapshot.opened) {
-        state.statusText = L"无法打开剪贴板（错误码 " + std::to_wstring(state.snapshot.openError) +
-            L"）。通常是其他程序正持有剪贴板，请稍后重试。";
-    } else {
-        state.statusText = L"共 " + std::to_wstring(state.snapshot.formats.size()) + L" 种格式，序列号 " +
-            std::to_wstring(state.snapshot.sequenceNumber) + L"。";
+    if (!state.snapshotTask) {
+        return;
     }
-    ::InvalidateRect(state.hwnd, nullptr, TRUE);
+    ++state.snapshotGeneration;
+    state.pendingPreviewFormat = 0;
+    state.snapshotTask->request(
+        [] {
+            ClipboardCaptureOptions options;
+            options.materialize = false;
+            options.previews = false;
+            return CaptureClipboardSnapshot(nullptr, options);
+        },
+        [&state](std::uint64_t, std::optional<ClipboardSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result) {
+                return;
+            }
+            state.snapshot = std::move(*result);
+            for (auto& info : state.snapshot.formats) {
+                if (!info.sizeKnown && info.sizeText.empty()) {
+                    info.sizeText = L"—";
+                }
+            }
+            BuildRows(state);
+            ShowOwnerDetail(state);
+            ApplyFilter(state);
+            if (!state.snapshot.opened) {
+                state.statusText = L"无法打开剪贴板（错误码 " + std::to_wstring(state.snapshot.openError) +
+                    L"）。通常是其他程序正持有剪贴板，请稍后重试。";
+            } else {
+                state.statusText = L"共 " + std::to_wstring(state.snapshot.formats.size()) + L" 种格式，序列号 " +
+                    std::to_wstring(state.snapshot.sequenceNumber) + L"。";
+            }
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        });
 }
 
 void ExportVisibleRows(ClipboardViewState& state) {
@@ -557,6 +668,8 @@ LRESULT CALLBACK ClipboardViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (!CreateChildControls(*state)) {
                 return -1;
             }
+            state->snapshotTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ClipboardSnapshot>>(hwnd, kMsgClipboardSnapshot);
+            state->previewTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ClipboardSnapshot>>(hwnd, kMsgClipboardPreview);
             LayoutView(*state);
             RefreshClipboard(*state);
         }
@@ -644,8 +757,20 @@ LRESULT CALLBACK ClipboardViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
         break;
+    case kMsgClipboardSnapshot:
+        if (state && state->snapshotTask) {
+            state->snapshotTask->consume(hwnd, wParam, lParam);
+        }
+        return 0;
+    case kMsgClipboardPreview:
+        if (state && state->previewTask) {
+            state->previewTask->consume(hwnd, wParam, lParam);
+        }
+        return 0;
     case WM_NCDESTROY:
         if (state) {
+            if (state->snapshotTask) state->snapshotTask->cancel();
+            if (state->previewTask) state->previewTask->cancel();
             state->formatList.detach();
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);

@@ -74,6 +74,9 @@ EtwSessionController::EtwSessionController() = default;
 
 EtwSessionController::~EtwSessionController() {
     stop();
+    // Legacy callers still cannot destroy a live callback context. Checked
+    // retirement keeps this object owned on failure, outside the GUI lifetime.
+    if (workerThread_.joinable()) workerThread_.join();
 }
 
 void EtwSessionController::setEventCallback(EventCallback callback) {
@@ -87,13 +90,13 @@ void EtwSessionController::setStatusCallback(StatusCallback callback) {
 }
 
 bool EtwSessionController::start(const EtwFilterState& filterState) {
-    if (running() || sessionHandle_.load() != 0) {
+    if (running()) {
         publishLastError(L"ETW session is already running.");
         return false;
     }
 
-    if (workerThread_.joinable()) {
-        workerThread_.join();
+    if ((workerThread_.joinable() || sessionHandle_.load() != 0 || consumerHandle_.load() != INVALID_PROCESSTRACE_HANDLE) && !stopChecked()) {
+        return false;
     }
 
     filterState_ = filterState;
@@ -111,6 +114,7 @@ bool EtwSessionController::start(const EtwFilterState& filterState) {
     }
 
     sessionHandle_.store(newSessionHandle);
+    cleanupPending_.store(true, std::memory_order_release);
     stopRequested_.store(false);
     running_.store(true);
 
@@ -119,12 +123,14 @@ bool EtwSessionController::start(const EtwFilterState& filterState) {
         return false;
     }
 
+    consumerFinished_.store(false, std::memory_order_release);
     try {
         workerThread_ = std::thread([this]() {
             workerLoop();
         });
     }
     catch (...) {
+        consumerFinished_.store(true, std::memory_order_release);
         running_.store(false);
         {std::lock_guard<std::mutex> lock(mutex_);evidence_.threadStartFailed = true;}
         stopOwnedSession();
@@ -137,20 +143,34 @@ bool EtwSessionController::start(const EtwFilterState& filterState) {
 }
 
 void EtwSessionController::stop() {
-    const bool wasRunning = running_.exchange(false);
-    if (!wasRunning && !workerThread_.joinable() && sessionHandle_.load() == 0) {
-        return;
-    }
+    (void)stopChecked();
+}
+
+bool EtwSessionController::stopChecked() {
+    running_.store(false);
     stopRequested_.store(true);
-
-    stopOwnedSession();if (sessionHandle_.load() != 0) closeConsumer();
-
-    if (workerThread_.joinable()) {
-        workerThread_.join();
+    stopOwnedSession();
+    // Successful STOP lets ProcessTrace drain its final buffer as before.
+    // Only a failed STOP needs explicit CloseTrace to wake the consumer.
+    if (sessionHandle_.load() != 0 && !closeConsumer() && !consumerFinished_.load(std::memory_order_acquire)) {
+        return false;
     }
-
-    stopOwnedSession();if (sessionHandle_.load() == 0) sessionName_.clear();
-    publishStatus(L"ETW session stopped.");
+    if (workerThread_.joinable()) workerThread_.join();
+    stopOwnedSession();
+    const bool consumerClosed = closeConsumer();
+    const bool complete = sessionHandle_.load() == 0 && consumerClosed &&
+        consumerHandle_.load() == INVALID_PROCESSTRACE_HANDLE;
+    if (complete) {
+        cleanupPending_.store(false, std::memory_order_release);
+        sessionName_.clear();
+        publishStatus(L"ETW session stopped.");
+    } else {
+        const auto state = evidence();
+        const ULONG error = !consumerClosed ? state.closeStatus :
+            (state.stopStatuses.empty() ? ERROR_GEN_FAILURE : state.stopStatuses.back());
+        publishLastError(Win32ErrorText(!consumerClosed ? L"CloseTrace" : L"ControlTraceW(STOP)", error));
+    }
+    return complete;
 }
 
 bool EtwSessionController::running() const {
@@ -169,9 +189,17 @@ void EtwSessionController::stopOwnedSession() {
     }
     if (status == ERROR_SUCCESS || status == ERROR_WMI_INSTANCE_NOT_FOUND) sessionHandle_.store(0);
 }
-void EtwSessionController::closeConsumer() {
-    const auto handle = consumerHandle_.exchange(INVALID_PROCESSTRACE_HANDLE);if (handle == INVALID_PROCESSTRACE_HANDLE) return;
-    const auto status = ::CloseTrace(handle);std::lock_guard<std::mutex> lock(mutex_);evidence_.closeAttempted = true;evidence_.closeStatus = status;
+bool EtwSessionController::closeConsumer() {
+    const auto handle = consumerHandle_.exchange(INVALID_PROCESSTRACE_HANDLE);
+    if (handle == INVALID_PROCESSTRACE_HANDLE) return true;
+    const auto status = ::CloseTrace(handle);
+    const bool closed = status == ERROR_SUCCESS || status == ERROR_CTX_CLOSE_PENDING || status == ERROR_INVALID_HANDLE;
+    if (!closed) {
+        auto empty = INVALID_PROCESSTRACE_HANDLE;
+        (void)consumerHandle_.compare_exchange_strong(empty, handle);
+    }
+    { std::lock_guard<std::mutex> lock(mutex_); evidence_.closeAttempted = true; evidence_.closeStatus = status; }
+    return closed;
 }
 
 std::wstring EtwSessionController::lastError() const {
@@ -224,6 +252,10 @@ void EtwSessionController::handleEventRecord(EVENT_RECORD* record) {
 }
 
 void EtwSessionController::workerLoop() {
+    struct Finished final {
+        std::atomic_bool& value;
+        ~Finished() { value.store(true, std::memory_order_release); }
+    } finished{consumerFinished_};
     const std::wstring sessionName = sessionName_;
 
     if (stopRequested_.load()) {

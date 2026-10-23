@@ -12,6 +12,10 @@
 
 #include <QWidget>
 
+#include <memory>
+
+namespace ks::ui { class AsyncUiDispatcher; }
+
 #include <cstdint> // std::uint64_t：保存时间戳与累计字节计数。
 #include <vector>  // std::vector：保存每核计数器句柄与采样结果。
 
@@ -22,6 +26,7 @@ class QLabel;
 class QLineSeries;
 class QResizeEvent;
 class QShowEvent;
+class QHideEvent;
 class QEvent;
 class QTimer;
 class QValueAxis;
@@ -38,7 +43,7 @@ public:
 
     // 析构函数作用：
     // - 停止刷新定时器；
-    // - 释放 PDH 查询句柄，避免资源泄漏。
+    // - 请求后台原生状态停止；句柄在退出 lease 内收尾，界面不等待。
     ~MonitorPanelWidget() override;
 
 protected:
@@ -51,6 +56,7 @@ protected:
     // - 首次展示后触发一次延迟重排；
     // - 解决初始 geometry 尚未稳定时的高度估算偏差。
     void showEvent(QShowEvent* showEventPointer) override;
+    void hideEvent(QHideEvent* hideEventPointer) override;
 
     // changeEvent 作用：主题、样式或应用调色板变化后立即重刷图表文字颜色。
     void changeEvent(QEvent* eventPointer) override;
@@ -60,24 +66,10 @@ private:
     // - 创建 CPU/内存/磁盘/网络图表控件与布局。
     void initializeUi();
 
-    // initializeCounters 作用：
-    // - 初始化 CPU 每核与磁盘读写 PDH 计数器。
-    void initializeCounters();
-
-    // refreshMetrics 作用：
-    // - 执行一次系统采样；
-    // - 刷新四张图的可视数据。
+    // One accepted native collection at a time; a physical receipt also recovers lost UI delivery.
     void refreshMetrics();
-
-    // samplePerCoreCpuUsage 作用：
-    // - 读取每个逻辑核心的实时利用率；
-    // - 输出总 CPU 平均利用率。
-    // 参数 coreUsagesOut：每核利用率输出数组。
-    // 参数 totalUsageOut：总平均利用率输出值。
-    // 返回：true=采样成功，false=采样失败。
-    bool samplePerCoreCpuUsage(
-        std::vector<double>* coreUsagesOut,
-        double* totalUsageOut);
+    void reconcileMetrics();
+    void refreshVisiblePresentation(bool snapToLatest = false);
 
     struct MemoryCompositionSample
     {
@@ -87,29 +79,27 @@ private:
         double commitPercent = 0.0;     // commitPercent：提交量占提交上限百分比。
     };
 
-    // sampleMemoryUsage 作用：
-    // - 获取系统内存组成百分比。
-    // 参数 memorySampleOut：内存组成输出值。
-    // 返回：true=采样成功，false=采样失败。
-    bool sampleMemoryUsage(MemoryCompositionSample* memorySampleOut) const;
+    struct MetricPresentationSample
+    {
+        std::vector<double> coreUsages;
+        double totalCpuUsage = 0.0;
+        MemoryCompositionSample memory;
+        double diskReadBytesPerSec = 0.0;
+        double diskWriteBytesPerSec = 0.0;
+        double networkRxBytesPerSec = 0.0;
+        double networkTxBytesPerSec = 0.0;
+        qint64 sampleTimeMs = 0;
+        bool memoryValid = false;
+        bool diskValid = false;
+        bool networkValid = false;
+    };
 
-    // sampleDiskRate 作用：
-    // - 获取系统总磁盘读写速率（字节/秒）。
-    // 参数 readBytesPerSecOut：读取速率输出值。
-    // 参数 writeBytesPerSecOut：写入速率输出值。
-    // 返回：true=采样成功，false=采样失败。
-    bool sampleDiskRate(
-        double* readBytesPerSecOut,
-        double* writeBytesPerSecOut);
-
-    // sampleNetworkRate 作用：
-    // - 获取系统网络上下行速率（字节/秒）。
-    // 参数 rxBytesPerSecOut：下行速率输出值。
-    // 参数 txBytesPerSecOut：上行速率输出值。
-    // 返回：true=采样成功，false=采样失败。
-    bool sampleNetworkRate(
-        double* rxBytesPerSecOut,
-        double* txBytesPerSecOut);
+    struct SamplingState;
+    struct SamplingReceipt;
+    void applyMetricSample(MetricPresentationSample sample);
+    std::shared_ptr<SamplingState> m_samplingState;
+    std::shared_ptr<SamplingReceipt> m_samplingReceipt;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_samplingDispatcher;
 
     // appendLineSample 作用：
     // - 给折线图追加一个采样点；
@@ -174,6 +164,14 @@ private:
     QValueAxis* m_networkAxisX = nullptr;     // m_networkAxisX：网络图 X 轴。
     QValueAxis* m_networkAxisY = nullptr;     // m_networkAxisY：网络图 Y 轴。
 
+    // 隐藏/最小化与紧凑摘要状态只门控展示，采样和规范历史继续。
+    MetricPresentationSample m_latestPresentation;
+    bool m_hasMetricSample = false;
+    bool m_chartPresentationDirty = false;
+    bool m_chartThemeDirty = true;
+    bool m_presentationExposed = false;
+    bool m_compactTextOnly = false;
+
     // 历史采样状态。
     qint64 m_metricSampleTimeMs = 0; // 本帧共同采样时间，毫秒。
     bool m_metricDiskValid = true; // 磁盘采样有效性，失败保留断点。
@@ -182,14 +180,4 @@ private:
     int m_historyLength = 60;        // m_historyLength：折线图保留点数。
     int m_sampleCounter = 0;         // m_sampleCounter：当前采样序号。
     QString m_lastCompactSummaryText; // m_lastCompactSummaryText：最近一次采样摘要文本。
-    std::uint64_t m_lastNetworkRxBytes = 0; // m_lastNetworkRxBytes：上次网络接收累计字节。
-    std::uint64_t m_lastNetworkTxBytes = 0; // m_lastNetworkTxBytes：上次网络发送累计字节。
-    qint64 m_lastNetworkSampleMs = 0;       // m_lastNetworkSampleMs：上次网络采样时间戳(ms)。
-
-    // PDH 句柄缓存。
-    void* m_cpuPerfQueryHandle = nullptr;       // m_cpuPerfQueryHandle：CPU 查询句柄。
-    std::vector<void*> m_coreCounterHandles;    // m_coreCounterHandles：每核 CPU 计数器句柄。
-    void* m_diskPerfQueryHandle = nullptr;      // m_diskPerfQueryHandle：磁盘查询句柄。
-    void* m_diskReadCounterHandle = nullptr;    // m_diskReadCounterHandle：磁盘读取计数器句柄。
-    void* m_diskWriteCounterHandle = nullptr;   // m_diskWriteCounterHandle：磁盘写入计数器句柄。
 };

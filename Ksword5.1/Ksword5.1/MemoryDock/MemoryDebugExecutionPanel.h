@@ -4,6 +4,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "../ArkDriverClient/ArkHvmNoAttachClient.h"
 #include <QWidget>
+#include <array>
 #include <functional>
 #include <memory>
 
@@ -56,6 +57,9 @@ namespace ks::ui
         std::shared_ptr<ksword::ark::DriverHandle> hvmHandle_; // 同一会话始终复用此设备句柄。
         std::vector<MemoryDebugThreadRecord> threads_; // 与选择器索引一一对应的强身份。
         FieldDocument document_; // 寄存器显示、搜索、复制和导出的唯一来源。
+        std::array<std::uint64_t, 28> documentKey_{}; // 后端、身份及全部显示数值；不比较协议填充。
+        QString documentLanguage_; // 语言变化仍重新生成当前规范文档。
+        bool documentKeyValid_ = false; // 只跳过相同现场文档，生命周期查询和状态回执仍应用。
         std::uint32_t pid_ = 0; // 当前工作台目标。
         std::uint64_t creation_ = 0; // 当前目标进程创建时间。
         std::uint64_t stopId_ = 0; // 协作后端当前一次性停点身份。

@@ -15,6 +15,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTableWidget;
+class QTableView;
+namespace ks::ui { template<typename RowT> class FlatTableModel; }
 class QAction;
 class QToolButton;
 
@@ -71,6 +73,9 @@ namespace ks::misc
         void applyRawReadResult(RawFileReadResult result);
         void applyRawExportResult(RawFileExportResult result);
 
+        const RawFileEntry* selectedRawEntry() const;
+        const DeletedDirectoryEntry* selectedDeletedEntry() const;
+
         SelectionProvider m_selectionProvider;
         JumpCallback m_jumpCallback;
         QPushButton* m_probeButton = nullptr;
@@ -84,25 +89,27 @@ namespace ks::misc
         QToolButton* m_rawMoreButton = nullptr;
         QAction* m_rawPeAction = nullptr;
         QLabel* m_rawSummaryLabel = nullptr;
-        QTableWidget* m_rawTable = nullptr;
+        QTableView* m_rawTable = nullptr;
+        ks::ui::FlatTableModel<RawFileEntry>* m_rawModel = nullptr;
         QLineEdit* m_filePathEdit = nullptr;
         QPushButton* m_fileBrowseButton = nullptr;
         QPushButton* m_extentButton = nullptr;
-        QTableWidget* m_extentTable = nullptr;
+        QTableView* m_extentTable = nullptr;
+        ks::ui::FlatTableModel<PhysicalFileExtent>* m_extentModel = nullptr;
         QLineEdit* m_volumePathEdit = nullptr;
         QLineEdit* m_clusterEdit = nullptr;
         QPushButton* m_reverseButton = nullptr;
-        QTableWidget* m_reverseTable = nullptr;
+        QTableView* m_reverseTable = nullptr;
+        ks::ui::FlatTableModel<ReverseClusterEntry>* m_reverseModel = nullptr;
         QPushButton* m_deletedScanButton = nullptr;
         QPushButton* m_deletedEraseButton = nullptr;
         QLabel* m_deletedSummaryLabel = nullptr;
-        QTableWidget* m_deletedTable = nullptr;
+        QTableView* m_deletedTable = nullptr;
+        ks::ui::FlatTableModel<DeletedDirectoryEntry>* m_deletedModel = nullptr;
         std::optional<DiskForensicsSelection> m_deletedSelection;
-        std::vector<DeletedDirectoryEntry> m_deletedEntries;
         std::optional<DiskForensicsSelection> m_rawSelection;
         ForensicFileSystemKind m_rawFileSystem =
             ForensicFileSystemKind::Unknown;
-        std::vector<RawFileEntry> m_rawEntries;
         bool m_busy = false;
     };
 }

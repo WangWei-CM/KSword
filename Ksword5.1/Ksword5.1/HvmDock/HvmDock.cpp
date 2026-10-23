@@ -1,4 +1,14 @@
 #include "HvmDock.h"
+namespace {
+const ks::ui::PageNavigationTabDefinition kHvmNavigation[] = {
+    {"hvm.guest", "", "", "跑第三方虚拟机", false},
+    {"hvm.control", "", "", "控制", true},
+    {"hvm.watch", "", "", "内存监视", false},
+    {"hvm.state", "", "", "状态详情", false},
+    {"hvm.evidence", "", "", "硬件虚拟化证据", false}
+};
+}
+
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ParameterWorkspace.h"
@@ -451,10 +461,9 @@ void HvmDock::initializeUi()
         setOperationRunning(running);
         if (m_commandOperationHandler) { m_commandOperationHandler(running); }
     };
-    tabs->addTab(m_guestVmPanel,
-                 ks::i18n::sourceText(QStringLiteral("跑第三方虚拟机")));
+    m_navigationTabs.add(kHvmNavigation[0], tabs, m_guestVmPanel);
 
-    tabs->addTab(controlPanel, ks::i18n::sourceText(QStringLiteral("控制")));
+    m_navigationTabs.add(kHvmNavigation[1], tabs, controlPanel);
 
     // 内存监视排在控制之后、状态详情之前。
     //
@@ -467,16 +476,16 @@ void HvmDock::initializeUi()
         setOperationRunning(running);
         if (m_commandOperationHandler) { m_commandOperationHandler(running); }
     };
-    tabs->addTab(m_watchPanel, ks::i18n::sourceText(QStringLiteral("内存监视")));
+    m_navigationTabs.add(kHvmNavigation[2], tabs, m_watchPanel);
 
-    tabs->addTab(detailPage, ks::i18n::sourceText(QStringLiteral("状态详情")));
+    m_navigationTabs.add(kHvmNavigation[3], tabs, detailPage);
     // 页名不再写 VT-x/EPT：同一页在 AMD 机器上显示 SVM/NPT 的读数，
     // 页名钉死在一套架构上会让另一套的用户以为这页与自己无关。
     m_hvmTab->onBusyChanged = [this](bool running) {
         setOperationRunning(running);
         if (m_commandOperationHandler) { m_commandOperationHandler(running); }
     };
-    tabs->addTab(m_hvmTab, ks::i18n::sourceText(QStringLiteral("硬件虚拟化证据")));
+    m_navigationTabs.add(kHvmNavigation[4], tabs, m_hvmTab);
     // 默认落在「控制」而不是第一页：「跑第三方虚拟机」是给撞上问题的人准备的
     // 出口，不是这一页的主线。主线是三步生命周期，它在「控制」上。
     tabs->setCurrentWidget(controlPanel);
@@ -767,3 +776,20 @@ void HvmDock::requestAction(const Action action)
     // 那条路径自己会补查询；打开面板则什么都不会变，这里补一次也无害。
     refreshStateAsync();
 }
+
+ks::ui::PageNavigationCatalog HvmDock::navigationCatalog(const HvmDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kHvmNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (existing) return existing->m_navigationTabs.describe(std::move(schema));
+    // 与构造函数applyState(HvmState{})一致：没有已知VMX快照时隐藏watch，绝不为目录查询驱动。
+    schema[2].visible = false;
+    return schema;
+}
+QWidget* HvmDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kHvmNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<HvmDock>(QStringLiteral("hvm")); }

@@ -1,4 +1,6 @@
 #include "TableInteractionSupport.h"
+#include "TableCompleteExport.h"
+#include "PageNavigationCatalog.h"
 #include "./ToolbarMetrics.h"
 #include "./FlatButtonTheme.h"
 
@@ -7,6 +9,8 @@
 #include "TableFreezeSupport.h"
 #include "TableHeaderSortingSupport.h"
 #include "TableSnapshotCompare.h"
+#include "CompleteExportCapture.h"
+#include "AsyncOperation.h"
 #include "TableSearchSupport.h"
 #include "VisibleTableWidget.h"
 #include "ResultTableHost.h"
@@ -22,6 +26,7 @@
 #include <QContextMenuEvent>
 #include <QDateTime>
 #include <QEvent>
+#include <QDynamicPropertyChangeEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -82,6 +87,11 @@ namespace
     constexpr char kActionBarProperty[] = "KSWORD_TABLE_INTERACTION_ACTION_BAR";
     constexpr char kStandardContextMenuProperty[] = "KSWORD_TABLE_INTERACTION_STANDARD_CONTEXT_MENU";
     constexpr char kComparisonActiveProperty[] = "KSWORD_TABLE_INTERACTION_COMPARISON_ACTIVE";
+    constexpr char kSearchTargetPrefixProperty[] = "ksword_compact_search_target_prefix";
+    constexpr char kCopyAllSource[] = "复制全表";
+    constexpr char kExportSource[] = "导出";
+    constexpr char kCopyAllTargetSuffix[] = "_copy_all";
+    constexpr char kExportTargetSuffix[] = "_export";
     constexpr int kActionBarHeight = 32;
     constexpr quint64 kBytesPerMiB = 1024ULL * 1024ULL;
     constexpr TableSnapshotCaptureLimits kSnapshotCaptureLimits{};
@@ -165,15 +175,6 @@ namespace
         return nullptr;
     }
 
-    QString normalizedTsvField(const QVariant& value)
-    {
-        QString text = value.toString();
-        text.replace(QLatin1Char('\t'), QLatin1Char(' '));
-        text.replace(QLatin1Char('\r'), QLatin1Char(' '));
-        text.replace(QLatin1Char('\n'), QLatin1Char(' '));
-        return text;
-    }
-
     /*
      * 复制、导出、快照比对都只取"可见"行列，而冻结是靠 setRowHidden/setColumnHidden
      * 实现的，与筛选共用同一个状态位。若不区分，用户特意钉住的行列反而会从导出的
@@ -185,7 +186,7 @@ namespace
         {
             return false;
         }
-        return tableView->isRowHidden(row) && !ks::ui::isRowHiddenByFreeze(tableView, row);
+        return ks::ui::IsTableRowExcludedByFilter(tableView, row);
     }
 
     bool isColumnHiddenByFilter(const QTableView* tableView, const int column)
@@ -205,18 +206,24 @@ namespace
             return rowList;
         }
 
-        const QModelIndexList selectedIndexList = tableView->selectionModel()->selectedIndexes();
-        rowList.reserve(selectedIndexList.size());
-        for (const QModelIndex& index : selectedIndexList)
+        // This helper belongs only to the explicit freeze-selected action.
+        // Copy/export and menu eligibility never materialize a selected cell list.
+        QVector<std::pair<int, int>> intervals;
+        const auto ranges = tableView->selectionModel()->selection();
+        for (const auto& range : ranges)
+            if (range.isValid() && range.parent() == tableView->rootIndex())
+                intervals.push_back({range.top(), range.bottom()});
+        std::sort(intervals.begin(), intervals.end());
+        int emittedThrough = -1;
+        for (const auto& interval : intervals)
         {
-            if (index.isValid() && !isRowHiddenByFilter(tableView, index.row()))
-            {
-                rowList.push_back(index.row());
-            }
+            // Merge row ranges before visiting rows. Disjoint column ranges can
+            // select the same rows many times without multiplying row work.
+            const int first = std::max(interval.first, emittedThrough + 1);
+            for (int row = first; row <= interval.second; ++row)
+                if (!isRowHiddenByFilter(tableView, row)) rowList.push_back(row);
+            emittedThrough = std::max(emittedThrough, interval.second);
         }
-
-        std::sort(rowList.begin(), rowList.end());
-        rowList.erase(std::unique(rowList.begin(), rowList.end()), rowList.end());
 
         if (rowList.isEmpty() && includeCurrentFallback)
         {
@@ -229,283 +236,20 @@ namespace
         return rowList;
     }
 
-    QVector<int> allVisibleRows(QTableView* tableView)
-    {
-        QVector<int> rowList;
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return rowList;
-        }
-
-        const int rowCount = tableView->model()->rowCount();
-        rowList.reserve(rowCount);
-        for (int row = 0; row < rowCount; ++row)
-        {
-            if (!isRowHiddenByFilter(tableView, row))
-            {
-                rowList.push_back(row);
-            }
-        }
-        return rowList;
-    }
-
-    QVector<int> visibleColumns(const QTableView* tableView)
-    {
-        QVector<int> columnList;
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return columnList;
-        }
-
-        const int columnCount = tableView->model()->columnCount();
-        columnList.reserve(columnCount);
-        for (int column = 0; column < columnCount; ++column)
-        {
-            if (!isColumnHiddenByFilter(tableView, column))
-            {
-                columnList.push_back(column);
-            }
-        }
-        return columnList;
-    }
-
-    QString tableRowsToTsv(
-        QTableView* tableView,
-        const QVector<int>& rowList,
-        const bool includeHeader)
-    {
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return {};
-        }
-
-        QAbstractItemModel* modelObject = tableView->model();
-        const QVector<int> columnList = visibleColumns(tableView);
-        if (rowList.isEmpty() || columnList.isEmpty())
-        {
-            return {};
-        }
-
-        QStringList lineList;
-        lineList.reserve(rowList.size() + (includeHeader ? 1 : 0));
-        if (includeHeader)
-        {
-            QStringList headerList;
-            headerList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                headerList.push_back(normalizedTsvField(
-                    modelObject->headerData(column, Qt::Horizontal, Qt::DisplayRole)));
-            }
-            lineList.push_back(headerList.join(QLatin1Char('\t')));
-        }
-
-        for (const int row : rowList)
-        {
-            if (row < 0 || row >= modelObject->rowCount() || isRowHiddenByFilter(tableView, row))
-            {
-                continue;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(modelObject->index(row, column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        return lineList.join(QLatin1Char('\n'));
-    }
-
-    void copyRowsToClipboard(QTableView* tableView, const QVector<int>& rowList)
-    {
-        if (QClipboard* clipboardObject = QApplication::clipboard())
-        {
-            const QString text = tableRowsToTsv(tableView, rowList, false);
-            if (!text.isEmpty())
-            {
-                clipboardObject->setText(text);
-            }
-        }
-    }
-
     void copySelectedRowsToClipboard(QTableView* tableView)
-    {
-        copyRowsToClipboard(tableView, selectedVisibleRows(tableView, true));
-    }
+    { ks::ui::CopyCompleteTableRows(tableView, ks::ui::CompleteTableScope::Selected); }
 
     void copyVisibleRowsToClipboard(QTableView* tableView)
-    {
-        copyRowsToClipboard(tableView, allVisibleRows(tableView));
-    }
+    { ks::ui::CopyCompleteTableRows(tableView, ks::ui::CompleteTableScope::All); }
 
-    // copySelectedTreeRowsToClipboard 作用：
-    // - 给 QTreeView/QTreeWidget 这类层级视图补上 Ctrl+C；
-    // - 上面那条表格路径按“扁平行号”工作，对树没有意义（不同父节点下 row 会重复），
-    //   所以这里改走 QModelIndex：用 indexBelow() 沿视觉顺序遍历，命中选中行就取一行；
-    //   折叠起来的子节点会被 indexBelow 自然跳过，复制结果与用户看到的完全一致；
-    // - 没有选中项时回落到当前行，与表格路径的 includeCurrentFallback 语义保持一致；
-    // - 列按表头视觉顺序输出并跳过隐藏列，用户拖动过列序时复制结果跟着走。
-    // 入参 treeView：目标树视图；为空或无模型时忽略。
-    // 返回：无；结果写入系统剪贴板。
     void copySelectedTreeRowsToClipboard(QTreeView* treeView)
-    {
-        if (treeView == nullptr || treeView->model() == nullptr)
-        {
-            return;
-        }
+    { ks::ui::CopyCompleteTreeRows(treeView); }
 
-        QItemSelectionModel* selectionModel = treeView->selectionModel();
-        QAbstractItemModel* modelObject = treeView->model();
-        if (selectionModel == nullptr)
-        {
-            return;
-        }
-
-        // 列序：优先按表头当前视觉顺序，没有表头时退回逻辑顺序。
-        QVector<int> columnList;
-        const int columnCount = modelObject->columnCount(treeView->rootIndex());
-        columnList.reserve(columnCount);
-        QHeaderView* headerView = treeView->header();
-        for (int position = 0; position < columnCount; ++position)
-        {
-            const int logicalColumn = headerView != nullptr
-                ? headerView->logicalIndex(position)
-                : position;
-            if (logicalColumn >= 0 && !treeView->isColumnHidden(logicalColumn))
-            {
-                columnList.push_back(logicalColumn);
-            }
-        }
-        if (columnList.isEmpty())
-        {
-            return;
-        }
-
-        QStringList lineList;
-        for (QModelIndex walkIndex = modelObject->index(0, 0, treeView->rootIndex());
-            walkIndex.isValid();
-            walkIndex = treeView->indexBelow(walkIndex))
-        {
-            // 用 isSelected(列 0) 判定整行：这些树一律是 SelectRows，选中即整行选中。
-            // 不用 isRowSelected(row, parent) 是因为它自 Qt 6.4 起已标记废弃。
-            if (!selectionModel->isSelected(walkIndex))
-            {
-                continue;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(walkIndex.sibling(walkIndex.row(), column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        if (lineList.isEmpty())
-        {
-            const QModelIndex currentIndex = selectionModel->currentIndex();
-            if (!currentIndex.isValid())
-            {
-                return;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(currentIndex.sibling(currentIndex.row(), column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        if (QClipboard* clipboardObject = QApplication::clipboard())
-        {
-            clipboardObject->setText(lineList.join(QLatin1Char('\n')));
-        }
-    }
-
-    // exportRowsToTsv 作用：
-    // - 将指定的可见表格行连同表头保存为 UTF-8 TSV 文件；
-    // - 输入为表格对象、待导出行号及默认文件名前缀；
-    // - 行集合为空或写入失败时展示提示，成功时由 QSaveFile 原子提交文件。
-    void exportRowsToTsv(
-        QTableView* tableView,
-        const QVector<int>& rowList,
-        const QString& defaultFileNamePrefix)
-    {
-        // tableText 用途：保存已按当前可见列序列化的 TSV 正文。
-        const QString tableText = tableRowsToTsv(tableView, rowList, true);
-        if (tableText.isEmpty())
-        {
-            QMessageBox::information(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("没有可导出的行。"));
-            return;
-        }
-
-        // outputPath 用途：保存用户确认后的目标文件完整路径。
-        QString outputPath = QFileDialog::getSaveFileName(
-            tableView,
-            localizedSourceText("导出 TSV"),
-            defaultFileNamePrefix
-                + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))
-                + QStringLiteral(".tsv"),
-            localizedSourceText("TSV 文件 (*.tsv)"));
-        if (outputPath.trimmed().isEmpty())
-        {
-            return;
-        }
-        if (QFileInfo(outputPath).suffix().isEmpty())
-        {
-            outputPath += QStringLiteral(".tsv");
-        }
-
-        // fileObject 用途：以原子替换方式写入用户选择的 TSV 文件。
-        QSaveFile fileObject(outputPath);
-        if (!fileObject.open(QIODevice::WriteOnly | QIODevice::Text))
-        {
-            QMessageBox::warning(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("导出失败：%1").arg(fileObject.errorString()));
-            return;
-        }
-
-        // outputStream 用途：以 UTF-8 编码将 TSV 正文写入临时文件。
-        QTextStream outputStream(&fileObject);
-        outputStream.setEncoding(QStringConverter::Utf8);
-        outputStream << tableText << Qt::endl;
-        if (outputStream.status() != QTextStream::Ok || !fileObject.commit())
-        {
-            QMessageBox::warning(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("导出失败：%1").arg(fileObject.errorString()));
-        }
-    }
-
-    // exportTableToTsv 作用：导出当前表格全部可见行，供顶部全量导出按钮使用。
     void exportTableToTsv(QTableView* tableView)
-    {
-        exportRowsToTsv(tableView, allVisibleRows(tableView), QStringLiteral("table_export_"));
-    }
+    { ks::ui::ExportCompleteTableRows(tableView, ks::ui::CompleteTableScope::All, QStringLiteral("table_export_")); }
 
-    // exportSelectedRowsToTsv 作用：导出当前选中行，未选中时回退到当前焦点行。
     void exportSelectedRowsToTsv(QTableView* tableView)
-    {
-        exportRowsToTsv(
-            tableView,
-            selectedVisibleRows(tableView, true),
-            QStringLiteral("table_selected_export_"));
-    }
+    { ks::ui::ExportCompleteTableRows(tableView, ks::ui::CompleteTableScope::Selected, QStringLiteral("table_selected_export_")); }
 
     // ComparisonTableView 同时用于比对视图和冻结视图。它继承表格外框宿主，
     // 因此冻结视图期间同样能像实时表一样预留冻结窗格所需的视口空间。
@@ -599,6 +343,9 @@ namespace
                 "  background-color:palette(base);"
                 "  border:none;"
                 "}"
+                "QWidget[ksword_main_surface_hierarchy=\"false\"] QFrame#KSWORD_TABLE_INTERACTION_ACTION_BAR{"
+                "  background-color:transparent;"
+                "}"
                 "QFrame#KSWORD_TABLE_INTERACTION_ACTION_BAR QToolButton{"
                 "  min-height:20px;"
                 "  padding:2px 7px;"
@@ -620,8 +367,9 @@ namespace
             layout->setContentsMargins(4, 2, 4, 2);
             layout->setSpacing(4);
 
-            m_copyAllButton = createButton("复制全表", QStringLiteral(":/Icon/log_copy.svg"));
-            m_exportButton = createButton("导出", QStringLiteral(":/Icon/log_export.svg"));
+            m_copyAllButton = createButton(kCopyAllSource, QStringLiteral(":/Icon/log_copy.svg"));
+            m_exportButton = createButton(kExportSource, QStringLiteral(":/Icon/log_export.svg"));
+            setSearchTargetPrefix(tableView->property(kSearchTargetPrefixProperty).toString());
             m_freezePaneButton = createButton("冻结");
             m_freezePaneButton->setObjectName(QStringLiteral("ksword_table_freeze_button"));
             m_freezePaneButton->setMinimumSize(68, 28);
@@ -639,50 +387,6 @@ namespace
 
             m_freezePaneMenu = new QMenu(m_freezePaneButton);
             m_freezePaneMenu->setStyleSheet(KswordTheme::ContextMenuStyle());
-            auto* freezeCountsWidget = new QWidget(m_freezePaneMenu);
-            auto* freezeCountsLayout = new QGridLayout(freezeCountsWidget);
-            freezeCountsLayout->setContentsMargins(10, 8, 10, 8);
-            freezeCountsLayout->setHorizontalSpacing(10);
-            freezeCountsLayout->setVerticalSpacing(6);
-            m_freezeRowsLabel = new QLabel(localizedSourceText("前面的行"), freezeCountsWidget);
-            m_freezeColumnsLabel = new QLabel(localizedSourceText("前面的列"), freezeCountsWidget);
-            m_freezeRowsSpin = new QSpinBox(freezeCountsWidget);
-            m_freezeColumnsSpin = new QSpinBox(freezeCountsWidget);
-            m_freezeRowsSpin->setObjectName(QStringLiteral("ksword_table_freeze_row_count"));
-            m_freezeColumnsSpin->setObjectName(QStringLiteral("ksword_table_freeze_column_count"));
-            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
-            {
-                spin->setRange(0, 0);
-                spin->setMinimumSize(72, 28);
-                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
-            }
-            m_freezeRowsLabel->setBuddy(m_freezeRowsSpin);
-            m_freezeColumnsLabel->setBuddy(m_freezeColumnsSpin);
-            m_applyFreezeCountsButton = new QPushButton(localizedSourceText("应用冻结"), freezeCountsWidget);
-            m_applyFreezeCountsButton->setObjectName(QStringLiteral("ksword_table_apply_freeze_counts"));
-            m_applyFreezeCountsButton->setMinimumHeight(28);
-            freezeCountsLayout->addWidget(m_freezeRowsLabel, 0, 0);
-            freezeCountsLayout->addWidget(m_freezeRowsSpin, 0, 1);
-            freezeCountsLayout->addWidget(m_freezeColumnsLabel, 1, 0);
-            freezeCountsLayout->addWidget(m_freezeColumnsSpin, 1, 1);
-            freezeCountsLayout->addWidget(m_applyFreezeCountsButton, 2, 0, 1, 2);
-            auto* freezeCountsAction = new QWidgetAction(m_freezePaneMenu);
-            freezeCountsAction->setDefaultWidget(freezeCountsWidget);
-            m_freezePaneMenu->addAction(freezeCountsAction);
-            m_freezePaneMenu->addSeparator();
-            m_freezeCurrentRowAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中行"));
-            m_freezeCurrentColumnAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中列"));
-            m_freezeCurrentCellAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中行列"));
-            m_freezePaneMenu->addSeparator();
-            m_unfreezeRowsAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消冻结行"));
-            m_unfreezeColumnsAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消冻结列"));
-            m_unfreezeAllAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消全部冻结"));
             m_freezePaneButton->setMenu(m_freezePaneMenu);
             m_freezePaneButton->setPopupMode(QToolButton::InstantPopup);
 
@@ -746,64 +450,36 @@ namespace
 
             connect(m_copyAllButton, &QToolButton::clicked, this, [this]()
                 {
-                    copyVisibleRowsToClipboard(activeTableView());
+                    if (!ks::ui::IsTablePresentationPreparing(m_table.data()))
+                        copyVisibleRowsToClipboard(activeTableView());
                 });
             connect(m_exportButton, &QToolButton::clicked, this, [this]()
                 {
-                    exportTableToTsv(activeTableView());
+                    if (!ks::ui::IsTablePresentationPreparing(m_table.data()))
+                        exportTableToTsv(activeTableView());
                 });
             connect(m_freezePaneMenu, &QMenu::aboutToShow, this, [this]()
                 {
+                    const QPointer<TableActionBar> alive(this);
+                    ensureFreezeMenuContents();
+                    if (!alive) return;
                     // ContextMenuStyle includes sampled theme colors. Refresh before
                     // native Show begins, never from a Show/Resize event filter.
                     const QString menuStyle = KswordTheme::ContextMenuStyle();
                     if (m_freezePaneMenu->styleSheet() != menuStyle) m_freezePaneMenu->setStyleSheet(menuStyle);
+                    if (!alive) return;
                     if (!m_freezeMenuBarrierActive)
                     {
                         m_freezeMenuBarrierActive = true;
                         m_freezeMenuSource = m_table;
                         beginItemViewContextMenu(m_freezeMenuSource.data());
+                        if (!alive) return;
                     }
                     updateFreezePaneMenu();
                 });
             connect(m_freezePaneMenu, &QMenu::aboutToHide, this, [this]()
                 {
                     closeFreezeMenuBarrier();
-                });
-            connect(m_applyFreezeCountsButton, &QPushButton::clicked, this, [this]()
-                {
-                    applyFreezeCounts();
-                    m_freezePaneMenu->hide();
-                });
-            connect(m_freezeCurrentRowAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(true, false);
-                });
-            connect(m_freezeCurrentColumnAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(false, true);
-                });
-            connect(m_freezeCurrentCellAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(true, true);
-                });
-            connect(m_unfreezeRowsAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenRows();
-                    updatePosition();
-                    updateControls();
-                });
-            connect(m_unfreezeColumnsAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenColumns();
-                    updatePosition();
-                    updateControls();
-                });
-            connect(m_unfreezeAllAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenPanes();
-                    updatePosition();
-                    updateControls();
                 });
             connect(m_pauseRefreshButton, &QToolButton::toggled, this, [this](const bool checked)
                 {
@@ -852,22 +528,41 @@ namespace
                 });
 
             m_table->installEventFilter(this);
+            if (m_table->viewport()) m_table->viewport()->installEventFilter(this);
             rebuildSnapshotControls();
             updateControls();
         }
 
         ~TableActionBar() override
         {
+            m_snapshotClosing = true;
+            if (m_snapshotCapture) m_snapshotCapture->close();
+            if (m_snapshotOperation) m_snapshotOperation->close();
+            releaseSnapshotCaptureLease();
             closeFreezeMenuBarrier();
         }
 
     protected:
         bool eventFilter(QObject* source, QEvent* event) override
         {
+            if (event && event->type() == QEvent::KeyPress
+                && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape
+                && (m_snapshotCaptureInProgress || m_pauseCaptureInProgress || m_comparisonInProgress))
+            {
+                cancelSnapshotWork();
+                return true;
+            }
             // Frozen sections are already published by the controller after model
             // resets/inserts/removes. Observe that state without polling or repolishing.
-            if (source == m_table && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
-                updateFreezeButton();
+            if ((source == m_table || source == activeTableView()) && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
+            {
+                if (static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()
+                    == ks::ui::TableRowFilterRevisionProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportBusyProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportPreparingProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::TablePresentationPreparingProperty) updateControls();
+                else updateFreezeButton();
+            }
             return QFrame::eventFilter(source, event);
         }
 
@@ -882,21 +577,27 @@ namespace
                 return;
             }
 
-            m_copyAllButton->setText(localizedSourceText("复制全表"));
-            m_exportButton->setText(localizedSourceText("导出"));
-            m_freezeRowsLabel->setText(localizedSourceText("前面的行"));
-            m_freezeColumnsLabel->setText(localizedSourceText("前面的列"));
-            m_applyFreezeCountsButton->setText(localizedSourceText("应用冻结"));
-            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
-                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            m_copyAllButton->setText(localizedSourceText(kCopyAllSource));
+            m_exportButton->setText(localizedSourceText(kExportSource));
+            if (m_freezeRowsSpin != nullptr)
+            {
+                m_freezeRowsLabel->setText(localizedSourceText("前面的行"));
+                m_freezeColumnsLabel->setText(localizedSourceText("前面的列"));
+                m_applyFreezeCountsButton->setText(localizedSourceText("应用冻结"));
+                for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
+                    spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            }
             m_freezePaneButton->setToolTip(localizedSourceText(
                 "冻结选中的行或列：行会钉在列标题正下方，列会固定在行表头右侧；支持一次冻结多选行"));
-            m_freezeCurrentRowAction->setText(localizedSourceText("冻结选中行"));
-            m_freezeCurrentColumnAction->setText(localizedSourceText("冻结选中列"));
-            m_freezeCurrentCellAction->setText(localizedSourceText("冻结选中行列"));
-            m_unfreezeRowsAction->setText(localizedSourceText("取消冻结行"));
-            m_unfreezeColumnsAction->setText(localizedSourceText("取消冻结列"));
-            m_unfreezeAllAction->setText(localizedSourceText("取消全部冻结"));
+            if (m_unfreezeAllAction != nullptr)
+            {
+                m_freezeCurrentRowAction->setText(localizedSourceText("冻结选中行"));
+                m_freezeCurrentColumnAction->setText(localizedSourceText("冻结选中列"));
+                m_freezeCurrentCellAction->setText(localizedSourceText("冻结选中行列"));
+                m_unfreezeRowsAction->setText(localizedSourceText("取消冻结行"));
+                m_unfreezeColumnsAction->setText(localizedSourceText("取消冻结列"));
+                m_unfreezeAllAction->setText(localizedSourceText("取消全部冻结"));
+            }
             m_cleanupButton->setText(localizedSourceText("清理"));
             m_doneCleanupButton->setText(localizedSourceText("完成"));
             m_deleteSelectedButton->setText(localizedSourceText("清理选中"));
@@ -911,6 +612,13 @@ namespace
         }
 
     public:
+        void setSearchTargetPrefix(const QString& prefix)
+        {
+            if (prefix.isEmpty()) return;
+            m_copyAllButton->setObjectName(prefix + QLatin1String(kCopyAllTargetSuffix));
+            m_exportButton->setObjectName(prefix + QLatin1String(kExportTargetSuffix));
+        }
+
         void setMode(const TableActionBarMode mode)
         {
             if (m_mode == mode)
@@ -1018,8 +726,97 @@ namespace
             return m_pauseOverlay.isNull() ? m_table.data() : m_pauseOverlay.data();
         }
 
+        void ensureFreezeMenuContents()
+        {
+            if (m_unfreezeAllAction != nullptr) return;
+            auto* freezeCountsWidget = new QWidget(m_freezePaneMenu);
+            auto* freezeCountsLayout = new QGridLayout(freezeCountsWidget);
+            freezeCountsLayout->setContentsMargins(10, 8, 10, 8);
+            freezeCountsLayout->setHorizontalSpacing(10);
+            freezeCountsLayout->setVerticalSpacing(6);
+            m_freezeRowsLabel = new QLabel(localizedSourceText("前面的行"), freezeCountsWidget);
+            m_freezeColumnsLabel = new QLabel(localizedSourceText("前面的列"), freezeCountsWidget);
+            m_freezeRowsSpin = new QSpinBox(freezeCountsWidget);
+            m_freezeColumnsSpin = new QSpinBox(freezeCountsWidget);
+            m_freezeRowsSpin->setObjectName(QStringLiteral("ksword_table_freeze_row_count"));
+            m_freezeColumnsSpin->setObjectName(QStringLiteral("ksword_table_freeze_column_count"));
+            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
+            {
+                spin->setRange(0, 0);
+                spin->setMinimumSize(72, 28);
+                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            }
+            m_freezeRowsLabel->setBuddy(m_freezeRowsSpin);
+            m_freezeColumnsLabel->setBuddy(m_freezeColumnsSpin);
+            m_applyFreezeCountsButton = new QPushButton(localizedSourceText("应用冻结"), freezeCountsWidget);
+            m_applyFreezeCountsButton->setObjectName(QStringLiteral("ksword_table_apply_freeze_counts"));
+            m_applyFreezeCountsButton->setMinimumHeight(28);
+            freezeCountsLayout->addWidget(m_freezeRowsLabel, 0, 0);
+            freezeCountsLayout->addWidget(m_freezeRowsSpin, 0, 1);
+            freezeCountsLayout->addWidget(m_freezeColumnsLabel, 1, 0);
+            freezeCountsLayout->addWidget(m_freezeColumnsSpin, 1, 1);
+            freezeCountsLayout->addWidget(m_applyFreezeCountsButton, 2, 0, 1, 2);
+            auto* freezeCountsAction = new QWidgetAction(m_freezePaneMenu);
+            freezeCountsAction->setDefaultWidget(freezeCountsWidget);
+            m_freezePaneMenu->addAction(freezeCountsAction);
+            m_freezePaneMenu->addSeparator();
+            m_freezeCurrentRowAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中行"));
+            m_freezeCurrentColumnAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中列"));
+            m_freezeCurrentCellAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中行列"));
+            m_freezePaneMenu->addSeparator();
+            m_unfreezeRowsAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消冻结行"));
+            m_unfreezeColumnsAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消冻结列"));
+            m_unfreezeAllAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消全部冻结"));
+            connect(m_applyFreezeCountsButton, &QPushButton::clicked, this, [this]()
+                {
+                    applyFreezeCounts();
+                    m_freezePaneMenu->hide();
+                });
+            connect(m_freezeCurrentRowAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(true, false);
+                });
+            connect(m_freezeCurrentColumnAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(false, true);
+                });
+            connect(m_freezeCurrentCellAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(true, true);
+                });
+            connect(m_unfreezeRowsAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenRows();
+                    updatePosition();
+                    updateControls();
+                });
+            connect(m_unfreezeColumnsAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenColumns();
+                    updatePosition();
+                    updateControls();
+                });
+            connect(m_unfreezeAllAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenPanes();
+                    updatePosition();
+                    updateControls();
+                });
+        }
+
         void updateFreezePaneMenu()
         {
+            if (m_unfreezeAllAction == nullptr)
+            {
+                updateFreezeButton();
+                return;
+            }
             QTableView* tableView = activeTableView();
             const QModelIndex currentIndex =
                 tableView != nullptr ? tableView->currentIndex() : QModelIndex();
@@ -1080,6 +877,7 @@ namespace
 
         void applyFreezeCounts()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             QTableView* tableView = activeTableView();
             if (m_inComparison || m_pauseCaptureInProgress || m_snapshotCaptureInProgress || m_comparisonInProgress
                 || tableView == nullptr || tableView->model() == nullptr) return;
@@ -1116,6 +914,7 @@ namespace
         // - freezeRows/freezeColumns 控制本次只修改哪一个方向。
         void freezeToCurrentIndex(const bool freezeRows, const bool freezeColumns)
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             QTableView* tableView = activeTableView();
             if (m_inComparison || tableView == nullptr || tableView->model() == nullptr ||
                 !tableView->currentIndex().isValid())
@@ -1239,14 +1038,68 @@ namespace
             }
         }
 
+        struct ComparisonInput
+        {
+            TableSnapshot earlier, later;
+            QSet<int> ignored;
+        };
+
+        void ensureSnapshotOperations()
+        {
+            if (!m_snapshotCapture) m_snapshotCapture = new ks::ui::CompleteExportCapture(this);
+            if (m_snapshotOperation) return;
+            m_snapshotOperation = new ks::ui::AsyncOperation(this);
+            m_snapshotOperation->setStateChangedCallback([this]()
+            {
+                if (m_snapshotClosing || m_cancelingSnapshotWork) return;
+                // Delivery may be dropped while the owner still exists. Release
+                // only the UI busy state; no source/business work is restarted.
+                if (!m_snapshotOperation->isBusy() && !m_snapshotCapture->isBusy())
+                {
+                    m_snapshotCaptureInProgress = m_pauseCaptureInProgress = m_comparisonInProgress = false;
+                    const QPointer<TableActionBar> alive(this);
+                    releaseSnapshotCaptureLease();
+                    if (alive) updateControls();
+                }
+            });
+        }
+
+        void beginSnapshotCaptureLease()
+        {
+            m_snapshotCoordinator = ks::ui::UiCommitCoordinator::forApplication();
+            if (m_snapshotCoordinator && !m_snapshotCaptureLease)
+            { m_snapshotCaptureLease = true; m_snapshotCoordinator->beginValueCapture(m_table); }
+        }
+
+        void releaseSnapshotCaptureLease()
+        {
+            if (!m_snapshotCaptureLease) return;
+            m_snapshotCaptureLease = false;
+            if (m_snapshotCoordinator) m_snapshotCoordinator->endValueCapture(m_table);
+        }
+
+        void cancelSnapshotWork()
+        {
+            const QPointer<TableActionBar> alive(this);
+            m_cancelingSnapshotWork = true;
+            if (m_snapshotCapture) m_snapshotCapture->cancel();
+            if (m_snapshotOperation) m_snapshotOperation->cancel();
+            releaseSnapshotCaptureLease();
+            if (!alive) return;
+            m_cancelingSnapshotWork = false;
+            m_snapshotCaptureInProgress = m_pauseCaptureInProgress = m_comparisonInProgress = false;
+            updateControls();
+        }
+
         bool pauseRefresh()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return false;
             if (m_refreshPaused)
             {
                 return true;
             }
             if (m_table.isNull() || m_table->model() == nullptr ||
-                m_inComparison || m_pauseCaptureInProgress)
+                m_inComparison || m_pauseCaptureInProgress || m_snapshotCaptureInProgress || m_comparisonInProgress)
             {
                 return false;
             }
@@ -1256,62 +1109,68 @@ namespace
             const QPointer<QAbstractItemModel> modelGuard(m_table->model());
             m_pauseCaptureInProgress = true;
             updateControls();
-            const TableSnapshot snapshot = TableSnapshotCompareEngine::capture(
-                m_table.data(),
-                localizedSourceText("视图已冻结"),
-                0,
-                kSnapshotCaptureLimits);
-            if (actionBarGuard.isNull())
+            if (!actionBarGuard) return false;
+            ensureSnapshotOperations();
+            beginSnapshotCaptureLease();
+            if (!actionBarGuard) return false;
+            const auto finished = [this, actionBarGuard, tableGuard, modelGuard](TableSnapshot snapshot)
             {
-                return false;
-            }
-            m_pauseCaptureInProgress = false;
-            if (tableGuard.isNull() || modelGuard.isNull() ||
-                m_table != tableGuard || tableGuard->model() != modelGuard ||
-                snapshot.sourceInvalidated)
-            {
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("冻结视图失败"),
-                    localizedSourceText("表格在捕获期间已重建，请重试。"));
-                updateControls();
-                return false;
-            }
-
-            if (snapshot.isTruncated())
-            {
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("冻结视图已截断"),
-                    localizedSourceText(
-                        "表格规模超过冻结视图快照的安全上限，当前冻结视图保留 %1/%2 行和 %3/%4 列；恢复实时视图后可回到完整实时表格。")
-                        .arg(snapshot.rows.size())
-                        .arg(snapshot.sourceRowCount)
-                        .arg(snapshot.visibleColumns.size())
-                        .arg(snapshot.sourceColumnCount));
-                if (actionBarGuard.isNull() || tableGuard.isNull() ||
-                    modelGuard.isNull() || m_table != tableGuard ||
-                    tableGuard->model() != modelGuard)
+                if (!actionBarGuard || m_snapshotClosing || m_cancelingSnapshotWork) return;
+                releaseSnapshotCaptureLease();
+                if (!actionBarGuard) return;
+                m_pauseCaptureInProgress = false;
+                if (tableGuard.isNull() || modelGuard.isNull() ||
+                    m_table != tableGuard || tableGuard->model() != modelGuard ||
+                    snapshot.sourceInvalidated)
                 {
-                    updateControls();
-                    return false;
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("冻结视图失败"),
+                        localizedSourceText("表格在捕获期间已重建，请重试。"));
+                    if (actionBarGuard) updateControls();
+                    return;
                 }
-            }
 
-            m_pauseModel = new TablePausedSnapshotModel(snapshot, this);
-            auto* pausedView = new ComparisonTableView(m_table.data());
-            m_pauseOverlay = pausedView;
-            configurePausedOverlay(pausedView, snapshot);
+                if (snapshot.isTruncated())
+                {
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("冻结视图已截断"),
+                        localizedSourceText(
+                            "表格规模超过冻结视图快照的安全上限，当前冻结视图保留 %1/%2 行和 %3/%4 列；恢复实时视图后可回到完整实时表格。")
+                            .arg(snapshot.rows.size())
+                            .arg(snapshot.sourceRowCount)
+                            .arg(snapshot.visibleColumns.size())
+                            .arg(snapshot.sourceColumnCount));
+                    if (actionBarGuard.isNull() || tableGuard.isNull() ||
+                        modelGuard.isNull() || m_table != tableGuard ||
+                        tableGuard->model() != modelGuard)
+                    {
+                        if (actionBarGuard) updateControls();
+                        return;
+                    }
+                }
 
-            m_frozenPaneController->setTargetTable(nullptr);
-            suspendOriginalTablePainting();
-            m_refreshPaused = true;
-            pausedView->show();
-            updatePosition();
-            pausedView->raise();
-            pausedView->setFocus(Qt::OtherFocusReason);
-            m_frozenPaneController->setTargetTable(pausedView);
-            updateControls();
+                m_pauseModel = new TablePausedSnapshotModel(snapshot, this);
+                auto* pausedView = new ComparisonTableView(m_table.data());
+                m_pauseOverlay = pausedView;
+                configurePausedOverlay(pausedView, snapshot);
+                pausedView->installEventFilter(this);
+
+                m_frozenPaneController->setTargetTable(nullptr);
+                suspendOriginalTablePainting();
+                m_refreshPaused = true;
+                pausedView->show();
+                updatePosition();
+                pausedView->raise();
+                pausedView->setFocus(Qt::OtherFocusReason);
+                m_frozenPaneController->setTargetTable(pausedView);
+                updateControls();
+                return;
+            };
+            if (!TableSnapshotCompareEngine::captureAsync(m_table, m_snapshotCapture, m_snapshotOperation,
+                localizedSourceText("视图已冻结"), 0, finished, kSnapshotCaptureLimits))
+            { TableSnapshot failed; failed.sourceInvalidated = true; finished(std::move(failed)); }
             return true;
         }
 
@@ -1389,9 +1248,10 @@ namespace
 
         void addSnapshot()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             if (m_table.isNull() ||
                 m_inComparison ||
-                m_snapshotCaptureInProgress ||
+                m_snapshotCaptureInProgress || m_pauseCaptureInProgress || m_comparisonInProgress ||
                 m_table->model() == nullptr)
             {
                 return;
@@ -1399,112 +1259,116 @@ namespace
 
             const quint64 sequence = m_nextSnapshotOrdinal++;
             const QString label = TableSnapshotCompareEngine::snapshotLabelForOrdinal(sequence);
+            const QPointer<TableActionBar> actionBarGuard(this);
             m_snapshotCaptureInProgress = true;
             updateControls();
 
-            QPointer<TableActionBar> actionBarGuard(this);
-            TableSnapshot snapshot = TableSnapshotCompareEngine::capture(
-                m_table.data(),
-                label,
-                sequence,
-                kSnapshotCaptureLimits);
-            if (actionBarGuard.isNull())
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            beginSnapshotCaptureLease();
+            if (!actionBarGuard) return;
+            const auto finished = [this, actionBarGuard](TableSnapshot snapshot)
             {
-                return;
-            }
-            m_snapshotCaptureInProgress = false;
-            if (snapshot.sourceInvalidated)
-            {
+                if (!actionBarGuard || m_snapshotClosing || m_cancelingSnapshotWork) return;
+                releaseSnapshotCaptureLease();
+                if (!actionBarGuard) return;
+                m_snapshotCaptureInProgress = false;
+                if (snapshot.sourceInvalidated)
+                {
+                    updateControls();
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("快照采集限制"),
+                        localizedSourceText("采集期间源表已关闭，或其数据、布局、表头可见状态发生变化。本次快照已整份丢弃；请在源表稳定后重试。"));
+                    return;
+                }
+
+                m_snapshots.push_back(std::move(snapshot));
+                const TableSnapshot& retainedSnapshot = m_snapshots.back();
+
+                QStringList limitMessages;
+                bool retainedPartialSnapshot = false;
+                if (retainedSnapshot.truncatedByRowLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 已截断：源表共 %2 行，仅访问 %3 行并保留 %4 行。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.sourceRowCount)
+                            .arg(retainedSnapshot.visitedSourceRows)
+                            .arg(retainedSnapshot.rows.size()));
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 行硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumRows));
+                }
+                if (retainedSnapshot.truncatedByColumnLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 仅扫描源表前 %2/%3 列，并保留其中 %4 个可见列。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.visitedSourceColumns)
+                            .arg(retainedSnapshot.sourceColumnCount)
+                            .arg(retainedSnapshot.visibleColumns.size()));
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 列硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumColumns));
+                }
+                if (retainedSnapshot.truncatedByByteLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 MiB 估算内存硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumEstimatedBytes / kBytesPerMiB));
+                }
+                if (retainedSnapshot.truncatedByValueLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 中有 %2 个表头值和 %3 个单元格值超过单值上限，另有 %4 个不支持的显示值类型；相关值已截断或留空。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.truncatedHeaderValueCount)
+                            .arg(retainedSnapshot.truncatedCellValueCount)
+                            .arg(retainedSnapshot.unsupportedDisplayValueCount));
+                    limitMessages.push_back(
+                        localizedSourceText("单个表头最多保留 %1 个字符，单个单元格最多保留 %2 个字符。")
+                            .arg(kSnapshotCaptureLimits.maximumHeaderCharacters)
+                            .arg(kSnapshotCaptureLimits.maximumCellCharacters));
+                }
+
+                const TableSnapshotRetentionResult retention =
+                    TableSnapshotCompareEngine::enforceRetentionLimits(
+                        m_snapshots,
+                        kSnapshotRetentionLimits);
+                if (!retention.evictedLabels.isEmpty())
+                {
+                    limitMessages.push_back(
+                        localizedSourceText("为满足最多 %1 份快照、总估算内存不超过 %2 MiB 的硬上限，已淘汰最旧的 %3 份快照：%4。")
+                            .arg(kSnapshotRetentionLimits.maximumSnapshots)
+                            .arg(kSnapshotRetentionLimits.maximumEstimatedBytes / kBytesPerMiB)
+                            .arg(retention.evictedLabels.size())
+                            .arg(retention.evictedLabels.join(QStringLiteral(", "))));
+                }
+                if (retainedPartialSnapshot)
+                {
+                    limitMessages.push_back(
+                        localizedSourceText("已保留的部分仍可继续参与快照比较。"));
+                }
+
+                pruneSnapshotSelections();
+                rebuildSnapshotControls();
                 updateControls();
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("快照采集限制"),
-                    localizedSourceText("采集期间源表已关闭，或其数据、布局、表头可见状态发生变化。本次快照已整份丢弃；请在源表稳定后重试。"));
-                return;
-            }
-
-            m_snapshots.push_back(std::move(snapshot));
-            const TableSnapshot& retainedSnapshot = m_snapshots.back();
-
-            QStringList limitMessages;
-            bool retainedPartialSnapshot = false;
-            if (retainedSnapshot.truncatedByRowLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 已截断：源表共 %2 行，仅访问 %3 行并保留 %4 行。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.sourceRowCount)
-                        .arg(retainedSnapshot.visitedSourceRows)
-                        .arg(retainedSnapshot.rows.size()));
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 行硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumRows));
-            }
-            if (retainedSnapshot.truncatedByColumnLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 仅扫描源表前 %2/%3 列，并保留其中 %4 个可见列。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.visitedSourceColumns)
-                        .arg(retainedSnapshot.sourceColumnCount)
-                        .arg(retainedSnapshot.visibleColumns.size()));
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 列硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumColumns));
-            }
-            if (retainedSnapshot.truncatedByByteLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 MiB 估算内存硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumEstimatedBytes / kBytesPerMiB));
-            }
-            if (retainedSnapshot.truncatedByValueLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 中有 %2 个表头值和 %3 个单元格值超过单值上限，另有 %4 个不支持的显示值类型；相关值已截断或留空。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.truncatedHeaderValueCount)
-                        .arg(retainedSnapshot.truncatedCellValueCount)
-                        .arg(retainedSnapshot.unsupportedDisplayValueCount));
-                limitMessages.push_back(
-                    localizedSourceText("单个表头最多保留 %1 个字符，单个单元格最多保留 %2 个字符。")
-                        .arg(kSnapshotCaptureLimits.maximumHeaderCharacters)
-                        .arg(kSnapshotCaptureLimits.maximumCellCharacters));
-            }
-
-            const TableSnapshotRetentionResult retention =
-                TableSnapshotCompareEngine::enforceRetentionLimits(
-                    m_snapshots,
-                    kSnapshotRetentionLimits);
-            if (!retention.evictedLabels.isEmpty())
-            {
-                limitMessages.push_back(
-                    localizedSourceText("为满足最多 %1 份快照、总估算内存不超过 %2 MiB 的硬上限，已淘汰最旧的 %3 份快照：%4。")
-                        .arg(kSnapshotRetentionLimits.maximumSnapshots)
-                        .arg(kSnapshotRetentionLimits.maximumEstimatedBytes / kBytesPerMiB)
-                        .arg(retention.evictedLabels.size())
-                        .arg(retention.evictedLabels.join(QStringLiteral(", "))));
-            }
-            if (retainedPartialSnapshot)
-            {
-                limitMessages.push_back(
-                    localizedSourceText("已保留的部分仍可继续参与快照比较。"));
-            }
-
-            pruneSnapshotSelections();
-            rebuildSnapshotControls();
-            updateControls();
-            if (!limitMessages.isEmpty())
-            {
-                QMessageBox::information(
-                    this,
-                    localizedSourceText("快照采集限制"),
-                    limitMessages.join(QStringLiteral("\n\n")));
-            }
+                if (!limitMessages.isEmpty())
+                {
+                    QMessageBox::information(
+                        this,
+                        localizedSourceText("快照采集限制"),
+                        limitMessages.join(QStringLiteral("\n\n")));
+                }
+            };
+            if (!TableSnapshotCompareEngine::captureAsync(m_table, m_snapshotCapture, m_snapshotOperation,
+                label, sequence, finished, kSnapshotCaptureLimits))
+            { TableSnapshot failed; failed.sourceInvalidated = true; finished(std::move(failed)); }
         }
 
         void enterCleanupMode()
@@ -1916,9 +1780,10 @@ namespace
 
         void showComparisonView()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             if (m_table.isNull() ||
                 m_cleanupMode ||
-                m_comparisonInProgress ||
+                m_comparisonInProgress || m_snapshotCaptureInProgress || m_pauseCaptureInProgress ||
                 m_selectedSnapshotSequences.size() != 2)
             {
                 return;
@@ -2007,56 +1872,69 @@ namespace
             m_ignoredSourceColumns.unite(TableSnapshotCompareEngine::defaultIgnoredColumnIndexes(*later));
             m_comparisonInProgress = true;
             updateControls();
-            const TableComparisonResult comparison = TableSnapshotCompareEngine::compare(
-                *earlier,
-                *later,
-                m_ignoredSourceColumns,
-                QVector<int>(),
-                kSnapshotComparisonLimits,
-                [sourceStillValid]()
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            m_snapshotOperation->submit<ComparisonInput, TableComparisonResult>({*earlier, *later, m_ignoredSourceColumns},
+                [](const ComparisonInput& value, const ks::ui::AsyncOperationToken& token)
+                { return TableSnapshotCompareEngine::compare(value.earlier, value.later, value.ignored,
+                    {}, kSnapshotComparisonLimits, [&token]() { return token.isCanceled(); }); },
+                [this, actionBarGuard, sourceStillValid](const TableComparisonResult& comparison, std::uint64_t)
                 {
-                    return !sourceStillValid();
-                });
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            m_comparisonInProgress = false;
-            if (!sourceStillValid() || comparison.cancelled)
-            {
-                updateControls();
-                return;
-            }
-            showComparisonLimitWarning(comparison);
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            if (!sourceStillValid())
-            {
-                updateControls();
-                return;
-            }
-            m_comparisonModel = new TableComparisonModel(comparison, this);
-            m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    m_comparisonInProgress = false;
+                    if (!m_selectedSnapshotSequences.contains(comparison.earlierSnapshot.sequence)
+                        || !m_selectedSnapshotSequences.contains(comparison.laterSnapshot.sequence))
+                    { updateControls(); return true; }
+                    if (m_ignoredSourceColumns != comparison.ignoredSourceColumns)
+                    {
+                        updateControls();
+                        if (m_inComparison) QTimer::singleShot(0, this, [this]() { refreshComparison(); });
+                        return true;
+                    }
+                    if (!sourceStillValid() || comparison.cancelled)
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    showComparisonLimitWarning(comparison);
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    if (!sourceStillValid())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    m_comparisonModel = new TableComparisonModel(comparison, this);
+                    m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
 
-            auto* comparisonView = new ComparisonTableView(m_table.data());
-            m_comparisonOverlay = comparisonView;
-            configureComparisonOverlay(comparisonView, comparison);
-            comparisonView->setProperty(kComparisonActiveProperty, true);
+                    auto* comparisonView = new ComparisonTableView(m_table.data());
+                    m_comparisonOverlay = comparisonView;
+                    configureComparisonOverlay(comparisonView, comparison);
+                    comparisonView->installEventFilter(this);
+                    comparisonView->setProperty(kComparisonActiveProperty, true);
 
-            m_frozenPaneController->setTargetTable(nullptr);
-            suspendOriginalTablePainting();
-            m_inComparison = true;
-            comparisonView->show();
-            updatePosition();
-            comparisonView->raise();
-            comparisonView->setFocus(Qt::OtherFocusReason);
-            updateControls();
+                    m_frozenPaneController->setTargetTable(nullptr);
+                    suspendOriginalTablePainting();
+                    m_inComparison = true;
+                    comparisonView->show();
+                    updatePosition();
+                    comparisonView->raise();
+                    comparisonView->setFocus(Qt::OtherFocusReason);
+                    updateControls();
+                    return true;
+                },
+                [this, actionBarGuard](std::exception_ptr)
+                { if (actionBarGuard) { m_comparisonInProgress = false; updateControls(); } });
         }
 
         void showCurrentView()
         {
+            if (m_comparisonInProgress) cancelSnapshotWork();
             if (!m_inComparison)
             {
                 return;
@@ -2102,42 +1980,53 @@ namespace
             {
                 std::swap(earlier, later);
             }
+            const QPointer<TableActionBar> actionBarGuard(this);
             m_comparisonInProgress = true;
             updateControls();
-            const QPointer<TableActionBar> actionBarGuard(this);
-            const TableComparisonResult comparison = TableSnapshotCompareEngine::compare(
-                *earlier,
-                *later,
-                m_ignoredSourceColumns,
-                QVector<int>(),
-                kSnapshotComparisonLimits,
-                [actionBarGuard]()
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            m_snapshotOperation->submit<ComparisonInput, TableComparisonResult>({*earlier, *later, m_ignoredSourceColumns},
+                [](const ComparisonInput& value, const ks::ui::AsyncOperationToken& token)
+                { return TableSnapshotCompareEngine::compare(value.earlier, value.later, value.ignored,
+                    {}, kSnapshotComparisonLimits, [&token]() { return token.isCanceled(); }); },
+                [this, actionBarGuard](const TableComparisonResult& comparison, std::uint64_t)
                 {
-                    return actionBarGuard.isNull() || actionBarGuard->m_table.isNull();
-                });
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            m_comparisonInProgress = false;
-            if (comparison.cancelled || m_table.isNull() || m_comparisonModel.isNull())
-            {
-                updateControls();
-                return;
-            }
-            showComparisonLimitWarning(comparison);
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            if (m_table.isNull() || m_comparisonModel.isNull())
-            {
-                updateControls();
-                return;
-            }
-            m_comparisonModel->setComparison(comparison);
-            m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
-            updateControls();
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    m_comparisonInProgress = false;
+                    if (!m_selectedSnapshotSequences.contains(comparison.earlierSnapshot.sequence)
+                        || !m_selectedSnapshotSequences.contains(comparison.laterSnapshot.sequence))
+                    { updateControls(); return true; }
+                    if (m_ignoredSourceColumns != comparison.ignoredSourceColumns)
+                    {
+                        updateControls();
+                        if (m_inComparison) QTimer::singleShot(0, this, [this]() { refreshComparison(); });
+                        return true;
+                    }
+                    if (comparison.cancelled || m_table.isNull() || m_comparisonModel.isNull())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    showComparisonLimitWarning(comparison);
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    if (m_table.isNull() || m_comparisonModel.isNull())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    m_comparisonModel->setComparison(comparison);
+                    m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
+                    updateControls();
+                    return true;
+                },
+                [this, actionBarGuard](std::exception_ptr)
+                { if (actionBarGuard) { m_comparisonInProgress = false; updateControls(); } });
         }
 
         void showIgnoredColumnsMenu()
@@ -2349,21 +2238,25 @@ namespace
 
         void updateControls()
         {
+            const bool presentationReady = !ks::ui::IsTablePresentationPreparing(m_table.data());
+            setEnabled(presentationReady);
             const bool hasSnapshots = !m_snapshots.isEmpty();
             const bool exactlyTwoSnapshotsSelected = m_selectedSnapshotSequences.size() == 2;
             QTableView* activeTable = activeTableView();
-            const bool hasVisibleRows = activeTable != nullptr &&
+            const bool hasVisibleRows = presentationReady && activeTable != nullptr &&
                 activeTable->model() != nullptr &&
-                activeTable->model()->rowCount() > 0 &&
+                ks::ui::HasTableRowsPassingFilters(activeTable) &&
                 activeTable->model()->columnCount() > 0;
-            const bool controlsAvailable =
+            const bool projectionReady = !ks::ui::IsTableRowFilterProjectionPending(activeTable);
+            const bool controlsAvailable = presentationReady &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_pauseCaptureInProgress;
-            m_copyAllButton->setEnabled(controlsAvailable && hasVisibleRows);
-            m_exportButton->setEnabled(controlsAvailable && hasVisibleRows);
+            const bool exportBusy = activeTable && activeTable->property(ks::ui::CompleteExportBusyProperty).toBool();
+            m_copyAllButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows && !exportBusy);
+            m_exportButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows && !exportBusy);
             m_freezePaneButton->setEnabled(
-                controlsAvailable &&
+                controlsAvailable && projectionReady &&
                 !m_inComparison &&
                 activeTable != nullptr &&
                 activeTable->model() != nullptr);
@@ -2382,7 +2275,7 @@ namespace
                     m_refreshPaused || m_pauseCaptureInProgress);
             }
             m_pauseRefreshButton->setEnabled(
-                !m_pauseCaptureInProgress &&
+                presentationReady && !m_pauseCaptureInProgress &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_cleanupMode &&
@@ -2392,7 +2285,7 @@ namespace
             m_addSnapshotButton->setText(localizedSourceText(
                 m_snapshotCaptureInProgress ? "正在采集…" : "增加快照"));
             m_addSnapshotButton->setEnabled(
-                controlsAvailable &&
+                controlsAvailable && projectionReady &&
                 !m_cleanupMode &&
                 !m_inComparison &&
                 !m_refreshPaused &&
@@ -2432,6 +2325,12 @@ namespace
             applyModeVisibility();
         }
 
+        ks::ui::CompleteExportCapture* m_snapshotCapture = nullptr;
+        ks::ui::AsyncOperation* m_snapshotOperation = nullptr;
+        QPointer<ks::ui::UiCommitCoordinator> m_snapshotCoordinator;
+        bool m_snapshotCaptureLease = false;
+        bool m_snapshotClosing = false;
+        bool m_cancelingSnapshotWork = false;
         QPointer<QTableView> m_table;
         QToolButton* m_moreButton = nullptr; // 自适应收纳入口，窄表格才显示。
         QMenu* m_moreMenu = nullptr; // 按需重建的动作镜像，原按钮继续持有业务状态。
@@ -2546,7 +2445,9 @@ namespace
             menu,
             tableView,
             clickedIndex,
-            !selectedVisibleRows(tableView, true).isEmpty(),
+            tableView && tableView->selectionModel() &&
+                (tableView->selectionModel()->hasSelection() ||
+                    (tableView->currentIndex().isValid() && !isRowHiddenByFilter(tableView, tableView->currentIndex().row()))),
             [guardedTable]()
             {
                 if (!guardedTable.isNull())
@@ -2601,8 +2502,8 @@ namespace
             return;
         }
 
-        const QVector<int> selectedRowList = selectedVisibleRows(tableView, false);
-        if (std::find(selectedRowList.cbegin(), selectedRowList.cend(), clickedIndex.row()) != selectedRowList.cend())
+        if (!isRowHiddenByFilter(tableView, clickedIndex.row()) &&
+            tableView->selectionModel()->rowIntersectsSelection(clickedIndex.row(), clickedIndex.parent()))
         {
             tableView->selectionModel()->setCurrentIndex(clickedIndex, QItemSelectionModel::NoUpdate);
             return;
@@ -2850,7 +2751,32 @@ namespace
 
 namespace ks::ui
 {
+    QVector<PageSearchBodyText> ColdCompactTableActionBody(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return {};
+        return {
+            {localizedSourceText(kCopyAllSource), targetPrefix + QLatin1String(kCopyAllTargetSuffix), {}, true},
+            {localizedSourceText(kExportSource), targetPrefix + QLatin1String(kExportTargetSuffix), {}, true}
+        };
+    }
+
+    void SetCompactTableSearchTargetPrefix(QTableView* tableView, const QString& targetPrefix)
+    {
+        if (!tableView || targetPrefix.isEmpty()) return;
+        const QPointer<QTableView> owner(tableView);
+        tableView->setProperty(kSearchTargetPrefixProperty, targetPrefix);
+        if (owner)
+            if (auto* bar = actionBarForTable(owner.data())) bar->setSearchTargetPrefix(targetPrefix);
+    }
+
     // 宿主复用原有功能实现，避免迁移时丢失冻结、暂停、快照比较或搜索能力。
+    bool IsTablePresentationPreparing(const QTableView* tableView)
+    {
+        for (const QWidget* owner = tableView; owner != nullptr; owner = owner->parentWidget())
+            if (owner->property(TablePresentationPreparingProperty).toBool()) return true;
+        return false;
+    }
+
     void ConfigureResultTableInteractions(
         QTableView* tableView,
         const ResultTableCapabilities& capabilities)
@@ -2968,6 +2894,20 @@ namespace ks::ui
             itemViewList.push_back(tableView);
         }
         return IsItemViewUiCommitBlockedByContextMenu(itemViewList);
+    }
+
+    bool DeferTablePresentationIfValueCaptureOpen(
+        QObject* owner,
+        const QString& commitKey,
+        const QList<QTableView*>& tableList,
+        std::function<void()> commitAction)
+    {
+        QList<QAbstractItemView*> views;
+        views.reserve(tableList.size());
+        for (QTableView* const table : tableList) views.append(table);
+        auto* const coordinator = UiCommitCoordinator::forApplication();
+        return coordinator != nullptr && coordinator->deferPresentationIfBlocked(
+            owner, commitKey, views, std::move(commitAction));
     }
 
     bool DeferItemViewUiCommitIfContextMenuOpen(

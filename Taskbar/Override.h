@@ -1,3 +1,5 @@
+#include <QPainter>
+
 #include <QPushButton>
 #include <QGraphicsDropShadowEffect>
 #include <QEnterEvent>
@@ -5,6 +7,29 @@
 #include <QPixmap>
 #include <QImage>
 #include <QColor>
+
+// 警报动画只更新此内容面的颜色，不重排或repolish子控件。
+class TaskbarColorSurface final : public QWidget
+{
+public:
+    explicit TaskbarColorSurface(QWidget* parent) : QWidget(parent) {}
+    void setSurfaceColor(const QColor& color)
+    {
+        if (m_color != color)
+        {
+            m_color = color;
+            update();
+        }
+    }
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), m_color);
+    }
+private:
+    QColor m_color = QColor(QStringLiteral("#0A0F16"));
+};
 
 class GlowIconButton : public QPushButton {
     Q_OBJECT

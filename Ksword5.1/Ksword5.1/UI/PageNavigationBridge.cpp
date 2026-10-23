@@ -1,12 +1,18 @@
 #include "../Framework.h"
 #include "./PageNavigationBridge.h"
+#include "./AsyncUiDispatcher.h"
 #include "../include/ads/DockWidget.h"
 #include <QAbstractItemView>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QSet>
 #include <QPointer>
+#include <QQueue>
+#include <QRunnable>
+#include <QThreadPool>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimer>
@@ -22,6 +28,7 @@ namespace ks::ui
             QPointer<ads::CDockWidget> dock; // 当前实例实际拥有的一级页面。
             QPointer<QWidget> page;         // 页对象身份；不使用易变化的标题或序号跳转。
             bool pageRequired = false;     // 区分一级入口和已经销毁的子页。
+            QString descriptorId;           // 静态工厂局部ID，仅在用户激活时解析真实页面。
         };
         PageNavigationBridge* owner;
         QPointer<QWidget> host;
@@ -29,21 +36,130 @@ namespace ks::ui
         DockAction prepare;
         DockAction nestedPrepare;
         DockAction activate;
+        PageNavigationCatalogProvider catalogProvider;
+        PageNavigationCatalogNavigator catalogNavigator;
         HWND client = nullptr;
         HWND server = nullptr; // 保存原生句柄，析构时不重新调用宿主 winId 创建窗口。
         QString request;
-        QString epoch;
+        QString epoch = QUuid::createUuid().toString(QUuid::WithoutBraces); // 当前Bridge实例身份。
+        QString completedRevision;
+        QCryptographicHash catalogHash{QCryptographicHash::Sha256};
         QMap<QString, Route> routes;
+        QSet<QString> catalogRouteIds; // 只有当前目录代实际登记的稳定ID可路由。
         QList<QPointer<ads::CDockWidget>> pending;
         int nextDock = 0;
         quint64 generation = 0;
         bool collecting = false;
 
-        // 消息在原生处理栈外发送，接收方停止响应时最多等待短时间。
+        struct Delivery
+        {
+            HWND destination = nullptr;
+            HWND source = nullptr;
+            QByteArray bytes;
+            quint64 generation = 0;
+        };
+        std::shared_ptr<AsyncUiDispatcher> deliveryDispatcher;
+        QQueue<Delivery> deliveries;
+        struct DeliveryReceipt
+        {
+            quint64 generation = 0;
+            bool delivered = false;
+            std::atomic_bool completed{false}; // worker发布物理完成，GUI ACK丢弃不抹掉该事实。
+        };
+        std::shared_ptr<DeliveryReceipt> deliveryReceipt;
+        QTimer* deliveryPoller = nullptr; // 只在一个真实worker在途时运行，GUI读取值receipt。
+        bool deliveryInFlight = false;
+        bool collectWaitingForDelivery = false;
+
+        static bool sendDelivery(const Delivery& delivery)
+        {
+            // 此函数仅在worker触碰Win32句柄和值字节，不读取QObject或控件。
+            if (!::GetPropW(delivery.destination, page_navigation::ClientProperty)
+                || !page_navigation::IsCompanionWindow(delivery.destination, page_navigation::TaskbarFileName)
+                || !::GetPropW(delivery.source, page_navigation::ServerProperty)
+                || !page_navigation::IsCompanionWindow(delivery.source, page_navigation::MainFileName))
+            {
+                return false;
+            }
+            COPYDATASTRUCT packet{page_navigation::ReplyTag, static_cast<DWORD>(delivery.bytes.size()),
+                const_cast<char*>(delivery.bytes.constData())};
+            DWORD_PTR accepted = 0;
+            return ::SendMessageTimeoutW(delivery.destination, WM_COPYDATA,
+                reinterpret_cast<WPARAM>(delivery.source), reinterpret_cast<LPARAM>(&packet),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 750, &accepted) != 0 && accepted != 0;
+        }
+
+        void finishDelivery(quint64 expected, bool delivered)
+        {
+            deliveryInFlight = false;
+            if (deliveryPoller) deliveryPoller->stop();
+            if (expected == generation && !delivered)
+            {
+                // 一次拒绝或超时即作废本代；不会继续等待其余目录包。
+                collecting = false;
+                collectWaitingForDelivery = false;
+                deliveries.clear();
+                ++generation;
+                return;
+            }
+            pumpDelivery(); // 旧代ACK只释放在途槽，不改变新代收集状态。
+            if (!deliveryInFlight && deliveries.isEmpty() && collecting && collectWaitingForDelivery)
+            {
+                collectWaitingForDelivery = false;
+                const quint64 next = generation;
+                QTimer::singleShot(0, owner, [this, next]() { collectNext(next); });
+            }
+        }
+
+        void reconcileDelivery(const std::shared_ptr<DeliveryReceipt>& expected = {})
+        {
+            const auto receipt = deliveryReceipt;
+            if (!receipt || (expected && receipt != expected)
+                || !receipt->completed.load(std::memory_order_acquire)) return;
+            deliveryReceipt.reset();
+            finishDelivery(receipt->generation, receipt->delivered);
+        }
+
+        void pumpDelivery()
+        {
+            reconcileDelivery(); // 新请求也能回收已物理完成但丢失GUI ACK的旧槽。
+            if (deliveryInFlight || deliveries.isEmpty()) return;
+            const Delivery delivery = deliveries.dequeue();
+            const auto dispatcher = deliveryDispatcher;
+            try
+            {
+                auto receipt = std::make_shared<DeliveryReceipt>();
+                receipt->generation = delivery.generation;
+                deliveryReceipt = receipt;
+                deliveryInFlight = true;
+                if (deliveryPoller) deliveryPoller->start();
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([delivery, dispatcher, receipt, state = this]()
+                {
+                    bool delivered = false;
+                    try { delivered = sendDelivery(delivery); }
+                    catch (...) { /* 原生身份验证分配失败与传输失败共用终态。 */ }
+                    receipt->delivered = delivered;
+                    receipt->completed.store(true, std::memory_order_release);
+                    try
+                    {
+                        dispatcher->post([state, receipt]() { state->reconcileDelivery(receipt); });
+                    }
+                    catch (...) { /* receipt已发布；GUI定时/下次请求核对同一物理完成。 */ }
+                }));
+                QThreadPool::globalInstance()->start(task.get(), -1);
+                task.release(); // pool接受前异常仍由本地unique_ptr收尾。
+            }
+            catch (...)
+            {
+                deliveryReceipt.reset();
+                finishDelivery(delivery.generation, false);
+            }
+        }
+
+        // GUI只序列化小包；每次最多一个值化packet在worker中等待接收方。
         void reply(QJsonObject message)
         {
-            if (!host || !::GetPropW(client, page_navigation::ClientProperty)
-                || !page_navigation::IsCompanionWindow(client, page_navigation::TaskbarFileName))
+            if (!host)
             {
                 collecting = false;
                 return;
@@ -53,20 +169,61 @@ namespace ks::ui
             const QByteArray bytes = QJsonDocument(message).toJson(QJsonDocument::Compact);
             if (bytes.size() > page_navigation::MaxMessageBytes)
             {
+                collecting = false;
+                deliveries.clear();
+                collectWaitingForDelivery = false;
+                ++generation;
                 return;
             }
-            COPYDATASTRUCT packet{page_navigation::ReplyTag, static_cast<DWORD>(bytes.size()),
-                const_cast<char*>(bytes.constData())};
-            DWORD_PTR result = 0;
-            ::SendMessageTimeoutW(client, WM_COPYDATA, static_cast<WPARAM>(host->winId()),
-                reinterpret_cast<LPARAM>(&packet), SMTO_ABORTIFHUNG | SMTO_BLOCK, 750, &result);
+            deliveries.enqueue(Delivery{client, server, bytes, generation});
+            pumpDelivery();
         }
 
         QString addRoute(ads::CDockWidget* dock, QWidget* page)
         {
-            const QString id = epoch + QLatin1Char(':') + QString::number(routes.size());
+            QObject* identity = page != nullptr ? static_cast<QObject*>(page) : static_cast<QObject*>(dock);
+            QString id = identity->property("ksword_navigation_route_id").toString();
+            const auto previous = routes.constFind(id);
+            if (id.isEmpty() || (previous != routes.cend()
+                && (previous->dock != dock || previous->page != page)))
+            {
+                id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                identity->setProperty("ksword_navigation_route_id", id);
+            }
             routes.insert(id, Route{dock, page, page != nullptr});
+            catalogRouteIds.insert(id);
             return id;
+        }
+
+        QString addDescriptorRoute(ads::CDockWidget* dock, const QString& descriptorId)
+        {
+            const QString dockId = addRoute(dock, nullptr);
+            const QString id = QUuid::createUuidV5(QUuid(dockId), descriptorId.toUtf8())
+                .toString(QUuid::WithoutBraces);
+            routes.insert(id, Route{dock, nullptr, false, descriptorId});
+            catalogRouteIds.insert(id);
+            return id;
+        }
+
+        void removeExpiredRoutes()
+        {
+            for (auto route = routes.begin(); route != routes.end();)
+            {
+                if (!route->dock || (route->pageRequired && !route->page))
+                {
+                    route = routes.erase(route);
+                }
+                else
+                {
+                    ++route;
+                }
+            }
+        }
+
+        void hashCatalogPart(const QJsonObject& part)
+        {
+            // 只签名实际目录内容，不混入请求token；稳定ID允许consumer跨请求复用真实行。
+            catalogHash.addData(QJsonDocument(part).toJson(QJsonDocument::Compact));
         }
 
         // 只收集导航页；表格单元格、弹窗和菜单不进入目录，也不切换页面触发业务动作。
@@ -134,25 +291,64 @@ namespace ks::ui
             {
                 return;
             }
+            if (deliveryInFlight || !deliveries.isEmpty())
+            {
+                // 一列的所有包确认后才构造下一列，队列规模不随整份目录累积。
+                collectWaitingForDelivery = true;
+                return;
+            }
             if (nextDock >= pending.size())
             {
                 collecting = false;
-                reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("complete")}});
+                completedRevision = QString::fromLatin1(catalogHash.result().toHex());
+                reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("complete")},
+                    {QStringLiteral("catalog_instance"), epoch},
+                    {QStringLiteral("revision"), completedRevision}});
                 return;
             }
+            const QPointer<PageNavigationBridge> lifetime(owner);
             const int column = nextDock++;
             QPointer<ads::CDockWidget> dock = pending[column];
             if (dock)
             {
-                prepare(dock);
-                if (nestedPrepare)
+                std::optional<QVector<ResolvedPageNavigationDescriptor>> descriptors;
+                if (catalogProvider)
                 {
-                    nestedPrepare(dock);
+                    const auto provider = catalogProvider;
+                    const auto catalog = provider(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
+                    if (catalog && dock)
+                        descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
+                }
+                if (!descriptors)
+                {
+                    // 未迁移或schema无效时保留真实页面回退，不以漏目录换取冷开速度。
+                    if (dock) prepare(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
+                    if (nestedPrepare && dock) nestedPrepare(dock);
+                    if (!lifetime || expected != generation || !collecting) return;
                 }
                 if (dock && expected == generation && collecting)
                 {
                     QJsonArray entries;
-                    collect(dock->widget(), dock, QStringList{dock->windowTitle()}, entries);
+                    if (descriptors)
+                    {
+                        for (const auto& descriptor : *descriptors)
+                        {
+                            if (!descriptor.page.visible) continue;
+                            entries.append(QJsonObject{
+                                {QStringLiteral("id"), addDescriptorRoute(dock, descriptor.page.id)},
+                                {QStringLiteral("title"), descriptor.page.title.left(256)},
+                                {QStringLiteral("path"), descriptor.path.join(QStringLiteral(" / ")).left(1024)},
+                                {QStringLiteral("depth"), descriptor.depth},
+                                {QStringLiteral("enabled"), descriptor.page.enabled},
+                                {QStringLiteral("current"), dock->isCurrentTab() && descriptor.page.current}});
+                        }
+                    }
+                    else
+                    {
+                        collect(dock->widget(), dock, QStringList{dock->windowTitle()}, entries);
+                    }
                     // 长目录按 32 项分包，单条名称/路径也有限长，不静默丢掉整列。
                     for (int start = 0; start < entries.size(); start += 32)
                     {
@@ -161,8 +357,10 @@ namespace ks::ui
                         {
                             part.append(entries[index]);
                         }
-                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("column")},
-                            {QStringLiteral("column"), column}, {QStringLiteral("entries"), part}});
+                        const QJsonObject message{{QStringLiteral("type"), QStringLiteral("column")},
+                            {QStringLiteral("column"), column}, {QStringLiteral("entries"), part}};
+                        hashCatalogPart(message);
+                        reply(message);
                     }
                 }
             }
@@ -171,10 +369,13 @@ namespace ks::ui
 
         void begin(HWND sender, const QString& token)
         {
+            deliveries.clear();
+            collectWaitingForDelivery = false;
             client = sender;
             request = token;
-            epoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            routes.clear();
+            removeExpiredRoutes();
+            catalogRouteIds.clear();
+            catalogHash.reset();
             pending.clear();
             nextDock = 0;
             collecting = true;
@@ -190,52 +391,98 @@ namespace ks::ui
                 columns.append(QJsonObject{{QStringLiteral("title"), dock->windowTitle()},
                     {QStringLiteral("id"), addRoute(dock, nullptr)}});
             }
+            hashCatalogPart(QJsonObject{{QStringLiteral("columns"), columns}});
             reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("begin")},
-                {QStringLiteral("columns"), columns}});
+                {QStringLiteral("columns"), columns}, {QStringLiteral("catalog_instance"), epoch},
+                {QStringLiteral("previous_revision"), completedRevision}});
             QTimer::singleShot(0, owner, [this, expected]() { collectNext(expected); });
         }
 
         void navigate(const QString& id)
         {
             const auto found = routes.constFind(id);
-            if (found == routes.cend() || !found->dock || (found->pageRequired && !found->page))
+            if (found == routes.cend() || !catalogRouteIds.contains(id)
+                || !found->dock || (found->pageRequired && !found->page))
             {
                 reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
                 return;
             }
             const Route target = *found;
-            // 激活前存外到内的导航链，切父页时可能触发惰性构建，逐步重新核验对象身份。
-            QList<QPointer<QWidget>> chain;
-            for (QWidget* page = target.page; page && page != target.dock; page = page->parentWidget())
+            const QPointer<PageNavigationBridge> lifetime(owner);
+            if (!target.descriptorId.isEmpty())
             {
-                if (qobject_cast<QStackedWidget*>(page->parentWidget()))
+                bool permitted = false;
+                if (catalogProvider && catalogNavigator)
                 {
-                    chain.prepend(page);
+                    const auto provider = catalogProvider;
+                    const auto catalog = provider(target.dock);
+                    if (!lifetime) return;
+                    if (catalog && target.dock)
+                    {
+                        if (const auto pages = ResolvePageNavigationCatalog(*catalog, target.dock->windowTitle()))
+                        {
+                            for (const auto& page : *pages)
+                            {
+                                if (page.page.id == target.descriptorId)
+                                {
+                                    permitted = page.page.visible && page.page.enabled;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
+                if (!permitted)
+                {
+                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                    return;
+                }
+                const auto navigator = catalogNavigator;
+                activate(target.dock); // 只有用户已选中目录项时才允许构造Dock。
+                if (!lifetime) return;
+                if (!target.dock || navigator(target.dock, target.descriptorId) == nullptr)
+                {
+                    if (lifetime) reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                    return;
+                }
+                if (!lifetime) return;
             }
-            activate(target.dock);
-            for (const QPointer<QWidget>& page : chain)
+            else
             {
-                if (!page)
+                QList<QPointer<QWidget>> chain;
+                for (QWidget* page = target.page; page && page != target.dock; page = page->parentWidget())
                 {
-                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
-                    return;
+                    if (qobject_cast<QStackedWidget*>(page->parentWidget())) chain.prepend(page);
                 }
-                auto* stack = qobject_cast<QStackedWidget*>(page->parentWidget());
-                auto* tabs = stack ? qobject_cast<QTabWidget*>(stack->parentWidget()) : nullptr;
-                const int index = stack ? stack->indexOf(page) : -1;
-                if (index < 0 || (tabs && (!tabs->isTabEnabled(index) || !tabs->isTabVisible(index))))
+                activate(target.dock);
+                if (!lifetime) return;
+                for (const QPointer<QWidget>& page : chain)
                 {
-                    reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
-                    return;
+                    if (!page)
+                    {
+                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                        return;
+                    }
+                    auto* stack = qobject_cast<QStackedWidget*>(page->parentWidget());
+                    auto* tabs = stack ? qobject_cast<QTabWidget*>(stack->parentWidget()) : nullptr;
+                    const int index = stack ? stack->indexOf(page) : -1;
+                    if (index < 0 || (tabs && (!tabs->isTabEnabled(index) || !tabs->isTabVisible(index))))
+                    {
+                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
+                        return;
+                    }
+                    tabs ? tabs->setCurrentIndex(index) : stack->setCurrentIndex(index);
+                    if (!lifetime) return;
                 }
-                tabs ? tabs->setCurrentIndex(index) : stack->setCurrentIndex(index);
             }
             if (host)
             {
                 if (host->isMinimized()) host->showNormal();
+                if (!lifetime) return;
                 host->raise();
+                if (!lifetime) return;
                 host->activateWindow();
+                if (!lifetime) return;
             }
             reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("activated")}});
         }
@@ -246,12 +493,23 @@ namespace ks::ui
         : QObject(host), m_state(std::make_unique<State>())
     {
         m_state->owner = this;
+        m_state->deliveryDispatcher = std::make_shared<AsyncUiDispatcher>(this);
+        m_state->deliveryPoller = new QTimer(this);
+        m_state->deliveryPoller->setInterval(50);
+        connect(m_state->deliveryPoller, &QTimer::timeout, this, [this]() { m_state->reconcileDelivery(); });
         m_state->host = host;
         m_state->list = std::move(list);
         m_state->prepare = std::move(prepare);
         m_state->activate = std::move(activate);
         m_state->nestedPrepare = std::move(nestedPrepare);
         m_state->server = reinterpret_cast<HWND>(host->winId());
+    }
+
+    void PageNavigationBridge::setPageCatalog(
+        PageNavigationCatalogProvider provider, PageNavigationCatalogNavigator navigator)
+    {
+        m_state->catalogProvider = std::move(provider);
+        m_state->catalogNavigator = std::move(navigator);
     }
 
     void PageNavigationBridge::setReady()
@@ -261,6 +519,9 @@ namespace ks::ui
 
     PageNavigationBridge::~PageNavigationBridge()
     {
+        m_state->deliveryPoller->stop();
+        m_state->deliveryDispatcher->close(); // state与原生身份移除前先关闭worker回投门禁。
+        m_state->deliveries.clear();
         if (::IsWindow(m_state->server))
         {
             ::RemovePropW(m_state->server, page_navigation::ServerProperty);
@@ -295,6 +556,8 @@ namespace ks::ui
                 if (operation == QStringLiteral("cancel"))
                 {
                     m_state->collecting = false;
+                    m_state->deliveries.clear();
+                    m_state->collectWaitingForDelivery = false;
                     ++m_state->generation;
                 }
                 else if (operation == QStringLiteral("navigate"))

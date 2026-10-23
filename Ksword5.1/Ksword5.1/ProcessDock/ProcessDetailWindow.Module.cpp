@@ -5,6 +5,7 @@
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/X64DbgNavigation.h"
 #include "../UI/TableInteractionSupport.h"
+#include <Shellapi.h>
 
 using namespace process_detail_window_internal;
 
@@ -18,6 +19,8 @@ using namespace process_detail_window_internal;
 // 显式析构第一步关闭请求门禁，随后才销毁派生页面缓存与控件成员。
 ProcessDetailWindow::~ProcessDetailWindow()
 {
+    if (m_detailActionOperation) m_detailActionOperation->close();
+    if (m_kernelFieldWatchOperation) m_kernelFieldWatchOperation->close();
     if (m_moduleOperation)
     {
         m_moduleOperation->close();
@@ -63,23 +66,68 @@ void ProcessDetailWindow::requestAsyncModuleRefresh(const bool forceRefresh)
     const int progressPid = firstRefresh ? m_moduleRefreshProgressPid : 0; // 值化收尾资源。
     updateModuleStatusLabel("● 正在刷新模块列表...", true);
 
-    m_moduleRefreshTicket = m_moduleOperation->submit<ModuleRequest, ModuleRefreshResult>(request,
+    m_moduleRefreshTicket = m_moduleOperation->submit<ModuleRequest, std::shared_ptr<const ModuleRefreshResult>>(request,
         [](const ModuleRequest& snapshot, const ks::ui::AsyncOperationToken& token)
         {
             const auto startTime = std::chrono::steady_clock::now(); // 查询耗时基准。
-            ModuleRefreshResult result{}; // 后台按值结果，不含任何页面地址。
-            result.includeSignatureCheck = snapshot.includeSignature;
+            auto result = std::make_shared<ModuleRefreshResult>(); // 后台按值结果，不含任何页面地址。
+            result->includeSignatureCheck = snapshot.includeSignature;
             if (!token.isCanceled())
             {
-                result.moduleSnapshot = ks::process::EnumerateProcessModulesAndThreadsIfIdentityMatches(
+                result->moduleSnapshot = ks::process::EnumerateProcessModulesAndThreadsIfIdentityMatches(
                     snapshot.processId, snapshot.creationTime, snapshot.includeSignature);
             }
-            result.elapsedMs = static_cast<std::uint64_t>(
+            auto rows = std::shared_ptr<std::vector<ModuleRowValue>>(new std::vector<ModuleRowValue>,
+                [](std::vector<ModuleRowValue>* obsolete) noexcept
+                {
+                    // A stale/closed AsyncOperation result may die on the GUI thread.
+                    // Own the allocation in its queued disposer as well as on execution.
+                    try
+                    {
+                        auto retired = std::unique_ptr<std::vector<ModuleRowValue>>(obsolete);
+                        auto task = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                        QThreadPool::globalInstance()->start(task.get());
+                        task.release();
+                    }
+                    catch (...) {} // Allocation failure retains ordinary RAII cleanup.
+                });
+            struct ShellComScope
+            {
+                HRESULT status = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                ~ShellComScope() { if (SUCCEEDED(status)) ::CoUninitialize(); }
+                bool usable() const { return SUCCEEDED(status) || status == RPC_E_CHANGED_MODE; }
+            } shellCom;
+            struct ShellIconOwner
+            {
+                HICON value = nullptr;
+                ~ShellIconOwner() { if (value) ::DestroyIcon(value); }
+            };
+            rows->reserve(result->moduleSnapshot.modules.size());
+            for (auto& record : result->moduleSnapshot.modules)
+            {
+                QImage image;
+                if (!token.isCanceled() && shellCom.usable() && !record.modulePath.empty())
+                {
+                    const QString path = QString::fromStdString(record.modulePath);
+                    SHFILEINFOW shellInfo{};
+                    const auto queried = ::SHGetFileInfoW(reinterpret_cast<LPCWSTR>(path.utf16()), 0,
+                        &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_SMALLICON);
+                    const ShellIconOwner icon{shellInfo.hIcon};
+                    if (queried != 0 && icon.value != nullptr) image = QImage::fromHICON(icon.value);
+                }
+                rows->push_back(ModuleRowValue{std::move(record), std::move(image)});
+            }
+            result->moduleCount = rows->size();
+            result->threadCount = result->moduleSnapshot.threads.size();
+            decltype(result->moduleSnapshot.modules){}.swap(result->moduleSnapshot.modules);
+            decltype(result->moduleSnapshot.threads){}.swap(result->moduleSnapshot.threads);
+            result->moduleRows = std::move(rows);
+            result->elapsedMs = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - startTime).count());
-            return result;
+            return std::shared_ptr<const ModuleRefreshResult>(std::move(result));
         },
-        [this, request](const ModuleRefreshResult& result, const std::uint64_t ticket)
+        [this, request](const std::shared_ptr<const ModuleRefreshResult>& result, const std::uint64_t ticket)
         {
             return tryApplyModuleRefreshResult(ticket, request.processId, request.creationTime, result);
         },
@@ -100,7 +148,7 @@ void ProcessDetailWindow::requestAsyncModuleRefresh(const bool forceRefresh)
 
 bool ProcessDetailWindow::tryApplyModuleRefreshResult(const std::uint64_t ticket,
     const std::uint32_t processId, const std::uint64_t creationTime,
-    const ModuleRefreshResult& refreshResult)
+    const std::shared_ptr<const ModuleRefreshResult>& refreshResult)
 {
     // 菜单延期回调可能在新请求后重放，不能仅依赖第一次收到结果时的验证。
     if (!m_moduleOperation || !m_moduleOperation->isCurrent(ticket)
@@ -110,14 +158,14 @@ bool ProcessDetailWindow::tryApplyModuleRefreshResult(const std::uint64_t ticket
     }
     if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({ m_moduleTable }))
     {
-        const auto snapshot = std::make_shared<ModuleRefreshResult>(refreshResult); // 值结果。
+        const auto snapshot = refreshResult; // 值结果。
         const QPointer<ProcessDetailWindow> safeThis(this); // 只在 UI 延期回调读取。
         if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
             QStringLiteral("process-detail-module-snapshot"), { m_moduleTable },
             [safeThis, ticket, processId, creationTime, snapshot]()
             {
                 if (!safeThis.isNull()
-                    && safeThis->tryApplyModuleRefreshResult(ticket, processId, creationTime, *snapshot))
+                    && safeThis->tryApplyModuleRefreshResult(ticket, processId, creationTime, snapshot))
                 {
                     safeThis->m_moduleOperation->completeDeferred(ticket);
                 }
@@ -127,40 +175,59 @@ bool ProcessDetailWindow::tryApplyModuleRefreshResult(const std::uint64_t ticket
         }
     }
     applyModuleRefreshResult(refreshResult);
-    return true;
+    return false; // Completion belongs to the final visible immutable projection.
 }
 
-void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& refreshResult)
+void ProcessDetailWindow::applyModuleRefreshResult(const std::shared_ptr<const ModuleRefreshResult>& refreshResult)
 {
     // 模块刷新结果应用日志：输出模块数、线程数和耗时。
     kLogEvent applyModuleResultEvent;
     info << applyModuleResultEvent
         << "[ProcessDetailWindow] applyModuleRefreshResult: modules="
-        << refreshResult.moduleSnapshot.modules.size()
+        << (refreshResult->moduleRows ? refreshResult->moduleRows->size() : 0U)
         << ", threads="
-        << refreshResult.moduleSnapshot.threads.size()
+        << refreshResult->moduleSnapshot.threads.size()
         << ", elapsedMs="
-        << refreshResult.elapsedMs
+        << refreshResult->elapsedMs
         << eol;
 
-    // 覆盖模块缓存并重建表格。
-    m_moduleRecords = refreshResult.moduleSnapshot.modules;
+    m_moduleRecords = refreshResult->moduleRows;
+    const QPointer<ProcessDetailWindow> alive(this);
+    const auto ticket = m_moduleRefreshTicket;
+    ModuleRefreshResult summary = *refreshResult;
+    summary.moduleRows.reset();
+    m_moduleTable->sourceReady = [alive, summary = std::move(summary), ticket]
+    {
+        if (!alive || !alive->m_moduleRefreshing || !alive->m_moduleOperation || !alive->m_moduleOperation->isCurrent(ticket)) return;
+        alive->finishModuleRefreshPresentation(summary);
+        if (alive && alive->m_moduleOperation) alive->m_moduleOperation->completeDeferred(ticket);
+    };
+    m_moduleTable->preparationFailed = [alive, ticket](const QString&)
+    {
+        if (!alive || !alive->m_moduleOperation || !alive->m_moduleOperation->isCurrent(ticket)) return;
+        alive->updateModuleStatusLabel(QStringLiteral("● 模块刷新失败。"), false);
+        if (alive && alive->m_moduleOperation) alive->m_moduleOperation->completeDeferred(ticket);
+    };
     rebuildModuleTable();
+}
 
+void ProcessDetailWindow::finishModuleRefreshPresentation(
+    const ModuleRefreshResult& refreshResult)
+{
     const QString diagnosticText = QString::fromStdString(refreshResult.moduleSnapshot.diagnosticText);
 
     // 更新状态标签：显示耗时、模块数量与线程数量。
     QString statusText = QString("● 刷新完成 %1 ms | 模块:%2 线程:%3")
         .arg(refreshResult.elapsedMs)
-        .arg(refreshResult.moduleSnapshot.modules.size())
-        .arg(refreshResult.moduleSnapshot.threads.size());
+        .arg(refreshResult.moduleCount)
+        .arg(refreshResult.threadCount);
     if (!diagnosticText.trimmed().isEmpty())
     {
         statusText += QStringLiteral(
             " | 存在诊断；详情已写入日志。");
     }
     updateModuleStatusLabel(statusText, false);
-    if (refreshResult.moduleSnapshot.modules.empty())
+    if (refreshResult.moduleCount == 0U)
     {
         m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusErrorColor(), 700));
     }
@@ -175,14 +242,14 @@ void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& re
     info << logEvent
         << "[ProcessDetailWindow] 模块刷新完成, pid=" << m_baseRecord.pid
         << ", elapsedMs=" << refreshResult.elapsedMs
-        << ", moduleCount=" << refreshResult.moduleSnapshot.modules.size()
-        << ", threadCount=" << refreshResult.moduleSnapshot.threads.size()
+        << ", moduleCount=" << refreshResult.moduleCount
+        << ", threadCount=" << refreshResult.threadCount
         << ", includeSignature=" << (refreshResult.includeSignatureCheck ? "true" : "false")
         << ", diagnostic=" << refreshResult.moduleSnapshot.diagnosticText
         << eol;
 
     // 模块数为 0 时额外输出告警日志，便于快速定位权限/跨位数问题。
-    if (refreshResult.moduleSnapshot.modules.empty())
+    if (refreshResult.moduleCount == 0U)
     {
         kLogEvent warnEvent;
         warn << warnEvent
@@ -194,86 +261,44 @@ void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& re
 
 void ProcessDetailWindow::rebuildModuleTable()
 {
-    // 重建模块表日志：用于衡量 UI 列表规模。
-    kLogEvent rebuildModuleTableEvent;
-    dbg << rebuildModuleTableEvent
-        << "[ProcessDetailWindow] rebuildModuleTable: recordCount="
-        << m_moduleRecords.size()
-        << eol;
-
-    m_moduleTable->clear();
-
-    for (const ks::process::ProcessModuleRecord& moduleRecord : m_moduleRecords)
+    if (m_moduleTable == nullptr) return;
+    const auto rows = m_moduleRecords;
+    const QColor trusted = signatureTrustedColor();
+    const QColor secondary = statusSecondaryColor();
+    const QColor untrusted = signatureUntrustedColor();
+    const QIcon placeholder(QStringLiteral(":/Icon/process_main.svg"));
+    m_moduleTable->setSourceFactory([rows, trusted, secondary, untrusted, placeholder](const ks::i18n::SourceTextSnapshot& translator)
     {
-        QTreeWidgetItem* rowItem = new QTreeWidgetItem();
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::Path), QString::fromStdString(moduleRecord.modulePath));
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::Size), formatModuleSizeText(moduleRecord.moduleSizeBytes));
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::Signature), QString::fromStdString(moduleRecord.signatureState));
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::EntryOffset), formatHexText(moduleRecord.entryPointRva));
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::State), QString::fromStdString(moduleRecord.runningState));
-        rowItem->setText(toModuleColumnIndex(ModuleColumn::ThreadId), QString::fromStdString(moduleRecord.threadIdText));
-
-        rowItem->setIcon(toModuleColumnIndex(ModuleColumn::Path), resolveProcessIcon(moduleRecord.modulePath, 16));
-
-        // 保存右键动作需要的核心数据。
-        rowItem->setData(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole, QString::fromStdString(moduleRecord.modulePath));
-        rowItem->setData(
-            toModuleColumnIndex(ModuleColumn::Path),
-            Qt::UserRole + 1,
-            QVariant::fromValue<qulonglong>(moduleRecord.moduleBaseAddress));
-        rowItem->setData(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole + 2, QVariant::fromValue(moduleRecord.representativeThreadId));
-
-        // 按签名可信状态上色：可信绿色，不可信红色，Pending/未知灰色。
-        if (moduleRecord.signatureTrusted)
+        QVector<ks::ui::ImmutableTableRow> values;
+        if (rows) values.reserve(static_cast<qsizetype>(rows->size()));
+        if (rows) for (const auto& value : *rows)
         {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), signatureTrustedColor());
+            const auto& record = value.record;
+            const QString path = QString::fromStdString(record.modulePath);
+            const double kb = static_cast<double>(record.moduleSizeBytes) / 1024.0;
+            const QString size = kb < 1024.0 ? QStringLiteral("%1 KB").arg(QString::number(kb, 'f', 1))
+                : QStringLiteral("%1 MB").arg(QString::number(kb / 1024.0, 'f', 2));
+            ks::ui::ImmutableTableRow row;
+            row.key = QString::number(record.moduleBaseAddress) + QChar('|') + path;
+            row.cells = {path, size, translator.sourceText(QString::fromStdString(record.signatureState)),
+                (QStringLiteral("0x") + QString::number(record.entryPointRva, 16).toUpper()),
+                translator.sourceText(QString::fromStdString(record.runningState)), QString::fromStdString(record.threadIdText)};
+            row.roles.insert(Qt::UserRole, path);
+            row.roles.insert(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(record.moduleBaseAddress));
+            row.roles.insert(Qt::UserRole + 2, QVariant::fromValue(record.representativeThreadId));
+            row.roles.insert(Qt::DecorationRole, value.icon.isNull() ? QVariant(placeholder) : QVariant(value.icon));
+            row.columnRoles[toModuleColumnIndex(ModuleColumn::Signature)].insert(Qt::ForegroundRole,
+                record.signatureTrusted ? trusted : (record.signatureState == "Pending" || record.signatureState == "Unknown") ? secondary : untrusted);
+            values.push_back(std::move(row));
         }
-        else if (moduleRecord.signatureState == "Pending" || moduleRecord.signatureState == "Unknown")
-        {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), statusSecondaryColor());
-        }
-        else
-        {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), signatureUntrustedColor());
-        }
-
-        m_moduleTable->addTopLevelItem(rowItem);
-    }
-
-    m_moduleTable->sortItems(toModuleColumnIndex(ModuleColumn::Path), Qt::AscendingOrder);
+        return ks::ui::MakeImmutableTableSource(std::move(values));
+    });
     filterModuleTable(m_moduleFilterEdit != nullptr ? m_moduleFilterEdit->text() : QString());
 }
 
 void ProcessDetailWindow::filterModuleTable(const QString& filterText)
 {
-    if (m_moduleTable == nullptr)
-    {
-        return;
-    }
-
-    const QString normalizedFilter = filterText.trimmed();
-    for (int rowIndex = 0; rowIndex < m_moduleTable->topLevelItemCount(); ++rowIndex)
-    {
-        QTreeWidgetItem* const rowItem = m_moduleTable->topLevelItem(rowIndex);
-        if (rowItem == nullptr)
-        {
-            continue;
-        }
-
-        bool matched = normalizedFilter.isEmpty();
-        if (!matched)
-        {
-            for (int columnIndex = 0; columnIndex < m_moduleTable->columnCount(); ++columnIndex)
-            {
-                if (rowItem->text(columnIndex).contains(normalizedFilter, Qt::CaseInsensitive))
-                {
-                    matched = true;
-                    break;
-                }
-            }
-        }
-        rowItem->setHidden(!matched);
-    }
+    if (m_moduleTable != nullptr) m_moduleTable->setQuery(filterText.trimmed());
 }
 
 void ProcessDetailWindow::updateModuleStatusLabel(const QString& statusText, const bool refreshing)
@@ -315,12 +340,12 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
         << localPosition.y()
         << eol;
 
-    QTreeWidgetItem* clickedItem = m_moduleTable->itemAt(localPosition);
-    if (clickedItem == nullptr)
+    const QModelIndex clickedItem = m_moduleTable->indexAt(localPosition);
+    if (!clickedItem.isValid())
     {
         return;
     }
-    m_moduleTable->setCurrentItem(clickedItem);
+    m_moduleTable->setCurrentIndex(clickedItem);
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(QStringLiteral(
@@ -380,18 +405,10 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
 
 void ProcessDetailWindow::copyCurrentModuleCell()
 {
-    QTreeWidgetItem* currentItem = m_moduleTable->currentItem();
-    if (currentItem == nullptr)
-    {
-        return;
-    }
-
-    const int currentColumn = m_moduleTable->currentColumn();
-    if (currentColumn < 0)
-    {
-        return;
-    }
-    QApplication::clipboard()->setText(currentItem->text(currentColumn));
+    const QModelIndex currentItem = m_moduleTable->currentIndex();
+    if (!currentItem.isValid()) return;
+    const int currentColumn = currentItem.column();
+    QApplication::clipboard()->setText(currentItem.data().toString());
     kLogEvent copyModuleCellEvent;
     dbg << copyModuleCellEvent
         << "[ProcessDetailWindow] copyCurrentModuleCell: column="
@@ -401,17 +418,12 @@ void ProcessDetailWindow::copyCurrentModuleCell()
 
 void ProcessDetailWindow::copyCurrentModuleRow()
 {
-    QTreeWidgetItem* currentItem = m_moduleTable->currentItem();
-    if (currentItem == nullptr)
-    {
-        return;
-    }
-
+    if (m_moduleTable->currentRow() < 0) return;
     QStringList fields;
     fields.reserve(static_cast<int>(ModuleColumn::Count));
     for (int columnIndex = 0; columnIndex < static_cast<int>(ModuleColumn::Count); ++columnIndex)
     {
-        fields.push_back(currentItem->text(columnIndex));
+        fields.push_back(m_moduleTable->currentCell(columnIndex).toString());
     }
     QApplication::clipboard()->setText(fields.join("\t"));
     kLogEvent copyModuleRowEvent;
@@ -426,7 +438,7 @@ void ProcessDetailWindow::showCurrentModuleDetailDialog()
     // - 将模块表当前行映射回 ProcessModuleRecord；
     // - 构造只读详情文本并放入项目内置 StructuredFieldView；
     // - 返回：无，用户可复制全部或打开模块所在目录。
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;
@@ -514,7 +526,7 @@ void ProcessDetailWindow::showCurrentModuleDetailDialog()
 
 void ProcessDetailWindow::openCurrentModuleFolder()
 {
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;
@@ -534,7 +546,7 @@ void ProcessDetailWindow::openCurrentModuleFolder()
 
 void ProcessDetailWindow::unloadCurrentModule()
 {
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;
@@ -562,7 +574,7 @@ void ProcessDetailWindow::unloadCurrentModule()
 
 void ProcessDetailWindow::suspendCurrentModuleThread()
 {
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;
@@ -597,7 +609,7 @@ void ProcessDetailWindow::suspendCurrentModuleThread()
 
 void ProcessDetailWindow::resumeCurrentModuleThread()
 {
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;
@@ -632,7 +644,7 @@ void ProcessDetailWindow::resumeCurrentModuleThread()
 
 void ProcessDetailWindow::terminateCurrentModuleThread()
 {
-    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
     if (moduleRecord == nullptr)
     {
         return;

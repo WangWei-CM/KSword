@@ -1,7 +1,12 @@
 #include "EmbeddedRowDelegate.h"
+#include "EmbeddedCellLayout.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
+#include <QApplication>
+#include <QIcon>
+#include <QStyle>
+#include <QWidget>
 #include <QEvent>
 #include <QHelpEvent>
 #include <QPainter>
@@ -37,39 +42,41 @@ namespace ks::ui
         }
     }
 
-    void EmbeddedRowDelegate::paint(
-        QPainter* painter,
-        const QStyleOptionViewItem& option,
-        const QModelIndex& index) const
+    QStyleOptionViewItem EmbeddedRowDelegate::sourceOption(
+        const QStyleOptionViewItem& option, const QModelIndex& index) const
     {
-        // sourceDelegate 无效时不绘制，避免访问已销毁的页面 delegate。
-        if (painter == nullptr || m_sourceDelegate.isNull())
-        {
-            return;
-        }
+        QStyleOptionViewItem result(option);
+        const int originalHeight = m_originalHeightProvider ? m_originalHeightProvider(index) : -1;
+        result.rect = LayoutEmbeddedCell(option.rect, originalHeight, index.column() == 0,
+            option.direction == Qt::RightToLeft).source;
+        return result;
+    }
 
-        // 非展开源行完全沿用原 delegate，保证普通页面视觉与交互保持不变。
-        const int originalHeight = m_originalHeightProvider
-            ? m_originalHeightProvider(index)
-            : -1;
-        if (originalHeight <= 0)
-        {
-            m_sourceDelegate->paint(painter, option, index);
-            return;
-        }
-
-        // 展开行的 itemRect 仍包含详情区域，源内容必须限制在原始行高内。
-        QStyleOptionViewItem clippedOption(option);
-        clippedOption.rect.setHeight(qMin(originalHeight, option.rect.height()));
-        if (clippedOption.rect.height() <= 0)
-        {
-            return;
-        }
-
-        // 只裁剪源 delegate 的绘制调用，详情编辑器仍由 DetailLayoutHost 覆盖下半区域。
+    void EmbeddedRowDelegate::paint(QPainter* painter,
+        const QStyleOptionViewItem& option, const QModelIndex& index) const
+    {
+        if (!painter || m_sourceDelegate.isNull()) return;
+        const int originalHeight = m_originalHeightProvider ? m_originalHeightProvider(index) : -1;
+        const auto layout = LayoutEmbeddedCell(option.rect, originalHeight, index.column() == 0,
+            option.direction == Qt::RightToLeft);
+        if (layout.band.isEmpty()) return;
+        QStyleOptionViewItem clipped(option);
+        clipped.rect = layout.band;
         painter->save();
-        painter->setClipRect(clippedOption.rect, Qt::IntersectClip);
-        m_sourceDelegate->paint(painter, clippedOption, index);
+        painter->setClipRect(layout.band, Qt::IntersectClip);
+        const QStyle* style = option.widget ? option.widget->style() : QApplication::style();
+        style->drawPrimitive(QStyle::PE_PanelItemViewItem, &clipped, painter, option.widget);
+        clipped.rect = layout.source;
+        m_sourceDelegate->paint(painter, clipped, index); // original DecorationRole remains intact
+        if (!layout.indicator.isEmpty())
+        {
+            static const QIcon collapsed(QStringLiteral(":/Icon/detail_node_collapsed.svg"));
+            static const QIcon expanded(QStringLiteral(":/Icon/detail_node_expanded.svg"));
+            const QIcon& icon = originalHeight > 0 ? expanded : collapsed;
+            const auto mode = !(option.state & QStyle::State_Enabled) ? QIcon::Disabled
+                : option.state & QStyle::State_Selected ? QIcon::Selected : QIcon::Normal;
+            icon.paint(painter, layout.indicator, Qt::AlignCenter, mode);
+        }
         painter->restore();
     }
 
@@ -80,7 +87,7 @@ namespace ks::ui
         // 尺寸计算直接转发，展开行高由 QTableWidget/QTreeWidget 原有接口控制。
         return m_sourceDelegate.isNull()
             ? QSize()
-            : m_sourceDelegate->sizeHint(option, index);
+            : m_sourceDelegate->sizeHint(option, index) + QSize(index.column() == 0 ? 20 : 0,0);
     }
 
     QWidget* EmbeddedRowDelegate::createEditor(
@@ -90,7 +97,7 @@ namespace ks::ui
     {
         return m_sourceDelegate.isNull()
             ? nullptr
-            : m_sourceDelegate->createEditor(parent, option, index);
+            : m_sourceDelegate->createEditor(parent, sourceOption(option,index), index);
     }
 
     void EmbeddedRowDelegate::destroyEditor(QWidget* editor, const QModelIndex& index) const
@@ -127,7 +134,7 @@ namespace ks::ui
     {
         if (!m_sourceDelegate.isNull())
         {
-            m_sourceDelegate->updateEditorGeometry(editor, option, index);
+            m_sourceDelegate->updateEditorGeometry(editor, sourceOption(option,index), index);
         }
     }
 
@@ -139,7 +146,7 @@ namespace ks::ui
     {
         // 事件区域仍交给原 delegate，避免复用委托后改变复选框等交互。
         return !m_sourceDelegate.isNull()
-            && m_sourceDelegate->editorEvent(event, model, option, index);
+            && m_sourceDelegate->editorEvent(event, model, sourceOption(option,index), index);
     }
 
     bool EmbeddedRowDelegate::helpEvent(
@@ -150,6 +157,6 @@ namespace ks::ui
     {
         // 工具提示与原 delegate 保持一致，行内模式只影响绘制几何。
         return !m_sourceDelegate.isNull()
-            && m_sourceDelegate->helpEvent(event, view, option, index);
+            && m_sourceDelegate->helpEvent(event, view, sourceOption(option,index), index);
     }
 }

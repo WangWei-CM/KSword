@@ -1,5 +1,7 @@
 #pragma once
 
+namespace ks::monitor { class MonitorCanonicalExport; }
+
 // ============================================================
 // ProcessTraceMonitorWidget.h
 // 作用：
@@ -12,7 +14,11 @@
 #include "ProcessTraceTimelineWidget.h"
 #include "../Framework.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/RetainedCleanupJob.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/StructuredFieldView.h"
+#include "ProcessTraceEventArchive.h"
+#include <QPersistentModelIndex>
 
 #include <QWidget>
 
@@ -26,6 +32,7 @@
 #include <unordered_map>  // std::unordered_map：按 PID 保存运行期进程树节点。
 #include <vector>         // std::vector：目标列表、事件缓存、Provider 列表。
 
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QEvent;
@@ -33,6 +40,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QAbstractButton;
 class QSplitter;
 class QTableWidget;
 class QTableWidgetItem;
@@ -128,6 +136,11 @@ public:
         std::uint64_t creationTime100ns = 0;
         bool alive = false;
         QString remarkText;
+        std::uint64_t identityEventTime100ns = 0;
+        std::uint64_t identitySequence = 0;
+        bool identityLookupPending = false;
+        bool identityLookupInFlight = false;
+        QString pendingProcessName, pendingImagePath;
     };
 
     // RuntimeTrackedProcess：
@@ -182,23 +195,12 @@ public:
     // - relationText：根进程/子进程/属性关联等说明；
     // - detailDocument：属性与元信息的唯一结构化快照；
     // - activityIdText：ActivityId 文本。
-    struct CapturedEventRow
-    {
-        std::uint64_t time100ns = 0;
-        QString time100nsText;
-        QString typeText;
-        QString providerText;
-        int eventId = 0;
-        QString eventName;
-        QString pidText;
-        QString processText;
-        QString rootPidText;
-        QString relationText;
-        ks::ui::FieldDocument detailDocument;
-        QString activityIdText;
-    };
+    using CapturedEventRow = ks::monitor::ProcessTraceCapturedEventRow;
+    using EventExportSnapshot = ks::monitor::ProcessTraceEventExportSnapshot;
+    EventExportSnapshot freezeVisibleEventRowsForExport();
 
 private:
+    struct CaptureState;
     // event：
     // - 作用：监听全局调色板/样式变化，刷新本页自定义 Collapse 的动态样式；
     // - 处理：先交给 QWidget 基类，再按事件类型重刷折叠面板；
@@ -236,22 +238,11 @@ private:
     // - 入参 processNameText/processPathText：ETW 属性里带出的进程名与路径提示；
     // - 入参 creationTime100ns：创建时间（若 ETW 暂未提供则为 0）；
     // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
-    void upsertAutoTrackedProcessInTargetList(
-        std::uint32_t pidValue,
-        std::uint32_t parentPidValue,
-        const QString& processNameText,
-        const QString& processPathText,
-        std::uint64_t creationTime100ns);
-    // removeTrackedProcessFromTargetListByPid：
-    // - 作用：当 ETW 明确报告进程退出时，从监听列表自动取消追踪；
-    // - 调用：ETW 线程通过 QueuedConnection 回到 UI 线程后调用；
-    // - 入参 pidValue：需要移除的 PID；
-    // - 入参 reasonText：本次移除的原因说明（用于日志审计）；
-    // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
-    void removeTrackedProcessFromTargetListByPid(
-        std::uint32_t pidValue,
-        const QString& reasonText);
+    void removeTrackedProcessFromTargetListByPid(std::uint32_t pidValue, const QString& reasonText);
     void refreshTargetTable();
+    void syncTargetEditsToCapture();
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    bool m_targetProjectionDirty = false;
     void removeSelectedTargetProcesses();
     void clearTargetProcesses();
     // showAvailableContextMenu：
@@ -286,45 +277,52 @@ private:
     // - 返回：true 表示 applyEventFilter 需要叠加时间范围判断。
     bool isTimelineFilterActive() const;
     void flushPendingRows();
-    void appendEventRow(const CapturedEventRow& rowValue);
+    void acceptPendingEventRows();
+    void projectEventRows();
+    void materializeEventRow(const ks::monitor::ProcessTraceEventRef& record);
+    void clearCanonicalEvents();
+    ks::monitor::ProcessTraceEventRef eventRecordAt(int row) const;
+    bool eventProjectionPending() const;
     ks::ui::FieldDocument eventDocumentForRow(int row) const;
     void openEventDetailViewerForRow(int row) const;
     void showEventContextMenu(const QPoint& position);
     void exportVisibleRowsToTsv();
+    void updateEventExportAction();
 
     // ========================= 监控流程 ==========================
     void startMonitoring();
     void stopMonitoring();
-    void stopMonitoringInternal(bool waitForThread);
+    void stopMonitoringInternal(bool ownerClosing);
     void setMonitoringPaused(bool paused);
     void refreshTrackedProcessSnapshotAsync();
-    void seedTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList);
-    void syncTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList);
-    void pruneStaleTrackedProcesses();
+    static void seedTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList);
+    static void syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList, std::uint64_t snapshotVersion);
+    static void pruneStaleTrackedProcesses(CaptureState& state);
 
     // ========================= ETW 采集 ==========================
     static void WINAPI processTraceEtwCallback(struct _EVENT_RECORD* eventRecordPtr);
-    void enqueueEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr);
-    bool buildRelevantEventRow(
+    static void enqueueEventFromRecord(CaptureState& state, const struct _EVENT_RECORD* eventRecordPtr);
+    static bool buildRelevantEventRow(CaptureState& state,
         const struct _EVENT_RECORD* eventRecordPtr,
         const QString& providerNameText,
         const QString& providerTypeText,
         const std::vector<EtwPropertyValue>& propertyList,
         CapturedEventRow* rowOut);
-    bool extractEventProperties(
+    static bool extractEventProperties(
         const struct _EVENT_RECORD* eventRecordPtr,
-        std::vector<EtwPropertyValue>* propertyListOut) const;
-    ks::ui::FieldDocument buildEventDetailDocument(
+        std::vector<EtwPropertyValue>* propertyListOut, bool identityOnly = false,
+        const std::vector<EtwPropertyValue>* knownIdentity = nullptr);
+    static ks::ui::FieldDocument buildEventDetailDocument(
         const QString& providerGuidText,
         const struct _EVENT_RECORD* eventRecordPtr,
-        const std::vector<EtwPropertyValue>& propertyList) const;
+        const std::vector<EtwPropertyValue>& propertyList);
 
     // ========================= 文本与样式辅助 ====================
     static QString blueButtonStyle();
     static QString blueInputStyle();
     static QString blueHeaderStyle();
     static QString collapsePanelStyle(const QWidget* panel);
-    static QString collapseHeaderButtonStyle();
+    static QString collapseHeaderButtonStyle(const QAbstractButton* button);
     static QString providerTypeFromName(const QString& providerNameText);
     static QString now100nsText();
     static std::uint64_t currentSystemTime100ns();
@@ -339,6 +337,54 @@ private:
     static QTableWidgetItem* createReadOnlyItem(const QString& textValue);
 
 private:
+    // Value capture epoch. Workers and ETW callback context never borrow QWidget.
+    struct CaptureState : std::enable_shared_from_this<CaptureState>
+    {
+        std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
+        std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
+        std::deque<ks::monitor::ProcessTraceEventRef> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
+        std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
+        std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
+        std::uint64_t m_eventSequence = 0; // under m_pendingMutex
+        std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
+        std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
+        std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
+        std::atomic_bool m_captureStopFlag{ false };                    // m_captureStopFlag：后台线程停止信号。
+        std::atomic_bool m_runtimeRefreshPending{ false };              // m_runtimeRefreshPending：运行期快照刷新是否进行中。
+        std::unique_ptr<std::thread> m_captureThread;                   // m_captureThread：ETW 会话线程。
+        std::atomic<std::uint64_t> m_sessionHandle{ 0 };                // m_sessionHandle：ETW 会话句柄。
+        std::atomic<std::uint64_t> m_traceHandle{ 0 };                  // m_traceHandle：ETW 消费句柄。
+        QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
+        std::mutex operationGate;
+        std::atomic_bool finished{ true };
+        std::atomic_bool cleanupPending{ false };
+        std::atomic<unsigned long> operationError{ 0 };
+        std::atomic<unsigned long> startupError{ 0 };
+        std::atomic_bool processStarted{ false };
+        std::atomic<unsigned long> processStatus{ 0 };
+        std::vector<TargetProcessEntry> targets;
+        std::uint64_t targetVersion = 0; // under m_runtimeMutex
+        std::uint64_t runtimeRevision = 0; // every tracked map mutation, under m_runtimeMutex
+        bool identityWorkerRunning = false; // under m_runtimeMutex; max one worker
+        std::mutex identityGate;
+        std::unordered_map<std::string, ks::process::ProcessRecord> identityCache; // bounded, under identityGate
+
+    };
+    static void runCapture(const std::shared_ptr<CaptureState>& state);
+    static bool cleanupCapture(const std::shared_ptr<CaptureState>& state);
+    void pollCaptureState();
+    static void publishTargetCreate(CaptureState& state, TargetProcessEntry entry, std::uint64_t eventTime100ns);
+    static void publishTargetExit(CaptureState& state, std::uint32_t pid, std::uint64_t eventTime100ns);
+    static void scheduleTargetEnrichment(const std::shared_ptr<CaptureState>& state);
+    static ks::process::ProcessRecord lookupTargetIdentity(CaptureState& state, std::uint32_t pid,
+        std::uint64_t expectedCreation, std::uint64_t eventTime100ns);
+    ks::ui::AsyncOperation* m_targetLookup = nullptr;
+
+    std::shared_ptr<CaptureState> m_capture = std::make_shared<CaptureState>();
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_captureCleanup;
+    std::uint64_t m_appliedTargetVersion = 0;
+    bool m_captureCompletionApplied = true;
+
     // ========================= 顶层控件 =========================
     QVBoxLayout* m_rootLayout = nullptr;                 // m_rootLayout：根布局。
     QWidget* m_configurationCollapseWidget = nullptr;    // m_configurationCollapseWidget：默认展开的进程定向配置折叠段。
@@ -369,6 +415,7 @@ private:
     QPushButton* m_startButton = nullptr;                // m_startButton：开始监控按钮。
     QPushButton* m_stopButton = nullptr;                 // m_stopButton：停止监控按钮。
     QPushButton* m_pauseButton = nullptr;                // m_pauseButton：暂停/继续按钮。
+    ks::monitor::MonitorCanonicalExport* m_eventExport = nullptr;
     QPushButton* m_exportButton = nullptr;               // m_exportButton：导出事件按钮。
     QLabel* m_statusLabel = nullptr;                     // m_statusLabel：整体监控状态标签。
 
@@ -386,40 +433,36 @@ private:
     QPushButton* m_eventClearFilterButton = nullptr;    // m_eventClearFilterButton：清空筛选按钮。
     QLabel* m_eventFilterStatusLabel = nullptr;         // m_eventFilterStatusLabel：筛选结果统计文本。
     ProcessTraceTimelineWidget* m_eventTimelineWidget = nullptr; // m_eventTimelineWidget：ETW 事件瀑布流时间轴。
+    ks::monitor::EventFilterProjection* m_eventFilterProjection = nullptr;
     QTableWidget* m_eventTable = nullptr;               // m_eventTable：行为事件结果表。
 
     // ========================= 后台状态 =========================
     std::vector<ks::process::ProcessRecord> m_availableProcessList; // m_availableProcessList：可选进程快照。
     std::vector<TargetProcessEntry> m_targetProcessList;            // m_targetProcessList：用户选择的根进程列表。
-    std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
-    std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
     static constexpr std::size_t kPendingRowCapacity = 24000;       // 待显示事件上限，积压时丢弃最旧事件。
     static constexpr std::size_t kUiFlushRowLimit = 160;            // 单个 GUI tick 最多写入的行数。
     static constexpr int kUiFlushBudgetMs = 4;                       // 单个 GUI tick 的渲染时间预算。
 
-    std::deque<CapturedEventRow> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
-    std::vector<ProcessTraceTimelineEventPoint> m_timelineEventPoints; // m_timelineEventPoints：时间轴绘制用轻量事件缓存。
-    std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
-    std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
-    std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
-    std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
-    std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
-    std::atomic_bool m_captureStopFlag{ false };                    // m_captureStopFlag：后台线程停止信号。
+    using EventRef = ks::monitor::ProcessTraceEventRef;
+    struct ProjectedEvent { EventRef record; QPersistentModelIndex index; };
+    ks::monitor::ProcessTraceEventArchive m_eventArchive;
+    std::unordered_map<const ks::monitor::ProcessTraceEventRecord*, ProjectedEvent> m_projectedEvents;
+    std::deque<EventRef> m_eventProjectionQueue, m_expiredEventProjection;
+    std::vector<EventRef> m_restoreSelectedEvents;
+    EventRef m_restoreCurrentEvent, m_restoreTopEvent;
+    std::uint64_t m_eventSessionGeneration = 0, m_timelineArchiveRevision = 0;
+    bool m_eventProjectionStale = true, m_eventProjectionWasVisible = false, m_eventProjectionPumpScheduled = false;
     std::atomic_bool m_availableRefreshPending{ false };            // m_availableRefreshPending：可选进程刷新是否进行中。
-    std::atomic_bool m_runtimeRefreshPending{ false };              // m_runtimeRefreshPending：运行期快照刷新是否进行中。
-    std::unique_ptr<std::thread> m_captureThread;                   // m_captureThread：ETW 会话线程。
     QTimer* m_uiUpdateTimer = nullptr;                              // m_uiUpdateTimer：事件表节流刷新定时器。
     QTimer* m_eventFilterDebounceTimer = nullptr;                   // m_eventFilterDebounceTimer：事件筛选节流定时器。
     QTimer* m_runtimeRefreshTimer = nullptr;                        // m_runtimeRefreshTimer：运行期快照辅助定时器。
     int m_captureProgressPid = 0;                                   // m_captureProgressPid：进度条任务 ID。
-    std::atomic<std::uint64_t> m_sessionHandle{ 0 };                // m_sessionHandle：ETW 会话句柄。
-    std::atomic<std::uint64_t> m_traceHandle{ 0 };                  // m_traceHandle：ETW 消费句柄。
+    bool m_captureStartupProgressApplied = false;
     std::uint64_t m_captureStartTime100ns = 0;                      // m_captureStartTime100ns：本轮监控起点时间。
     std::uint64_t m_captureStopTime100ns = 0;                       // m_captureStopTime100ns：本轮监控停止时间。
     std::uint64_t m_timelineSelectionStart100ns = 0;                // m_timelineSelectionStart100ns：时间轴框选起点。
     std::uint64_t m_timelineSelectionEnd100ns = 0;                  // m_timelineSelectionEnd100ns：时间轴框选终点。
     bool m_timelineUserSelectionActive = false;                     // m_timelineUserSelectionActive：用户是否已启用时间框选。
     qint64 m_lastTimelineRefreshMs = 0;                             // m_lastTimelineRefreshMs：上次向时间轴复制事件点的时间。
-    QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_uiDispatcher;        // 辅助快照晚完成时不借用已释放控件或应用。
 };

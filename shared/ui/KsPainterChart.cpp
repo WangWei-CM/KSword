@@ -2,6 +2,7 @@
 
 #include <QAbstractAnimation>
 #include <QFontMetricsF>
+#include <QHideEvent>
 #include <QPaintEvent>
 #include <QPainterPath>
 #include <QSet>
@@ -1046,6 +1047,11 @@ QChartView::QChartView(QChart* chart, QWidget* parent)
         &QVariantAnimation::valueChanged,
         this,
         [this](const QVariant& progressValue) {
+            if (!isPresentationVisible())
+            {
+                m_modelDirty = true;
+                return;
+            }
             m_animationProgress = progressValue.toReal();
             QFrame::update();
         });
@@ -1054,6 +1060,11 @@ QChartView::QChartView(QChart* chart, QWidget* parent)
         &QVariantAnimation::finished,
         this,
         [this]() {
+            if (!isPresentationVisible())
+            {
+                m_modelDirty = true;
+                return;
+            }
             m_animationProgress = 1.0;
             m_displayedLinePoints = m_toLinePoints;
             m_displayedBarValues = m_toBarValues;
@@ -1061,7 +1072,7 @@ QChartView::QChartView(QChart* chart, QWidget* parent)
             QFrame::update();
         });
 
-    syncSnapshotsToCurrent();
+    // Construction is hidden. The first Show takes the current complete model.
 }
 
 QChartView::~QChartView()
@@ -1075,6 +1086,21 @@ QChartView::~QChartView()
 QChart* QChartView::chart() const
 {
     return m_chart;
+}
+
+void QChartView::presentLatestWithoutAnimation()
+{
+    m_animation->stop();
+    if (!isPresentationVisible())
+    {
+        m_modelDirty = true;
+        return;
+    }
+    syncSnapshotsToCurrent();
+    // A callback already queued before this flush may still run. It must not
+    // animate this snapshot again; genuinely later model changes set dirty.
+    m_modelDirty = false;
+    QFrame::update();
 }
 
 QWidget* QChartView::viewport()
@@ -1122,18 +1148,32 @@ QSize QChartView::sizeHint() const
     return QSize(240, 150);
 }
 
+bool QChartView::isPresentationVisible() const
+{
+    // Spontaneous Hide keeps isVisible() true, while Expose may precede the
+    // restored windowState. Track actual Show/Hide instead of that stale state.
+    return isVisible() && m_presentationExposed;
+}
+
 void QChartView::showEvent(QShowEvent* event)
 {
+    m_presentationExposed = true;
     QFrame::showEvent(event);
-    if (m_animation == nullptr || m_animation->state() != QAbstractAnimation::Running)
-    {
-        syncSnapshotsToCurrent();
-    }
+    presentLatestWithoutAnimation();
+}
+
+void QChartView::hideEvent(QHideEvent* event)
+{
+    m_presentationExposed = false;
+    m_animation->stop();
+    m_modelDirty = true;
+    QFrame::hideEvent(event);
 }
 
 void QChartView::scheduleModelUpdate()
 {
-    if (m_updateScheduled)
+    m_modelDirty = true;
+    if (!isPresentationVisible() || m_updateScheduled)
     {
         return;
     }
@@ -1144,6 +1184,11 @@ void QChartView::scheduleModelUpdate()
 void QChartView::applyPendingModelUpdate()
 {
     m_updateScheduled = false;
+    if (!isPresentationVisible() || !m_modelDirty)
+    {
+        return;
+    }
+    m_modelDirty = false;
     if (m_chart == nullptr)
     {
         QFrame::update();
@@ -1164,6 +1209,11 @@ void QChartView::applyPendingModelUpdate()
 
 void QChartView::startModelAnimation()
 {
+    if (!isPresentationVisible())
+    {
+        m_modelDirty = true;
+        return;
+    }
     if (m_chart == nullptr)
     {
         return;

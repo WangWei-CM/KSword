@@ -16,12 +16,16 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QElapsedTimer>
+#include <QScrollBar>
 #include <QApplication>
 #include <QBrush>
 #include <QChar>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -35,8 +39,8 @@
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QThreadPool>
-#include <QTreeWidget>
-#include <QTreeWidgetItem>
+#include <QTimer>
+#include <QTreeView>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -44,6 +48,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -52,6 +57,187 @@
 
 namespace
 {
+    constexpr const char* ThreadProjectionExposureProperty = "ksword_thread_projection_exposed";
+    bool threadProjectionExposed(const QTreeView* table)
+    {
+        // A spontaneous Hide can leave QWidget::isVisible() true while minimized.
+        return table != nullptr && table->isVisible() &&
+            table->property(ThreadProjectionExposureProperty).toBool() && !table->window()->isMinimized();
+    }
+
+    // Actual Show/Hide exposure is independent of the logical QWidget visibility bit.
+    class ThreadPageShowFilter final : public QObject
+    {
+    public:
+        ThreadPageShowFilter(std::function<void()> onShow, std::function<void()> onHide, QObject* parent)
+            : QObject(parent), m_onShow(std::move(onShow)), m_onHide(std::move(onHide))
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Show)
+            {
+                watched->setProperty(ThreadProjectionExposureProperty, true);
+                // Restore can deliver Show before the top-level minimized state settles.
+                QTimer::singleShot(0, this, m_onShow);
+            }
+            else if (event->type() == QEvent::Hide)
+            {
+                watched->setProperty(ThreadProjectionExposureProperty, false);
+                m_onHide();
+            }
+            return false;
+        }
+
+    private:
+        std::function<void()> m_onShow;
+        std::function<void()> m_onHide;
+    };
+
+    using ThreadSnapshot = std::shared_ptr<const std::vector<ks::process::SystemThreadRecord>>;
+
+    // Flat, immutable projection: all rows/columns remain addressable without 32 item cells per row.
+    class ThreadSnapshotModel final : public QAbstractTableModel
+    {
+    public:
+        struct Projection
+        {
+            ThreadSnapshot records;
+            std::vector<std::size_t> rows;
+            std::unordered_map<std::string, int> rowByIdentity;
+            std::function<QVariant(const ks::process::SystemThreadRecord&, int, int)> value;
+        };
+
+        ThreadSnapshotModel(QStringList headers, std::function<void()> requestSort, QObject* parent)
+            : QAbstractTableModel(parent), m_headers(std::move(headers)), m_requestSort(std::move(requestSort))
+        {
+        }
+
+        ~ThreadSnapshotModel() override
+        {
+            if (m_cancelled != nullptr) m_cancelled->store(true, std::memory_order_relaxed);
+            retire(std::move(m_projection));
+        }
+
+        void setCancellation(std::shared_ptr<std::atomic<bool>> cancelled)
+        {
+            m_cancelled = std::move(cancelled);
+        }
+
+        int rowCount(const QModelIndex& parent = {}) const override
+        {
+            return parent.isValid() || m_projection == nullptr
+                ? 0 : static_cast<int>(m_projection->rows.size());
+        }
+
+        int columnCount(const QModelIndex& parent = {}) const override
+        {
+            return parent.isValid() ? 0 : static_cast<int>(m_headers.size());
+        }
+
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (role == Qt::DisplayRole && orientation == Qt::Horizontal &&
+                section >= 0 && section < m_headers.size())
+            {
+                return ks::i18n::displayText(m_headers.at(section));
+            }
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+
+        const ks::process::SystemThreadRecord* record(const QModelIndex& index) const
+        {
+            if (!index.isValid() || index.model() != this || m_projection == nullptr ||
+                index.row() < 0 || index.row() >= rowCount())
+            {
+                return nullptr;
+            }
+            return &m_projection->records->at(m_projection->rows.at(index.row()));
+        }
+
+        const ks::process::SystemThreadRecord* recordByIdentity(
+            std::uint32_t pid, std::uint32_t tid, std::uint64_t createTime) const
+        {
+            if (m_projection == nullptr)
+            {
+                return nullptr;
+            }
+            const auto found = m_projection->rowByIdentity.find(
+                ks::process::BuildThreadIdentityKey(pid, tid, createTime));
+            return found == m_projection->rowByIdentity.end() ? nullptr : record(index(found->second, 0));
+        }
+
+        QModelIndex indexByIdentity(const std::string& identity, int column) const
+        {
+            if (m_projection == nullptr)
+            {
+                return {};
+            }
+            const auto found = m_projection->rowByIdentity.find(identity);
+            return found == m_projection->rowByIdentity.end() ? QModelIndex{} : index(found->second, column);
+        }
+
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            const auto* source = record(index);
+            return source == nullptr ? QVariant{} : m_projection->value(*source, index.column(), role);
+        }
+
+        void sort(int, Qt::SortOrder) override
+        {
+            // QTreeView has already recorded the requested sort indicator. Build a new complete
+            // projection, keeping the currently displayed snapshot usable until it is ready.
+            if (!m_replacing) m_requestSort();
+        }
+
+        void replace(std::shared_ptr<Projection> projection)
+        {
+            m_replacing = true;
+            beginResetModel();
+            auto retired = std::move(m_projection);
+            m_projection = std::move(projection);
+            endResetModel();
+            m_replacing = false;
+            retire(std::move(retired));
+        }
+
+    private:
+        static void retire(std::shared_ptr<Projection> projection)
+        {
+            if (projection != nullptr && !QCoreApplication::closingDown())
+            {
+                // Last references to old large record vectors are released away from the GUI.
+                QThreadPool::globalInstance()->start(QRunnable::create(
+                    [projection = std::move(projection)]() {}));
+            }
+        }
+
+        QStringList m_headers;
+        std::function<void()> m_requestSort;
+        std::shared_ptr<Projection> m_projection;
+        std::shared_ptr<std::atomic<bool>> m_cancelled;
+        bool m_replacing = false;
+    };
+
+    struct ThreadProjectionRow
+    {
+        std::size_t source = 0;
+        QString sortText;
+    };
+
+    struct ThreadProjectionWork
+    {
+        std::shared_ptr<ThreadSnapshotModel::Projection> projection;
+        std::vector<ThreadProjectionRow> rows;
+        std::size_t cursor = 0;
+        std::shared_ptr<std::atomic<bool>> cancelled;
+    };
+
+    struct ThreadProjectionCancelled {};
+
+
     // 线程页表头：强调线程基础身份、调度状态与时间统计。
     const QStringList ThreadTableHeaders{
         "TID",
@@ -550,10 +736,15 @@ void ProcessDock::initializeThreadPage()
     ks::ui::NormalizeToolbarRow(m_threadTopLayout);
     m_threadPageLayout->addWidget(threadToolbar);
 
-    // 线程表格初始化：使用 QTreeWidget 以支持首列图标与多列排序。
-    m_threadTable = new QTreeWidget(m_threadPage);
-    m_threadTable->setColumnCount(static_cast<int>(ThreadTableColumn::Count));
-    m_threadTable->setHeaderLabels(ThreadTableHeaders);
+    // 线程表格保留树视图导航/列设置，单份快照按需提供单元数据。
+    m_threadTable = new QTreeView(m_threadPage);
+    m_threadTable->setModel(new ThreadSnapshotModel(ThreadTableHeaders,
+        [this]() {
+            if (m_threadSnapshotReady)
+            {
+                rebuildThreadTable();
+            }
+        }, m_threadTable));
     m_threadTable->setRootIsDecorated(false);
     m_threadTable->setItemsExpandable(false);
     m_threadTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -561,6 +752,8 @@ void ProcessDock::initializeThreadPage()
     m_threadTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_threadTable->setUniformRowHeights(true);
     m_threadTable->setAlternatingRowColors(true);
+    m_threadTable->header()->setSortIndicator(
+        toThreadColumnIndex(ThreadTableColumn::OwnerPid), Qt::AscendingOrder);
     m_threadTable->setSortingEnabled(true);
     m_threadTable->setContextMenuPolicy(Qt::CustomContextMenu);
 
@@ -608,12 +801,7 @@ void ProcessDock::initializeThreadPage()
     applyThreadColumnLayout(ThreadColumnLayout::PresetA);
 
     m_threadPageLayout->addWidget(m_threadTable, 1);
-    m_sideTabWidget->addTab(m_threadPage, blueTintedIcon(IconThreadTab), "线程列表");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_threadPage,
-        QStringLiteral("process.tab.threads"),
-        QStringLiteral("线程列表"));
+    registerNavigationTab(NavigationPage::Threads, m_sideTabWidget, m_threadPage, blueTintedIcon(IconThreadTab));
     refreshSideTabIconContrast();
 }
 
@@ -753,11 +941,37 @@ void ProcessDock::initializeThreadPageConnections()
         });
     }
 
-    // 搜索框：仅过滤当前缓存结果，不触发系统调用。
+    m_threadProjectionTimer = new QTimer(this);
+    m_threadProjectionTimer->setSingleShot(true);
+    connect(m_threadProjectionTimer, &QTimer::timeout, this, [this]() {
+        if (m_threadProjectionDirty)
+        {
+            rebuildThreadTable();
+        }
+    });
+    if (m_threadTable != nullptr)
+    {
+        m_threadPageVisibilityFilter = new ThreadPageShowFilter(
+            [this]() { activateThreadPage(); },
+            [this]() {
+                if (m_threadProjectionInProgress)
+                {
+                    cancelThreadProjection();
+                    m_threadProjectionDirty = true;
+                }
+            }, this);
+        m_threadTable->setProperty(ThreadProjectionExposureProperty,
+            m_threadTable->isVisible() && !m_threadTable->window()->isMinimized());
+        m_threadTable->installEventFilter(m_threadPageVisibilityFilter);
+    }
+
+    // 合并连续输入；仅投影最近一次缓存，不触发系统调用。
     if (m_threadSearchLineEdit != nullptr)
     {
         connect(m_threadSearchLineEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-            rebuildThreadTable();
+            cancelThreadProjection();
+            m_threadProjectionDirty = true;
+            m_threadProjectionTimer->start(120);
         });
     }
 
@@ -765,7 +979,9 @@ void ProcessDock::initializeThreadPageConnections()
     if (m_threadScopeCombo != nullptr)
     {
         connect(m_threadScopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-            rebuildThreadTable();
+            cancelThreadProjection();
+            m_threadProjectionDirty = true;
+            m_threadProjectionTimer->start(0);
         });
     }
 
@@ -785,7 +1001,7 @@ void ProcessDock::initializeThreadPageConnections()
     // 线程表右键菜单：挂起/恢复/结束线程 + 转到进程详情。
     if (m_threadTable != nullptr)
     {
-        connect(m_threadTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_threadTable, &QTreeView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showThreadTableContextMenu(localPosition);
         });
 
@@ -800,6 +1016,47 @@ void ProcessDock::initializeThreadPageConnections()
             clearThreadColumnPresetSelection();
         });
     }
+}
+
+void ProcessDock::activateThreadPage()
+{
+    if (!threadProjectionExposed(m_threadTable))
+    {
+        return;
+    }
+    if (m_threadProjectionDirty)
+    {
+        rebuildThreadTable();
+    }
+    // 首次进入才枚举；热切使用完整缓存，手动刷新和监控请求仍保持原语义。
+    if (!m_threadSnapshotReady)
+    {
+        requestAsyncThreadRefresh(true);
+    }
+}
+
+void ProcessDock::shutdownThreadPage()
+{
+    cancelThreadProjection();
+    if (m_threadProjectionTimer != nullptr)
+    {
+        m_threadProjectionTimer->stop();
+    }
+    if (m_threadPageVisibilityFilter != nullptr)
+    {
+        if (m_threadTable != nullptr)
+        {
+            m_threadTable->removeEventFilter(m_threadPageVisibilityFilter);
+        }
+        delete m_threadPageVisibilityFilter;
+        m_threadPageVisibilityFilter = nullptr;
+    }
+}
+
+void ProcessDock::resetThreadCounterBaseline()
+{
+    ++m_threadCounterGeneration;
+    m_threadCounterSampleByIdentity.reset();
 }
 
 void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
@@ -826,6 +1083,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 
     m_threadRefreshInProgress = true;
     const std::uint64_t localTicket = ++m_threadRefreshTicket;
+    const std::uint64_t counterGeneration = m_threadCounterGeneration;
     auto previousThreadCounters = m_threadCounterSampleByIdentity;
     auto cpuCoreUsageSnapshot = m_latestCpuCoreUsageSnapshot;
     const std::uint32_t logicalCpuCount = m_logicalCpuCount;
@@ -847,6 +1105,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
     QRunnable* backgroundTask = QRunnable::create([
         guardThis,
         localTicket,
+        counterGeneration,
         logicalCpuCount,
         previousThreadCounters = std::move(previousThreadCounters),
         cpuCoreUsageSnapshot = std::move(cpuCoreUsageSnapshot)]() mutable {
@@ -859,8 +1118,12 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
         const std::uint64_t currentTick100ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count() / 100);
-        auto nextThreadCounters =
-            std::make_shared<std::unordered_map<std::string, ks::process::ThreadCounterSample>>();
+        using ThreadCounters = std::unordered_map<std::string, ks::process::ThreadCounterSample>;
+        auto nextThreadCounters = std::shared_ptr<ThreadCounters>(new ThreadCounters,
+            [](ThreadCounters* retired) {
+                if (QCoreApplication::closingDown()) delete retired;
+                else QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; }));
+            });
         nextThreadCounters->reserve(threadList.size());
         for (ks::process::SystemThreadRecord& threadRecord : threadList)
         {
@@ -868,11 +1131,19 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                 threadRecord.ownerPid,
                 threadRecord.threadId,
                 threadRecord.createTime100ns);
-            const auto previousIt = previousThreadCounters.find(identityKey);
+            const ks::process::ThreadCounterSample* previousSample = nullptr;
+            if (previousThreadCounters != nullptr)
+            {
+                const auto previousIt = previousThreadCounters->find(identityKey);
+                if (previousIt != previousThreadCounters->end())
+                {
+                    previousSample = &previousIt->second;
+                }
+            }
             ks::process::ThreadCounterSample nextSample{};
             ks::process::UpdateThreadCpuUsage(
                 threadRecord,
-                previousIt != previousThreadCounters.end() ? &previousIt->second : nullptr,
+                previousSample,
                 nextSample,
                 logicalCpuCount,
                 currentTick100ns);
@@ -895,7 +1166,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 
         auto deferredThreadList =
             std::make_shared<std::vector<ks::process::SystemThreadRecord>>(std::move(threadList));
-        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, usedNtQuery, r0ThreadExtensionMerged, diagnosticText, deferredThreadList, nextThreadCounters]() {
+        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, counterGeneration, usedNtQuery, r0ThreadExtensionMerged, diagnosticText, deferredThreadList, nextThreadCounters]() {
             if (guardThis == nullptr)
             {
                 return;
@@ -914,6 +1185,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
             auto commit = [
                 guardThis,
                 localTicket,
+                counterGeneration,
                 usedNtQuery,
                 r0ThreadExtensionMerged,
                 diagnosticText,
@@ -925,16 +1197,29 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                     return;
                 }
 
-                guardThis->m_threadRecordList = std::move(*deferredThreadList);
-                guardThis->m_threadCounterSampleByIdentity = std::move(*nextThreadCounters);
+                auto retiredRecords = std::move(guardThis->m_threadRecordList);
+                guardThis->m_threadRecordList = deferredThreadList;
+                if (retiredRecords != nullptr)
+                {
+                    QThreadPool::globalInstance()->start(QRunnable::create(
+                        [retiredRecords = std::move(retiredRecords)]() {}));
+                }
+                // Pause/reset may have happened while the immutable worker was running.
+                // Its completed row snapshot is still valid, but its old CPU baseline must
+                // never undo that explicit reset.
+                if (guardThis->m_threadCounterGeneration == counterGeneration)
+                {
+                    guardThis->m_threadCounterSampleByIdentity = nextThreadCounters;
+                }
                 guardThis->m_threadDiagnosticText = diagnosticText;
+                guardThis->m_threadSnapshotReady = true;
                 guardThis->rebuildThreadTable();
 
                 {
                     kLogEvent logEvent;
                     info << logEvent
                         << "[ProcessDock] 线程列表刷新完成, ticket=" << localTicket
-                        << ", count=" << guardThis->m_threadRecordList.size()
+                        << ", count=" << guardThis->m_threadRecordList->size()
                         << ", usedNtQuery=" << (usedNtQuery ? "true" : "false")
                         << ", r0ThreadExtensionMerged=" << (r0ThreadExtensionMerged ? "true" : "false")
                         << ", diagnostic=" << guardThis->m_threadDiagnosticText
@@ -1021,117 +1306,239 @@ bool ProcessDock::threadRecordMatchesScope(const ks::process::SystemThreadRecord
     return true;
 }
 
+void ProcessDock::cancelThreadProjection()
+{
+    ++m_threadProjectionTicket;
+    if (m_threadProjectionCancel != nullptr)
+    {
+        m_threadProjectionCancel->store(true, std::memory_order_relaxed);
+    }
+    m_threadProjectionInProgress = false;
+}
+
 void ProcessDock::rebuildThreadTable()
 {
-    if (m_threadTable == nullptr)
+    // Invalidate old work before a menu/hidden early return, so its late completion
+    // cannot replace the newer deferred rebuild registered under the same barrier key.
+    cancelThreadProjection();
+    m_threadProjectionDirty = true;
+    if (!threadProjectionExposed(m_threadTable) || m_threadRecordList == nullptr)
     {
         return;
     }
-
-    QSignalBlocker tableSignalBlocker(m_threadTable);
-    m_threadTable->setSortingEnabled(false);
-    m_threadTable->clear();
-
-    // processRecordByPid 用途：按 PID 复用进程缓存中的路径与图标信息。
-    std::unordered_map<std::uint32_t, const ks::process::ProcessRecord*> processRecordByPid;
-    processRecordByPid.reserve(m_cacheByIdentity.size());
-    for (const auto& cachePair : m_cacheByIdentity)
+    QPointer<ProcessDock> guardThis(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
+            this, QStringLiteral("process-thread-projection-apply"), {m_threadTable},
+            [guardThis]() {
+                if (guardThis != nullptr && guardThis->m_threadProjectionDirty)
+                {
+                    guardThis->rebuildThreadTable();
+                }
+            }))
     {
-        const ks::process::ProcessRecord& processRecord = cachePair.second.record;
-        const auto pidIt = processRecordByPid.find(processRecord.pid);
-        if (pidIt == processRecordByPid.end())
-        {
-            processRecordByPid.emplace(processRecord.pid, &processRecord);
-            continue;
-        }
+        return;
+    }
+    m_threadProjectionDirty = false;
+    m_threadProjectionInProgress = true;
+    const std::uint64_t projectionTicket = m_threadProjectionTicket;
+    if (m_threadProjectionTimer != nullptr)
+    {
+        m_threadProjectionTimer->stop();
+    }
+    auto work = std::shared_ptr<ThreadProjectionWork>(new ThreadProjectionWork,
+        [](ThreadProjectionWork* retired) {
+            if (QCoreApplication::closingDown())
+            {
+                delete retired;
+            }
+            else
+            {
+                QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; }));
+            }
+        });
+    work->cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_threadProjectionCancel = work->cancelled;
+    static_cast<ThreadSnapshotModel*>(m_threadTable->model())->setCancellation(work->cancelled);
+    work->projection = std::make_shared<ThreadSnapshotModel::Projection>();
+    work->projection->records = m_threadRecordList;
+    work->rows.reserve(m_threadRecordList->size());
 
-        // 选择 imagePath 非空的一条，提升线程页进程图标命中率。
-        if (pidIt->second != nullptr &&
-            pidIt->second->imagePath.empty() &&
-            !processRecord.imagePath.empty())
+    // Copy only one small owner identity/path per PID, rather than copying a process record
+    // for every thread or scanning all process rows for each hidden ProcessPath cell.
+    auto owners = std::make_shared<std::unordered_map<std::uint32_t, ks::process::ProcessRecord>>();
+    owners->reserve(m_cacheByIdentity.size());
+    for (const auto& pair : m_cacheByIdentity)
+    {
+        const auto& source = pair.second.record;
+        auto found = owners->find(source.pid);
+        if (found == owners->end() || (found->second.imagePath.empty() && !source.imagePath.empty()))
         {
-            processRecordByPid[processRecord.pid] = &processRecord;
+            ks::process::ProcessRecord owner{};
+            owner.pid = source.pid;
+            owner.processName = source.processName;
+            owner.imagePath = source.imagePath;
+            (*owners)[source.pid] = std::move(owner);
         }
     }
-
-    // 逐行构建线程列表：
-    // - 先按搜索词过滤；
-    // - 再填充文本和图标；
-    // - 最后写入 TID/PID 到 UserRole，供右键动作读取。
-    for (const ks::process::SystemThreadRecord& threadRecord : m_threadRecordList)
-    {
-        if (!threadRecordMatchesScope(threadRecord) || !threadRecordMatchesSearch(threadRecord))
+    const auto display = [guardThis, owners](const ks::process::SystemThreadRecord& record, int column) -> QString {
+        const auto found = owners->find(record.ownerPid);
+        if (column == toThreadColumnIndex(ThreadTableColumn::ProcessPath))
         {
-            continue;
+            return found != owners->end() && !found->second.imagePath.empty()
+                ? QString::fromStdString(found->second.imagePath) : QStringLiteral("-");
         }
-
-        const auto processIt = processRecordByPid.find(threadRecord.ownerPid);
-
-        QTreeWidgetItem* rowItem = new QTreeWidgetItem();
-        for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
+        if (column == toThreadColumnIndex(ThreadTableColumn::ProcessName) &&
+            (record.ownerProcessName.empty() || record.ownerProcessName == "Unknown") && found != owners->end())
         {
-            const ThreadTableColumn column = static_cast<ThreadTableColumn>(columnIndex);
-            rowItem->setText(columnIndex, formatThreadColumnText(threadRecord, column));
+            return QString::fromStdString(found->second.processName.empty() ? "Unknown" : found->second.processName);
         }
-
-        // 进程列图标：优先使用进程缓存中的 imagePath，保证同进程图标可复用缓存。
-        ks::process::ProcessRecord iconSourceRecord{};
-        if (processIt != processRecordByPid.end() && processIt->second != nullptr)
+        return guardThis != nullptr
+            ? guardThis->formatThreadColumnText(record, static_cast<ThreadTableColumn>(column)) : QString{};
+    };
+    work->projection->value = [guardThis, owners, display](
+        const ks::process::SystemThreadRecord& record, int column, int role) -> QVariant {
+        if (role == Qt::DisplayRole || role == Qt::EditRole)
         {
-            iconSourceRecord = *(processIt->second);
-            if (threadRecord.ownerProcessName.empty() || threadRecord.ownerProcessName == "Unknown")
+            return display(record, column);
+        }
+        if (column == toThreadColumnIndex(ThreadTableColumn::ThreadId))
+        {
+            if (role == Qt::UserRole) return QVariant::fromValue(static_cast<qulonglong>(record.threadId));
+            if (role == Qt::UserRole + 1) return QVariant::fromValue(static_cast<qulonglong>(record.ownerPid));
+            if (role == Qt::UserRole + 2) return QVariant::fromValue(static_cast<qulonglong>(record.createTime100ns));
+        }
+        if (role == Qt::DecorationRole && column == toThreadColumnIndex(ThreadTableColumn::ProcessName) && guardThis != nullptr)
+        {
+            const auto found = owners->find(record.ownerPid);
+            if (found != owners->end()) return guardThis->resolveProcessIcon(found->second);
+            ks::process::ProcessRecord owner{};
+            owner.pid = record.ownerPid;
+            owner.processName = record.ownerProcessName;
+            return guardThis->resolveProcessIcon(owner);
+        }
+        if (role == Qt::ToolTipRole && column == toThreadColumnIndex(ThreadTableColumn::ThreadR0Status))
+        {
+            return threadR0DiagnosticText(record);
+        }
+        const bool suspect = record.isR0OnlyThread ||
+            (record.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U;
+        if (role == Qt::ForegroundRole)
+        {
+            if (suspect) return QBrush(KswordTheme::ErrorColor());
+            if (record.threadState == 4) return QBrush(KswordTheme::ExitedRowForegroundColor());
+        }
+        if (role == Qt::BackgroundRole && suspect)
+        {
+            return QBrush(KswordTheme::WithAlpha(KswordTheme::ErrorBackgroundColor(),
+                KswordTheme::IsDarkModeEnabled() ? 140 : 255));
+        }
+        return {};
+    };
+    const int sortColumn = m_threadTable->header()->sortIndicatorSection();
+    const Qt::SortOrder sortOrder = m_threadTable->header()->sortIndicatorOrder();
+    auto chunk = std::make_shared<std::function<void()>>();
+    std::weak_ptr<std::function<void()>> weakChunk(chunk);
+    *chunk = [guardThis, projectionTicket, work, display, sortColumn, sortOrder, weakChunk]() {
+        if (guardThis == nullptr || guardThis->m_threadProjectionTicket != projectionTicket ||
+            work->cancelled->load(std::memory_order_relaxed))
+        {
+            return;
+        }
+        if (!threadProjectionExposed(guardThis->m_threadTable))
+        {
+            guardThis->cancelThreadProjection();
+            guardThis->m_threadProjectionDirty = true;
+            return;
+        }
+        QElapsedTimer budget;
+        budget.start();
+        const auto& records = *work->projection->records;
+        do
+        {
+            if (work->cursor >= records.size()) break;
+            const std::size_t source = work->cursor++;
+            const auto& record = records[source];
+            if (guardThis->threadRecordMatchesScope(record) && guardThis->threadRecordMatchesSearch(record))
             {
-                rowItem->setText(
-                    toThreadColumnIndex(ThreadTableColumn::ProcessName),
-                    QString::fromStdString(iconSourceRecord.processName.empty() ? "Unknown" : iconSourceRecord.processName));
+                work->rows.push_back({source, display(record, sortColumn)});
             }
-        }
-        else
+        } while (budget.elapsed() < 4);
+        if (work->cursor < records.size())
         {
-            iconSourceRecord.pid = threadRecord.ownerPid;
-            iconSourceRecord.processName = threadRecord.ownerProcessName;
-        }
-        rowItem->setIcon(toThreadColumnIndex(ThreadTableColumn::ProcessName), resolveProcessIcon(iconSourceRecord));
-
-        rowItem->setData(
-            toThreadColumnIndex(ThreadTableColumn::ThreadId),
-            Qt::UserRole,
-            QVariant::fromValue(static_cast<qulonglong>(threadRecord.threadId)));
-        rowItem->setData(
-            toThreadColumnIndex(ThreadTableColumn::ThreadId),
-            Qt::UserRole + 1,
-            QVariant::fromValue(static_cast<qulonglong>(threadRecord.ownerPid)));
-        rowItem->setToolTip(
-            toThreadColumnIndex(ThreadTableColumn::ThreadR0Status),
-            threadR0DiagnosticText(threadRecord));
-
-        // R0-only 线程使用红色高亮，已终止线程使用灰色高亮；两者都只影响展示。
-        if (threadRecord.isR0OnlyThread ||
-            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U)
-        {
-            const QColor suspectForeground = KswordTheme::ErrorColor();
-            const QColor suspectBackground = KswordTheme::WithAlpha(
-                KswordTheme::ErrorBackgroundColor(),
-                KswordTheme::IsDarkModeEnabled() ? 140 : 255);
-            for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
+            if (auto next = weakChunk.lock())
             {
-                rowItem->setForeground(columnIndex, QBrush(suspectForeground));
-                rowItem->setBackground(columnIndex, QBrush(suspectBackground));
+                QTimer::singleShot(0, guardThis, [next]() { (*next)(); });
             }
+            return;
         }
-        else if (threadRecord.threadState == 4)
-        {
-            for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
-            {
-                rowItem->setForeground(columnIndex, QBrush(KswordTheme::ExitedRowForegroundColor()));
-            }
-        }
-
-        m_threadTable->addTopLevelItem(rowItem);
-    }
-
-    m_threadTable->setSortingEnabled(true);
-    m_threadTable->sortItems(toThreadColumnIndex(ThreadTableColumn::OwnerPid), Qt::AscendingOrder);
+        // Pure immutable text/index work: neither Qt widgets nor the ProcessDock caches are
+        // touched by this worker. Cancelled queries stop rather than queueing obsolete sorts.
+        QThreadPool::globalInstance()->start(QRunnable::create(
+            [guardThis, projectionTicket, work, sortOrder]() {
+                try
+                {
+                    std::stable_sort(work->rows.begin(), work->rows.end(), [work, sortOrder](const auto& left, const auto& right) {
+                        if (work->cancelled->load(std::memory_order_relaxed)) throw ThreadProjectionCancelled{};
+                        const int comparison = QString::localeAwareCompare(left.sortText, right.sortText);
+                        return sortOrder == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
+                    });
+                    work->projection->rows.reserve(work->rows.size());
+                    work->projection->rowByIdentity.reserve(work->rows.size());
+                    for (const auto& row : work->rows)
+                    {
+                        if (work->cancelled->load(std::memory_order_relaxed)) return;
+                        const auto& record = work->projection->records->at(row.source);
+                        const int projectedRow = static_cast<int>(work->projection->rows.size());
+                        work->projection->rows.push_back(row.source);
+                        work->projection->rowByIdentity.emplace(ks::process::BuildThreadIdentityKey(
+                            record.ownerPid, record.threadId, record.createTime100ns), projectedRow);
+                    }
+                    // Drop the potentially large temporary strings on this worker.
+                    std::vector<ThreadProjectionRow>().swap(work->rows);
+                }
+                catch (const ThreadProjectionCancelled&)
+                {
+                    return;
+                }
+                if (guardThis == nullptr || work->cancelled->load(std::memory_order_relaxed)) return;
+                QMetaObject::invokeMethod(guardThis, [guardThis, projectionTicket, work]() {
+                    if (guardThis == nullptr || guardThis->m_threadProjectionTicket != projectionTicket ||
+                        work->cancelled->load(std::memory_order_relaxed)) return;
+                    const auto commit = [guardThis, projectionTicket, work]() {
+                        if (guardThis == nullptr || guardThis->m_threadProjectionTicket != projectionTicket ||
+                            work->cancelled->load(std::memory_order_relaxed)) return;
+                        if (!threadProjectionExposed(guardThis->m_threadTable))
+                        {
+                            guardThis->cancelThreadProjection();
+                            guardThis->m_threadProjectionDirty = true;
+                            return;
+                        }
+                        auto* model = static_cast<ThreadSnapshotModel*>(guardThis->m_threadTable->model());
+                        const QModelIndex previous = guardThis->m_threadTable->currentIndex();
+                        const auto* selected = model->record(previous);
+                        const std::string selectedIdentity = selected != nullptr
+                            ? ks::process::BuildThreadIdentityKey(selected->ownerPid, selected->threadId, selected->createTime100ns)
+                            : std::string{};
+                        const int oldScroll = guardThis->m_threadTable->verticalScrollBar()->value();
+                        model->replace(work->projection);
+                        if (!selectedIdentity.empty())
+                        {
+                            guardThis->m_threadTable->setCurrentIndex(model->indexByIdentity(
+                                selectedIdentity, previous.isValid() ? previous.column() : 0));
+                        }
+                        guardThis->m_threadTable->verticalScrollBar()->setValue(oldScroll);
+                        guardThis->m_threadProjectionInProgress = false;
+                    };
+                    if (!ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
+                            guardThis.data(), QStringLiteral("process-thread-projection-apply"),
+                            {guardThis->m_threadTable}, commit))
+                    {
+                        commit();
+                    }
+                }, Qt::QueuedConnection);
+            }));
+    };
+    QTimer::singleShot(0, this, [chunk]() { (*chunk)(); });
 }
 
 QString ProcessDock::formatThreadColumnText(
@@ -1398,62 +1805,33 @@ QString ProcessDock::buildThreadContextMenuStyle() const
         .arg(KswordTheme::OnAccentDynamicHex());
 }
 
-void ProcessDock::bindThreadContextActionToItem(QTreeWidgetItem* clickedItem)
+void ProcessDock::bindThreadContextActionToIndex(const QModelIndex& clickedIndex)
 {
     clearThreadContextActionBinding();
-    if (clickedItem == nullptr)
-    {
-        return;
-    }
-
-    m_threadContextActionTid = clickedItem->data(
-        toThreadColumnIndex(ThreadTableColumn::ThreadId),
-        Qt::UserRole).toULongLong();
-    m_threadContextActionPid = clickedItem->data(
-        toThreadColumnIndex(ThreadTableColumn::ThreadId),
-        Qt::UserRole + 1).toULongLong();
+    if (!clickedIndex.isValid()) return;
+    const QModelIndex identity = clickedIndex.siblingAtColumn(toThreadColumnIndex(ThreadTableColumn::ThreadId));
+    m_threadContextActionTid = identity.data(Qt::UserRole).toULongLong();
+    m_threadContextActionPid = identity.data(Qt::UserRole + 1).toULongLong();
+    m_threadContextActionCreateTime = identity.data(Qt::UserRole + 2).toULongLong();
 }
 
 void ProcessDock::clearThreadContextActionBinding()
 {
     m_threadContextActionTid = 0;
     m_threadContextActionPid = 0;
+    m_threadContextActionCreateTime = 0;
     m_threadContextMenuVisible = false;
 }
 
 const ks::process::SystemThreadRecord* ProcessDock::selectedThreadRecord() const
 {
-    std::uint32_t targetTid = m_threadContextActionTid;
-    std::uint32_t targetPid = m_threadContextActionPid;
-
-    // 若右键绑定为空，则回退当前选中行（键盘触发时会走这里）。
-    if ((targetTid == 0 || targetPid == 0) && m_threadTable != nullptr)
+    if (m_threadTable == nullptr) return nullptr;
+    const auto* model = static_cast<const ThreadSnapshotModel*>(m_threadTable->model());
+    if (m_threadContextActionTid != 0 && m_threadContextActionPid != 0)
     {
-        QTreeWidgetItem* currentItem = m_threadTable->currentItem();
-        if (currentItem != nullptr)
-        {
-            targetTid = currentItem->data(
-                toThreadColumnIndex(ThreadTableColumn::ThreadId),
-                Qt::UserRole).toULongLong();
-            targetPid = currentItem->data(
-                toThreadColumnIndex(ThreadTableColumn::ThreadId),
-                Qt::UserRole + 1).toULongLong();
-        }
+        return model->recordByIdentity(m_threadContextActionPid, m_threadContextActionTid, m_threadContextActionCreateTime);
     }
-
-    if (targetTid == 0 || targetPid == 0)
-    {
-        return nullptr;
-    }
-
-    for (const ks::process::SystemThreadRecord& threadRecord : m_threadRecordList)
-    {
-        if (threadRecord.threadId == targetTid && threadRecord.ownerPid == targetPid)
-        {
-            return &threadRecord;
-        }
-    }
-    return nullptr;
+    return model->record(m_threadTable->currentIndex());
 }
 
 void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
@@ -1463,20 +1841,15 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
         return;
     }
 
-    QTreeWidgetItem* clickedItem = m_threadTable->itemAt(localPosition);
-    if (clickedItem == nullptr)
+    const QModelIndex clickedIndex = m_threadTable->indexAt(localPosition);
+    if (!clickedIndex.isValid())
     {
         clearThreadContextActionBinding();
         return;
     }
 
-    m_threadTable->setCurrentItem(clickedItem);
-    const int clickedColumn = m_threadTable->columnAt(localPosition.x());
-    if (clickedColumn >= 0)
-    {
-        m_threadTable->setCurrentItem(clickedItem, clickedColumn);
-    }
-    bindThreadContextActionToItem(clickedItem);
+    m_threadTable->setCurrentIndex(clickedIndex);
+    bindThreadContextActionToIndex(clickedIndex);
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(buildThreadContextMenuStyle());
@@ -1679,19 +2052,19 @@ void ProcessDock::copyCurrentThreadCell()
         return;
     }
 
-    QTreeWidgetItem* currentItem = m_threadTable->currentItem();
-    if (currentItem == nullptr)
+    const QModelIndex currentIndex = m_threadTable->currentIndex();
+    if (!currentIndex.isValid())
     {
         return;
     }
 
-    const int currentColumn = m_threadTable->currentColumn();
+    const int currentColumn = currentIndex.column();
     if (currentColumn < 0)
     {
         return;
     }
 
-    QApplication::clipboard()->setText(currentItem->text(currentColumn));
+    QApplication::clipboard()->setText(currentIndex.data(Qt::DisplayRole).toString());
 }
 
 void ProcessDock::copyCurrentThreadRow()
@@ -1701,8 +2074,8 @@ void ProcessDock::copyCurrentThreadRow()
         return;
     }
 
-    QTreeWidgetItem* currentItem = m_threadTable->currentItem();
-    if (currentItem == nullptr)
+    const QModelIndex currentIndex = m_threadTable->currentIndex();
+    if (!currentIndex.isValid())
     {
         return;
     }
@@ -1711,7 +2084,7 @@ void ProcessDock::copyCurrentThreadRow()
     rowFields.reserve(static_cast<int>(ThreadTableColumn::Count));
     for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
     {
-        rowFields.push_back(currentItem->text(columnIndex));
+        rowFields.push_back(currentIndex.siblingAtColumn(columnIndex).data(Qt::DisplayRole).toString());
     }
     QApplication::clipboard()->setText(rowFields.join("\t"));
 }
@@ -1755,6 +2128,7 @@ void ProcessDock::openThreadStackWindow()
     ThreadStackTarget target{};
     target.processId = threadRecord->ownerPid;
     target.threadId = threadRecord->threadId;
+    target.threadCreationTime100ns = threadRecord->createTime100ns;
     target.processName = QString::fromStdString(threadRecord->ownerProcessName);
     target.startAddress = threadRecord->startAddress;
     target.win32StartAddress = threadRecord->win32StartAddress;
@@ -1774,6 +2148,7 @@ void ProcessDock::openThreadStackWindow()
             !cachePair.second.record.imagePath.empty())
         {
             target.processPath = QString::fromStdString(cachePair.second.record.imagePath);
+            target.processCreationTime100ns = cachePair.second.record.creationTime100ns;
             break;
         }
     }

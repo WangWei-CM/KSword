@@ -5,6 +5,7 @@
 #include "../MemorySnapshotBytesProvider.h"
 #include "WorkbenchPseudocodeView.h"
 #include <QWidget>
+#include "../PageNavigationTabCatalog.h"
 #include <memory>
 #include <vector>
 
@@ -40,6 +41,9 @@ namespace ks::ui
     {
         Q_OBJECT
     public:
+        static PageNavigationCatalog navigationCatalog(const SnapshotWorkbenchWidget* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // parent 只管理 Qt 生命周期；构造共享子页，不附加目标或读取真实字节。
         explicit SnapshotWorkbenchWidget(QWidget* parent = nullptr);
         // 解除子视图的 provider 后销毁宿主，取消尚未完成的解释请求。
@@ -129,10 +133,18 @@ namespace ks::ui
         void changeEvent(QEvent* event) override;
 
     private:
+        static PageNavigationTabDefinition navigationDefinition(int index);
+        void addNavigationTab(int index, QWidget* page);
+        PageNavigationTabCatalog m_navigationTabs;
+
         // 从当前缓存和锚点更新正式反汇编页，保留宿主的坐标解释。
         void rebuildDisassembly();
         // 更新正式文本/结构子页，只呈现完整有效的已捕获窗口。
         void rebuildText();
+        // Known transaction spans avoid rescanning the rest of the captured buffer.
+        void refreshEditedRange(std::uint64_t address, std::uint64_t length);
+        void refreshFromHexEditorImpl(std::size_t offset, std::size_t count, bool knownRange);
+        void recountChanges(const QByteArray& bytes);
         // 更新完整捕获比较；不足或超限由共享比较模型明确报告。
         void rebuildComparison();
         // 将读取基线与上次读取参照安装到 HEX，展示暂存与真实读取变化。
@@ -197,9 +209,12 @@ namespace ks::ui
         QByteArray m_recentChanges; // 当前与上次实际读取不同的逐字节展示标记。
         MemorySnapshotBytesProvider m_bytesProvider; // 仅服务当前捕获缓存的共享只读 provider。
         QString m_sourceIdentity; // 宿主提供的稳定真实来源/后端/会话身份。
+        detail::MemoryEditHistory::DifferenceSummary m_changeSummary;
         detail::MemoryEditHistory m_history; // 当前基线之上的有界本地差异历史。
         std::uint64_t m_base = 0; // 已载入窗口起点，不等同于全部可请求范围。
         std::uint64_t m_anchor = 0; // 当前正式反汇编起点。
+        // Data-only generation: architecture, palette and permissions do not invalidate comparisons.
+        std::uint64_t m_comparisonRevision = 0;
         std::uint64_t m_snapshotRevision = 0; // 取消陈旧编辑、解释和模态动作的修订代次。
         SnapshotAddressKind m_addressKind = SnapshotAddressKind::MemoryAddress; // 当前地址或文件偏移域。
         bool m_editable = false; // 本地暂存是否开放；不代表真实目标写权限。

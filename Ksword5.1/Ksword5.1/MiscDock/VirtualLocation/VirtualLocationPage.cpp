@@ -1,4 +1,6 @@
 #include "VirtualLocationPage.h"
+#include "../../UI/AsyncOperation.h"
+#include <tuple>
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
@@ -33,6 +35,90 @@ namespace
     using ks::misc::virtual_location::CoordinateSystem;
     using ks::misc::virtual_location::GeoCoordinate;
     using ks::misc::virtual_location::RegistryBackend;
+
+    enum class VirtualLocationBodyText
+    {
+        Scope, Status, LiveFixIdle, Refresh, QueryLiveFix, Input, SystemLabel,
+        PresetLabel, LatitudeLabel, LongitudeLabel, AltitudeLabel, AccuracyLabel,
+        Action, ForceProvider, Apply, Clear, UseLiveFix, RestartService, Idle,
+        Wgs84, Gcj02, Bd09, NoPreset, Conversion
+    };
+    struct VirtualLocationBodyEntry
+    {
+        const char* target;
+        const char* key;
+        const char* fallback;
+        bool mnemonic;
+    };
+    constexpr VirtualLocationBodyEntry kVirtualLocationBody[] = {
+        {"ks_virtual_location_scope", "misc.virtual_location.scope", "本页把坐标写成 Windows 的“系统默认位置”，只对通过 Windows 位置服务取位置的程序生效，"
+                "而且要在系统拿不到更精确的定位源时才会被采用。浏览器网页定位、自带 IP 库或自建定位 SDK 的应用不受影响。"
+                "修改只落在注册表上，随时可以用“清除虚拟定位”还原。", false},
+        {"ks_virtual_location_status", "misc.virtual_location.status.title", "当前状态", false},
+        {"ks_virtual_location_live_fix", "misc.virtual_location.livefix.idle", "实况定位：尚未读取。", false},
+        {"ks_virtual_location_refresh", "misc.virtual_location.refresh", "刷新状态", true},
+        {"ks_virtual_location_query_live_fix", "misc.virtual_location.livefix.query", "读取实况定位", true},
+        {"ks_virtual_location_input", "misc.virtual_location.input.title", "虚拟坐标", false},
+        {"ks_virtual_location_system_label", "misc.virtual_location.input.system", "坐标系：", false},
+        {"ks_virtual_location_preset_label", "misc.virtual_location.input.preset", "预设点：", false},
+        {"ks_virtual_location_latitude_label", "misc.virtual_location.input.latitude", "纬度：", false},
+        {"ks_virtual_location_longitude_label", "misc.virtual_location.input.longitude", "经度：", false},
+        {"ks_virtual_location_altitude_label", "misc.virtual_location.input.altitude", "海拔：", false},
+        {"ks_virtual_location_accuracy_label", "misc.virtual_location.input.accuracy", "误差半径：", false},
+        {"ks_virtual_location_action", "misc.virtual_location.action.title", "操作", false},
+        {"ks_virtual_location_force_provider", "misc.virtual_location.action.force_provider", "同时禁用 Windows 位置提供程序，强制定位回落到默认位置（影响全系统）", true},
+        {"ks_virtual_location_apply", "misc.virtual_location.action.apply", "应用虚拟定位", true},
+        {"ks_virtual_location_clear", "misc.virtual_location.action.clear", "清除虚拟定位", true},
+        {"ks_virtual_location_use_live_fix", "misc.virtual_location.action.use_livefix", "用实况定位填入", true},
+        {"ks_virtual_location_restart_service", "misc.virtual_location.action.restart_service", "重启位置服务", true},
+        {"ks_virtual_location_result", "misc.virtual_location.action.idle", "尚未执行任何操作。", false},
+        {"ksVirtualLocationSystemCombo", "", "WGS-84（GPS / Windows 原始坐标）", false},
+        {"ksVirtualLocationSystemCombo", "", "GCJ-02（高德 / 腾讯地图坐标）", false},
+        {"ksVirtualLocationSystemCombo", "", "BD-09（百度地图坐标）", false},
+        {"ksVirtualLocationPresetCombo", "", "（不使用预设点）", false},
+        {"ks_virtual_location_conversion", "", "", false}
+    };
+    const VirtualLocationBodyEntry& virtualLocationBodyEntry(VirtualLocationBodyText id)
+    {
+        return kVirtualLocationBody[static_cast<int>(id)];
+    }
+    QString virtualLocationBodySource(VirtualLocationBodyText id)
+    {
+        return QString::fromUtf8(virtualLocationBodyEntry(id).fallback);
+    }
+    QString virtualLocationBodyText(VirtualLocationBodyText id)
+    {
+        const auto& entry = virtualLocationBodyEntry(id);
+        const QString fallback = virtualLocationBodySource(id);
+        return *entry.key ? ks::i18n::text(QString::fromLatin1(entry.key), fallback)
+            : ks::i18n::sourceText(fallback);
+    }
+    QString virtualLocationBodyTarget(VirtualLocationBodyText id)
+    {
+        return QString::fromLatin1(virtualLocationBodyEntry(id).target);
+    }
+    void bindVirtualLocationBody(QObject* target, VirtualLocationBodyText id)
+    {
+        const auto& entry = virtualLocationBodyEntry(id);
+        target->setObjectName(virtualLocationBodyTarget(id));
+        ks::i18n::LanguageManager::instance().bindText(target,
+            QString::fromLatin1(entry.key), virtualLocationBodySource(id));
+    }
+    constexpr char kVirtualLocationRawSearchPrefix[] = "ks_virtual_location_diagnostics";
+    constexpr double kInitialLatitude = 39.909187;
+    constexpr double kInitialLongitude = 116.397451;
+    constexpr double kInitialAltitude = 44.0;
+    constexpr double kInitialAccuracy = 50.0;
+    GeoCoordinate initialInputCoordinate()
+    {
+        GeoCoordinate coordinate;
+        coordinate.latitude = kInitialLatitude;
+        coordinate.longitude = kInitialLongitude;
+        coordinate.altitude = kInitialAltitude;
+        coordinate.errorRadiusMeters = kInitialAccuracy;
+        coordinate.altitudeAccuracyMeters = kInitialAccuracy;
+        return coordinate;
+    }
 
     // kLiveFixTimeoutMilliseconds：
     // - 系统首次定位可能要走网络查询，给到 12 秒再判超时。
@@ -92,6 +178,20 @@ namespace
             .arg(coordinate.longitude, 0, 'f', 6);
     }
 
+    QString conversionPreviewText(const GeoCoordinate& current, CoordinateSystem system)
+    {
+        const GeoCoordinate wgs =
+            ks::misc::virtual_location::convertCoordinate(current, system, CoordinateSystem::Wgs84);
+        const GeoCoordinate gcj =
+            ks::misc::virtual_location::convertCoordinate(current, system, CoordinateSystem::Gcj02);
+        const GeoCoordinate bd =
+            ks::misc::virtual_location::convertCoordinate(current, system, CoordinateSystem::Bd09);
+        return QStringLiteral("换算预览：WGS-84 %1｜GCJ-02 %2｜BD-09 %3（写入系统的是 WGS-84）")
+            .arg(formatCoordinate(wgs))
+            .arg(formatCoordinate(gcj))
+            .arg(formatCoordinate(bd));
+    }
+
     // showOpaqueMessage：
     // - 作用：弹一个不透明的主题化提示框，避免继承父链的半透明背景；
     // - 返回：无。
@@ -133,13 +233,88 @@ namespace
 
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> VirtualLocationPage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(42);
+        const auto append = [&body](VirtualLocationBodyText id, const QStringList& groups = {})
+        {
+            body.append({virtualLocationBodyText(id), virtualLocationBodyTarget(id), groups,
+                virtualLocationBodyEntry(id).mnemonic});
+        };
+        append(VirtualLocationBodyText::Scope);
+        append(VirtualLocationBodyText::Input);
+        const QStringList input{virtualLocationBodyText(VirtualLocationBodyText::Input)};
+        append(VirtualLocationBodyText::SystemLabel, input);
+        for (const auto id : {VirtualLocationBodyText::Wgs84, VirtualLocationBodyText::Gcj02,
+            VirtualLocationBodyText::Bd09}) append(id, input);
+        append(VirtualLocationBodyText::PresetLabel, input);
+        append(VirtualLocationBodyText::NoPreset, input);
+        int presetCount = 0;
+        const auto* presets = virtual_location::presetLocations(&presetCount);
+        for (int index = 0; index < presetCount; ++index)
+            body.append({ks::i18n::text(QString::fromLatin1(presets[index].nameKey),
+                QString::fromUtf8(presets[index].nameText)),
+                virtualLocationBodyTarget(VirtualLocationBodyText::NoPreset), input, false});
+        for (const auto id : {VirtualLocationBodyText::LatitudeLabel, VirtualLocationBodyText::LongitudeLabel,
+            VirtualLocationBodyText::AltitudeLabel, VirtualLocationBodyText::AccuracyLabel}) append(id, input);
+        body.append({ks::i18n::sourceText(conversionPreviewText(initialInputCoordinate(), CoordinateSystem::Wgs84)),
+            virtualLocationBodyTarget(VirtualLocationBodyText::Conversion), input, false});
+        append(VirtualLocationBodyText::Action);
+        const QStringList action{virtualLocationBodyText(VirtualLocationBodyText::Action)};
+        append(VirtualLocationBodyText::ForceProvider, action);
+        append(VirtualLocationBodyText::UseLiveFix, action);
+        append(VirtualLocationBodyText::RestartService, action);
+        // Adding the original buttons/receipt to workspace layouts reparents
+        // them out of their source groups before the real QObject traversal.
+        append(VirtualLocationBodyText::Apply);
+        append(VirtualLocationBodyText::Clear);
+        append(VirtualLocationBodyText::Status);
+        const QStringList status{virtualLocationBodyText(VirtualLocationBodyText::Status)};
+        auto fields = ks::ui::StructuredFieldView::coldSearchBody(QString::fromLatin1(kVirtualLocationRawSearchPrefix));
+        for (auto& field : fields)
+        {
+            field.groupTitles = status + field.groupTitles;
+            body.append(std::move(field));
+        }
+        append(VirtualLocationBodyText::LiveFixIdle, status);
+        append(VirtualLocationBodyText::Refresh, status);
+        append(VirtualLocationBodyText::QueryLiveFix, status);
+        append(VirtualLocationBodyText::Idle);
+        return body;
+    }
+
     VirtualLocationPage::VirtualLocationPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_statusOperation = new ks::ui::AsyncOperation(this);
+        m_mutationOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_statusOperation->setStateChangedCallback([this]() {
+            if (m_statusPending && !m_statusOperation->isInFlight())
+            {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
+        m_mutationOperation->setStateChangedCallback([this]() {
+            if (m_mutationPending && !m_mutationOperation->isInFlight())
+            {
+                m_mutationPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
         updateConversionPreview();
         updateButtons();
+    }
+
+    VirtualLocationPage::~VirtualLocationPage()
+    {
+        m_statusOperation->close();
+        m_mutationOperation->close();
     }
 
     void VirtualLocationPage::showEvent(QShowEvent* event)
@@ -199,13 +374,7 @@ namespace ks::misc
         m_scopeLabel = new QLabel(this);
         m_scopeLabel->setWordWrap(true);
         applyScopeBannerStyle();
-        language.bindText(
-            m_scopeLabel,
-            QStringLiteral("misc.virtual_location.scope"),
-            QStringLiteral(
-                "本页把坐标写成 Windows 的“系统默认位置”，只对通过 Windows 位置服务取位置的程序生效，"
-                "而且要在系统拿不到更精确的定位源时才会被采用。浏览器网页定位、自带 IP 库或自建定位 SDK 的应用不受影响。"
-                "修改只落在注册表上，随时可以用“清除虚拟定位”还原。"));
+        bindVirtualLocationBody(m_scopeLabel, VirtualLocationBodyText::Scope);
         introductionLayout->addWidget(m_scopeLabel);
 
         // 单列坐标编辑与只读定位证据并排，避免经纬度横排挤出参数边界。
@@ -217,10 +386,7 @@ namespace ks::misc
         auto* statusGroup = new QGroupBox(this);
         // 已生效位置与待输入参数使用独立的轻分组，减少连续表单的混淆。
         ks::ui::StylePrimaryGroup(statusGroup);
-        language.bindText(
-            statusGroup,
-            QStringLiteral("misc.virtual_location.status.title"),
-            QStringLiteral("当前状态"));
+        bindVirtualLocationBody(statusGroup, VirtualLocationBodyText::Status);
         auto* statusLayout = new QVBoxLayout(statusGroup);
         statusLayout->setSpacing(6);
 
@@ -245,6 +411,7 @@ namespace ks::misc
         statusLayout->addWidget(m_currentLocationLabel);
 
         m_rawValueView = new ks::ui::StructuredFieldView(statusGroup);
+        m_rawValueView->setSearchTargetPrefix(QString::fromLatin1(kVirtualLocationRawSearchPrefix));
         m_rawValueView->setObjectName(QStringLiteral("ksVirtualLocationRawView"));
         m_rawValueView->setMinimumHeight(160);
         m_rawValueView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -258,10 +425,7 @@ namespace ks::misc
         m_liveFixLabel = new QLabel(statusGroup);
         m_liveFixLabel->setWordWrap(true);
         m_liveFixLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        language.bindText(
-            m_liveFixLabel,
-            QStringLiteral("misc.virtual_location.livefix.idle"),
-            QStringLiteral("实况定位：尚未读取。"));
+        bindVirtualLocationBody(m_liveFixLabel, VirtualLocationBodyText::LiveFixIdle);
         statusLayout->addWidget(m_liveFixLabel);
 
         auto* statusButtonLayout = new QHBoxLayout();
@@ -273,14 +437,8 @@ namespace ks::misc
             QIcon(QStringLiteral(":/Icon/virtual_location.svg")),
             QString(),
             statusGroup);
-        language.bindText(
-            m_refreshButton,
-            QStringLiteral("misc.virtual_location.refresh"),
-            QStringLiteral("刷新状态"));
-        language.bindText(
-            m_liveFixButton,
-            QStringLiteral("misc.virtual_location.livefix.query"),
-            QStringLiteral("读取实况定位"));
+        bindVirtualLocationBody(m_refreshButton, VirtualLocationBodyText::Refresh);
+        bindVirtualLocationBody(m_liveFixButton, VirtualLocationBodyText::QueryLiveFix);
         language.bindToolTip(
             m_liveFixButton,
             QStringLiteral("misc.virtual_location.livefix.tooltip"),
@@ -297,26 +455,20 @@ namespace ks::misc
         // ===================== 虚拟坐标 =====================
         auto* inputGroup = new QGroupBox(this);
         ks::ui::StylePrimaryGroup(inputGroup);
-        language.bindText(
-            inputGroup,
-            QStringLiteral("misc.virtual_location.input.title"),
-            QStringLiteral("虚拟坐标"));
+        bindVirtualLocationBody(inputGroup, VirtualLocationBodyText::Input);
         auto* inputLayout = new QGridLayout(inputGroup);
         inputLayout->setHorizontalSpacing(10);
         inputLayout->setVerticalSpacing(8);
 
         auto* systemLabel = new QLabel(inputGroup);
-        language.bindText(
-            systemLabel,
-            QStringLiteral("misc.virtual_location.input.system"),
-            QStringLiteral("坐标系："));
+        bindVirtualLocationBody(systemLabel, VirtualLocationBodyText::SystemLabel);
         m_coordinateSystemCombo = new QComboBox(inputGroup);
         ks::ui::StylePrimaryCombo(m_coordinateSystemCombo);
         m_coordinateSystemCombo->setObjectName(
             QStringLiteral("ksVirtualLocationSystemCombo"));
-        m_coordinateSystemCombo->addItem(QStringLiteral("WGS-84（GPS / Windows 原始坐标）"));
-        m_coordinateSystemCombo->addItem(QStringLiteral("GCJ-02（高德 / 腾讯地图坐标）"));
-        m_coordinateSystemCombo->addItem(QStringLiteral("BD-09（百度地图坐标）"));
+        m_coordinateSystemCombo->addItem(virtualLocationBodySource(VirtualLocationBodyText::Wgs84));
+        m_coordinateSystemCombo->addItem(virtualLocationBodySource(VirtualLocationBodyText::Gcj02));
+        m_coordinateSystemCombo->addItem(virtualLocationBodySource(VirtualLocationBodyText::Bd09));
         language.bindToolTip(
             m_coordinateSystemCombo,
             QStringLiteral("misc.virtual_location.input.system.tooltip"),
@@ -326,14 +478,11 @@ namespace ks::misc
         inputLayout->addWidget(m_coordinateSystemCombo, 0, 1);
 
         auto* presetLabel = new QLabel(inputGroup);
-        language.bindText(
-            presetLabel,
-            QStringLiteral("misc.virtual_location.input.preset"),
-            QStringLiteral("预设点："));
+        bindVirtualLocationBody(presetLabel, VirtualLocationBodyText::PresetLabel);
         m_presetCombo = new QComboBox(inputGroup);
         ks::ui::StylePrimaryCombo(m_presetCombo);
         m_presetCombo->setObjectName(QStringLiteral("ksVirtualLocationPresetCombo"));
-        m_presetCombo->addItem(QStringLiteral("（不使用预设点）"));
+        m_presetCombo->addItem(virtualLocationBodySource(VirtualLocationBodyText::NoPreset));
         int presetCount = 0;
         const virtual_location::PresetLocation* const presets =
             virtual_location::presetLocations(&presetCount);
@@ -347,28 +496,22 @@ namespace ks::misc
         inputLayout->addWidget(m_presetCombo, 1, 1);
 
         auto* latitudeLabel = new QLabel(inputGroup);
-        language.bindText(
-            latitudeLabel,
-            QStringLiteral("misc.virtual_location.input.latitude"),
-            QStringLiteral("纬度："));
+        bindVirtualLocationBody(latitudeLabel, VirtualLocationBodyText::LatitudeLabel);
         m_latitudeSpin = new QDoubleSpinBox(inputGroup);
         m_latitudeSpin->setObjectName(QStringLiteral("ksVirtualLocationLatitudeSpin"));
         m_latitudeSpin->setDecimals(8);
         m_latitudeSpin->setRange(-90.0, 90.0);
         m_latitudeSpin->setSingleStep(0.0001);
-        m_latitudeSpin->setValue(39.909187);
+        m_latitudeSpin->setValue(kInitialLatitude);
 
         auto* longitudeLabel = new QLabel(inputGroup);
-        language.bindText(
-            longitudeLabel,
-            QStringLiteral("misc.virtual_location.input.longitude"),
-            QStringLiteral("经度："));
+        bindVirtualLocationBody(longitudeLabel, VirtualLocationBodyText::LongitudeLabel);
         m_longitudeSpin = new QDoubleSpinBox(inputGroup);
         m_longitudeSpin->setObjectName(QStringLiteral("ksVirtualLocationLongitudeSpin"));
         m_longitudeSpin->setDecimals(8);
         m_longitudeSpin->setRange(-180.0, 180.0);
         m_longitudeSpin->setSingleStep(0.0001);
-        m_longitudeSpin->setValue(116.397451);
+        m_longitudeSpin->setValue(kInitialLongitude);
 
         inputLayout->addWidget(latitudeLabel, 2, 0);
         inputLayout->addWidget(m_latitudeSpin, 2, 1);
@@ -376,15 +519,12 @@ namespace ks::misc
         inputLayout->addWidget(m_longitudeSpin, 3, 1);
 
         auto* altitudeLabel = new QLabel(inputGroup);
-        language.bindText(
-            altitudeLabel,
-            QStringLiteral("misc.virtual_location.input.altitude"),
-            QStringLiteral("海拔："));
+        bindVirtualLocationBody(altitudeLabel, VirtualLocationBodyText::AltitudeLabel);
         m_altitudeSpin = new QDoubleSpinBox(inputGroup);
         m_altitudeSpin->setObjectName(QStringLiteral("ksVirtualLocationAltitudeSpin"));
         m_altitudeSpin->setDecimals(2);
         m_altitudeSpin->setRange(-1000.0, 100000.0);
-        m_altitudeSpin->setValue(44.0);
+        m_altitudeSpin->setValue(kInitialAltitude);
         // LanguageManager::bindSuffix 只接 QSpinBox，这里两个都是 QDoubleSpinBox，
         // 直接取一次词条设进去；单位切换跟随下次页面重建。
         m_altitudeSpin->setSuffix(
@@ -393,15 +533,12 @@ namespace ks::misc
                 QStringLiteral(" 米")));
 
         auto* accuracyLabel = new QLabel(inputGroup);
-        language.bindText(
-            accuracyLabel,
-            QStringLiteral("misc.virtual_location.input.accuracy"),
-            QStringLiteral("误差半径："));
+        bindVirtualLocationBody(accuracyLabel, VirtualLocationBodyText::AccuracyLabel);
         m_accuracySpin = new QDoubleSpinBox(inputGroup);
         m_accuracySpin->setObjectName(QStringLiteral("ksVirtualLocationAccuracySpin"));
         m_accuracySpin->setDecimals(1);
         m_accuracySpin->setRange(0.0, 100000.0);
-        m_accuracySpin->setValue(50.0);
+        m_accuracySpin->setValue(kInitialAccuracy);
         m_accuracySpin->setSuffix(
             ks::i18n::text(
                 QStringLiteral("misc.virtual_location.input.meter.suffix"),
@@ -413,6 +550,7 @@ namespace ks::misc
         inputLayout->addWidget(m_accuracySpin, 5, 1);
 
         m_conversionLabel = new QLabel(inputGroup);
+        m_conversionLabel->setObjectName(virtualLocationBodyTarget(VirtualLocationBodyText::Conversion));
         m_conversionLabel->setWordWrap(true);
         m_conversionLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
         m_conversionLabel->setStyleSheet(
@@ -426,18 +564,12 @@ namespace ks::misc
         // ===================== 操作 =====================
         auto* actionGroup = new QGroupBox(this);
         ks::ui::StylePrimaryGroup(actionGroup);
-        language.bindText(
-            actionGroup,
-            QStringLiteral("misc.virtual_location.action.title"),
-            QStringLiteral("操作"));
+        bindVirtualLocationBody(actionGroup, VirtualLocationBodyText::Action);
         auto* actionLayout = new QVBoxLayout(actionGroup);
         actionLayout->setSpacing(8);
 
         m_forceProviderCheck = new QCheckBox(actionGroup);
-        language.bindText(
-            m_forceProviderCheck,
-            QStringLiteral("misc.virtual_location.action.force_provider"),
-            QStringLiteral("同时禁用 Windows 位置提供程序，强制定位回落到默认位置（影响全系统）"));
+        bindVirtualLocationBody(m_forceProviderCheck, VirtualLocationBodyText::ForceProvider);
         language.bindToolTip(
             m_forceProviderCheck,
             QStringLiteral("misc.virtual_location.action.force_provider.tooltip"),
@@ -463,22 +595,10 @@ namespace ks::misc
             QIcon(QStringLiteral(":/Icon/process_start.svg")),
             QString(),
             actionGroup);
-        language.bindText(
-            m_applyButton,
-            QStringLiteral("misc.virtual_location.action.apply"),
-            QStringLiteral("应用虚拟定位"));
-        language.bindText(
-            m_clearButton,
-            QStringLiteral("misc.virtual_location.action.clear"),
-            QStringLiteral("清除虚拟定位"));
-        language.bindText(
-            m_useLiveFixButton,
-            QStringLiteral("misc.virtual_location.action.use_livefix"),
-            QStringLiteral("用实况定位填入"));
-        language.bindText(
-            m_restartServiceButton,
-            QStringLiteral("misc.virtual_location.action.restart_service"),
-            QStringLiteral("重启位置服务"));
+        bindVirtualLocationBody(m_applyButton, VirtualLocationBodyText::Apply);
+        bindVirtualLocationBody(m_clearButton, VirtualLocationBodyText::Clear);
+        bindVirtualLocationBody(m_useLiveFixButton, VirtualLocationBodyText::UseLiveFix);
+        bindVirtualLocationBody(m_restartServiceButton, VirtualLocationBodyText::RestartService);
         language.bindToolTip(
             m_restartServiceButton,
             QStringLiteral("misc.virtual_location.action.restart_service.tooltip"),
@@ -501,10 +621,7 @@ namespace ks::misc
         m_resultLabel = new QLabel(actionGroup);
         m_resultLabel->setWordWrap(true);
         m_resultLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        language.bindText(
-            m_resultLabel,
-            QStringLiteral("misc.virtual_location.action.idle"),
-            QStringLiteral("尚未执行任何操作。"));
+        bindVirtualLocationBody(m_resultLabel, VirtualLocationBodyText::Idle);
         workspace->results()->addWidget(m_resultLabel);
         ks::ui::StyleParameterSection(actionGroup);
         workspace->parameters()->addWidget(actionGroup);
@@ -603,18 +720,43 @@ namespace ks::misc
         }
     }
 
+    void VirtualLocationPage::showAsyncFailure()
+    {
+        setResultText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"),
+            QStringLiteral("后台任务未返回有效回执，请刷新状态。")), true);
+    }
+
     void VirtualLocationPage::refreshStatus()
     {
-        if (m_busy) {
-            return;
-        }
+        if (m_busy) return;
+        m_statusPending = true;
         setBusy(true);
+        using Snapshot = std::pair<virtual_location::ServiceSnapshot, virtual_location::DefaultLocationSnapshot>;
+        m_statusOperation->submit<int, Snapshot>(0,
+            [](const int&, const ks::ui::AsyncOperationToken& token) {
+                Snapshot snapshot;
+                if (token.isCanceled()) return snapshot;
+                snapshot.first = virtual_location::readServiceSnapshot();
+                if (!token.isCanceled()) snapshot.second = virtual_location::readDefaultLocation();
+                return snapshot;
+            },
+            [this](const Snapshot& snapshot, std::uint64_t) {
+                m_statusPending = false;
+                setBusy(false);
+                applyStatusSnapshot(snapshot.first, snapshot.second);
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+    }
 
-        const virtual_location::ServiceSnapshot serviceSnapshot =
-            virtual_location::readServiceSnapshot();
-        const virtual_location::DefaultLocationSnapshot locationSnapshot =
-            virtual_location::readDefaultLocation();
-
+    void VirtualLocationPage::applyStatusSnapshot(
+        const virtual_location::ServiceSnapshot& serviceSnapshot,
+        const virtual_location::DefaultLocationSnapshot& locationSnapshot)
+    {
         m_serviceLabel->setText(
             QStringLiteral("位置服务：%1；系统位置开关：%2；桌面应用位置：%3")
                 .arg(serviceSnapshot.serviceStateText)
@@ -674,7 +816,7 @@ namespace ks::misc
 
         m_rawValueView->setDocument(defaultLocationDocument(locationSnapshot));
 
-        setBusy(false);
+        updateButtons();
     }
 
     void VirtualLocationPage::applyVirtualLocation()
@@ -687,41 +829,37 @@ namespace ks::misc
         const GeoCoordinate wgsCoordinate = virtual_location::convertCoordinate(
             inputCoordinate(), currentCoordinateSystem(), CoordinateSystem::Wgs84);
 
-        setBusy(true);
-        const virtual_location::OperationResult writeResult =
-            virtual_location::applyDefaultLocation(wgsCoordinate);
-        setBusy(false);
-
-        if (!writeResult.ok) {
-            setResultText(
-                QStringLiteral("应用失败：%1").arg(writeResult.detailText),
-                true);
+        runMutation([wgsCoordinate]() {
+            const auto result = virtual_location::applyDefaultLocation(wgsCoordinate);
             kLogEvent applyEvent;
-            err << applyEvent << "[VirtualLocationPage] 写入系统默认位置失败。" << eol;
-            refreshStatus();
-            return;
-        }
+            if (!result.ok) err << applyEvent << "[VirtualLocationPage] 写入系统默认位置失败。" << eol;
+            else info << applyEvent << "[VirtualLocationPage] 系统默认位置已更新。" << eol;
+            return result;
+        },
+            [this, wgsCoordinate](const virtual_location::OperationResult& writeResult,
+                const virtual_location::DefaultLocationSnapshot& verifySnapshot) {
+                if (!writeResult.ok) {
+                    setResultText(
+                        QStringLiteral("应用失败：%1").arg(writeResult.detailText),
+                        true);
+                    return;
+                }
 
-        // 立刻回读一次：注册表值类型或路径万一跟预期不符，这里就能当场暴露。
-        const virtual_location::DefaultLocationSnapshot verifySnapshot =
-            virtual_location::readDefaultLocation();
-        const bool verified = verifySnapshot.present &&
-            qAbs(verifySnapshot.coordinate.latitude - wgsCoordinate.latitude) < 1e-5 &&
-            qAbs(verifySnapshot.coordinate.longitude - wgsCoordinate.longitude) < 1e-5;
+                const bool verified = verifySnapshot.present &&
+                    qAbs(verifySnapshot.coordinate.latitude - wgsCoordinate.latitude) < 1e-5 &&
+                    qAbs(verifySnapshot.coordinate.longitude - wgsCoordinate.longitude) < 1e-5;
 
-        setResultText(
-            verified
-                ? QStringLiteral("已写入并回读校验通过：WGS-84 %1（%2）。要让已经在跑的程序拿到新位置，"
-                                 "通常还需要重启位置服务或重启该程序。")
-                      .arg(formatCoordinate(wgsCoordinate))
-                      .arg(backendText(writeResult.backend))
-                : QStringLiteral("已写入（%1），但回读校验没通过，请检查下方原始值清单。")
-                      .arg(backendText(writeResult.backend)),
-            !verified);
+                setResultText(
+                    verified
+                        ? QStringLiteral("已写入并回读校验通过：WGS-84 %1（%2）。要让已经在跑的程序拿到新位置，"
+                                         "通常还需要重启位置服务或重启该程序。")
+                              .arg(formatCoordinate(wgsCoordinate))
+                              .arg(backendText(writeResult.backend))
+                        : QStringLiteral("已写入（%1），但回读校验没通过，请检查下方原始值清单。")
+                              .arg(backendText(writeResult.backend)),
+                    !verified);
 
-        kLogEvent applyEvent;
-        info << applyEvent << "[VirtualLocationPage] 系统默认位置已更新。" << eol;
-        refreshStatus();
+            });
     }
 
     void VirtualLocationPage::clearVirtualLocation()
@@ -729,17 +867,15 @@ namespace ks::misc
         if (m_busy) {
             return;
         }
-        setBusy(true);
-        const virtual_location::OperationResult clearResult =
-            virtual_location::clearDefaultLocation();
-        setBusy(false);
-
-        setResultText(
-            clearResult.ok
-                ? QStringLiteral("已清除系统默认位置（%1）。").arg(backendText(clearResult.backend))
-                : QStringLiteral("清除失败：%1").arg(clearResult.detailText),
-            !clearResult.ok);
-        refreshStatus();
+        runMutation([]() { return virtual_location::clearDefaultLocation(); },
+            [this](const virtual_location::OperationResult& clearResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                setResultText(
+                    clearResult.ok
+                        ? QStringLiteral("已清除系统默认位置（%1）。").arg(backendText(clearResult.backend))
+                        : QStringLiteral("清除失败：%1").arg(clearResult.detailText),
+                    !clearResult.ok);
+            });
     }
 
     void VirtualLocationPage::toggleProviderPolicy(const bool disabled)
@@ -768,29 +904,27 @@ namespace ks::misc
             return;
         }
 
-        setBusy(true);
-        const virtual_location::OperationResult policyResult =
-            virtual_location::setLocationProviderDisabled(disabled);
-        setBusy(false);
+        runMutation([disabled]() { return virtual_location::setLocationProviderDisabled(disabled); },
+            [this, disabled](const virtual_location::OperationResult& policyResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                if (!policyResult.ok) {
+                    setResultText(
+                        QStringLiteral("组策略修改失败：%1").arg(policyResult.detailText),
+                        true);
+                    const QSignalBlocker blocker(m_forceProviderCheck);
+                    m_forceProviderCheck->setChecked(m_providerDisabled);
+                    return;
+                }
 
-        if (!policyResult.ok) {
-            setResultText(
-                QStringLiteral("组策略修改失败：%1").arg(policyResult.detailText),
-                true);
-            const QSignalBlocker blocker(m_forceProviderCheck);
-            m_forceProviderCheck->setChecked(m_providerDisabled);
-            return;
-        }
-
-        m_providerDisabled = disabled;
-        setResultText(
-            disabled
-                ? QStringLiteral("已禁用 Windows 位置提供程序（%1）。策略要在位置服务下次启动后才完全生效。")
-                      .arg(backendText(policyResult.backend))
-                : QStringLiteral("已恢复 Windows 位置提供程序（%1）。")
-                      .arg(backendText(policyResult.backend)),
-            false);
-        refreshStatus();
+                m_providerDisabled = disabled;
+                setResultText(
+                    disabled
+                        ? QStringLiteral("已禁用 Windows 位置提供程序（%1）。策略要在位置服务下次启动后才完全生效。")
+                              .arg(backendText(policyResult.backend))
+                        : QStringLiteral("已恢复 Windows 位置提供程序（%1）。")
+                              .arg(backendText(policyResult.backend)),
+                    false);
+            });
     }
 
     void VirtualLocationPage::restartLocationService()
@@ -798,17 +932,58 @@ namespace ks::misc
         if (m_busy) {
             return;
         }
-        setBusy(true);
-        const virtual_location::OperationResult restartResult =
-            virtual_location::restartLocationService();
-        setBusy(false);
+        runMutation([]() { return virtual_location::restartLocationService(); },
+            [this](const virtual_location::OperationResult& restartResult,
+                const virtual_location::DefaultLocationSnapshot&) {
+                setResultText(
+                    restartResult.ok
+                        ? QStringLiteral("位置服务已停止，下一次有程序请求定位时会自动重新启动并读取新的默认位置。")
+                        : QStringLiteral("重启位置服务失败：%1").arg(restartResult.detailText),
+                    !restartResult.ok);
+            });
+    }
 
-        setResultText(
-            restartResult.ok
-                ? QStringLiteral("位置服务已停止，下一次有程序请求定位时会自动重新启动并读取新的默认位置。")
-                : QStringLiteral("重启位置服务失败：%1").arg(restartResult.detailText),
-            !restartResult.ok);
-        refreshStatus();
+    void VirtualLocationPage::runMutation(
+        std::function<virtual_location::OperationResult()> operation,
+        std::function<void(const virtual_location::OperationResult&,
+            const virtual_location::DefaultLocationSnapshot&)> applyReceipt)
+    {
+        if (m_busy) return;
+        m_statusOperation->cancel();
+        m_mutationPending = true;
+        setBusy(true);
+        using Operation = std::function<virtual_location::OperationResult()>;
+        using Receipt = std::tuple<virtual_location::OperationResult,
+            virtual_location::ServiceSnapshot, virtual_location::DefaultLocationSnapshot>;
+        const auto accepted = m_mutationOperation->submitTransaction<Operation, Receipt>(std::move(operation),
+            [](const Operation& execute) {
+                const auto result = execute();
+                const auto service = virtual_location::readServiceSnapshot();
+                const auto location = virtual_location::readDefaultLocation();
+                return Receipt{result, service, location};
+            },
+            [this, applyReceipt = std::move(applyReceipt)](const Receipt& receipt, std::uint64_t) {
+                m_mutationPending = false;
+                const QPointer<VirtualLocationPage> alive(this);
+                applyReceipt(std::get<0>(receipt), std::get<2>(receipt));
+                if (alive)
+                {
+                    alive->applyStatusSnapshot(std::get<1>(receipt), std::get<2>(receipt));
+                    alive->setBusy(false);
+                }
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_mutationPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+        if (accepted == 0)
+        {
+            m_mutationPending = false;
+            setBusy(false);
+            showAsyncFailure();
+        }
     }
 
     void VirtualLocationPage::requestLiveFix(const bool fillInputs)
@@ -901,17 +1076,8 @@ namespace ks::misc
     {
         const GeoCoordinate current = inputCoordinate();
         const CoordinateSystem system = currentCoordinateSystem();
-        const GeoCoordinate wgs =
-            virtual_location::convertCoordinate(current, system, CoordinateSystem::Wgs84);
-        const GeoCoordinate gcj =
-            virtual_location::convertCoordinate(current, system, CoordinateSystem::Gcj02);
-        const GeoCoordinate bd =
-            virtual_location::convertCoordinate(current, system, CoordinateSystem::Bd09);
         m_conversionLabel->setText(
-            QStringLiteral("换算预览：WGS-84 %1｜GCJ-02 %2｜BD-09 %3（写入系统的是 WGS-84）")
-                .arg(formatCoordinate(wgs))
-                .arg(formatCoordinate(gcj))
-                .arg(formatCoordinate(bd)));
+            conversionPreviewText(current, system));
     }
 
     virtual_location::CoordinateSystem VirtualLocationPage::currentCoordinateSystem() const

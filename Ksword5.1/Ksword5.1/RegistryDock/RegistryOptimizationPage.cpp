@@ -2,6 +2,10 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "RegistryOptimizationPage.h"
+#include "../UI/AsyncOperation.h"
+#include <QShowEvent>
+#include <QEvent>
+#include <QScrollBar>
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -38,7 +42,7 @@
 #include <QMetaObject>
 #include <QOperatingSystemVersion>
 #include <QPointer>
-#include <QProcess>
+#include <QSaveFile>
 #include <QPushButton>
 #include "../UI/SegmentedControl.h"
 #include <QRegularExpression>
@@ -54,6 +58,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -300,7 +305,7 @@ namespace
     // - 作用：判断动作是否属于会阻塞调用线程的 ExplorerNotify 广播（AssocChanged / Custom）；
     // - 入参 actionObject：单条优化动作的 JSON 对象；
     // - 返回：true 表示必须放到后台线程执行，否则 UI 会被顶层窗口的应答超时拖住。
-    bool actionUsesBlockingBroadcast(const QJsonObject& actionObject)
+    [[maybe_unused]] bool actionUsesBlockingBroadcast(const QJsonObject& actionObject)
     {
         const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
             jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
@@ -596,12 +601,10 @@ namespace
     // - Input zipRelativePath: relative path inside registry_optimization_assets;
     // - Processing: searches runtime profiles first, then source-tree profiles for development;
     // - Return: candidate zip paths in priority order.
-    QStringList registryOptimizationAssetCandidates(const QString& zipRelativePath)
+    QStringList registryOptimizationAssetCandidates(const QString& zipRelativePath, const QString& appDir, const QString& currentDir)
     {
         QStringList candidates;
         const QString normalizedZipPath = QDir::fromNativeSeparators(zipRelativePath);
-        const QString appDir = QCoreApplication::applicationDirPath();
-        const QString currentDir = QDir::currentPath();
         candidates << QDir(appDir).filePath(QStringLiteral("profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
         candidates << QDir(appDir).filePath(QStringLiteral("../profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
         candidates << QDir(currentDir).filePath(QStringLiteral("profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
@@ -929,14 +932,41 @@ namespace
 RegistryOptimizationPage::RegistryOptimizationPage(QWidget* parent)
     : QWidget(parent)
 {
+    m_profileOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_ordinaryOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_ordinaryOperation->setStateChangedCallback([this] {
+        if (m_stateApplyInProgress && !m_ordinaryOperation->isBusy() && !m_ordinaryReceipt)
+            cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+    });
     initializeUi();
     initializeConnections();
-    loadOptimizationProfile();
 }
 
 RegistryOptimizationPage::~RegistryOptimizationPage()
 {
+    if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
+    m_ordinaryOperation->close();
+    if (m_scopeOperation) m_scopeOperation->close();
+    m_profileOperation->close();
     cancelStateApply();
+}
+
+void RegistryOptimizationPage::showEvent(QShowEvent* event)
+{
+    if (!m_profileRequested) loadOptimizationProfile();
+    else if (m_profilePresentationDirty) presentOptimizationProfile();
+    if (m_scopeProjection && m_scopeProjectionTimer) m_scopeProjectionTimer->start(0);
+    scheduleVisibleRowWidgets();
+    QWidget::showEvent(event);
+}
+
+void RegistryOptimizationPage::presentOptimizationProfile()
+{
+    if (!isVisible() || !m_profilePresentationDirty) return;
+    m_profilePresentationDirty = false;
+    rebuildGroupTree();
+    rebuildItemTable();
+    applyColumnPreset(m_columnPreset);
 }
 
 void RegistryOptimizationPage::initializeUi()
@@ -1095,96 +1125,120 @@ QStringList RegistryOptimizationPage::profileCandidatePaths() const
 
 void RegistryOptimizationPage::loadOptimizationProfile()
 {
+    m_profileRequested = true;
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为优化配置已重新加载。"));
+    if (m_stateApplyInProgress) { m_deferredProfileReload = true; return; }
+    ++m_scopeProjectionRevision;
+    if (m_scopeOperation) m_scopeOperation->cancel();
+    if (m_scopeProjectionTimer) m_scopeProjectionTimer->stop();
+    if (m_rowWidgetTimer) m_rowWidgetTimer->stop();
+    m_rebuildingTable = true;
+    m_itemTable->setEnabled(false);
+    m_refreshStateButton->setEnabled(false);
+    auto oldProjection = std::move(m_scopeProjection);
+    auto oldItems = std::move(m_itemList);
+    auto oldRows = std::move(m_visibleRows);
+    QThreadPool::globalInstance()->start([projection = std::move(oldProjection), items = std::move(oldItems), rows = std::move(oldRows)]() {});
     if (m_filterDebounceTimer != nullptr) m_filterDebounceTimer->stop();
-    m_itemList.clear();
-    m_visibleRows.clear();
     m_loadedProfilePath.clear();
-    m_itemTable->setRowCount(0);
     m_groupTree->clear();
     m_detailText->setDocument({});
-
-    QString selectedPath;
-    for (const QString& candidatePath : profileCandidatePaths())
-    {
-        const QString resolvedPath = ks::profile::resolveProfileJsonPath(candidatePath);
-        if (!resolvedPath.isEmpty())
-        {
-            selectedPath = QDir::cleanPath(resolvedPath);
-            break;
-        }
-    }
-
-    if (selectedPath.isEmpty())
-    {
-        updateStatusText(QStringLiteral("未找到 profiles/%1；系统优化页已加载，但没有可显示项目。").arg(QString::fromLatin1(kOptimizationProfileFileName)));
-        return;
-    }
-
-    QJsonParseError parseError{};
-    QString readErrorText;
-    const QJsonDocument document = ks::profile::readProfileJsonDocument(selectedPath, &parseError, &readErrorText);
-    if (parseError.error != QJsonParseError::NoError || !document.isArray())
-    {
-        const QString reasonText = readErrorText.isEmpty() ? parseError.errorString() : readErrorText;
-        updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(reasonText, selectedPath));
-        return;
-    }
-
-    const QJsonArray itemArray = document.array();
-    for (const QJsonValue& itemValue : itemArray)
-    {
-        if (!itemValue.isObject()) continue;
-        const QJsonObject itemObject = itemValue.toObject();
-
-        OptimizationItem item;
-        item.groupIndex = jsonInt(itemObject, QStringLiteral("group_index"));
-        item.itemIndex = jsonInt(itemObject, QStringLiteral("item_index"));
-        item.groupNameText = jsonString(itemObject, QStringLiteral("group_name"));
-        item.itemNameText = jsonString(itemObject, QStringLiteral("item_name"));
-        item.itemTypeText = jsonString(itemObject, QStringLiteral("item_type"));
-        item.groupConditionText = jsonString(itemObject, QStringLiteral("group_condition"));
-        item.itemConditionText = jsonString(itemObject, QStringLiteral("item_condition"));
-        item.warningText = jsonString(itemObject, QStringLiteral("item_warning"));
-
-        const QJsonArray scopeArray = itemObject.value(QStringLiteral("scopes")).toArray();
-        for (const QJsonValue& scopeValue : scopeArray)
-        {
-            if (!scopeValue.isObject()) continue;
-            const QJsonObject scopeObject = scopeValue.toObject();
-            OptimizationScope scope;
-            scope.scopeText = jsonString(scopeObject, QStringLiteral("scope"));
-            scope.conditionText = jsonString(scopeObject, QStringLiteral("scope_condition"));
-
-            const QJsonArray stateArray = scopeObject.value(QStringLiteral("states")).toArray();
-            for (const QJsonValue& stateValue : stateArray)
+    m_profilePresentationDirty = false;
+    m_profileOperation->submit<QStringList, ProfileLoadResult>(profileCandidatePaths(),
+        [](const QStringList& candidates, const ks::ui::AsyncOperationToken& token) {
+            ProfileLoadResult result;
+            for (const QString& candidate : candidates)
             {
-                if (!stateValue.isObject()) continue;
-                const QJsonObject stateObject = stateValue.toObject();
-                OptimizationState state;
-                state.tagText = jsonString(stateObject, QStringLiteral("state_tag"));
-                state.labelText = jsonString(stateObject, QStringLiteral("state_label"));
-                state.conditionText = jsonString(stateObject, QStringLiteral("state_condition"));
-                state.warningText = jsonString(stateObject, QStringLiteral("state_warning"));
-
-                const QJsonArray actionArray = stateObject.value(QStringLiteral("actions")).toArray();
-                for (const QJsonValue& actionValue : actionArray)
-                {
-                    if (actionValue.isObject()) state.actionList.push_back(actionValue.toObject());
-                }
-                scope.stateList.push_back(state);
+                if (token.isCanceled()) return result;
+                const QString path = ks::profile::resolveProfileJsonPath(candidate);
+                if (!path.isEmpty()) { result.path = QDir::cleanPath(path); result.found = true; break; }
             }
-            item.scopeList.push_back(scope);
-        }
-        m_itemList.push_back(item);
-    }
+            if (!result.found || token.isCanceled()) return result;
+            QJsonParseError parseError{};
+            QString readError;
+            const QJsonDocument document = ks::profile::readProfileJsonDocument(result.path, &parseError, &readError);
+            if (parseError.error != QJsonParseError::NoError || !document.isArray())
+            {
+                result.error = readError.isEmpty() ? parseError.errorString() : readError;
+                return result;
+            }
+            result.parsed = true;
+            const QJsonArray itemArray = document.array();
+            for (const QJsonValue& itemValue : itemArray)
+            {
+                if (token.isCanceled()) return result;
+                if (!itemValue.isObject()) continue;
+                const QJsonObject itemObject = itemValue.toObject();
 
-    m_loadedProfilePath = selectedPath;
-    rebuildGroupTree();
-    rebuildItemTable();
-    applyColumnPreset(m_columnPreset);
-    updateStatusText(QStringLiteral("已加载系统优化 JSON：%1；项目 %2 个。").arg(selectedPath).arg(m_itemList.size()));
+                OptimizationItem item;
+                item.groupIndex = jsonInt(itemObject, QStringLiteral("group_index"));
+                item.itemIndex = jsonInt(itemObject, QStringLiteral("item_index"));
+                item.groupNameText = jsonString(itemObject, QStringLiteral("group_name"));
+                item.itemNameText = jsonString(itemObject, QStringLiteral("item_name"));
+                item.itemTypeText = jsonString(itemObject, QStringLiteral("item_type"));
+                item.groupConditionText = jsonString(itemObject, QStringLiteral("group_condition"));
+                item.itemConditionText = jsonString(itemObject, QStringLiteral("item_condition"));
+                item.warningText = jsonString(itemObject, QStringLiteral("item_warning"));
+
+                const QJsonArray scopeArray = itemObject.value(QStringLiteral("scopes")).toArray();
+                for (const QJsonValue& scopeValue : scopeArray)
+                {
+                    if (!scopeValue.isObject()) continue;
+                    const QJsonObject scopeObject = scopeValue.toObject();
+                    OptimizationScope scope;
+                    scope.scopeText = jsonString(scopeObject, QStringLiteral("scope"));
+                    scope.conditionText = jsonString(scopeObject, QStringLiteral("scope_condition"));
+
+                    const QJsonArray stateArray = scopeObject.value(QStringLiteral("states")).toArray();
+                    for (const QJsonValue& stateValue : stateArray)
+                    {
+                        if (!stateValue.isObject()) continue;
+                        const QJsonObject stateObject = stateValue.toObject();
+                        OptimizationState state;
+                        state.tagText = jsonString(stateObject, QStringLiteral("state_tag"));
+                        state.labelText = jsonString(stateObject, QStringLiteral("state_label"));
+                        state.conditionText = jsonString(stateObject, QStringLiteral("state_condition"));
+                        state.warningText = jsonString(stateObject, QStringLiteral("state_warning"));
+
+                        const QJsonArray actionArray = stateObject.value(QStringLiteral("actions")).toArray();
+                        for (const QJsonValue& actionValue : actionArray)
+                        {
+                            if (actionValue.isObject()) state.actionList.push_back(actionValue.toObject());
+                        }
+                        scope.stateList.push_back(state);
+                    }
+                    item.scopeList.push_back(scope);
+                }
+                result.items.push_back(std::move(item));
+            }
+
+            return result;
+        },
+        [this](const ProfileLoadResult& result, std::uint64_t) {
+            if (!result.found)
+                updateStatusText(QStringLiteral("未找到 profiles/%1；系统优化页已加载，但没有可显示项目。")
+                    .arg(QString::fromLatin1(kOptimizationProfileFileName)));
+            else if (!result.parsed)
+                updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(result.error, result.path));
+            else
+            {
+                m_loadedProfilePath = result.path;
+                m_itemList = result.items;
+                m_profilePresentationDirty = true;
+                presentOptimizationProfile();
+                updateStatusText(QStringLiteral("已加载系统优化 JSON：%1；项目 %2 个。")
+                    .arg(result.path).arg(m_itemList.size()));
+            }
+            return true;
+        },
+        [this](std::exception_ptr failure) {
+            QString reason;
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { reason = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(reason, QString()));
+        });
 }
 
 void RegistryOptimizationPage::rebuildGroupTree()
@@ -1243,124 +1297,207 @@ void RegistryOptimizationPage::rebuildItemTable()
 
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为筛选结果已改变。"));
+    if (m_stateApplyInProgress) { m_deferredItemRebuild = true; return; }
+    const quint64 revision = ++m_scopeProjectionRevision;
     m_rebuildingTable = true;
-    QSignalBlocker blocker(m_itemTable);
-    const bool updatesEnabled = m_itemTable->updatesEnabled();
-    m_itemTable->setUpdatesEnabled(false);
-    m_visibleRows.clear();
-    m_itemTable->setRowCount(0);
-
+    m_itemTable->setEnabled(false);
+    m_refreshStateButton->setEnabled(false);
+    if (m_scopeProjectionTimer) m_scopeProjectionTimer->stop();
+    auto retiredProjection = std::move(m_scopeProjection);
+    QThreadPool::globalInstance()->start([retiredProjection = std::move(retiredProjection)]() {});
     const QTreeWidgetItem* selectedGroupItem = m_groupTree->currentItem();
-    const QString selectedGroup = selectedGroupItem == nullptr ? QString() : selectedGroupItem->data(0, kRoleGroupName).toString();
+    const QString selectedGroup = selectedGroupItem ? selectedGroupItem->data(0, kRoleGroupName).toString() : QString();
     const QString filterText = m_filterEdit->text().trimmed();
-
-    for (int itemIndex = 0; itemIndex < m_itemList.size(); ++itemIndex)
-    {
-        const OptimizationItem& item = m_itemList.at(itemIndex);
-        if (!selectedGroup.isEmpty() && item.groupNameText.compare(selectedGroup, Qt::CaseInsensitive) != 0)
-        {
-            continue;
-        }
-
-        for (int scopeIndex = 0; scopeIndex < item.scopeList.size(); ++scopeIndex)
-        {
-            const OptimizationScope& scope = item.scopeList.at(scopeIndex);
-            const QString haystack = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
-                .arg(item.groupNameText, item.itemNameText, item.itemTypeText, scope.scopeText, item.itemConditionText, item.warningText);
-            if (!filterText.isEmpty() && !haystack.contains(filterText, Qt::CaseInsensitive))
-            {
-                continue;
-            }
-
-            const int tableRow = m_itemTable->rowCount();
-            m_itemTable->insertRow(tableRow);
-            m_itemTable->setRowHeight(tableRow, kDefaultRowHeight);
-            m_visibleRows.push_back(VisibleRow{ itemIndex, scopeIndex });
-
-            m_itemTable->setItem(tableRow, 0, new QTableWidgetItem(item.itemNameText));
-            m_itemTable->setItem(tableRow, 1, new QTableWidgetItem(scopeDisplayText(scope.scopeText)));
-            m_itemTable->setItem(tableRow, 2, new QTableWidgetItem(item.itemTypeText));
-            m_itemTable->setItem(
-                tableRow,
-                3,
-                new QTableWidgetItem(ks::i18n::sourceText(QStringLiteral("未检测"))));
-            QTableWidgetItem* targetPlaceholderItem = new QTableWidgetItem();
-            targetPlaceholderItem->setSizeHint(QSize(kTargetColumnWidth, kDefaultRowHeight));
-            targetPlaceholderItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            m_itemTable->setItem(tableRow, kTargetControlColumn, targetPlaceholderItem);
-            QTableWidgetItem* actionPlaceholderItem = new QTableWidgetItem();
-            actionPlaceholderItem->setSizeHint(QSize(kActionColumnWidth, kDefaultRowHeight));
-            actionPlaceholderItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            m_itemTable->setItem(tableRow, kActionButtonColumn, actionPlaceholderItem);
-
-            if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
-            {
-                QComboBox* comboBox = new QComboBox(m_itemTable);
-                // 行内目标选择器同样保留实底；行高仍由表格既有密度控制。
-                ks::ui::StylePrimaryCombo(comboBox);
-                comboBox->setObjectName(QStringLiteral("optimizationTargetCombo"));
-                comboBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-                comboBox->setMinimumWidth(kTargetColumnWidth - 16);
-                for (const OptimizationState& state : scope.stateList)
-                {
-                    if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0)
-                    {
-                        comboBox->addItem(state.labelText, state.labelText);
-                    }
+    if (!m_scopeOperation) {
+        m_scopeOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_scopeOperation->setStateChangedCallback([this]() {
+            if (m_rebuildingTable && !m_scopeProjection && !m_scopeOperation->isInFlight())
+                updateStatusText(ks::i18n::sourceText(QStringLiteral("系统优化：列表准备失败，请重新筛选或加载。")));
+        });
+    }
+    struct Request { QVector<OptimizationItem> items; QString group; QString filter; QString undetected; quint64 revision; };
+    m_scopeOperation->submit<Request, ScopeProjection>(
+        {m_itemList, selectedGroup, filterText, ks::i18n::sourceText(QStringLiteral("未检测")), revision},
+        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
+            ScopeProjection result;
+            result.revision = request.revision;
+            for (qsizetype itemIndex = 0; itemIndex < request.items.size(); ++itemIndex) {
+                if (token.isCanceled()) return result;
+                const auto& item = request.items.at(itemIndex);
+                if (!request.group.isEmpty() && item.groupNameText.compare(request.group, Qt::CaseInsensitive) != 0) continue;
+                for (qsizetype scopeIndex = 0; scopeIndex < item.scopeList.size(); ++scopeIndex) {
+                    const auto& scope = item.scopeList.at(scopeIndex);
+                    const QString haystack = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
+                        .arg(item.groupNameText, item.itemNameText, item.itemTypeText, scope.scopeText, item.itemConditionText, item.warningText);
+                    if (!request.filter.isEmpty() && !haystack.contains(request.filter, Qt::CaseInsensitive)) continue;
+                    PreparedScopeRow row;
+                    row.source.itemIndex = static_cast<int>(itemIndex);
+                    row.source.scopeIndex = static_cast<int>(scopeIndex);
+                    if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
+                        for (const auto& state : scope.stateList)
+                            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0) { row.source.targetLabel = state.labelText; break; }
+                    QStringList conditions;
+                    if (!item.groupConditionText.isEmpty()) conditions << QStringLiteral("组条件: %1").arg(item.groupConditionText);
+                    if (!item.itemConditionText.isEmpty()) conditions << QStringLiteral("项目条件: %1").arg(item.itemConditionText);
+                    if (!scope.conditionText.isEmpty()) conditions << QStringLiteral("作用域条件: %1").arg(scope.conditionText);
+                    if (!item.warningText.isEmpty()) conditions << QStringLiteral("警告: %1").arg(item.warningText);
+                    row.columns = {item.itemNameText, scopeDisplayText(scope.scopeText), item.itemTypeText, request.undetected,
+                        QString(), QString(), conditions.join(QStringLiteral(" | "))};
+                    result.rows.push_back(std::move(row));
                 }
-                comboBox->setProperty("row", tableRow);
-                m_itemTable->setCellWidget(tableRow, kTargetControlColumn, buildCenteredCellWidget(comboBox, m_itemTable));
             }
-            else
-            {
-                QCheckBox* checkBox = new QCheckBox(QStringLiteral("启用"), m_itemTable);
-                checkBox->setObjectName(QStringLiteral("optimizationTargetCheck"));
-                checkBox->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-                checkBox->setProperty("row", tableRow);
-                m_itemTable->setCellWidget(tableRow, kTargetControlColumn, buildCenteredCellWidget(checkBox, m_itemTable));
+            return result;
+        }, [this](const ScopeProjection& result, std::uint64_t) -> bool {
+            if (result.revision != m_scopeProjectionRevision) return true;
+            m_scopeProjection = std::make_shared<ScopeProjection>(result);
+            m_nextScopeProjectionRow = 0;
+            m_scopeProjectionClearing = true;
+            if (!m_scopeProjectionTimer) {
+                m_scopeProjectionTimer = new QTimer(this);
+                m_scopeProjectionTimer->setSingleShot(true);
+                connect(m_scopeProjectionTimer, &QTimer::timeout, this, [this]() { continueItemProjection(); });
             }
+            m_scopeProjectionTimer->start(0);
+            return true;
+        }, [this, revision](std::exception_ptr) {
+            if (revision != m_scopeProjectionRevision) return;
+            updateStatusText(ks::i18n::sourceText(QStringLiteral("系统优化：列表准备失败，请重新筛选或加载。")));
+        });
+}
 
-            QPushButton* applyButton = new QPushButton(QStringLiteral("应用"), m_itemTable);
-            applyButton->setObjectName(QStringLiteral("registryOptimizationApplyButton"));
-            applyButton->setToolTip(QStringLiteral("对这一项执行注册表优化设置"));
-            applyButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-            applyButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            applyButton->setFixedWidth(kActionColumnWidth - 14);
-            applyButton->setProperty("row", tableRow);
-            connect(applyButton, &QPushButton::clicked, this, [this, applyButton]() {
-                const int row = applyButton->property("row").toInt();
-                applyVisibleRow(row);
-            });
-            m_itemTable->setCellWidget(tableRow, kActionButtonColumn, buildCenteredCellWidget(applyButton, m_itemTable));
-
-            QStringList conditionLines;
-            if (!item.groupConditionText.isEmpty()) conditionLines << QStringLiteral("组条件: %1").arg(item.groupConditionText);
-            if (!item.itemConditionText.isEmpty()) conditionLines << QStringLiteral("项目条件: %1").arg(item.itemConditionText);
-            if (!scope.conditionText.isEmpty()) conditionLines << QStringLiteral("作用域条件: %1").arg(scope.conditionText);
-            if (!item.warningText.isEmpty()) conditionLines << QStringLiteral("警告: %1").arg(item.warningText);
-            m_itemTable->setItem(tableRow, 6, new QTableWidgetItem(conditionLines.join(QStringLiteral(" | "))));
+void RegistryOptimizationPage::continueItemProjection()
+{
+    if (!isVisible() || !m_scopeProjection || m_scopeProjection->revision != m_scopeProjectionRevision) return;
+    const QPointer<RegistryOptimizationPage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-optimization-scope-projection"), {m_itemTable},
+        [guard]() { if (guard) guard->continueItemProjection(); })) return;
+    QSignalBlocker blocker(m_itemTable);
+    for (int unit = 0; unit < 24; ++unit) {
+        if (m_scopeProjectionClearing) {
+            if (m_itemTable->rowCount() > 0) { m_itemTable->removeRow(m_itemTable->rowCount() - 1); continue; }
+            auto retiredRows = std::move(m_visibleRows);
+            QThreadPool::globalInstance()->start([retiredRows = std::move(retiredRows)]() {});
+            m_rowsWithWidgets.clear();
+            m_scopeProjectionClearing = false;
+        }
+        if (m_nextScopeProjectionRow >= m_scopeProjection->rows.size()) {
+            m_rebuildingTable = false;
+            m_itemTable->setEnabled(true);
+            m_refreshStateButton->setEnabled(true);
+            if (m_itemTable->rowCount() > 0) { m_itemTable->setCurrentCell(0, 0); updateDetailPanel(0); }
+            else m_detailText->setDocument({});
+            updateStatusText(QStringLiteral("系统优化：当前显示 %1 行；来源 %2。").arg(m_itemTable->rowCount()).arg(m_loadedProfilePath));
+            applyColumnPreset(m_columnPreset);
+            auto retiredProjection = std::move(m_scopeProjection);
+            QThreadPool::globalInstance()->start([retiredProjection = std::move(retiredProjection)]() {});
+            scheduleVisibleRowWidgets();
+            return;
+        }
+        const auto& prepared = m_scopeProjection->rows.at(m_nextScopeProjectionRow++);
+        const int row = m_itemTable->rowCount();
+        m_itemTable->insertRow(row);
+        m_itemTable->setRowHeight(row, kDefaultRowHeight);
+        m_visibleRows.push_back(prepared.source);
+        for (int column = 0; column < prepared.columns.size(); ++column) {
+            auto* item = new QTableWidgetItem(prepared.columns.at(column));
+            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+            if (column == kTargetControlColumn) item->setSizeHint(QSize(kTargetColumnWidth, kDefaultRowHeight));
+            if (column == kActionButtonColumn) item->setSizeHint(QSize(kActionColumnWidth, kDefaultRowHeight));
+            m_itemTable->setItem(row, column, item);
         }
     }
+    m_scopeProjectionTimer->start(0);
+}
 
-    m_rebuildingTable = false;
-    if (m_itemTable->rowCount() > 0)
-    {
-        m_itemTable->setCurrentCell(0, 0);
-        updateDetailPanel(0);
+bool RegistryOptimizationPage::eventFilter(QObject* watched, QEvent* event)
+{
+    if (m_itemTable && watched == m_itemTable->viewport()
+        && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) scheduleVisibleRowWidgets();
+    return QWidget::eventFilter(watched, event);
+}
+
+void RegistryOptimizationPage::scheduleVisibleRowWidgets()
+{
+    if (!m_rowWidgetTimer) {
+        m_rowWidgetTimer = new QTimer(this);
+        m_rowWidgetTimer->setSingleShot(true);
+        connect(m_rowWidgetTimer, &QTimer::timeout, this, [this]() { materializeVisibleRowWidgets(); });
+        m_itemTable->viewport()->installEventFilter(this);
+        connect(m_itemTable->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { scheduleVisibleRowWidgets(); });
     }
-    else
-    {
-        m_detailText->setDocument({});
+    m_rowWidgetTimer->start(0);
+}
+
+void RegistryOptimizationPage::materializeVisibleRowWidgets()
+{
+    if (m_rebuildingTable || !m_itemTable->isVisible() || m_itemTable->rowCount() == 0) return;
+    const QPointer<RegistryOptimizationPage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-optimization-visible-editors"), {m_itemTable},
+        [guard]() { if (guard) guard->materializeVisibleRowWidgets(); })) return;
+    const quint64 revision = m_scopeProjectionRevision;
+    const int first = std::max(0, m_itemTable->rowAt(0));
+    const int bottom = m_itemTable->rowAt(m_itemTable->viewport()->height() - 1);
+    const int last = bottom >= 0 ? bottom : m_itemTable->rowCount() - 1;
+    for (const int row : QSet<int>(m_rowsWithWidgets)) {
+        if (row >= first && row <= last) continue;
+        m_itemTable->removeCellWidget(row, kTargetControlColumn);
+        m_itemTable->removeCellWidget(row, kActionButtonColumn);
+        m_rowsWithWidgets.remove(row);
     }
-    updateStatusText(QStringLiteral("系统优化：当前显示 %1 行；来源 %2。").arg(m_itemTable->rowCount()).arg(m_loadedProfilePath));
-    applyColumnPreset(m_columnPreset);
-    m_itemTable->setUpdatesEnabled(updatesEnabled);
-    if (updatesEnabled) m_itemTable->viewport()->update();
+    for (int row = first; row <= last; ++row) {
+        if (m_rowsWithWidgets.contains(row) || row >= m_visibleRows.size()) continue;
+        const auto& source = m_visibleRows.at(row);
+        const auto& item = m_itemList.at(source.itemIndex);
+        const auto& scope = item.scopeList.at(source.scopeIndex);
+        if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0) {
+            auto* combo = new QComboBox(m_itemTable);
+            ks::ui::StylePrimaryCombo(combo);
+            combo->setObjectName(QStringLiteral("optimizationTargetCombo"));
+            combo->setMinimumWidth(kTargetColumnWidth - 16);
+            for (const auto& state : scope.stateList)
+                if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0) combo->addItem(state.labelText, state.labelText);
+            const int index = combo->findData(source.targetLabel);
+            if (index >= 0) combo->setCurrentIndex(index);
+            connect(combo, &QComboBox::currentIndexChanged, this, [this, combo, row, revision]() {
+                if (revision == m_scopeProjectionRevision && !m_rebuildingTable && row < m_visibleRows.size()) m_visibleRows[row].targetLabel = combo->currentData().toString();
+            });
+            m_itemTable->setCellWidget(row, kTargetControlColumn, buildCenteredCellWidget(combo, m_itemTable));
+        } else {
+            auto* check = new QCheckBox(QStringLiteral("启用"), m_itemTable);
+            check->setObjectName(QStringLiteral("optimizationTargetCheck"));
+            check->setChecked(source.targetEnabled);
+            connect(check, &QCheckBox::toggled, this, [this, row, revision](bool checked) {
+                if (revision == m_scopeProjectionRevision && !m_rebuildingTable && row < m_visibleRows.size()) m_visibleRows[row].targetEnabled = checked;
+            });
+            m_itemTable->setCellWidget(row, kTargetControlColumn, buildCenteredCellWidget(check, m_itemTable));
+        }
+        auto* apply = new QPushButton(QStringLiteral("应用"), m_itemTable);
+        apply->setObjectName(QStringLiteral("registryOptimizationApplyButton"));
+        apply->setToolTip(QStringLiteral("对这一项执行注册表优化设置"));
+        apply->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        apply->setFixedWidth(kActionColumnWidth - 14);
+        apply->setEnabled(!m_stateApplyInProgress);
+        connect(apply, &QPushButton::clicked, this, [this, row, revision]() { if (revision == m_scopeProjectionRevision && !m_rebuildingTable) applyVisibleRow(row); });
+        m_itemTable->setCellWidget(row, kActionButtonColumn, buildCenteredCellWidget(apply, m_itemTable));
+        m_rowsWithWidgets.insert(row);
+    }
+}
+
+void RegistryOptimizationPage::setTargetForRow(const int row, const QString& label, const bool enabled)
+{
+    if (row < 0 || row >= m_visibleRows.size()) return;
+    m_visibleRows[row].targetLabel = label;
+    m_visibleRows[row].targetEnabled = enabled;
+    QWidget* target = m_itemTable->cellWidget(row, kTargetControlColumn);
+    if (auto* combo = findTargetComboBox(target)) {
+        const int index = combo->findData(label);
+        if (index >= 0) combo->setCurrentIndex(index);
+    } else if (auto* check = findTargetCheckBox(target)) check->setChecked(enabled);
 }
 
 void RegistryOptimizationPage::refreshVisibleStates()
 {
-    if (m_stateRefreshInProgress) return;
+    if (m_rebuildingTable || m_stateRefreshInProgress) return;
 
     const QVector<OptimizationItem> itemSnapshot = m_itemList;
     const QVector<VisibleRow> visibleRowsSnapshot = m_visibleRows;
@@ -1415,6 +1552,7 @@ void RegistryOptimizationPage::refreshVisibleStates()
                     statusItem->setText(result.stateText);
                 }
 
+                guardThis->setTargetForRow(result.tableRow, result.targetLabel, result.targetEnabled);
                 QWidget* targetWidget = guardThis->m_itemTable->cellWidget(result.tableRow, kTargetControlColumn);
                 if (QComboBox* comboBox = findTargetComboBox(targetWidget))
                 {
@@ -1460,6 +1598,8 @@ void RegistryOptimizationPage::refreshVisibleRowState(const int tableRow)
         statusItem->setText(stateText);
     }
 
+    setTargetForRow(tableRow, detectedState ? detectedState->labelText : QString(),
+        detectedState && detectedState->tagText.compare(QStringLiteral("State"), Qt::CaseInsensitive) == 0);
     QWidget* targetWidget = m_itemTable->cellWidget(tableRow, kTargetControlColumn);
     if (QComboBox* comboBox = findTargetComboBox(targetWidget))
     {
@@ -1623,25 +1763,13 @@ const RegistryOptimizationPage::OptimizationState* RegistryOptimizationPage::sel
     if (rowRef.scopeIndex < 0 || rowRef.scopeIndex >= item.scopeList.size()) return nullptr;
     const OptimizationScope& scope = item.scopeList.at(rowRef.scopeIndex);
 
-    QWidget* targetWidget = m_itemTable->cellWidget(tableRow, kTargetControlColumn);
-    if (const QComboBox* comboBox = findTargetComboBox(targetWidget))
+    if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
     {
-        const QString targetLabel = comboBox->currentData().toString();
-        for (const OptimizationState& state : scope.stateList)
-        {
-            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0 &&
-                state.labelText == targetLabel)
-            {
-                return &state;
-            }
-        }
+        for (const auto& state : scope.stateList)
+            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0 && state.labelText == rowRef.targetLabel) return &state;
         return nullptr;
     }
-
-    const QCheckBox* targetCheckBox = findTargetCheckBox(targetWidget);
-    const bool targetEnabled = targetCheckBox == nullptr
-        ? false
-        : targetCheckBox->isChecked();
+    const bool targetEnabled = rowRef.targetEnabled;
     const QString desiredTag = targetEnabled ? QStringLiteral("True") : QStringLiteral("False");
     for (const OptimizationState& state : scope.stateList)
     {
@@ -1674,7 +1802,7 @@ bool RegistryOptimizationPage::applyVisibleRow(const int tableRow)
     }
 
     cancelStateRefresh();
-    if (tableRow < 0 || tableRow >= m_visibleRows.size()) return false;
+    if (m_rebuildingTable || tableRow < 0 || tableRow >= m_visibleRows.size()) return false;
     const VisibleRow rowRef = m_visibleRows.at(tableRow);
     const OptimizationItem& item = m_itemList.at(rowRef.itemIndex);
     const OptimizationScope& scope = item.scopeList.at(rowRef.scopeIndex);
@@ -1711,6 +1839,8 @@ void RegistryOptimizationPage::beginStateApply(
     const OptimizationState& state)
 {
     m_stateApplyInProgress = true;
+    m_stateApplyCancelRequested = false;
+    m_stateApplyCancelReason.clear();
     m_stateApplyTableRow = tableRow;
     m_stateApplyItemName = item.itemNameText;
     m_stateApplyTargetLabel = state.labelText;
@@ -1743,7 +1873,8 @@ void RegistryOptimizationPage::beginStateApply(
 
 void RegistryOptimizationPage::continueStateApply()
 {
-    if (!m_stateApplyInProgress || m_stateApplyProcess != nullptr) return;
+    if (!m_stateApplyInProgress || m_externalSession
+        || m_ordinaryOperation->isBusy() || !m_stateApplyActiveAction.isEmpty()) return;
 
     if (m_stateApplyNextActionIndex >= m_stateApplyActions.size())
     {
@@ -1768,41 +1899,106 @@ void RegistryOptimizationPage::continueStateApply()
         return;
     }
 
-    // ExplorerNotify 广播会对 HWND_BROADCAST 逐个顶层窗口等待应答，繁忙窗口各自等满超时，
-    // 留在 UI 线程会造成数秒冻结；这里改成后台线程执行，完成后回投继续推进动作序列。
-    if (actionUsesBlockingBroadcast(m_stateApplyActiveAction))
-    {
-        const QJsonObject broadcastAction = m_stateApplyActiveAction;
-        const QPointer<RegistryOptimizationPage> guardedSelf(this);
-        const quint64 requestGeneration = property(kStateApplyGenerationProperty).toULongLong();
-        QThreadPool::globalInstance()->start(
-            [guardedSelf, broadcastAction, requestGeneration]()
+    const QString family = jsonString(m_stateApplyActiveAction, QStringLiteral("action_family"),
+        jsonString(m_stateApplyActiveAction, QStringLiteral("action_tag"))).trimmed();
+    if ((family.compare(QStringLiteral("RegWrite"), Qt::CaseInsensitive) == 0
+            || family.compare(QStringLiteral("RegExist"), Qt::CaseInsensitive) == 0)
+        && jsonString(m_stateApplyActiveAction, QStringLiteral("Data")) == QStringLiteral("?ColorDialog()"))
+        prepareColorAction(m_stateApplyActiveAction);
+    else
+        submitOrdinaryAction(m_stateApplyActiveAction);
+}
+
+void RegistryOptimizationPage::submitOrdinaryAction(const QJsonObject& action, const RegistryValueState* original)
+{
+    struct Request { QJsonObject action; RegistryValueState original; bool hasOriginal = false; };
+    const Request request{action, original ? *original : RegistryValueState{}, original != nullptr};
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_ordinaryReceipt = false;
+    const auto ticket = m_ordinaryOperation->submitTransaction<Request, OrdinaryActionResult>(request,
+        [](const Request& value) {
+            OrdinaryActionResult result;
+            result.ok = executeAction(value.action, &result.details, &result.restartExplorer, value.hasOriginal ? &value.original : nullptr);
+            return result;
+        }, [this, generation](const OrdinaryActionResult& result, std::uint64_t) {
+            acceptOrdinaryAction(result, generation);
+            return true;
+        }, [this](std::exception_ptr) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0, this, [this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
+        });
+    if (!ticket) cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+}
+
+void RegistryOptimizationPage::prepareColorAction(const QJsonObject& action)
+{
+    struct Result { RegistryValueState original; QString error; bool ok = false; };
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_ordinaryReceipt = false;
+    m_ordinaryOperation->submit<QJsonObject, Result>(action, [](const QJsonObject& value, const ks::ui::AsyncOperationToken&) {
+        Result result;
+        const QString key = jsonString(value, QStringLiteral("Key"));
+        const RegistryAccessContext context{actionRegistryViewFlags(value) == KEY_WOW64_32KEY ? 32 : 0, false};
+        if (!RegistryWorkbenchAccess::read(key, jsonString(value, QStringLiteral("Value")), context, &result.original, &result.error)
+            || !result.original.complete) return result;
+        if (key.isEmpty()) { result.error = QStringLiteral("RegWrite 缺少 Key。"); return result; }
+        DWORD type = REG_NONE;
+        const QString typeText = jsonString(value, QStringLiteral("Type"), QStringLiteral("REG_DWORD"));
+        if (!parseRegistryType(typeText, &type)) { result.error = QStringLiteral("不支持注册表类型：%1").arg(typeText); return result; }
+        result.ok = true;
+        return result;
+    }, [this, action, generation](const Result& result, std::uint64_t) {
+        m_ordinaryReceipt = true;
+        QTimer::singleShot(0, this, [this, action, generation, result] {
+            if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+            if (m_stateApplyCancelRequested) { cancelStateApply(m_stateApplyCancelReason); return; }
+            if (!result.ok)
             {
-                const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(broadcastAction, true);
+                OrdinaryActionResult outcome;
+                outcome.ok = describeActionResult(action, false, result.error, &outcome.details, &outcome.restartExplorer);
+                acceptOrdinaryAction(outcome, generation);
+                return;
+            }
+            const QPointer<RegistryOptimizationPage> alive(this);
+            const QColor color = QColorDialog::getColor(Qt::white, this, QStringLiteral("选择注册表颜色值"));
+            if (!alive || !m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+            if (!color.isValid())
+            {
+                OrdinaryActionResult outcome;
+                outcome.ok = describeActionResult(action, false, QStringLiteral("用户取消颜色选择。"), &outcome.details, &outcome.restartExplorer);
+                acceptOrdinaryAction(outcome, generation);
+                return;
+            }
+            const quint32 colorValue = 0xFF000000U | (static_cast<quint32>(color.blue()) << 16)
+                | (static_cast<quint32>(color.green()) << 8) | static_cast<quint32>(color.red());
+            auto resolved = action;
+            if (!action.value(QStringLiteral("summary")).isString())
+                resolved.insert(QStringLiteral("summary"), QString::fromUtf8(QJsonDocument(action).toJson(QJsonDocument::Compact)));
+            resolved.insert(QStringLiteral("Data"), QStringLiteral("%1").arg(colorValue, 8, 16, QLatin1Char('0')).toUpper());
+            submitOrdinaryAction(resolved, &result.original);
+        });
+        return true;
+    }, [this](std::exception_ptr) {
+        m_ordinaryReceipt = true;
+        QTimer::singleShot(0, this, [this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
+    });
+}
 
-                QCoreApplication* const appInstance = QCoreApplication::instance();
-                if (appInstance == nullptr) { return; }
-
-                QMetaObject::invokeMethod(appInstance,
-                    [guardedSelf, requestGeneration, outcome]()
-                    {
-                        if (guardedSelf.isNull()) { return; }
-                        if (guardedSelf->property(kStateApplyGenerationProperty).toULongLong() != requestGeneration) { return; }
-                        guardedSelf->completePendingAction(outcome.succeeded, outcome.errorTextValue);
-                    });
-            });
-        return;
-    }
-
-    ks::ui::FieldDocument actionDetailLines;
-    bool actionRestartExplorer = false;
-    const bool actionOk = executeAction(m_stateApplyActiveAction, &actionDetailLines, &actionRestartExplorer);
-    m_stateApplyRestartExplorer = m_stateApplyRestartExplorer || actionRestartExplorer;
-    m_stateApplyAllOk = m_stateApplyAllOk && actionOk;
-    m_stateApplyDetailLines.nodes += actionDetailLines.nodes;
+void RegistryOptimizationPage::acceptOrdinaryAction(const OrdinaryActionResult& result, const quint64 generation)
+{
+    m_ordinaryReceipt = true;
+    if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+    m_stateApplyRestartExplorer = m_stateApplyRestartExplorer || result.restartExplorer;
+    m_stateApplyAllOk = m_stateApplyAllOk && result.ok;
+    m_stateApplyDetailLines.nodes += result.details.nodes;
+    m_stateApplyActiveAction = {};
     ++m_stateApplyNextActionIndex;
     m_detailText->setDocument(m_stateApplyDetailLines);
-    QTimer::singleShot(0, this, [this]() { continueStateApply(); });
+    QTimer::singleShot(0, this, [this, generation] {
+        if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+        if (m_stateApplyCancelRequested) cancelStateApply(m_stateApplyCancelReason);
+        else continueStateApply();
+    });
 }
 
 void RegistryOptimizationPage::completePendingAction(const bool actionOk, const QString& errorText)
@@ -1811,10 +2007,12 @@ void RegistryOptimizationPage::completePendingAction(const bool actionOk, const 
 
     if (!actionOk)
     {
+        const QPointer<RegistryOptimizationPage> alive(this);
         (void)ks::ui::promptForPrivilegeFailure(
             this,
             QStringLiteral("执行系统优化"),
             errorText);
+        if (!alive) return;
     }
 
     bool actionRestartExplorer = false;
@@ -1840,7 +2038,10 @@ void RegistryOptimizationPage::completePendingAction(const bool actionOk, const 
     m_stateApplyActiveAction = QJsonObject();
     ++m_stateApplyNextActionIndex;
     m_detailText->setDocument(m_stateApplyDetailLines);
-    QTimer::singleShot(0, this, [this]() { continueStateApply(); });
+    QTimer::singleShot(0, this, [this]() {
+        if (m_stateApplyCancelRequested) cancelStateApply(m_stateApplyCancelReason);
+        else continueStateApply();
+    });
 }
 
 void RegistryOptimizationPage::finishStateApply()
@@ -1871,19 +2072,18 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
 {
     if (!m_stateApplyInProgress) return;
 
+    if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
+    if (m_ordinaryOperation->isBusy())
+    {
+        m_stateApplyCancelRequested = true;
+        m_stateApplyCancelReason = reasonText;
+        updateStatusText(QStringLiteral("系统优化：已请求取消，将在当前动作完成并取得回执后停止。"));
+        return;
+    }
+
     // 序列代次自增：仍在后台阻塞的广播动作完成后不再推进这一轮（或下一轮）序列。
     setProperty(kStateApplyGenerationProperty, property(kStateApplyGenerationProperty).toULongLong() + 1);
 
-    if (m_stateApplyProcess != nullptr)
-    {
-        m_stateApplyProcess->disconnect(this);
-        m_stateApplyProcess->kill();
-        m_stateApplyProcess->deleteLater();
-        m_stateApplyProcess = nullptr;
-    }
-    delete m_stateApplyTemporaryDir;
-    m_stateApplyTemporaryDir = nullptr;
-    m_stateApplyZipDestinationPath.clear();
     if (!reasonText.isEmpty())
     {
         m_stateApplyDetailLines.field(QStringLiteral("已取消"), reasonText, true);
@@ -1896,6 +2096,12 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
     m_stateApplyActiveAction = QJsonObject();
     m_stateApplyNextActionIndex = 0;
     setApplyControlsEnabled(true);
+    m_stateApplyCancelRequested = false;
+    m_stateApplyCancelReason.clear();
+    const bool reload = std::exchange(m_deferredProfileReload, false);
+    const bool rebuild = std::exchange(m_deferredItemRebuild, false);
+    if (reload) QTimer::singleShot(0, this, [this] { loadOptimizationProfile(); });
+    else if (rebuild) QTimer::singleShot(0, this, [this] { rebuildItemTable(); });
 }
 
 void RegistryOptimizationPage::setApplyControlsEnabled(const bool enabled)
@@ -1929,172 +2135,134 @@ bool RegistryOptimizationPage::actionRequiresExternalProcess(const QJsonObject& 
 
 bool RegistryOptimizationPage::startExternalAction(const QJsonObject& actionObject, QString* errorTextOut)
 {
-    if (errorTextOut != nullptr) errorTextOut->clear();
-    const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
-        jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
-
-    QString programPath;
-    QStringList arguments;
-    if (familyText.compare(QStringLiteral("ExplorerNotify"), Qt::CaseInsensitive) == 0)
-    {
-        const QString commandText = jsonString(actionObject, QStringLiteral("Cmd"));
-        if (commandText.isEmpty())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("ExplorerNotify Cmd 缺少命令。");
-            return false;
-        }
-        programPath = QStringLiteral("cmd.exe");
-        arguments = { QStringLiteral("/c"), commandText };
-    }
-    else if (familyText.compare(QStringLiteral("FileCreateByZIP"), Qt::CaseInsensitive) == 0)
-    {
-        const QString destinationPath = expandEnvironmentPath(jsonString(actionObject, QStringLiteral("Path")));
-        const QString zipReference = jsonString(actionObject, QStringLiteral("ZIPFile"));
-        if (destinationPath.isEmpty() || zipReference.isEmpty())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("FileCreateByZIP 缺少 Path 或 ZIPFile。");
-            return false;
-        }
-
-        QString zipRelativePath;
-        QString entryPath;
-        if (!splitZipFileReference(zipReference, &zipRelativePath, &entryPath))
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("ZIPFile 格式无效：%1").arg(zipReference);
-            return false;
-        }
-
-        QString zipPath;
-        for (const QString& candidate : registryOptimizationAssetCandidates(zipRelativePath))
-        {
-            if (QFileInfo::exists(candidate))
-            {
-                zipPath = QDir::cleanPath(candidate);
-                break;
-            }
-        }
-        if (zipPath.isEmpty())
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("未找到 ZIP 资产：profiles/registry_optimization_assets/%1").arg(zipRelativePath);
-            }
-            return false;
-        }
-
-        m_stateApplyTemporaryDir = new QTemporaryDir();
-        if (!m_stateApplyTemporaryDir->isValid())
-        {
-            delete m_stateApplyTemporaryDir;
-            m_stateApplyTemporaryDir = nullptr;
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法创建临时目录用于解压 ZIP。");
-            return false;
-        }
-
-        programPath = QStringLiteral("tar.exe");
-        arguments = {
-            QStringLiteral("-xf"),
-            QDir::toNativeSeparators(zipPath),
-            QStringLiteral("-C"),
-            QDir::toNativeSeparators(m_stateApplyTemporaryDir->path()),
-            QDir::fromNativeSeparators(entryPath)
-        };
-        m_stateApplyZipDestinationPath = destinationPath;
-    }
-    else
-    {
-        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("不支持的外部动作族：%1").arg(familyText);
-        return false;
-    }
-
-    QProcess* process = new QProcess(this);
-    m_stateApplyProcess = process;
-    connect(process, &QProcess::errorOccurred, this, [this, process](const QProcess::ProcessError) {
-        if (m_stateApplyProcess != process) return;
-        const QString errorText = process->errorString();
-        m_stateApplyProcess = nullptr;
-        process->deleteLater();
-        delete m_stateApplyTemporaryDir;
-        m_stateApplyTemporaryDir = nullptr;
-        m_stateApplyZipDestinationPath.clear();
-        completePendingAction(false, errorText);
-    });
-    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-        [this, process, familyText](const int exitCode, const QProcess::ExitStatus exitStatus) {
-            if (m_stateApplyProcess != process) return;
-            const QString standardError = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
-            m_stateApplyProcess = nullptr;
-            process->deleteLater();
-
-            bool actionOk = exitStatus == QProcess::NormalExit && exitCode == 0;
-            QString errorText;
-            if (!actionOk)
-            {
-                errorText = standardError.isEmpty()
-                    ? QStringLiteral("命令退出码：%1").arg(exitCode)
-                    : standardError;
-            }
-            else if (familyText.compare(QStringLiteral("FileCreateByZIP"), Qt::CaseInsensitive) == 0)
-            {
-                QString zipRelativePath;
-                QString entryPath;
-                splitZipFileReference(jsonString(m_stateApplyActiveAction, QStringLiteral("ZIPFile")), &zipRelativePath, &entryPath);
-                const QString extractedPath = QDir(m_stateApplyTemporaryDir->path()).filePath(QDir::fromNativeSeparators(entryPath));
-                if (!QFileInfo::exists(extractedPath))
-                {
-                    actionOk = false;
-                    errorText = QStringLiteral("ZIP 中未找到条目：%1").arg(QDir::fromNativeSeparators(entryPath));
-                }
-                else
-                {
-                    const QFileInfo destinationInfo(m_stateApplyZipDestinationPath);
-                    QDir destinationDirectory = destinationInfo.dir();
-                    if (!destinationDirectory.exists() && !destinationDirectory.mkpath(QStringLiteral(".")))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法创建目标目录：%1").arg(destinationDirectory.absolutePath());
-                    }
-                    else if (QFileInfo::exists(m_stateApplyZipDestinationPath) && !QFile::remove(m_stateApplyZipDestinationPath))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法覆盖目标文件：%1").arg(m_stateApplyZipDestinationPath);
-                    }
-                    else if (!QFile::copy(extractedPath, m_stateApplyZipDestinationPath))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法复制 ZIP 条目到目标：%1").arg(m_stateApplyZipDestinationPath);
-                    }
-                }
-            }
-
-            delete m_stateApplyTemporaryDir;
-            m_stateApplyTemporaryDir = nullptr;
-            m_stateApplyZipDestinationPath.clear();
-            completePendingAction(actionOk, errorText);
+    if (errorTextOut) errorTextOut->clear();
+    auto session = ks::registry::external::Session::create();
+    if (!session) { if (errorTextOut) *errorTextOut = QString::number(ERROR_OPERATION_ABORTED); return false; }
+    auto work = session->reserve();
+    if (!work) { if (errorTextOut) *errorTextOut = QString::number(ERROR_OPERATION_ABORTED); return false; }
+    struct Request { QJsonObject action; QString appDir; QString currentDir; std::shared_ptr<ks::registry::external::Session::Work> work; };
+    const Request request{actionObject,QCoreApplication::applicationDirPath(),QDir::currentPath(),std::move(work)};
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_externalSession = std::move(session);
+    m_ordinaryReceipt = false;
+    const auto ticket = m_ordinaryOperation->submitTransaction<Request,ExternalActionResult>(request,
+        [](const Request& value) { return executeExternalAction(value.action,value.appDir,value.currentDir,value.work); },
+        [this,generation](const ExternalActionResult& result,std::uint64_t) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0,this,[this,generation,result] {
+                if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
+                if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong()!=generation) return;
+                if (result.canceled) { m_stateApplyCancelRequested=true;m_stateApplyCancelReason=result.error; }
+                completePendingAction(result.ok,result.error);
+            });
+            return true;
+        }, [this](std::exception_ptr) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0,this,[this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
         });
-    process->setProgram(programPath);
-    process->setArguments(arguments);
-    process->start();
-    return true;
+    if (!ticket)
+    {
+        m_ordinaryReceipt = true;
+        if (m_externalSession) {m_externalSession->stop();m_externalSession.reset();}
+        if (errorTextOut) *errorTextOut=QString::number(ERROR_OPERATION_ABORTED);
+    }
+    return ticket != 0;
+}
+
+RegistryOptimizationPage::ExternalActionResult RegistryOptimizationPage::executeExternalAction(
+    const QJsonObject& actionObject,const QString& appDir,const QString& currentDir,
+    const std::shared_ptr<ks::registry::external::Session::Work>& work)
+{
+    // Declared first: every local process/file object is destroyed before publishing physical completion.
+    struct Completion { std::shared_ptr<ks::registry::external::Session::Work> work; ~Completion(){work->finish();} } completion{work};
+    auto& runtime=*work->runtime();
+    ExternalActionResult result;
+    const auto canceled=[&]() {
+        result.canceled=true;
+        result.error=QStringLiteral("外部动作已取消；进程已结束，已提交的更改不会撤回。");
+        return result;
+    };
+    if(runtime.stopped.load())return canceled();
+    const QString familyText=jsonString(actionObject,QStringLiteral("action_family"),jsonString(actionObject,QStringLiteral("action_tag"))).trimmed();
+    QString programPath,entryPath,destinationPath;
+    QStringList arguments;
+    if(familyText.compare(QStringLiteral("ExplorerNotify"),Qt::CaseInsensitive)==0)
+    {
+        const auto commandText=jsonString(actionObject,QStringLiteral("Cmd"));
+        if(commandText.isEmpty()){result.error=QStringLiteral("ExplorerNotify Cmd 缺少命令。");return result;}
+        programPath=QStringLiteral("cmd.exe");arguments={QStringLiteral("/c"),commandText};
+    }
+    else if(familyText.compare(QStringLiteral("FileCreateByZIP"),Qt::CaseInsensitive)==0)
+    {
+        destinationPath=expandEnvironmentPath(jsonString(actionObject,QStringLiteral("Path")));
+        const auto zipReference=jsonString(actionObject,QStringLiteral("ZIPFile"));
+        if(destinationPath.isEmpty() || zipReference.isEmpty()){result.error=QStringLiteral("FileCreateByZIP 缺少 Path 或 ZIPFile。");return result;}
+        QString zipRelativePath;
+        if(!splitZipFileReference(zipReference,&zipRelativePath,&entryPath)){result.error=QStringLiteral("ZIPFile 格式无效：%1").arg(zipReference);return result;}
+        QString zipPath;
+        for(const auto& candidate:registryOptimizationAssetCandidates(zipRelativePath,appDir,currentDir))
+            if(QFileInfo::exists(candidate)){zipPath=QDir::cleanPath(candidate);break;}
+        if(zipPath.isEmpty()){result.error=QStringLiteral("未找到 ZIP 资产：profiles/registry_optimization_assets/%1").arg(zipRelativePath);return result;}
+        QTemporaryDir temporary;
+        if(!temporary.isValid()){result.error=QStringLiteral("无法创建临时目录用于解压 ZIP。");return result;}
+        runtime.temporaryRoot=temporary.path();
+        temporary.setAutoRemove(false); // Retained resource owner removes it only after actual process termination.
+        programPath=QStringLiteral("tar.exe");
+        arguments={QStringLiteral("-xf"),QDir::toNativeSeparators(zipPath),QStringLiteral("-C"),QDir::toNativeSeparators(runtime.temporaryRoot),QDir::fromNativeSeparators(entryPath)};
+    }
+    else {result.error=QStringLiteral("不支持的外部动作族：%1").arg(familyText);return result;}
+    const auto process=ks::registry::external::runProcess(runtime,programPath,arguments);
+    if(process.canceled)return canceled();
+    if(!process.ok){result.error=process.error.isEmpty()?QStringLiteral("命令退出码：%1").arg(process.exitCode):process.error;return result;}
+    if(!destinationPath.isEmpty())
+    {
+        if(runtime.stopped.load())return canceled();
+        const auto extractedPath=QDir(runtime.temporaryRoot).filePath(QDir::fromNativeSeparators(entryPath));
+        if(!QFileInfo::exists(extractedPath)){result.error=QStringLiteral("ZIP 中未找到条目：%1").arg(QDir::fromNativeSeparators(entryPath));return result;}
+        const QFileInfo destinationInfo(destinationPath);auto directory=destinationInfo.dir();
+        if(!directory.exists()&&!directory.mkpath(QStringLiteral("."))){result.error=QStringLiteral("无法创建目标目录：%1").arg(directory.absolutePath());return result;}
+        QFile input(extractedPath);QSaveFile output(destinationPath);output.setDirectWriteFallback(false);
+        const auto copyFailed=[&]() {output.cancelWriting();result.error=QStringLiteral("无法复制 ZIP 条目到目标：%1").arg(destinationPath);return result;};
+        if(!input.open(QIODevice::ReadOnly)||!output.open(QIODevice::WriteOnly))return copyFailed();
+        while(!input.atEnd())
+        {
+            if(runtime.stopped.load()){output.cancelWriting();return canceled();}
+            const auto block=input.read(1024*1024);
+            if(block.isEmpty()&&!input.atEnd())return copyFailed();
+            qint64 position=0;
+            while(position<block.size())
+            {
+                const auto written=output.write(block.constData()+position,block.size()-position);
+                if(written<=0 || written>block.size()-position)return copyFailed();
+                position+=written;
+            }
+        }
+        if(input.error()!=QFileDevice::NoError)return copyFailed();
+        if(runtime.stopped.load()){output.cancelWriting();return canceled();}
+        if(!output.commit())return copyFailed();
+        result.published=true;
+    }
+    result.ok=true;
+    result.canceled=runtime.stopped.load(); // Stop later actions without relabeling an already-published file as rolled back.
+    if(result.canceled)result.error=QStringLiteral("外部动作已取消；进程已结束，已提交的更改不会撤回。");
+    return result;
 }
 
 bool RegistryOptimizationPage::executeAction(
     const QJsonObject& actionObject,
     ks::ui::FieldDocument* detailLinesOut,
-    bool* restartExplorerOut)
+    bool* restartExplorerOut, const RegistryValueState* original)
 {
     if (restartExplorerOut != nullptr) *restartExplorerOut = false;
     const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
         jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
-    const QString summaryText = jsonString(actionObject, QStringLiteral("summary"),
-        QString::fromUtf8(QJsonDocument(actionObject).toJson(QJsonDocument::Compact)));
     QString errorText;
     bool ok = false;
 
     if (familyText.compare(QStringLiteral("RegWrite"), Qt::CaseInsensitive) == 0 ||
         familyText.compare(QStringLiteral("RegExist"), Qt::CaseInsensitive) == 0)
     {
-        ok = executeRegistryWriteAction(actionObject, &errorText);
+        ok = executeRegistryWriteAction(actionObject, &errorText, original);
     }
     else if (familyText.compare(QStringLiteral("RegDelete"), Qt::CaseInsensitive) == 0 ||
         familyText.compare(QStringLiteral("RegDetete"), Qt::CaseInsensitive) == 0)
@@ -2124,6 +2292,14 @@ bool RegistryOptimizationPage::executeAction(
         ok = false;
     }
 
+    return describeActionResult(actionObject, ok, errorText, detailLinesOut, restartExplorerOut);
+}
+
+bool RegistryOptimizationPage::describeActionResult(const QJsonObject& actionObject, const bool ok, const QString& errorText,
+    ks::ui::FieldDocument* detailLinesOut, bool* restartExplorerOut)
+{
+    const QString summaryText = jsonString(actionObject, QStringLiteral("summary"),
+        QString::fromUtf8(QJsonDocument(actionObject).toJson(QJsonDocument::Compact)));
     const QString restartText = jsonString(actionObject, QStringLiteral("activate_restart"));
     if (restartExplorerOut != nullptr && restartText.contains(QStringLiteral("Explorer"), Qt::CaseInsensitive))
     {
@@ -2143,7 +2319,7 @@ bool RegistryOptimizationPage::executeAction(
     return ok;
 }
 
-bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut)
+bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut, const RegistryValueState* capturedOriginal)
 {
     if (errorTextOut != nullptr) errorTextOut->clear();
     const QString keyPath = jsonString(actionObject, QStringLiteral("Key"));
@@ -2154,8 +2330,9 @@ bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& act
     const REGSAM viewFlags = actionRegistryViewFlags(actionObject);
     const RegistryAccessContext context{viewFlags == KEY_WOW64_32KEY ? 32 : 0, false}; // 固定配置来源。
     RegistryValueState original; // 模态/运算前的完整原始值，用于提交前冲突检查。
-    if (!RegistryWorkbenchAccess::read(keyPath, valueName, context, &original, errorTextOut)
-        || !original.complete) return false;
+    if (capturedOriginal) original = *capturedOriginal;
+    else if (!RegistryWorkbenchAccess::read(keyPath, valueName, context, &original, errorTextOut)) return false;
+    if (!original.complete) return false;
 
     if (keyPath.isEmpty())
     {
@@ -2168,21 +2345,6 @@ bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& act
     {
         if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("不支持注册表类型：%1").arg(typeText);
         return false;
-    }
-
-    if (dataText == QStringLiteral("?ColorDialog()"))
-    {
-        const QColor color = QColorDialog::getColor(Qt::white, this, QStringLiteral("选择注册表颜色值"));
-        if (!color.isValid())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("用户取消颜色选择。");
-            return false;
-        }
-        const quint32 colorValue = 0xFF000000U |
-            (static_cast<quint32>(color.blue()) << 16) |
-            (static_cast<quint32>(color.green()) << 8) |
-            static_cast<quint32>(color.red());
-        dataText = QStringLiteral("%1").arg(colorValue, 8, 16, QLatin1Char('0')).toUpper();
     }
 
     QByteArray newData;
@@ -2346,7 +2508,7 @@ bool RegistryOptimizationPage::executeExplorerNotifyAction(const QJsonObject& ac
 
     // AssocChanged / Custom 的正常路径已由 continueStateApply 改走后台线程；
     // 这里只保留同步兜底（不重复初始化 COM，UI 线程套间由 Qt 负责）。
-    const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(actionObject, false);
+    const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(actionObject, true);
     if (!outcome.succeeded && errorTextOut != nullptr)
     {
         *errorTextOut = outcome.errorTextValue;

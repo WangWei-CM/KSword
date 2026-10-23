@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QLineEdit>
 #include <QLabel>
+#include <QPushButton>
 #include <QToolButton>
 #include <QPointer>
 #include <QTimer>
@@ -50,27 +51,40 @@ namespace ks::ui
             {
                 button->setProperty("ksword_toolbar_control", true);
             }
-            // 后续页面主题刷新可能替换局部 QSS；补回已登记几何且禁止重复追加。
-            if (!button->styleSheet().contains(geometryRule))
-            {
-                button->setStyleSheet(button->styleSheet() + geometryRule);
-            }
             button->setIconSize(QSize(16, 16));
             const auto* toolButton = qobject_cast<QToolButton*>(button);
             // 翻译绑定前的文字按钮也可能暂时没有文字，不能因此把它锁成一个图标方块。
             const bool explicitIconTool = toolButton && toolButton->toolButtonStyle() == Qt::ToolButtonIconOnly;
             const bool fixedIconAction = button->text().isEmpty()
                 && button->minimumWidth() == button->maximumWidth() && button->maximumWidth() <= 40;
-            if (!button->icon().isNull() && (explicitIconTool || fixedIconAction))
+            const bool iconOnlyAction = !button->icon().isNull() && (explicitIconTool || fixedIconAction);
+            if (iconOnlyAction)
             {
                 button->setFixedWidth(controlHeight);
                 // 图标按钮保持方形，不能被文字按钮的横向留白压缩可见图标。
                 button->setProperty("ksword_toolbar_icon_only", true);
+            }
+            // 几何QSS只匹配这两类按钮。给复选框/单选框追加无效规则会与
+            // 它们的独立主题绑定互相覆盖，并经StyleChange/PaletteChange循环排队。
+            if (!toolButton && !qobject_cast<QPushButton*>(button)) return;
+            // 保留当前业务/主题配色，按原顺序一次补齐最终几何，避免首次图标按钮两次 polish。
+            const QString currentStyle = button->styleSheet();
+            QString finalStyle = currentStyle;
+            if (!finalStyle.contains(geometryRule))
+            {
+                finalStyle += geometryRule;
+            }
+            if (iconOnlyAction)
+            {
                 const QString iconRule = ToolbarIconGeometryStyle();
-                if (!button->styleSheet().endsWith(iconRule))
+                if (!finalStyle.endsWith(iconRule))
                 {
-                    button->setStyleSheet(button->styleSheet() + iconRule);
+                    finalStyle += iconRule;
                 }
+            }
+            if (finalStyle != currentStyle)
+            {
+                button->setStyleSheet(finalStyle);
             }
         }
     }

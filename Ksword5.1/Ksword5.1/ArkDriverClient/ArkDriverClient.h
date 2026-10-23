@@ -465,7 +465,8 @@ namespace ksword::ark
         KernelTimerDpcEnumResult enumerateKernelTimerDpc(
             unsigned long maxEntries = KSWORD_ARK_TIMER_DPC_DEFAULT_MAX_ENTRIES,
             unsigned long maxEntriesPerBucket = KSWORD_ARK_TIMER_DPC_DEFAULT_BUCKET_BUDGET) const;
-        DriverObjectQueryResult queryDriverObject(const std::wstring& driverName, unsigned long flags = KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxDevices = KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT, unsigned long maxAttachedDevices = KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT) const;
+        DriverObjectModuleSnapshot captureDriverObjectModules() const;
+        DriverObjectQueryResult queryDriverObject(const std::wstring& driverName, unsigned long flags = KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxDevices = KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT, unsigned long maxAttachedDevices = KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT, const DriverObjectModuleSnapshot* modules = nullptr) const;
         // controlIoTimer：R0 按名称重新引用 DriverObject，用带引用设备快照
         // 核对 DriverObject/DeviceObject/PIO_TIMER 三重身份后，调用公开 IoStartTimer/IoStopTimer。
         IoTimerControlResult controlIoTimer(

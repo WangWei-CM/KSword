@@ -8,6 +8,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 
 #include <QAbstractItemView>
 #include <QByteArray>
@@ -21,8 +23,10 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QTimer>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -40,6 +44,41 @@
 #include <PowrProf.h>
 
 #pragma comment(lib, "PowrProf.lib")
+
+struct HardwarePowerSchemeSnapshot
+{
+    struct Scheme { QString name; QByteArray guid; bool active = false; };
+    std::vector<Scheme> schemes;
+    QByteArray activeGuid;
+    DWORD enumerationError = ERROR_SUCCESS;
+    ULONG enumerationErrorIndex = 0;
+};
+
+struct HardwarePowerTransactionRequest
+{
+    enum class Kind { Scheme, Cpu, Restore };
+    Kind kind = Kind::Cpu;
+    QByteArray schemeGuid;
+    bool hasRestoreCpu = false;
+    KSWORD_ARK_CPU_POWER_RESPONSE restoreCpu{};
+    KSWORD_ARK_CPU_POWER_CONTROL_REQUEST cpu{};
+};
+
+struct HardwarePowerTransactionResult
+{
+    HardwarePowerTransactionRequest::Kind kind = HardwarePowerTransactionRequest::Kind::Cpu;
+    bool invalidGuid = false;
+    DWORD schemeError = ERROR_SUCCESS;
+    bool schemeApplied = false;
+    bool schemesRead = false;
+    HardwarePowerSchemeSnapshot schemes;
+    bool cpuRead = false;
+    ksword::ark::CpuPowerResult cpu;
+    bool controlAttempted = false;
+    unsigned long preflightFailure = KSWORD_ARK_CPU_POWER_FAILURE_NONE;
+    KSWORD_ARK_CPU_POWER_CONTROL_REQUEST request{};
+    ksword::ark::CpuPowerResult control;
+};
 
 namespace
 {
@@ -243,7 +282,7 @@ namespace
     }
 
     // validateCpuPowerRequestForUi：在弹出确认框前阻止必然被 R0 拒绝的关系错误。
-    QString validateCpuPowerRequestForUi(
+    unsigned long cpuPowerRequestFailureReason(
         const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request,
         const KSWORD_ARK_CPU_POWER_RESPONSE& snapshot)
     {
@@ -257,10 +296,7 @@ namespace
                 request.pl2Milliwatts >
                     KSWORD_ARK_CPU_POWER_ABSOLUTE_MAX_MILLIWATTS)
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_POWER_ABSOLUTE_RANGE,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_POWER_ABSOLUTE_RANGE;
             }
             if (snapshot.packageMaximumPowerMilliwatts != 0UL &&
                 (request.pl1Milliwatts >
@@ -268,10 +304,7 @@ namespace
                  request.pl2Milliwatts >
                     snapshot.packageMaximumPowerMilliwatts))
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_POWER_PLATFORM_MAXIMUM,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_POWER_PLATFORM_MAXIMUM;
             }
             if (snapshot.packageMinimumPowerMilliwatts != 0UL &&
                 (request.pl1Milliwatts <
@@ -279,10 +312,7 @@ namespace
                  request.pl2Milliwatts <
                     snapshot.packageMinimumPowerMilliwatts))
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_POWER_PLATFORM_MINIMUM,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_POWER_PLATFORM_MINIMUM;
             }
         }
 
@@ -291,10 +321,7 @@ namespace
             if (request.hwpMinimumPerformance >
                 request.hwpMaximumPerformance)
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_HWP_ORDER,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_HWP_ORDER;
             }
             if (request.hwpDesiredPerformance != 0UL &&
                 (request.hwpDesiredPerformance <
@@ -302,10 +329,7 @@ namespace
                  request.hwpDesiredPerformance >
                     request.hwpMaximumPerformance))
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_HWP_DESIRED_RANGE,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_HWP_DESIRED_RANGE;
             }
             if ((snapshot.hwpLowestPerformance != 0UL &&
                     request.hwpMinimumPerformance <
@@ -316,13 +340,19 @@ namespace
                      request.hwpDesiredPerformance >
                         snapshot.hwpHighestPerformance)))
             {
-                return cpuPowerFailureReasonText(
-                    KSWORD_ARK_CPU_POWER_FAILURE_HWP_PLATFORM_RANGE,
-                    request,
-                    snapshot);
+                return KSWORD_ARK_CPU_POWER_FAILURE_HWP_PLATFORM_RANGE;
             }
         }
-        return QString();
+        return KSWORD_ARK_CPU_POWER_FAILURE_NONE;
+    }
+
+    QString validateCpuPowerRequestForUi(
+        const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request,
+        const KSWORD_ARK_CPU_POWER_RESPONSE& snapshot)
+    {
+        const unsigned long reason = cpuPowerRequestFailureReason(request, snapshot);
+        return reason == KSWORD_ARK_CPU_POWER_FAILURE_NONE ? QString()
+            : cpuPowerFailureReasonText(reason, request, snapshot);
     }
 }
 
@@ -331,6 +361,13 @@ HardwarePowerPage::HardwarePowerPage(QWidget* parent)
 {
     initializeUi();
     initializeConnections();
+    m_queryOperation = new ks::ui::AsyncOperation(this);
+    m_queryOperation->setStateChangedCallback([this]() { updateControlAvailability(); });
+}
+
+HardwarePowerPage::~HardwarePowerPage()
+{
+    m_queryOperation->close();
 }
 
 void HardwarePowerPage::showEvent(QShowEvent* event)
@@ -678,266 +715,416 @@ void HardwarePowerPage::initializeConnections()
     });
 }
 
+namespace { HardwarePowerSchemeSnapshot collectPowerSchemeSnapshot(const ks::ui::AsyncOperationToken* token); }
+
 void HardwarePowerPage::refreshAll()
 {
-    setStatus(powerText(
-        QStringLiteral("hardware.power.status.refreshing"),
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
+    struct Result { HardwarePowerSchemeSnapshot schemes; ksword::ark::CpuPowerResult cpu; };
+    m_queryPending = true;
+    setStatus(powerText(QStringLiteral("hardware.power.status.refreshing"),
         QStringLiteral("状态：正在刷新 Windows 电源方案与 R0 CPU 电源快照...")));
-    refreshPowerSchemes();
-    refreshCpuPower();
+    const auto consume = [this](const Result& result) {
+        m_queryPending = false;
+        applyPowerSchemesSnapshot(result.schemes);
+        applySnapshotToUi(result.cpu);
+    };
+    m_queryOperation->submit<int, Result>(0, [](int, const ks::ui::AsyncOperationToken& token) {
+        Result result;
+        result.schemes = collectPowerSchemeSnapshot(&token);
+        if (!token.isCanceled())
+        {
+            const ksword::ark::DriverClient client;
+            result.cpu = client.queryCpuPowerState();
+        }
+        return result;
+    }, [this, consume](const Result& result, std::uint64_t ticket) {
+        const QPointer<HardwarePowerPage> guard(this);
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("hardware-power-query"),
+            {m_snapshotTable}, [guard, result, consume, ticket]() {
+                if (guard == nullptr || !guard->m_queryOperation->isCurrent(ticket)) return;
+                consume(result);
+                guard->m_queryOperation->completeDeferred(ticket);
+            })) return false;
+        consume(result);
+        return true;
+    }, [this](std::exception_ptr failure) {
+        m_queryPending = false;
+        ksword::ark::CpuPowerResult result;
+        try { if (failure) std::rethrow_exception(failure); }
+        catch (const std::exception& error) { result.io.message = error.what(); }
+        catch (...) {}
+        applySnapshotToUi(result);
+    });
 }
 
-void HardwarePowerPage::refreshPowerSchemes()
+namespace
 {
-    if (m_powerSchemeCombo == nullptr)
+    HardwarePowerSchemeSnapshot collectPowerSchemeSnapshot(const ks::ui::AsyncOperationToken* token)
     {
-        return;
+        HardwarePowerSchemeSnapshot result;
+        GUID* activeGuid = nullptr;
+        const DWORD activeError = ::PowerGetActiveScheme(nullptr, &activeGuid);
+
+
+        for (ULONG schemeIndex = 0UL;; ++schemeIndex)
+        {
+            if (token != nullptr && token->isCanceled()) break;
+            GUID schemeGuid{};
+            DWORD guidBytesCount = sizeof(schemeGuid);
+            const DWORD enumerateError = ::PowerEnumerate(
+                nullptr,
+                nullptr,
+                nullptr,
+                ACCESS_SCHEME,
+                schemeIndex,
+                reinterpret_cast<UCHAR*>(&schemeGuid),
+                &guidBytesCount);
+            if (enumerateError == ERROR_NO_MORE_ITEMS)
+            {
+                break;
+            }
+            if (enumerateError != ERROR_SUCCESS || guidBytesCount != sizeof(schemeGuid))
+            {
+                result.enumerationError = enumerateError != ERROR_SUCCESS ? enumerateError : ERROR_INVALID_DATA;
+                result.enumerationErrorIndex = schemeIndex;
+                break;
+            }
+
+            result.schemes.push_back({ powerSchemeFriendlyName(schemeGuid), guidBytes(schemeGuid),
+                activeError == ERROR_SUCCESS && activeGuid != nullptr && ::IsEqualGUID(*activeGuid, schemeGuid) });
+        }
+        if (activeError == ERROR_SUCCESS && activeGuid != nullptr) result.activeGuid = guidBytes(*activeGuid);
+        if (activeGuid != nullptr) ::LocalFree(activeGuid);
+        return result;
+    }
+}
+
+
+namespace
+{
+    unsigned long restorableCpuApplyFlags(
+        bool hasSnapshot, const KSWORD_ARK_CPU_POWER_RESPONSE& snapshot,
+        bool hasRestoreSnapshot, const KSWORD_ARK_CPU_POWER_RESPONSE& restoreSnapshot)
+{
+    if (!hasSnapshot || !hasRestoreSnapshot ||
+        snapshot.vendor != KSWORD_ARK_CPU_POWER_VENDOR_INTEL ||
+        restoreSnapshot.vendor != KSWORD_ARK_CPU_POWER_VENDOR_INTEL)
+    {
+        return 0UL;
     }
 
+    unsigned long applyFlags = 0UL;
+    if ((snapshot.capabilityFlags &
+            KSWORD_ARK_CPU_POWER_CAP_PACKAGE_POWER_PROGRAMMABLE) != 0ULL &&
+        (snapshot.responseFlags &
+            KSWORD_ARK_CPU_POWER_RESPONSE_FLAG_POWER_LIMIT_LOCKED) == 0UL &&
+        (snapshot.fieldFlags &
+            (KSWORD_ARK_CPU_POWER_FIELD_RAPL_UNIT |
+             KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT)) ==
+            (KSWORD_ARK_CPU_POWER_FIELD_RAPL_UNIT |
+             KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT) &&
+        (restoreSnapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT) != 0UL)
+    {
+        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_POWER_LIMITS;
+    }
+    if ((snapshot.capabilityFlags &
+            KSWORD_ARK_CPU_POWER_CAP_TURBO_CONTROL) != 0ULL &&
+        (snapshot.fieldFlags & KSWORD_ARK_CPU_POWER_FIELD_MISC_ENABLE) != 0UL &&
+        (restoreSnapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_MISC_ENABLE) != 0UL)
+    {
+        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_TURBO;
+    }
+    if ((snapshot.capabilityFlags &
+            KSWORD_ARK_CPU_POWER_CAP_HWP_ENABLED) != 0ULL &&
+        (snapshot.fieldFlags &
+            (KSWORD_ARK_CPU_POWER_FIELD_HWP_CAPABILITIES |
+             KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST)) ==
+            (KSWORD_ARK_CPU_POWER_FIELD_HWP_CAPABILITIES |
+             KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST) &&
+        (restoreSnapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST) != 0UL)
+    {
+        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_HWP;
+    }
+    if ((snapshot.capabilityFlags &
+            KSWORD_ARK_CPU_POWER_CAP_TURBO_RATIO_PROGRAMMABLE) != 0ULL &&
+        (snapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_TURBO_RATIO_LIMIT) != 0UL &&
+        (restoreSnapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_TURBO_RATIO_LIMIT) != 0UL)
+    {
+        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_TURBO_RATIO;
+    }
+    if ((snapshot.capabilityFlags &
+            KSWORD_ARK_CPU_POWER_CAP_PERF_CONTROL_PROGRAMMABLE) != 0ULL &&
+        (snapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_PERF_CONTROL) != 0UL &&
+        (restoreSnapshot.fieldFlags &
+            KSWORD_ARK_CPU_POWER_FIELD_PERF_CONTROL) != 0UL &&
+        restoreSnapshot.requestedMultiplier > 0UL &&
+        restoreSnapshot.requestedMultiplier <= 0xFFUL)
+    {
+        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_PERF_CONTROL;
+    }
+    return applyFlags;
+}
+
+    KSWORD_ARK_CPU_POWER_CONTROL_REQUEST buildRestoreControlRequest(
+        const unsigned long applyFlags, const KSWORD_ARK_CPU_POWER_RESPONSE& snapshot,
+        const KSWORD_ARK_CPU_POWER_RESPONSE& restoreSnapshot)
+{
+    KSWORD_ARK_CPU_POWER_CONTROL_REQUEST request{};
+    request.size = sizeof(request);
+    request.version = KSWORD_ARK_CPU_POWER_PROTOCOL_VERSION;
+    request.applyFlags = applyFlags;
+    request.requestFlags = KSWORD_ARK_CPU_POWER_REQUEST_FLAG_UI_CONFIRMED |
+        KSWORD_ARK_CPU_POWER_REQUEST_FLAG_REQUIRE_CURRENT;
+    if ((applyFlags & KSWORD_ARK_CPU_POWER_APPLY_TURBO_RATIO) != 0UL)
+    {
+        request.requestFlags |=
+            KSWORD_ARK_CPU_POWER_REQUEST_FLAG_TURBO_RATIO_ARRAY;
+    }
+
+    request.pl1Milliwatts = restoreSnapshot.pl1Milliwatts;
+    request.pl2Milliwatts = restoreSnapshot.pl2Milliwatts;
+    request.pl1Enabled = restoreSnapshot.pl1Enabled;
+    request.pl1ClampEnabled = restoreSnapshot.pl1ClampEnabled;
+    request.pl2Enabled = restoreSnapshot.pl2Enabled;
+    request.pl2ClampEnabled = restoreSnapshot.pl2ClampEnabled;
+    request.turboEnabled = restoreSnapshot.turboEnabled;
+    request.hwpMinimumPerformance =
+        restoreSnapshot.hwpMinimumPerformance;
+    request.hwpMaximumPerformance =
+        restoreSnapshot.hwpMaximumPerformance;
+    request.hwpDesiredPerformance =
+        restoreSnapshot.hwpDesiredPerformance;
+    request.hwpEnergyPerformancePreference =
+        (snapshot.capabilityFlags & KSWORD_ARK_CPU_POWER_CAP_HWP_EPP) != 0ULL
+        ? restoreSnapshot.hwpEnergyPerformancePreference
+        : snapshot.hwpEnergyPerformancePreference;
+    request.requestedMultiplier = restoreSnapshot.requestedMultiplier;
+    for (unsigned long ratioIndex = 0UL;
+        ratioIndex < KSWORD_ARK_CPU_POWER_TURBO_RATIO_COUNT;
+        ++ratioIndex)
+    {
+        request.turboRatios[ratioIndex] =
+            restoreSnapshot.turboRatios[ratioIndex];
+        if (request.turboRatio == 0UL && request.turboRatios[ratioIndex] != 0UL)
+        {
+            request.turboRatio = request.turboRatios[ratioIndex];
+        }
+    }
+
+    request.expectedPackagePowerLimit = snapshot.msrPackagePowerLimit;
+    request.expectedMiscEnable = snapshot.msrMiscEnable;
+    request.expectedHwpRequest = snapshot.msrHwpRequest;
+    request.expectedTurboRatioLimit = snapshot.msrTurboRatioLimit;
+    request.expectedPerfControl = snapshot.msrPerfControl;
+    return request;
+}
+
+    bool validCpuPowerSnapshot(const ksword::ark::CpuPowerResult& result)
+    {
+        return !result.unsupported && result.io.ok &&
+            result.io.bytesReturned >= sizeof(KSWORD_ARK_CPU_POWER_RESPONSE) &&
+            result.response.size >= sizeof(KSWORD_ARK_CPU_POWER_RESPONSE) &&
+            result.response.version == KSWORD_ARK_CPU_POWER_PROTOCOL_VERSION;
+    }
+
+    HardwarePowerTransactionResult runPowerTransaction(const HardwarePowerTransactionRequest& request)
+    {
+        HardwarePowerTransactionResult result;
+        result.kind = request.kind;
+        if (request.kind != HardwarePowerTransactionRequest::Kind::Cpu && !request.schemeGuid.isEmpty())
+        {
+            GUID scheme{};
+            if (!guidFromBytes(request.schemeGuid, &scheme))
+            {
+                result.invalidGuid = true;
+                return result;
+            }
+            result.schemeError = ::PowerSetActiveScheme(nullptr, &scheme);
+            if (result.schemeError != ERROR_SUCCESS) return result;
+            result.schemeApplied = true;
+            result.schemes = collectPowerSchemeSnapshot(nullptr);
+            result.schemesRead = true;
+        }
+        if (request.kind == HardwarePowerTransactionRequest::Kind::Scheme) return result;
+
+        const ksword::ark::DriverClient client;
+        result.request = request.cpu;
+        if (request.kind == HardwarePowerTransactionRequest::Kind::Restore)
+        {
+            if (!request.hasRestoreCpu) return result;
+            // Windows may have changed the CPU request. Use this fresh raw value
+            // for REQUIRE_CURRENT while preserving the first restore target.
+            result.cpu = client.queryCpuPowerState();
+            result.cpuRead = true;
+            const unsigned long flags = restorableCpuApplyFlags(
+                validCpuPowerSnapshot(result.cpu), result.cpu.response, true, request.restoreCpu);
+            if (flags == 0UL) return result;
+            result.request = buildRestoreControlRequest(flags, result.cpu.response, request.restoreCpu);
+            result.preflightFailure = cpuPowerRequestFailureReason(result.request, result.cpu.response);
+            if (result.preflightFailure != KSWORD_ARK_CPU_POWER_FAILURE_NONE) return result;
+        }
+        result.control = client.controlCpuPower(result.request);
+        result.controlAttempted = true;
+        result.cpu = client.queryCpuPowerState();
+        result.cpuRead = true;
+        return result;
+    }
+}
+
+
+
+void HardwarePowerPage::applyPowerSchemesSnapshot(const HardwarePowerSchemeSnapshot& snapshot)
+{
+    if (m_powerSchemeCombo == nullptr) return;
+    m_powerSchemeEnumerationError = snapshot.enumerationError == ERROR_SUCCESS ? QString()
+        : powerText(QStringLiteral("hardware.power.error.scheme_enumerate"),
+            QStringLiteral("Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。"))
+            .arg(snapshot.enumerationErrorIndex).arg(snapshot.enumerationError);
     m_powerSchemeCombo->clear();
-    GUID* activeGuid = nullptr;
-    const DWORD activeError = ::PowerGetActiveScheme(nullptr, &activeGuid);
     int activeIndex = -1;
-
-    for (ULONG schemeIndex = 0UL;; ++schemeIndex)
+    for (const auto& scheme : snapshot.schemes)
     {
-        GUID schemeGuid{};
-        DWORD guidBytesCount = sizeof(schemeGuid);
-        const DWORD enumerateError = ::PowerEnumerate(
-            nullptr,
-            nullptr,
-            nullptr,
-            ACCESS_SCHEME,
-            schemeIndex,
-            reinterpret_cast<UCHAR*>(&schemeGuid),
-            &guidBytesCount);
-        if (enumerateError == ERROR_NO_MORE_ITEMS)
-        {
-            break;
-        }
-        if (enumerateError != ERROR_SUCCESS || guidBytesCount != sizeof(schemeGuid))
-        {
-            continue;
-        }
-
-        QString friendlyName = powerSchemeFriendlyName(schemeGuid);
-        if (friendlyName.isEmpty())
-        {
-            friendlyName = powerText(
-                QStringLiteral("hardware.power.scheme.unnamed"),
-                QStringLiteral("未命名电源方案"));
-        }
-        const bool isActive = activeError == ERROR_SUCCESS &&
-            activeGuid != nullptr && ::IsEqualGUID(*activeGuid, schemeGuid);
-        if (isActive)
-        {
-            friendlyName += powerText(
-                QStringLiteral("hardware.power.scheme.active_suffix"),
-                QStringLiteral("（当前）"));
-        }
-        const int comboIndex = m_powerSchemeCombo->count();
-        m_powerSchemeCombo->addItem(friendlyName, guidBytes(schemeGuid));
-        if (isActive)
-        {
-            activeIndex = comboIndex;
-        }
+        QString name = scheme.name;
+        if (name.isEmpty()) name = powerText(QStringLiteral("hardware.power.scheme.unnamed"),
+            QStringLiteral("未命名电源方案"));
+        if (scheme.active) name += powerText(QStringLiteral("hardware.power.scheme.active_suffix"),
+            QStringLiteral("（当前）"));
+        m_powerSchemeCombo->addItem(name, scheme.guid);
+        if (scheme.active) activeIndex = m_powerSchemeCombo->count()-1;
     }
-
-    // 首次成功读取的活动方案作为本页面生命周期内的一键还原目标，后续刷新不覆盖。
-    if (activeError == ERROR_SUCCESS && activeGuid != nullptr &&
-        m_restorePowerSchemeGuid.isEmpty())
-    {
-        m_restorePowerSchemeGuid = guidBytes(*activeGuid);
-    }
-    if (activeGuid != nullptr)
-    {
-        ::LocalFree(activeGuid);
-    }
-    if (activeIndex >= 0)
-    {
-        m_powerSchemeCombo->setCurrentIndex(activeIndex);
-    }
-    const bool hasSchemes = m_powerSchemeCombo->count() > 0;
-    m_powerSchemeCombo->setEnabled(hasSchemes);
-    m_applyPowerSchemeButton->setEnabled(hasSchemes);
+    if (m_restorePowerSchemeGuid.isEmpty() && !snapshot.activeGuid.isEmpty())
+        m_restorePowerSchemeGuid = snapshot.activeGuid;
+    if (activeIndex >= 0) m_powerSchemeCombo->setCurrentIndex(activeIndex);
     updateControlAvailability();
+    setStatus(m_statusText, m_statusIsError);
 }
 
 void HardwarePowerPage::applySelectedPowerScheme()
 {
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
     if (m_powerSchemeCombo == nullptr || m_powerSchemeCombo->currentIndex() < 0)
     {
-        QMessageBox::critical(
-            this,
+        QMessageBox::critical(this,
             powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败")),
             powerText(QStringLiteral("hardware.power.error.no_scheme"), QStringLiteral("没有可应用的 Windows 电源方案。")));
         return;
     }
-
-    GUID schemeGuid{};
-    if (!guidFromBytes(
-            m_powerSchemeCombo->currentData().toByteArray(),
-            &schemeGuid))
+    HardwarePowerTransactionRequest request;
+    request.kind = HardwarePowerTransactionRequest::Kind::Scheme;
+    request.schemeGuid = m_powerSchemeCombo->currentData().toByteArray();
+    GUID scheme{};
+    if (!guidFromBytes(request.schemeGuid, &scheme))
     {
-        QMessageBox::critical(
-            this,
+        QMessageBox::critical(this,
             powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败")),
             powerText(QStringLiteral("hardware.power.error.scheme_data"), QStringLiteral("所选电源方案 GUID 数据无效。")));
         return;
     }
-
-    const DWORD error = ::PowerSetActiveScheme(nullptr, &schemeGuid);
-    if (error != ERROR_SUCCESS)
-    {
-        const QString message = powerText(
-            QStringLiteral("hardware.power.error.scheme_apply"),
-            QStringLiteral("应用 Windows 电源方案失败，Win32=%1。"))
-            .arg(error);
-        setStatus(message, true);
-        QMessageBox::critical(
-            this,
-            powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败")),
-            message);
-        return;
-    }
-
-    setStatus(powerText(
-        QStringLiteral("hardware.power.status.scheme_applied"),
-        QStringLiteral("状态：Windows 电源方案已应用。")));
-    refreshPowerSchemes();
+    submitPowerTransaction(request);
 }
 
 void HardwarePowerPage::restoreInitialState()
 {
-    const QString errorTitle = powerText(
-        QStringLiteral("hardware.power.error.title"),
-        QStringLiteral("电源调节失败"));
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
     if (m_restorePowerSchemeGuid.isEmpty() && !m_hasRestoreCpuSnapshot)
     {
-        QMessageBox::critical(
-            this,
-            errorTitle,
-            powerText(
-                QStringLiteral("hardware.power.error.no_restore"),
+        QMessageBox::critical(this,
+            powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败")),
+            powerText(QStringLiteral("hardware.power.error.no_restore"),
                 QStringLiteral("尚未捕获可还原的首次状态，请先刷新。")));
         return;
     }
-
-    // 在确认前先刷新当前 CPU 状态，避免以失效能力判断是否需要风险确认。
-    if (m_hasRestoreCpuSnapshot)
+    m_restorePreparing = true;
+    if (!m_hasRestoreCpuSnapshot)
     {
-        refreshCpuPower();
-    }
-
-    const unsigned long initialCpuApplyFlags = restorableCpuApplyFlags();
-    if (initialCpuApplyFlags != 0UL)
-    {
-        const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST initialRequest =
-            buildRestoreControlRequest(initialCpuApplyFlags);
-        const QString validationError =
-            validateCpuPowerRequestForUi(initialRequest, m_snapshot);
-        if (!validationError.isEmpty())
-        {
-            setStatus(validationError, true);
-            QMessageBox::critical(this, errorTitle, validationError);
-            return;
-        }
-    }
-
-    if (QMessageBox::warning(
-            this,
-            powerText(
-                QStringLiteral("hardware.power.confirm.restore_title"),
-                QStringLiteral("确认一键还原")),
-            powerText(
-                QStringLiteral("hardware.power.confirm.restore"),
-                QStringLiteral("即将恢复本页首次有效刷新时捕获的 Windows 电源方案，以及当前仍可写的 PL1/PL2、Turbo、HWP、Turbo Ratio 和请求倍频。固件或 Windows 仍可能再次重写这些值。是否继续？")),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No) != QMessageBox::Yes)
-    {
+        confirmRestoreInitialState();
         return;
     }
-
-    bool restoredPowerScheme = false;
-    if (!m_restorePowerSchemeGuid.isEmpty())
+    // Refresh capabilities before confirming, without admitting another action.
+    m_queryPending = true;
+    setStatus(powerText(QStringLiteral("hardware.power.status.refreshing"),
+        QStringLiteral("状态：正在刷新 Windows 电源方案与 R0 CPU 电源快照...")));
+    const auto consume = [this](const ksword::ark::CpuPowerResult& result) {
+        m_queryPending = false;
+        applySnapshotToUi(result);
+        QTimer::singleShot(0, this, [this]() { confirmRestoreInitialState(); });
+    };
+    const auto ticket = m_queryOperation->submit<int, ksword::ark::CpuPowerResult>(0,
+        [](int, const ks::ui::AsyncOperationToken&) {
+            return ksword::ark::DriverClient().queryCpuPowerState();
+        }, [this, consume](const ksword::ark::CpuPowerResult& result, std::uint64_t ticket) {
+            const QPointer<HardwarePowerPage> guard(this);
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("hardware-power-restore-query"), {m_snapshotTable},
+                [guard, result, consume, ticket]() {
+                    if (guard == nullptr || !guard->m_queryOperation->isCurrent(ticket)) return;
+                    consume(result);
+                    guard->m_queryOperation->completeDeferred(ticket);
+                })) return false;
+            consume(result);
+            return true;
+        }, [this](std::exception_ptr) {
+            m_queryPending = false;
+            m_restorePreparing = false;
+            m_hasSnapshot = false;
+            setStatus(powerText(QStringLiteral("hardware.power.status.query_dropped"),
+                QStringLiteral("状态：电源查询已结束但未收到结果，请刷新。")), true);
+        });
+    if (ticket == 0)
     {
-        GUID schemeGuid{};
-        if (!guidFromBytes(m_restorePowerSchemeGuid, &schemeGuid))
-        {
-            QMessageBox::critical(
-                this,
-                errorTitle,
-                powerText(
-                    QStringLiteral("hardware.power.error.restore_scheme_data"),
-                    QStringLiteral("首次捕获的 Windows 电源方案 GUID 数据无效。")));
-            return;
-        }
-        const DWORD schemeError = ::PowerSetActiveScheme(nullptr, &schemeGuid);
-        if (schemeError != ERROR_SUCCESS)
-        {
-            const QString message = powerText(
-                QStringLiteral("hardware.power.error.restore_scheme_apply"),
-                QStringLiteral("还原首次 Windows 电源方案失败，Win32=%1。"))
-                .arg(schemeError);
-            setStatus(message, true);
-            QMessageBox::critical(this, errorTitle, message);
-            return;
-        }
-        restoredPowerScheme = true;
-        refreshPowerSchemes();
+        m_queryPending = false;
+        m_restorePreparing = false;
+        reportPowerTransactionUnavailable(false);
     }
-
-    bool restoredCpuState = false;
-    if (m_hasRestoreCpuSnapshot)
-    {
-        // Windows 方案可能立即重写 CPU 请求；重新采样后再构造 expected 字段。
-        refreshCpuPower();
-        const unsigned long cpuApplyFlags = restorableCpuApplyFlags();
-        if (cpuApplyFlags != 0UL)
-        {
-            const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST request =
-                buildRestoreControlRequest(cpuApplyFlags);
-            if (!executeControlRequest(request))
-            {
-                return;
-            }
-            restoredCpuState = true;
-        }
-    }
-
-    if (restoredPowerScheme && restoredCpuState)
-    {
-        setStatus(powerText(
-            QStringLiteral("hardware.power.status.restored"),
-            QStringLiteral("状态：已还原首次捕获的 Windows 电源方案和当前可写 CPU 设置。")));
-    }
-    else if (restoredPowerScheme)
-    {
-        setStatus(powerText(
-            QStringLiteral("hardware.power.status.restored_scheme_only"),
-            QStringLiteral("状态：已还原首次捕获的 Windows 电源方案；当前没有可写的 CPU 还原字段。")));
-    }
-    else if (restoredCpuState)
-    {
-        setStatus(powerText(
-            QStringLiteral("hardware.power.status.restored_cpu_only"),
-            QStringLiteral("状态：已还原首次捕获的当前可写 CPU 设置。")));
-    }
-    else
-    {
-        const QString message = powerText(
-            QStringLiteral("hardware.power.error.restore_unavailable"),
-            QStringLiteral("首次状态已捕获，但当前没有可执行的还原目标。"));
-        setStatus(message, true);
-        QMessageBox::critical(this, errorTitle, message);
-    }
+    updateControlAvailability();
 }
 
-void HardwarePowerPage::refreshCpuPower()
+void HardwarePowerPage::confirmRestoreInitialState()
 {
-    const ksword::ark::DriverClient client;
-    applySnapshotToUi(client.queryCpuPowerState());
+    if (!m_restorePreparing || m_queryOperation->isBusy()) return;
+    const unsigned long flags = restorableCpuApplyFlags();
+    const QString validation = flags == 0UL ? QString()
+        : validateCpuPowerRequestForUi(buildRestoreControlRequest(flags), m_snapshot);
+    if (!validation.isEmpty())
+    {
+        m_restorePreparing = false;
+        updateControlAvailability();
+        setStatus(validation, true);
+        QMessageBox::critical(this,
+            powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败")), validation);
+        return;
+    }
+    HardwarePowerTransactionRequest request;
+    request.kind = HardwarePowerTransactionRequest::Kind::Restore;
+    request.schemeGuid = m_restorePowerSchemeGuid;
+    request.hasRestoreCpu = m_hasRestoreCpuSnapshot;
+    request.restoreCpu = m_restoreCpuSnapshot;
+    m_confirming = true;
+    updateControlAvailability();
+    const QPointer<HardwarePowerPage> guard(this);
+    const int answer = QMessageBox::warning(this,
+        powerText(QStringLiteral("hardware.power.confirm.restore_title"), QStringLiteral("确认一键还原")),
+        powerText(QStringLiteral("hardware.power.confirm.restore"),
+            QStringLiteral("即将恢复本页首次有效刷新时捕获的 Windows 电源方案，以及当前仍可写的 PL1/PL2、Turbo、HWP、Turbo Ratio 和请求倍频。固件或 Windows 仍可能再次重写这些值。是否继续？")),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (guard == nullptr) return;
+    m_confirming = false;
+    m_restorePreparing = false;
+    if (answer == QMessageBox::Yes) submitPowerTransaction(request);
+    updateControlAvailability();
 }
+
+
 
 void HardwarePowerPage::applySnapshotToUi(const ksword::ark::CpuPowerResult& result)
 {
@@ -1213,6 +1400,37 @@ void HardwarePowerPage::applySnapshotToUi(const ksword::ark::CpuPowerResult& res
 
 void HardwarePowerPage::updateControlAvailability()
 {
+    const bool operationBusy = m_queryOperation != nullptr && m_queryOperation->isBusy();
+    if (m_transactionPending && !operationBusy)
+    {
+        m_transactionPending = false;
+        reportPowerTransactionUnavailable(true);
+    }
+    if (m_queryPending && !operationBusy)
+    {
+        m_queryPending = false;
+        m_restorePreparing = false;
+        m_hasSnapshot = false;
+        setStatus(powerText(QStringLiteral("hardware.power.status.query_dropped"),
+            QStringLiteral("状态：电源查询已结束但未收到结果，请刷新。")), true);
+    }
+    const bool busy = operationBusy || m_confirming || m_restorePreparing;
+    m_refreshAllButton->setEnabled(!busy);
+    const bool hasSchemes = m_powerSchemeCombo->count() > 0;
+    m_powerSchemeCombo->setEnabled(!busy && hasSchemes);
+    m_applyPowerSchemeButton->setEnabled(!busy && hasSchemes);
+    if (busy)
+    {
+        const QList<QWidget*> controls { m_restoreInitialStateButton, m_pl1Spin, m_pl2Spin,
+            m_pl1EnableCheck, m_pl1ClampCheck, m_pl2EnableCheck, m_pl2ClampCheck,
+            m_applyPowerLimitsButton, m_raisePowerLimitsButton, m_turboEnableCheck, m_applyTurboButton,
+            m_turboRatioSpin, m_applyTurboRatioButton, m_requestedMultiplierSpin,
+            m_applyRequestedMultiplierButton, m_hwpMinimumSpin, m_hwpMaximumSpin,
+            m_hwpDesiredSpin, m_hwpEppSpin, m_applyHwpButton };
+        for (QWidget* control : controls) control->setEnabled(false);
+        return;
+    }
+
     const bool hasIntelSnapshot = m_hasSnapshot &&
         m_snapshot.vendor == KSWORD_ARK_CPU_POWER_VENDOR_INTEL;
     const bool powerLimitLocked = m_hasSnapshot &&
@@ -1293,10 +1511,13 @@ void HardwarePowerPage::setStatus(const QString& text, const bool isError)
     {
         return;
     }
-    m_statusLabel->setText(text);
+    m_statusText = text;
+    m_statusIsError = isError;
+    m_statusLabel->setText(m_powerSchemeEnumerationError.isEmpty()
+        ? text : text + QLatin1Char('\n') + m_powerSchemeEnumerationError);
     m_statusLabel->setStyleSheet(
         QStringLiteral("font-weight:600;color:%1;")
-            .arg(isError
+            .arg(isError || !m_powerSchemeEnumerationError.isEmpty()
                 ? KswordTheme::ErrorHex()
                 : KswordTheme::PrimaryBlueHex));
 }
@@ -1351,145 +1572,22 @@ KSWORD_ARK_CPU_POWER_CONTROL_REQUEST HardwarePowerPage::buildControlRequest(
 
 unsigned long HardwarePowerPage::restorableCpuApplyFlags() const
 {
-    if (!m_hasSnapshot || !m_hasRestoreCpuSnapshot ||
-        m_snapshot.vendor != KSWORD_ARK_CPU_POWER_VENDOR_INTEL ||
-        m_restoreCpuSnapshot.vendor != KSWORD_ARK_CPU_POWER_VENDOR_INTEL)
-    {
-        return 0UL;
-    }
-
-    unsigned long applyFlags = 0UL;
-    if ((m_snapshot.capabilityFlags &
-            KSWORD_ARK_CPU_POWER_CAP_PACKAGE_POWER_PROGRAMMABLE) != 0ULL &&
-        (m_snapshot.responseFlags &
-            KSWORD_ARK_CPU_POWER_RESPONSE_FLAG_POWER_LIMIT_LOCKED) == 0UL &&
-        (m_snapshot.fieldFlags &
-            (KSWORD_ARK_CPU_POWER_FIELD_RAPL_UNIT |
-             KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT)) ==
-            (KSWORD_ARK_CPU_POWER_FIELD_RAPL_UNIT |
-             KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT) &&
-        (m_restoreCpuSnapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_PACKAGE_POWER_LIMIT) != 0UL)
-    {
-        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_POWER_LIMITS;
-    }
-    if ((m_snapshot.capabilityFlags &
-            KSWORD_ARK_CPU_POWER_CAP_TURBO_CONTROL) != 0ULL &&
-        (m_snapshot.fieldFlags & KSWORD_ARK_CPU_POWER_FIELD_MISC_ENABLE) != 0UL &&
-        (m_restoreCpuSnapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_MISC_ENABLE) != 0UL)
-    {
-        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_TURBO;
-    }
-    if ((m_snapshot.capabilityFlags &
-            KSWORD_ARK_CPU_POWER_CAP_HWP_ENABLED) != 0ULL &&
-        (m_snapshot.fieldFlags &
-            (KSWORD_ARK_CPU_POWER_FIELD_HWP_CAPABILITIES |
-             KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST)) ==
-            (KSWORD_ARK_CPU_POWER_FIELD_HWP_CAPABILITIES |
-             KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST) &&
-        (m_restoreCpuSnapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_HWP_REQUEST) != 0UL)
-    {
-        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_HWP;
-    }
-    if ((m_snapshot.capabilityFlags &
-            KSWORD_ARK_CPU_POWER_CAP_TURBO_RATIO_PROGRAMMABLE) != 0ULL &&
-        (m_snapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_TURBO_RATIO_LIMIT) != 0UL &&
-        (m_restoreCpuSnapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_TURBO_RATIO_LIMIT) != 0UL)
-    {
-        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_TURBO_RATIO;
-    }
-    if ((m_snapshot.capabilityFlags &
-            KSWORD_ARK_CPU_POWER_CAP_PERF_CONTROL_PROGRAMMABLE) != 0ULL &&
-        (m_snapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_PERF_CONTROL) != 0UL &&
-        (m_restoreCpuSnapshot.fieldFlags &
-            KSWORD_ARK_CPU_POWER_FIELD_PERF_CONTROL) != 0UL &&
-        m_restoreCpuSnapshot.requestedMultiplier > 0UL &&
-        m_restoreCpuSnapshot.requestedMultiplier <= 0xFFUL)
-    {
-        applyFlags |= KSWORD_ARK_CPU_POWER_APPLY_PERF_CONTROL;
-    }
-    return applyFlags;
+    return ::restorableCpuApplyFlags(m_hasSnapshot, m_snapshot,
+        m_hasRestoreCpuSnapshot, m_restoreCpuSnapshot);
 }
 
 KSWORD_ARK_CPU_POWER_CONTROL_REQUEST HardwarePowerPage::buildRestoreControlRequest(
     const unsigned long applyFlags) const
 {
-    KSWORD_ARK_CPU_POWER_CONTROL_REQUEST request{};
-    request.size = sizeof(request);
-    request.version = KSWORD_ARK_CPU_POWER_PROTOCOL_VERSION;
-    request.applyFlags = applyFlags;
-    request.requestFlags = KSWORD_ARK_CPU_POWER_REQUEST_FLAG_UI_CONFIRMED |
-        KSWORD_ARK_CPU_POWER_REQUEST_FLAG_REQUIRE_CURRENT;
-    if ((applyFlags & KSWORD_ARK_CPU_POWER_APPLY_TURBO_RATIO) != 0UL)
-    {
-        request.requestFlags |=
-            KSWORD_ARK_CPU_POWER_REQUEST_FLAG_TURBO_RATIO_ARRAY;
-    }
-
-    request.pl1Milliwatts = m_restoreCpuSnapshot.pl1Milliwatts;
-    request.pl2Milliwatts = m_restoreCpuSnapshot.pl2Milliwatts;
-    request.pl1Enabled = m_restoreCpuSnapshot.pl1Enabled;
-    request.pl1ClampEnabled = m_restoreCpuSnapshot.pl1ClampEnabled;
-    request.pl2Enabled = m_restoreCpuSnapshot.pl2Enabled;
-    request.pl2ClampEnabled = m_restoreCpuSnapshot.pl2ClampEnabled;
-    request.turboEnabled = m_restoreCpuSnapshot.turboEnabled;
-    request.hwpMinimumPerformance =
-        m_restoreCpuSnapshot.hwpMinimumPerformance;
-    request.hwpMaximumPerformance =
-        m_restoreCpuSnapshot.hwpMaximumPerformance;
-    request.hwpDesiredPerformance =
-        m_restoreCpuSnapshot.hwpDesiredPerformance;
-    request.hwpEnergyPerformancePreference =
-        (m_snapshot.capabilityFlags & KSWORD_ARK_CPU_POWER_CAP_HWP_EPP) != 0ULL
-        ? m_restoreCpuSnapshot.hwpEnergyPerformancePreference
-        : m_snapshot.hwpEnergyPerformancePreference;
-    request.requestedMultiplier = m_restoreCpuSnapshot.requestedMultiplier;
-    for (unsigned long ratioIndex = 0UL;
-        ratioIndex < KSWORD_ARK_CPU_POWER_TURBO_RATIO_COUNT;
-        ++ratioIndex)
-    {
-        request.turboRatios[ratioIndex] =
-            m_restoreCpuSnapshot.turboRatios[ratioIndex];
-        if (request.turboRatio == 0UL && request.turboRatios[ratioIndex] != 0UL)
-        {
-            request.turboRatio = request.turboRatios[ratioIndex];
-        }
-    }
-
-    request.expectedPackagePowerLimit = m_snapshot.msrPackagePowerLimit;
-    request.expectedMiscEnable = m_snapshot.msrMiscEnable;
-    request.expectedHwpRequest = m_snapshot.msrHwpRequest;
-    request.expectedTurboRatioLimit = m_snapshot.msrTurboRatioLimit;
-    request.expectedPerfControl = m_snapshot.msrPerfControl;
-    return request;
+    return ::buildRestoreControlRequest(applyFlags, m_snapshot, m_restoreCpuSnapshot);
 }
 
-bool HardwarePowerPage::executeControlRequest(
-    const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request)
+bool HardwarePowerPage::presentControlResult(
+    const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request,
+    const ksword::ark::CpuPowerResult& result)
 {
-    const QString errorTitle = powerText(
-        QStringLiteral("hardware.power.error.title"),
+    const QString errorTitle = powerText(QStringLiteral("hardware.power.error.title"),
         QStringLiteral("电源调节失败"));
-    const QString validationError =
-        validateCpuPowerRequestForUi(request, m_snapshot);
-    if (!validationError.isEmpty())
-    {
-        setStatus(validationError, true);
-        QMessageBox::critical(this, errorTitle, validationError);
-        return false;
-    }
-
-    setStatus(powerText(
-        QStringLiteral("hardware.power.status.applying"),
-        QStringLiteral("状态：正在通过 KswordARK 应用并回读校验 CPU 电源设置...")));
-    const ksword::ark::DriverClient client;
-    const ksword::ark::CpuPowerResult result =
-        client.controlCpuPower(request);
     const bool responseValid =
         result.io.bytesReturned >= sizeof(KSWORD_ARK_CPU_POWER_RESPONSE) &&
         result.response.size >= sizeof(KSWORD_ARK_CPU_POWER_RESPONSE) &&
@@ -1529,12 +1627,9 @@ bool HardwarePowerPage::executeControlRequest(
             .arg(detail);
         setStatus(message, true);
         QMessageBox::critical(this, errorTitle, message);
-        refreshCpuPower();
-        setStatus(message, true);
         return false;
     }
 
-    refreshCpuPower();
     setStatus(powerText(
         QStringLiteral("hardware.power.status.applied"),
         QStringLiteral("状态：CPU 电源设置已写入并回读验证，已更新逻辑处理器 %1 个。"))
@@ -1542,50 +1637,135 @@ bool HardwarePowerPage::executeControlRequest(
     return true;
 }
 
-void HardwarePowerPage::sendControlRequest(
-    const unsigned long applyFlags,
-    const QString& confirmationText)
+void HardwarePowerPage::reportPowerTransactionUnavailable(bool accepted)
 {
-    const QString errorTitle = powerText(
-        QStringLiteral("hardware.power.error.title"),
-        QStringLiteral("电源调节失败"));
+    if (accepted) m_hasSnapshot = false;
+    setStatus(accepted
+        ? powerText(QStringLiteral("hardware.power.status.receipt_missing"),
+            QStringLiteral("状态：电源操作已结束但未收到完整回执，请刷新当前状态，勿自动重发。"))
+        : powerText(QStringLiteral("hardware.power.status.not_accepted"),
+            QStringLiteral("状态：当前忙碌或正在退出，未接受新的电源操作。")), true);
+}
+
+void HardwarePowerPage::submitPowerTransaction(const HardwarePowerTransactionRequest& request)
+{
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
+    setStatus(powerText(QStringLiteral("hardware.power.status.transaction"),
+        QStringLiteral("状态：正在应用电源操作并读取当前状态…")));
+    const auto ticket = m_queryOperation->submitTransaction<HardwarePowerTransactionRequest,
+        HardwarePowerTransactionResult>(request, runPowerTransaction,
+        [this](const HardwarePowerTransactionResult& result, std::uint64_t ticket) {
+            const QPointer<HardwarePowerPage> guard(this);
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("hardware-power-transaction"), {m_snapshotTable},
+                [guard, result, ticket]() {
+                    if (guard == nullptr || !guard->m_queryOperation->isCurrent(ticket)) return;
+                    guard->consumePowerTransaction(result);
+                    if (guard != nullptr) guard->m_queryOperation->completeDeferred(ticket);
+                })) return false;
+            consumePowerTransaction(result);
+            return true;
+        }, [this](std::exception_ptr) {
+            m_transactionPending = false;
+            reportPowerTransactionUnavailable(true);
+        });
+    if (ticket == 0)
+    {
+        m_transactionPending = false;
+        reportPowerTransactionUnavailable(false);
+    }
+    else m_transactionPending = true;
+    updateControlAvailability();
+}
+
+void HardwarePowerPage::consumePowerTransaction(const HardwarePowerTransactionResult& result)
+{
+    m_transactionPending = false;
+    if (result.schemesRead) applyPowerSchemesSnapshot(result.schemes);
+    if (result.cpuRead) applySnapshotToUi(result.cpu);
+    const bool restore = result.kind == HardwarePowerTransactionRequest::Kind::Restore;
+    const QString errorTitle = powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败"));
+    if (result.invalidGuid || result.schemeError != ERROR_SUCCESS)
+    {
+        const QString message = result.invalidGuid
+            ? (restore
+                ? powerText(QStringLiteral("hardware.power.error.restore_scheme_data"), QStringLiteral("首次捕获的 Windows 电源方案 GUID 数据无效。"))
+                : powerText(QStringLiteral("hardware.power.error.scheme_data"), QStringLiteral("所选电源方案 GUID 数据无效。")))
+            : (restore
+                ? powerText(QStringLiteral("hardware.power.error.restore_scheme_apply"), QStringLiteral("还原首次 Windows 电源方案失败，Win32=%1。"))
+                : powerText(QStringLiteral("hardware.power.error.scheme_apply"), QStringLiteral("应用 Windows 电源方案失败，Win32=%1。"))).arg(result.schemeError);
+        setStatus(message, true);
+        QMessageBox::critical(this, errorTitle, message);
+        return;
+    }
+    if (result.preflightFailure != KSWORD_ARK_CPU_POWER_FAILURE_NONE)
+    {
+        const QString message = cpuPowerFailureReasonText(result.preflightFailure, result.request, result.cpu.response);
+        setStatus(message, true);
+        QMessageBox::critical(this, errorTitle, message);
+        return;
+    }
+    if (result.controlAttempted && !presentControlResult(result.request, result.control)) return;
+    if (result.kind == HardwarePowerTransactionRequest::Kind::Scheme)
+    {
+        setStatus(powerText(QStringLiteral("hardware.power.status.scheme_applied"), QStringLiteral("状态：Windows 电源方案已应用。")));
+    }
+    else if (restore)
+    {
+        if (result.schemeApplied && result.controlAttempted)
+            setStatus(powerText(QStringLiteral("hardware.power.status.restored"), QStringLiteral("状态：已还原首次捕获的 Windows 电源方案和当前可写 CPU 设置。")));
+        else if (result.schemeApplied)
+            setStatus(powerText(QStringLiteral("hardware.power.status.restored_scheme_only"), QStringLiteral("状态：已还原首次捕获的 Windows 电源方案；当前没有可写的 CPU 还原字段。")));
+        else if (result.controlAttempted)
+            setStatus(powerText(QStringLiteral("hardware.power.status.restored_cpu_only"), QStringLiteral("状态：已还原首次捕获的当前可写 CPU 设置。")));
+        else
+        {
+            const QString message = powerText(QStringLiteral("hardware.power.error.restore_unavailable"), QStringLiteral("首次状态已捕获，但当前没有可执行的还原目标。"));
+            setStatus(message, true);
+            QMessageBox::critical(this, errorTitle, message);
+        }
+    }
+}
+
+void HardwarePowerPage::sendControlRequest(
+    const unsigned long applyFlags, const QString& confirmationText)
+{
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
+    const QString errorTitle = powerText(QStringLiteral("hardware.power.error.title"), QStringLiteral("电源调节失败"));
     if (!m_hasSnapshot)
     {
-        QMessageBox::critical(
-            this,
-            errorTitle,
-            powerText(
-                QStringLiteral("hardware.power.error.no_snapshot"),
+        QMessageBox::critical(this, errorTitle,
+            powerText(QStringLiteral("hardware.power.error.no_snapshot"),
                 QStringLiteral("没有可用于并发校验的 CPU 电源快照，请先刷新。")));
         return;
     }
-    const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST request =
-        buildControlRequest(applyFlags);
-    const QString validationError =
-        validateCpuPowerRequestForUi(request, m_snapshot);
-    if (!validationError.isEmpty())
+    HardwarePowerTransactionRequest request;
+    request.cpu = buildControlRequest(applyFlags);
+    const QString validation = validateCpuPowerRequestForUi(request.cpu, m_snapshot);
+    if (!validation.isEmpty())
     {
-        setStatus(validationError, true);
-        QMessageBox::critical(this, errorTitle, validationError);
+        setStatus(validation, true);
+        QMessageBox::critical(this, errorTitle, validation);
         return;
     }
-    if (QMessageBox::warning(
-            this,
-            powerText(
-                QStringLiteral("hardware.power.confirm.title"),
-                QStringLiteral("确认 CPU 电源修改")),
-            confirmationText,
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No) != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    (void)executeControlRequest(request);
+    m_confirming = true;
+    updateControlAvailability();
+    const QPointer<HardwarePowerPage> guard(this);
+    const int answer = QMessageBox::warning(this,
+        powerText(QStringLiteral("hardware.power.confirm.title"), QStringLiteral("确认 CPU 电源修改")),
+        confirmationText, QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (guard == nullptr) return;
+    m_confirming = false;
+    if (answer == QMessageBox::Yes) submitPowerTransaction(request);
+    updateControlAvailability();
 }
 
 void HardwarePowerPage::raisePowerLimitsToPlatformMaximum()
 {
+    updateControlAvailability();
+    if (m_queryOperation->isBusy() || m_confirming || m_restorePreparing) return;
     if (!m_hasSnapshot ||
         m_snapshot.packageMaximumPowerMilliwatts == 0UL ||
         (m_snapshot.responseFlags &

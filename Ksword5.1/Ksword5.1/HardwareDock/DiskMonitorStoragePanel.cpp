@@ -311,10 +311,29 @@ namespace
     }
 }
 
+DiskMonitorStorageSamplingBackend::DiskMonitorStorageSamplingBackend()
+    : m_performanceState(std::make_unique<DiskMonitorStoragePerformanceState>())
+{
+}
+
+DiskMonitorStorageSamplingBackend::~DiskMonitorStorageSamplingBackend()
+{
+    retirePerformanceCountersAsync(QStringLiteral("storage-sampling-backend-destructor"));
+}
+
+std::shared_ptr<DiskMonitorStorageSamplingBackend> DiskMonitorStoragePanel::samplingBackend() const
+{
+    return m_samplingBackend;
+}
+
+void DiskMonitorStoragePanel::retirePerformanceCountersAsync(const QString& reason)
+{
+    m_samplingBackend->retirePerformanceCountersAsync(reason);
+}
+
 DiskMonitorStoragePanel::DiskMonitorStoragePanel(QWidget* parent)
     : QWidget(parent),
-      m_performanceState(
-          std::make_unique<DiskMonitorStoragePerformanceState>())
+      m_samplingBackend(std::make_shared<DiskMonitorStorageSamplingBackend>())
 {
     // 存储区仅负责表格展示；采样由 DiskMonitorPage 的既有后台线程统一调度，
     // 避免硬件页增加另一组定时器并与页面销毁发生竞争。
@@ -365,7 +384,7 @@ DiskMonitorStoragePanel::~DiskMonitorStoragePanel()
         QStringLiteral("storage-panel-destructor"));
 }
 
-void DiskMonitorStoragePanel::retirePerformanceCountersAsync(
+void DiskMonitorStorageSamplingBackend::retirePerformanceCountersAsync(
     const QString& reason)
 {
     if (m_performanceState == nullptr)
@@ -395,7 +414,7 @@ void DiskMonitorStoragePanel::retirePerformanceCountersAsync(
     }
 }
 
-DiskMonitorStorageBatch DiskMonitorStoragePanel::collectSamples(
+DiskMonitorStorageBatch DiskMonitorStorageSamplingBackend::collectSamples(
     const std::atomic_bool* stopRequested)
 {
     DiskMonitorStorageBatch sampleBatch;

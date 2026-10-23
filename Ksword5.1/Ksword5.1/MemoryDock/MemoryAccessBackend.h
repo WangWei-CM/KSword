@@ -24,6 +24,9 @@
 
 #include <cstdint>
 #include <string>
+#include <functional>
+#include <mutex>
+#include <vector>
 
 namespace ksword::memory_backend
 {
@@ -126,6 +129,35 @@ namespace ksword::memory_backend
     // - 作用：返回会话代次，每次写入自增；
     // - 说明：轮询方（右上角指示灯）用它判断"这一轮要不要重画"，省掉逐字段比较。
     std::uint64_t ddmaSessionGeneration();
+
+    // Thread-safe frozen session for background consumers. The legacy reference
+    // accessor remains GUI-thread only; no worker may retain that reference.
+    struct DdmaSessionSnapshot
+    {
+        DdmaSession session;
+        std::uint64_t generation = 0;
+    };
+    DdmaSessionSnapshot captureDdmaSession();
+
+    // Failure history belongs to the process, independent of any requesting
+    // page. This is an audit receipt, not a new channel-lock/reset policy.
+    struct DdmaScratchFailure
+    {
+        DdmaSession session;
+        std::uint64_t physicalAddress = 0;
+        std::uint64_t bytesDone = 0;
+        bool write = false;
+        QString failureText;
+    };
+    std::vector<DdmaScratchFailure> captureDdmaScratchFailures();
+
+
+    // One process-wide gate covers complete multi-call transactions and all
+    // synchronous facade callers. Recursive only for facade calls inside a task.
+    std::recursive_mutex& ddmaTransactionMutex();
+    // Accepted tasks are owned by the process queue and finish even if their
+    // requesting page closes. A full queue rejects before accepting any work.
+    bool submitDdmaTransaction(std::function<void()> transaction);
 
     // backendDisplayName：
     // - 输入：后端枚举；

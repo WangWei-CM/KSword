@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QMessageBox>
+#include <QPointer>
 #include <QUuid>
 
 #include <algorithm>
@@ -40,7 +41,7 @@ namespace
             const QString scheme = trimmedPath.mid(classesPrefix.size());
             return (rootKey == HKEY_CURRENT_USER || rootKey == HKEY_LOCAL_MACHINE)
                 && !scheme.isEmpty()
-                && !scheme.contains('\\');
+                && !scheme.contains('\\') && !scheme.contains(QChar(u'\0'));
         }
         if (rootKey != HKEY_CURRENT_USER)
         {
@@ -141,7 +142,7 @@ namespace
             return status;
         }
         if ((valueType != REG_SZ && valueType != REG_EXPAND_SZ)
-            || byteCount < sizeof(wchar_t))
+            || byteCount < sizeof(wchar_t) || byteCount % sizeof(wchar_t) != 0)
         {
             return ERROR_INVALID_DATA;
         }
@@ -158,7 +159,13 @@ namespace
             &byteCount);
         if (status == ERROR_SUCCESS)
         {
-            *valueOut = QString::fromWCharArray(buffer.constData()).trimmed();
+            if ((valueType != REG_SZ && valueType != REG_EXPAND_SZ)
+                || byteCount < sizeof(wchar_t) || byteCount % sizeof(wchar_t) != 0
+                || buffer.at(static_cast<qsizetype>(byteCount / sizeof(wchar_t)) - 1) != L'\0')
+                return ERROR_INVALID_DATA;
+            *valueOut = QString::fromWCharArray(buffer.constData(),
+                static_cast<qsizetype>(byteCount / sizeof(wchar_t)) - 1);
+            if (valueOut->contains(QChar(u'\0'))) return ERROR_INVALID_DATA;
         }
         return status;
     }
@@ -205,28 +212,18 @@ bool ContextMenuCleanerTab::isUrlBindingDeletionAllowed(const ContextMenuEntry& 
 }
 
 bool ContextMenuCleanerTab::createUrlBindingBackup(
-    const QVector<int>& entryIndexes,
-    QString* errorTextOut) const
+    const QVector<ContextMenuEntry>& entries,
+    QString* errorTextOut)
 {
     if (errorTextOut != nullptr)
     {
         errorTextOut->clear();
     }
-    if (entryIndexes.isEmpty())
+    if (entries.isEmpty())
     {
         if (errorTextOut != nullptr)
         {
             *errorTextOut = QStringLiteral("没有可备份的 URL 绑定项目。");
-        }
-        return false;
-    }
-
-    const AreaWidgets* areaWidgets = widgetsForArea(MenuArea::UrlBinding);
-    if (areaWidgets == nullptr)
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("URL 绑定页面状态不可用。");
         }
         return false;
     }
@@ -270,17 +267,9 @@ bool ContextMenuCleanerTab::createUrlBindingBackup(
         return false;
     }
 
-    for (int itemIndex = 0; itemIndex < entryIndexes.size(); ++itemIndex)
+    for (int itemIndex = 0; itemIndex < entries.size(); ++itemIndex)
     {
-        const int entryIndex = entryIndexes.at(itemIndex);
-        if (entryIndex < 0 || entryIndex >= areaWidgets->entries.size())
-        {
-            status = ERROR_INVALID_INDEX;
-            setBackupError(errorTextOut, QStringLiteral("备份条目下标无效"), status);
-            break;
-        }
-
-        const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
+        const ContextMenuEntry& entry = entries.at(itemIndex);
         if (!isUrlBindingDeletionAllowed(entry))
         {
             status = ERROR_ACCESS_DENIED;
@@ -407,8 +396,10 @@ bool ContextMenuCleanerTab::createUrlBindingBackup(
     return status == ERROR_SUCCESS;
 }
 
-void ContextMenuCleanerTab::restoreLastUrlBindingBackup()
+ContextMenuCleanerTab::ShellTransactionResult ContextMenuCleanerTab::restoreUrlBindingBackupValue()
 {
+    ShellTransactionResult result;
+    result.stage = ShellTransactionStage::Completed;
     HKEY backupRoot = nullptr;
     LSTATUS status = ::RegOpenKeyExW(
         HKEY_CURRENT_USER,
@@ -416,52 +407,45 @@ void ContextMenuCleanerTab::restoreLastUrlBindingBackup()
         0,
         KEY_READ,
         &backupRoot);
-    if (status == ERROR_FILE_NOT_FOUND)
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
-            QStringLiteral("当前没有可恢复的 URL 绑定备份。"));
-        return;
-    }
     if (status != ERROR_SUCCESS || backupRoot == nullptr)
     {
-        QMessageBox::critical(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
-            QStringLiteral("无法打开 URL 绑定备份：%1")
-                .arg(winErrorText(static_cast<DWORD>(status))));
-        return;
+        result.error = status == ERROR_FILE_NOT_FOUND
+            ? QStringLiteral("当前没有可恢复的 URL 绑定备份。")
+            : QStringLiteral("无法打开 URL 绑定备份：%1").arg(winErrorText(static_cast<DWORD>(status)));
+        return result;
     }
-
     QString batchId;
     status = readStringValue(backupRoot, kLastBackupIdValue, &batchId);
     ::RegCloseKey(backupRoot);
-    if (status != ERROR_SUCCESS || batchId.isEmpty())
+    if (status != ERROR_SUCCESS || batchId.isEmpty() || batchId.contains('\\'))
     {
-        QMessageBox::critical(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
-            QStringLiteral("最近备份索引无效：%1")
-                .arg(winErrorText(static_cast<DWORD>(status))));
-        return;
+        result.error = QStringLiteral("最近备份索引无效：%1").arg(winErrorText(static_cast<DWORD>(status)));
+        return result;
     }
-
-    const QString batchPath = QStringLiteral("%1\\%2")
-        .arg(QString::fromWCharArray(kBackupRootPath), batchId);
-    const QStringList itemNames = enumerateRegistrySubKeys(
-        HKEY_CURRENT_USER,
-        batchPath,
-        0);
-    if (itemNames.isEmpty())
+    const QString batchPath = QStringLiteral("%1\\%2").arg(QString::fromWCharArray(kBackupRootPath), batchId);
+    HKEY batchKey = nullptr;
+    status = ::RegOpenKeyExW(HKEY_CURRENT_USER,
+        reinterpret_cast<const wchar_t*>(batchPath.utf16()), 0, KEY_READ, &batchKey);
+    if (status != ERROR_SUCCESS || !batchKey)
     {
-        QMessageBox::critical(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
-            QStringLiteral("最近备份不包含任何注册表树。"));
-        return;
+        result.error = winErrorText(static_cast<DWORD>(status));
+        return result;
     }
-
+    QStringList itemNames;
+    for (DWORD index = 0;; ++index)
+    {
+        wchar_t name[256]; DWORD length = 256;
+        status = ::RegEnumKeyExW(batchKey, index, name, &length, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) { status = ERROR_SUCCESS; break; }
+        if (status != ERROR_SUCCESS) break;
+        itemNames.push_back(QString::fromWCharArray(name, static_cast<int>(length)));
+    }
+    ::RegCloseKey(batchKey);
+    if (status != ERROR_SUCCESS || itemNames.isEmpty())
+    {
+        result.error = QStringLiteral("最近备份不包含任何注册表树。") + winErrorText(static_cast<DWORD>(status));
+        return result;
+    }
     QStringList failedItems;
     int restoredCount = 0;
     for (const QString& itemName : itemNames)
@@ -585,24 +569,30 @@ void ContextMenuCleanerTab::restoreLastUrlBindingBackup()
         }
     }
 
-    refreshArea(MenuArea::UrlBinding);
-    if (failedItems.isEmpty())
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
-            QStringLiteral("已从最近备份恢复 %1 个 URL 绑定注册表树。").arg(restoredCount));
-    }
-    else
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("恢复 URL 绑定"),
+    result.count = restoredCount;
+    result.failures = std::move(failedItems);
+    result.ok = result.failures.isEmpty();
+    return result;
+}
+
+void ContextMenuCleanerTab::restoreLastUrlBindingBackup()
+{
+    if (!beginShellAction()) return;
+    submitShellTransaction([]() { return restoreUrlBindingBackupValue(); },
+        [this](const ShellTransactionResult& result) {
+        refreshArea(MenuArea::UrlBinding);
+        if (result.stage != ShellTransactionStage::Completed || !result.error.isEmpty())
+        {
+            QMessageBox::warning(this, QStringLiteral("恢复 URL 绑定"), result.failureText());
+            return;
+        }
+        if (result.failures.isEmpty())
+            QMessageBox::information(this, QStringLiteral("恢复 URL 绑定"),
+                QStringLiteral("已从最近备份恢复 %1 个 URL 绑定注册表树。").arg(result.count));
+        else QMessageBox::warning(this, QStringLiteral("恢复 URL 绑定"),
             QStringLiteral("成功恢复 %1 项，失败 %2 项：\n\n%3")
-                .arg(restoredCount)
-                .arg(failedItems.size())
-                .arg(failedItems.join('\n')));
-    }
+                .arg(result.count).arg(result.failures.size()).arg(result.failures.join('\n')));
+    });
 }
 
 } // namespace ks::misc

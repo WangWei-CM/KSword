@@ -1,4 +1,6 @@
 #include "KernelDisassemblyDialog.h"
+#include "AsyncOperation.h"
+#include "../Internationalization/LanguageManager.h"
 #include "MemoryWorkbench/SnapshotWorkbenchWidget.h"
 #include "MemoryWorkbench/WorkbenchDisasmView.h"
 #include "UI_All.h"
@@ -149,6 +151,7 @@ namespace
         const std::uint64_t baseAddress,
         const ks::ui::DisassemblyArchitecture architecture,
         const std::uint32_t maximumInstructions,
+        const bool collectRows,
         ks::ui::DisassemblyResult& resultOut)
     {
 #if KSWORD_HAS_ZYDIS
@@ -156,9 +159,9 @@ namespace
         result.backendName = QStringLiteral(
             "Zydis v4（编译期固定依赖）");
         std::uint32_t offset = 0U;
+        std::uint32_t decodedCount = 0U;
         while (offset < static_cast<std::uint32_t>(bytes.size())
-            && result.rows.size()
-                < static_cast<qsizetype>(maximumInstructions))
+            && decodedCount < maximumInstructions)
         {
             ZydisDisassembledInstruction instruction{};
             const ZydisMachineMode mode =
@@ -185,6 +188,8 @@ namespace
             {
                 break;
             }
+            ++decodedCount;
+            if (!collectRows) { offset += length; continue; }
             const QString text =
                 QString::fromLatin1(instruction.text).trimmed();
             const qsizetype separator =
@@ -210,7 +215,7 @@ namespace
         }
         result.complete =
             offset >= static_cast<std::uint32_t>(bytes.size());
-        if (!result.rows.isEmpty())
+        if (decodedCount != 0U)
         {
             if (!result.complete)
             {
@@ -219,9 +224,7 @@ namespace
                     "剩余字节将由有界降级解码器保留。");
                 while (offset
                         < static_cast<std::uint32_t>(bytes.size())
-                    && result.rows.size()
-                        < static_cast<qsizetype>(
-                            maximumInstructions))
+                    && decodedCount < maximumInstructions)
                 {
                     ks::ui::DisassemblyRow row =
                         fallbackDecodeOne(
@@ -233,7 +236,8 @@ namespace
                         1U,
                         static_cast<std::uint32_t>(
                             row.bytes.size()));
-                    result.rows.push_back(std::move(row));
+                    if (collectRows) result.rows.push_back(std::move(row));
+                    ++decodedCount;
                     offset += consumed;
                 }
                 result.complete =
@@ -248,6 +252,7 @@ namespace
         Q_UNUSED(baseAddress);
         Q_UNUSED(architecture);
         Q_UNUSED(maximumInstructions);
+        Q_UNUSED(collectRows);
         Q_UNUSED(resultOut);
 #endif
         return false;
@@ -631,11 +636,12 @@ namespace
 
 namespace ks::ui
 {
-    DisassemblyResult InstructionDecoder::decode(
+    DisassemblyResult InstructionDecoder::decodeImpl(
         const QByteArray& bytes,
         const std::uint64_t baseAddress,
         const DisassemblyArchitecture architecture,
-        const std::uint32_t maximumInstructions)
+        const std::uint32_t maximumInstructions,
+        const bool collectRows)
     {
         DisassemblyResult result;
         if (bytes.isEmpty())
@@ -663,6 +669,7 @@ namespace ks::ui
                 baseAddress,
                 architecture,
                 boundedMaximum,
+                collectRows,
                 result))
         {
             return result;
@@ -674,9 +681,9 @@ namespace ks::ui
             "常见控制流、序言、尾声和 ModR/M 指令已解码，"
             "未知指令以 db 保留原始字节，不猜测语义。");
         std::uint32_t offset = 0U;
+        std::uint32_t decodedCount = 0U;
         while (offset < static_cast<std::uint32_t>(bytes.size())
-            && result.rows.size()
-                < static_cast<qsizetype>(boundedMaximum))
+            && decodedCount < boundedMaximum)
         {
             DisassemblyRow row = fallbackDecodeOne(
                 bytes,
@@ -686,7 +693,8 @@ namespace ks::ui
             const std::uint32_t consumed = std::max(
                 1U,
                 static_cast<std::uint32_t>(row.bytes.size()));
-            result.rows.push_back(std::move(row));
+            if (collectRows) result.rows.push_back(std::move(row));
+            ++decodedCount;
             offset += consumed;
         }
         result.complete =
@@ -694,10 +702,24 @@ namespace ks::ui
         return result;
     }
 
+    DisassemblyResult InstructionDecoder::decode(const QByteArray& bytes, std::uint64_t address,
+        DisassemblyArchitecture architecture, std::uint32_t maximumInstructions)
+    {
+        return decodeImpl(bytes, address, architecture, maximumInstructions, true);
+    }
+
+    DisassemblyResult InstructionDecoder::describe(const QByteArray& bytes, std::uint64_t address,
+        DisassemblyArchitecture architecture, std::uint32_t maximumInstructions)
+    {
+        return decodeImpl(bytes, address, architecture, maximumInstructions, false);
+    }
+
     KernelDisassemblyDialog::KernelDisassemblyDialog(
         QWidget* parent)
         : QDialog(parent)
     {
+        m_readOperation = std::make_unique<AsyncOperation>(this);
+        m_descriptionOperation = std::make_unique<AsyncOperation>(this);
         setWindowTitle(QStringLiteral("指令视图"));
         applyResponsiveWindowGeometry(this, parent, QSize(980, 640), QSize(520, 360));
         auto* layout = new QVBoxLayout(this);
@@ -755,6 +777,7 @@ namespace ks::ui
             this, [this](bool x64) {
                 ++m_snapshotRevision;
                 m_architecture = x64 ? DisassemblyArchitecture::X64 : DisassemblyArchitecture::X86;
+                updateDecodeDescription();
             });
         connect(m_editor, &SnapshotWorkbenchWidget::instructionContextMenuAboutToShow,
             this, [this](QMenu* menu, std::uint64_t, bool valid) {
@@ -816,52 +839,61 @@ namespace ks::ui
         const std::uint32_t boundedBytes = std::min<std::uint32_t>(
             byteCount,
             KSWORD_ARK_MEMORY_READ_MAX_BYTES);
-        const ksword::ark::DriverClient client;
-        const ksword::ark::VirtualMemoryReadResult read =
-            client.readVirtualMemory(
-                0U,
-                address,
-                boundedBytes,
-                KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS);
-        if (!read.io.ok
-            || read.readStatus != KSWORD_ARK_MEMORY_READ_STATUS_OK
-            || read.copyStatus != 0
-            || read.bytesRead != boundedBytes
-            || read.data.size() < static_cast<std::size_t>(boundedBytes))
-        {
-            ownedMessageBox(
-                parent, QMessageBox::Warning,
-                QStringLiteral("指令视图"),
-                QStringLiteral(
-                    "R0 内核字节读取失败。\n"
-                    "Win32=%1，NTSTATUS=0x%2，读取=%3/%4。\n%5")
-                    .arg(read.io.win32Error)
-                    .arg(
-                        static_cast<unsigned long>(
-                            read.copyStatus),
-                        8,
-                        16,
-                        QChar('0'))
-                    .arg(read.bytesRead)
-                    .arg(boundedBytes)
-                    .arg(QString::fromStdString(
-                        read.io.message)));
-            return;
-        }
-        const qsizetype snapshotBytes = static_cast<qsizetype>(boundedBytes);
-        const QByteArray snapshot(
-            reinterpret_cast<const char*>(read.data.data()),
-            snapshotBytes);
         QPointer<KernelDisassemblyDialog> dialog = new KernelDisassemblyDialog(parent);
-        dialog->setSnapshot(
-            snapshot,
-            address,
-            DisassemblyArchitecture::X64,
-            sourceDescription);
+        dialog->readKernelSnapshot(address, boundedBytes, sourceDescription);
         if (!dialog) return;
-        dialog->setKernelMutationEnabled(true);
         dialog->exec();
         if (dialog) delete dialog.data();
+    }
+
+    KernelDisassemblyDialog::~KernelDisassemblyDialog()
+    {
+        // Retire read-only delivery before any child editor/label is destroyed.
+        m_readOperation->close();
+        m_descriptionOperation->close();
+    }
+
+    void KernelDisassemblyDialog::readKernelSnapshot(std::uint64_t address,
+        std::uint32_t length, QString description)
+    {
+        const QPointer<KernelDisassemblyDialog> self(this);
+        setSnapshot({}, address, DisassemblyArchitecture::X64, description);
+        if (!self) return;
+        m_descriptionOperation->cancel();
+        ++m_descriptionRevision;
+        m_readPending = true;
+        m_backendLabel->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
+        const auto revision = m_readRevision;
+        struct Request { std::uint64_t address; std::uint32_t length; };
+        const auto applyRead = [self, revision, address, length, description](
+            const ksword::ark::VirtualMemoryReadResult& read) {
+            if (!self || self->m_readRevision != revision) return;
+            self->m_readPending = false;
+            if (!read.io.ok || read.readStatus != KSWORD_ARK_MEMORY_READ_STATUS_OK
+                || read.copyStatus != 0 || read.bytesRead != length || read.data.size() < length)
+            {
+                ownedMessageBox(self, QMessageBox::Warning, QStringLiteral("指令视图"),
+                    QStringLiteral("R0 内核字节读取失败。\nWin32=%1，NTSTATUS=0x%2，读取=%3/%4。\n%5")
+                        .arg(read.io.win32Error)
+                        .arg(static_cast<unsigned long>(read.copyStatus), 8, 16, QChar('0'))
+                        .arg(read.bytesRead).arg(length).arg(QString::fromStdString(read.io.message)));
+                if (self && self->m_readRevision == revision) self->reject();
+                return;
+            }
+            const QByteArray snapshot(reinterpret_cast<const char*>(read.data.data()), static_cast<qsizetype>(length));
+            const auto publicationRevision = self->m_snapshotRevision + 1;
+            self->setSnapshot(snapshot, address, self->m_architecture, description);
+            if (self && self->m_snapshotRevision == publicationRevision) self->setKernelMutationEnabled(true);
+        };
+        m_readOperation->submit<Request, ksword::ark::VirtualMemoryReadResult>(Request{address, length},
+            [](const Request& request, const AsyncOperationToken& token) {
+                if (token.isCanceled()) return ksword::ark::VirtualMemoryReadResult{};
+                const ksword::ark::DriverClient client;
+                return client.readVirtualMemory(0U, request.address, request.length,
+                    KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS);
+            },
+            [applyRead](const auto& read, std::uint64_t) { applyRead(read); return true; },
+            [applyRead](std::exception_ptr) { applyRead(ksword::ark::VirtualMemoryReadResult{}); });
     }
 
     void KernelDisassemblyDialog::setSnapshot(
@@ -870,6 +902,8 @@ namespace ks::ui
         const DisassemblyArchitecture architecture,
         const QString& sourceDescription)
     {
+        m_readPending = false;
+        ++m_readRevision;
         m_originalBytes = bytes;
         m_sourceDescription = sourceDescription;
         ++m_snapshotRevision;
@@ -931,24 +965,39 @@ namespace ks::ui
         return m_editor == nullptr ? std::nullopt : m_editor->selectedInstruction();
     }
 
+    void KernelDisassemblyDialog::updateDecodeDescription()
+    {
+        if (m_readPending) return;
+        const QPointer<KernelDisassemblyDialog> self(this);
+        const auto revision = ++m_descriptionRevision;
+        struct Request { QByteArray bytes; std::uint64_t address; DisassemblyArchitecture architecture; };
+        m_backendLabel->setText(ks::i18n::sourceText(QStringLiteral("正在处理，请稍候…")));
+        m_descriptionOperation->submit<Request, DisassemblyResult>(
+            Request{m_originalBytes, m_baseAddress, m_architecture},
+            [](const Request& request, const AsyncOperationToken&) {
+                return InstructionDecoder::describe(request.bytes, request.address, request.architecture);
+            },
+            [self, revision](const DisassemblyResult& result, std::uint64_t) {
+                if (!self || self->m_descriptionRevision != revision) return true;
+                self->m_backendLabel->setText(QStringLiteral("解码后端：%1%2").arg(result.backendName)
+                    .arg(result.diagnosticText.isEmpty() ? QString() : QStringLiteral("\n%1").arg(result.diagnosticText)));
+                return true;
+            },
+            [self, revision](std::exception_ptr) {
+                if (self && self->m_descriptionRevision == revision)
+                    self->m_backendLabel->setText(ks::i18n::sourceText(QStringLiteral("没有可解码的字节。")));
+            });
+    }
+
     void KernelDisassemblyDialog::rebuildRows()
     {
-        const DisassemblyResult result =
-            InstructionDecoder::decode(
-                m_originalBytes,
-                m_baseAddress,
-                m_architecture);
-        m_backendLabel->setText(
-            QStringLiteral("解码后端：%1%2")
-                .arg(result.backendName)
-                .arg(
-                    result.diagnosticText.isEmpty()
-                        ? QString()
-                        : QStringLiteral("\n%1")
-                            .arg(result.diagnosticText)));
+        const QPointer<KernelDisassemblyDialog> self(this);
+        const auto revision = m_snapshotRevision;
+        updateDecodeDescription();
+        if (!self || m_snapshotRevision != revision) return;
         m_editor->setSnapshot(m_originalBytes, m_baseAddress, m_architecture, m_baseAddress,
             m_sourceDescription);
-        m_editor->showDisassemblyAt(m_baseAddress);
+        if (self && m_snapshotRevision == revision) m_editor->showDisassemblyAt(m_baseAddress);
     }
 
     void KernelDisassemblyDialog::executeKernelMutation(

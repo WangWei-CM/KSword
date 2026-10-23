@@ -1,4 +1,6 @@
 #include "BootEditorTab.h"
+#include "../../UI/AsyncOperation.h"
+#include "../../Internationalization/LanguageManager.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 
 #include <QApplication>
@@ -8,7 +10,6 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
-#include <QEventLoop>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QLabel>
@@ -66,7 +67,7 @@ namespace
     // - BootEditorTab 构造函数直接调用 refreshBcdEntries()，而构造函数与 refreshBcdEntries()
     //   都位于 BootEditorTab.cpp，不在本次可修改范围内，无法把首轮枚举整体挪出构造期；
     // - 因此改在 runBcdEdit 内部拦截“刷新专用只读枚举”：真正的 bcdedit 交给线程池执行，
-    //   调用方立刻拿到由上一轮缓存文本组成的占位结果，后台结果回投 UI 线程后再刷新一次；
+    //   调用方立刻拿到 pending 状态并保留界面，后台结果回投 UI 线程后才提交一次；
     // - 跨调用状态用 QObject 动态属性承载，既避开不可修改的头文件，
     //   又保证控件析构时状态随对象一起消失，不会留下文件级残留。
 
@@ -95,18 +96,6 @@ namespace
     // - 作用：全局单调递增的枚举请求代号，用于淘汰已被新请求取代的旧结果；
     // - 说明：目前只在 UI 线程自增，用原子类型是为了防止后续被误用到其它线程。
     std::atomic<quint64> g_enumRequestGenerationCounter{ 0 };
-
-    // g_placeholderLogOwnerObject：
-    // - 作用：记录“最近一次 runBcdEdit 返回的是异步占位结果”的控件地址；
-    // - 说明：appendCommandLog 读到同一地址时跳过本次日志，避免把缓存文本重复写进原始输出区；
-    // - 线程：只在 UI 线程读写。
-    const void* g_placeholderLogOwnerObject = nullptr;
-
-    // g_synchronousCommandDepth：
-    // - 作用：记录当前有几层写命令正卡在嵌套事件循环里等待；
-    // - 说明：>0 时禁止异步枚举结果触发刷新，避免重建表格顺带改写用户正在提交的编辑框内容；
-    // - 线程：只在 UI 线程读写。
-    int g_synchronousCommandDepth = 0;
 
     // isBcdRefreshEnumRequest：
     // - 作用：判断本次调用是否为刷新流程专用的整表只读枚举；
@@ -197,599 +186,341 @@ namespace
 
 void BootEditorTab::applySelectedEntryChanges()
 {
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
+    if (m_commandPending) return;
+    const BcdEntry* entry = currentEntry();
+    if (!entry)
     {
         QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。"));
         return;
     }
-
-    const QString identifierText = selectedEntry->identifierText.trimmed();
-    if (identifierText.isEmpty())
+    const QString identifier = entry->identifierText.trimmed();
+    if (identifier.isEmpty())
     {
         QMessageBox::warning(this, QStringLiteral("引导编辑器"), QStringLiteral("当前条目标识符为空，无法写入。"));
         return;
     }
-
-    // 批量写入策略：
-    // - 按字段逐条执行 bcdedit /set；
-    // - 任一步失败就终止后续写入，避免状态部分落地。
-    if (!m_descriptionEdit->text().trimmed().isEmpty())
+    BcdCommandPlan plan;
+    const auto appendSet = [&plan, &identifier](const QString& key, const QString& value, const QString& title) {
+        plan.commands.push_back({{QStringLiteral("/set"), identifier, key, value}, title, false});
+    };
+    const auto appendOptional = [&appendSet](const QString& key, const QLineEdit* edit, const QString& title) {
+        const QString value = edit->text().trimmed();
+        if (!value.isEmpty()) appendSet(key, value, title);
+    };
+    appendOptional(QStringLiteral("description"), m_descriptionEdit, QStringLiteral("写入 description"));
+    appendOptional(QStringLiteral("device"), m_deviceEdit, QStringLiteral("写入 device"));
+    appendOptional(QStringLiteral("osdevice"), m_osDeviceEdit, QStringLiteral("写入 osdevice"));
+    appendOptional(QStringLiteral("path"), m_pathEdit, QStringLiteral("写入 path"));
+    appendOptional(QStringLiteral("systemroot"), m_systemRootEdit, QStringLiteral("写入 systemroot"));
+    appendOptional(QStringLiteral("locale"), m_localeEdit, QStringLiteral("写入 locale"));
+    const QString policy = m_bootMenuPolicyCombo->currentData().toString().trimmed();
+    if (!policy.isEmpty()) appendSet(QStringLiteral("bootmenupolicy"), policy, QStringLiteral("写入 bootmenupolicy"));
+    appendSet(QStringLiteral("testsigning"), boolToBcdOnOff(m_testSigningCheck->isChecked()), QStringLiteral("写入 testsigning"));
+    appendSet(QStringLiteral("nointegritychecks"), boolToBcdOnOff(m_noIntegrityCheck->isChecked()), QStringLiteral("写入 nointegritychecks"));
+    appendSet(QStringLiteral("debug"), boolToBcdOnOff(m_debugCheck->isChecked()), QStringLiteral("写入 debug"));
+    appendSet(QStringLiteral("bootlog"), boolToBcdYesNo(m_bootLogCheck->isChecked()), QStringLiteral("写入 bootlog"));
+    appendSet(QStringLiteral("basevideo"), boolToBcdYesNo(m_baseVideoCheck->isChecked()), QStringLiteral("写入 basevideo"));
+    appendSet(QStringLiteral("recoveryenabled"), boolToBcdYesNo(m_recoveryEnabledCheck->isChecked()), QStringLiteral("写入 recoveryenabled"));
+    const auto appendDelete = [&plan, &identifier](const QString& key) {
+        plan.commands.push_back({{QStringLiteral("/deletevalue"), identifier, key}, QStringLiteral("删除 %1").arg(key), true});
+    };
+    const QString mode = m_safeBootCombo->currentData().toString().trimmed().toLower();
+    if (mode == QStringLiteral("off"))
     {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("description"), m_descriptionEdit->text().trimmed() },
-            QStringLiteral("写入 description"),
-            false))
-        {
-            return;
-        }
+        appendDelete(QStringLiteral("safeboot"));
+        appendDelete(QStringLiteral("safebootalternateshell"));
     }
-    if (!m_deviceEdit->text().trimmed().isEmpty())
+    else if (mode == QStringLiteral("minimal") || mode == QStringLiteral("network"))
     {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("device"), m_deviceEdit->text().trimmed() },
-            QStringLiteral("写入 device"),
-            false))
-        {
-            return;
-        }
+        appendSet(QStringLiteral("safeboot"), mode, mode == QStringLiteral("minimal")
+            ? QStringLiteral("写入 safeboot=minimal") : QStringLiteral("写入 safeboot=network"));
+        appendDelete(QStringLiteral("safebootalternateshell"));
     }
-    if (!m_osDeviceEdit->text().trimmed().isEmpty())
+    else if (mode == QStringLiteral("alternateshell"))
     {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("osdevice"), m_osDeviceEdit->text().trimmed() },
-            QStringLiteral("写入 osdevice"),
-            false))
-        {
-            return;
-        }
+        appendSet(QStringLiteral("safeboot"), QStringLiteral("minimal"), QStringLiteral("写入 safeboot=minimal"));
+        appendSet(QStringLiteral("safebootalternateshell"), QStringLiteral("yes"), QStringLiteral("写入 safebootalternateshell=yes"));
     }
-    if (!m_pathEdit->text().trimmed().isEmpty())
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("path"), m_pathEdit->text().trimmed() },
-            QStringLiteral("写入 path"),
-            false))
-        {
-            return;
-        }
-    }
-    if (!m_systemRootEdit->text().trimmed().isEmpty())
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("systemroot"), m_systemRootEdit->text().trimmed() },
-            QStringLiteral("写入 systemroot"),
-            false))
-        {
-            return;
-        }
-    }
-    if (!m_localeEdit->text().trimmed().isEmpty())
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("locale"), m_localeEdit->text().trimmed() },
-            QStringLiteral("写入 locale"),
-            false))
-        {
-            return;
-        }
-    }
-
-    const QString bootMenuPolicyValue = m_bootMenuPolicyCombo->currentData().toString().trimmed();
-    if (!bootMenuPolicyValue.isEmpty())
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("bootmenupolicy"), bootMenuPolicyValue },
-            QStringLiteral("写入 bootmenupolicy"),
-            false))
-        {
-            return;
-        }
-    }
-
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("testsigning"), boolToBcdOnOff(m_testSigningCheck->isChecked()) },
-        QStringLiteral("写入 testsigning"),
-        false))
-    {
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("nointegritychecks"), boolToBcdOnOff(m_noIntegrityCheck->isChecked()) },
-        QStringLiteral("写入 nointegritychecks"),
-        false))
-    {
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("debug"), boolToBcdOnOff(m_debugCheck->isChecked()) },
-        QStringLiteral("写入 debug"),
-        false))
-    {
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("bootlog"), boolToBcdYesNo(m_bootLogCheck->isChecked()) },
-        QStringLiteral("写入 bootlog"),
-        false))
-    {
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("basevideo"), boolToBcdYesNo(m_baseVideoCheck->isChecked()) },
-        QStringLiteral("写入 basevideo"),
-        false))
-    {
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("recoveryenabled"), boolToBcdYesNo(m_recoveryEnabledCheck->isChecked()) },
-        QStringLiteral("写入 recoveryenabled"),
-        false))
-    {
-        return;
-    }
-
-    // safeboot 处理：
-    // - 关闭模式：删除 safeboot 与 safebootalternateshell；
-    // - 其余模式：按组合值写入。
-    const QString safeBootModeValue = m_safeBootCombo->currentData().toString().trimmed().toLower();
-
-    // deleteValueWithMissingTolerance：
-    // - 统一处理 deletevalue 的返回；
-    // - 若仅因“字段不存在”失败则视为目标状态已满足；
-    // - 其它失败直接中止，避免最终误报“写入完成”。
-    const auto deleteValueWithMissingTolerance = [this, &identifierText](const QString& elementName) -> bool
-        {
-            const QString operationText = QStringLiteral("删除 %1").arg(elementName);
-            const BcdCommandResult deleteResult = runBcdEdit(
-                QStringList{
-                    QStringLiteral("/deletevalue"),
-                    identifierText,
-                    elementName
-                },
-                kDefaultCommandTimeoutMs,
-                operationText);
-            appendCommandLog(
-                QStringLiteral("bcdedit /deletevalue %1 %2").arg(identifierText, elementName),
-                deleteResult);
-
-            if (deleteResult.startSucceeded && !deleteResult.timeout && deleteResult.exitCode == 0)
-            {
-                return true;
-            }
-
-            const QString outputLowerText = deleteResult.mergedOutputText.toLower();
-            const bool likelyMissingElement =
-                outputLowerText.contains(QStringLiteral("not found"))
-                || outputLowerText.contains(QStringLiteral("cannot find"))
-                || outputLowerText.contains(QStringLiteral("does not exist"))
-                || deleteResult.mergedOutputText.contains(QStringLiteral("找不到"))
-                || deleteResult.mergedOutputText.contains(QStringLiteral("不存在"))
-                || deleteResult.mergedOutputText.contains(QStringLiteral("未找到"));
-
-            if (likelyMissingElement)
-            {
-                kLogEvent warnEvent;
-                warn << warnEvent
-                    << "[BootEditor] deletevalue 字段不存在，按目标状态继续: element="
-                    << elementName.toStdString()
-                    << ", identifier="
-                    << identifierText.toStdString()
-                    << eol;
-                return true;
-            }
-
-            QMessageBox::warning(
-                this,
-                QStringLiteral("引导编辑器"),
-                QStringLiteral("%1失败：\n%2")
-                .arg(operationText, deleteResult.mergedOutputText.trimmed()));
-            return false;
-        };
-
-    if (safeBootModeValue == QStringLiteral("off"))
-    {
-        if (!deleteValueWithMissingTolerance(QStringLiteral("safeboot")))
-        {
-            return;
-        }
-        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
-        {
-            return;
-        }
-    }
-    else if (safeBootModeValue == QStringLiteral("minimal"))
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("safeboot"), QStringLiteral("minimal") },
-            QStringLiteral("写入 safeboot=minimal"),
-            false))
-        {
-            return;
-        }
-        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
-        {
-            return;
-        }
-    }
-    else if (safeBootModeValue == QStringLiteral("network"))
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("safeboot"), QStringLiteral("network") },
-            QStringLiteral("写入 safeboot=network"),
-            false))
-        {
-            return;
-        }
-        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
-        {
-            return;
-        }
-    }
-    else if (safeBootModeValue == QStringLiteral("alternateshell"))
-    {
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("safeboot"), QStringLiteral("minimal") },
-            QStringLiteral("写入 safeboot=minimal"),
-            false))
-        {
-            return;
-        }
-        if (!runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/set"), identifierText, QStringLiteral("safebootalternateshell"), QStringLiteral("yes") },
-            QStringLiteral("写入 safebootalternateshell=yes"),
-            false))
-        {
-            return;
-        }
-    }
-
-    QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("当前条目已写入完成。"));
-    refreshBcdEntries();
+    plan.successTitle = QStringLiteral("引导编辑器");
+    plan.successText = QStringLiteral("当前条目已写入完成。");
+    queueBcdPlan(std::move(plan));
 }
 
 void BootEditorTab::applyBootManagerChanges()
 {
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/timeout"), QString::number(m_timeoutSpin->value()) },
-        QStringLiteral("写入 timeout"),
-        true))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    queueBcdCommand({QStringLiteral("/timeout"), QString::number(m_timeoutSpin->value())}, QStringLiteral("写入 timeout"));
 }
 
 void BootEditorTab::setLegacyBootForSelectedEntry()
 {
-    // 当前项传统引导：
-    // - 对当前选中条目写入 bootmenupolicy Legacy；
-    // - 成功后刷新列表与右侧详情。
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-
-    if (!applyBootMenuPolicyByIdentifier(
-        selectedEntry->identifierText.trimmed(),
-        QStringLiteral("Legacy"),
-        QStringLiteral("当前项启用传统引导")))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。")); return; }
+    queueBootMenuPolicy(entry->identifierText.trimmed(), QStringLiteral("Legacy"), QStringLiteral("当前项启用传统引导"));
 }
 
 void BootEditorTab::setLegacyBootForDefaultEntry()
 {
-    // 默认项传统引导：
-    // - 对 {bootmgr}.default 对应条目写入 bootmenupolicy Legacy；
-    // - 若未读取到默认标识符则提示刷新后重试。
-    const QString defaultIdentifierText = m_defaultIdentifierText.trimmed();
-    if (defaultIdentifierText.isEmpty())
+    const QString identifier = m_defaultIdentifierText.trimmed();
+    if (identifier.isEmpty())
     {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("传统引导"),
-            QStringLiteral("当前未识别到默认启动项，请先刷新 BCD。"));
+        QMessageBox::warning(this, QStringLiteral("传统引导"), QStringLiteral("当前未识别到默认启动项，请先刷新 BCD。"));
         return;
     }
-
-    if (!applyBootMenuPolicyByIdentifier(
-        defaultIdentifierText,
-        QStringLiteral("Legacy"),
-        QStringLiteral("默认项启用传统引导")))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    queueBootMenuPolicy(identifier, QStringLiteral("Legacy"), QStringLiteral("默认项启用传统引导"));
 }
 
 void BootEditorTab::setStandardBootForSelectedEntry()
 {
-    // 当前项恢复标准：
-    // - 对当前选中条目写入 bootmenupolicy Standard；
-    // - 用于回退“传统引导”快捷设置。
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-
-    if (!applyBootMenuPolicyByIdentifier(
-        selectedEntry->identifierText.trimmed(),
-        QStringLiteral("Standard"),
-        QStringLiteral("当前项恢复标准引导")))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。")); return; }
+    queueBootMenuPolicy(entry->identifierText.trimmed(), QStringLiteral("Standard"), QStringLiteral("当前项恢复标准引导"));
 }
 
 void BootEditorTab::setSelectedAsDefaultEntry()
 {
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/default"), selectedEntry->identifierText.trimmed() },
-        QStringLiteral("设置默认启动项"),
-        true))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。")); return; }
+    queueBcdCommand({QStringLiteral("/default"), entry->identifierText.trimmed()}, QStringLiteral("设置默认启动项"));
 }
 
 void BootEditorTab::addSelectedToBootSequence()
 {
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-    if (!runBcdAndExpectSuccess(
-        QStringList{
-            QStringLiteral("/bootsequence"),
-            selectedEntry->identifierText.trimmed(),
-            QStringLiteral("/addfirst")
-        },
-        QStringLiteral("设置下一次启动项"),
-        true))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。")); return; }
+    queueBcdCommand({QStringLiteral("/bootsequence"), entry->identifierText.trimmed(), QStringLiteral("/addfirst")}, QStringLiteral("设置下一次启动项"));
 }
 
 void BootEditorTab::createCopyFromSelectedEntry()
 {
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-
-    const QString sourceDescription = readElementValue(
-        *selectedEntry,
-        QStringList{ QStringLiteral("description"), QStringLiteral("描述") });
-    const QString defaultNewDescription = sourceDescription.trimmed().isEmpty()
-        ? QStringLiteral("新建引导项")
-        : QStringLiteral("%1 - 副本").arg(sourceDescription.trimmed());
-
-    bool inputOk = false;
-    const QString newDescription = QInputDialog::getText(
-        this,
-        QStringLiteral("复制引导项"),
-        QStringLiteral("新引导项描述："),
-        QLineEdit::Normal,
-        defaultNewDescription,
-        &inputOk).trimmed();
-    if (!inputOk || newDescription.isEmpty())
-    {
-        return;
-    }
-
-    const BcdCommandResult copyResult = runBcdEdit(
-        QStringList{
-            QStringLiteral("/copy"),
-            selectedEntry->identifierText.trimmed(),
-            QStringLiteral("/d"),
-            newDescription
-        },
-        kDefaultCommandTimeoutMs,
-        QStringLiteral("复制引导项"));
-    appendCommandLog(QStringLiteral("bcdedit /copy"), copyResult);
-
-    if (!copyResult.startSucceeded || copyResult.timeout || copyResult.exitCode != 0)
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("复制引导项"),
-            QStringLiteral("复制失败：\n%1").arg(copyResult.mergedOutputText.trimmed()));
-        return;
-    }
-
-    // newIdentifierRegex：
-    // - 从命令输出中抽取新 GUID；
-    // - 成功后自动追加到 displayorder 尾部。
-    const QRegularExpression newIdentifierRegex(QStringLiteral("\\{[^\\}\\s]+\\}"));
-    QRegularExpressionMatchIterator matchIterator = newIdentifierRegex.globalMatch(copyResult.mergedOutputText);
-    QString newIdentifierText;
-    while (matchIterator.hasNext())
-    {
-        const QRegularExpressionMatch match = matchIterator.next();
-        newIdentifierText = match.captured(0);
-    }
-
-    if (!newIdentifierText.trimmed().isEmpty())
-    {
-        runBcdAndExpectSuccess(
-            QStringList{
-                QStringLiteral("/displayorder"),
-                newIdentifierText.trimmed(),
-                QStringLiteral("/addlast")
-            },
-            QStringLiteral("追加到 displayorder"),
-            false);
-    }
-
-    QMessageBox::information(this, QStringLiteral("复制引导项"), QStringLiteral("复制成功。"));
-    refreshBcdEntries();
+    if (m_commandPending) return;
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。")); return; }
+    const QString identifier = entry->identifierText.trimmed();
+    const QString description = readElementValue(*entry, {QStringLiteral("description"), QStringLiteral("描述")});
+    const QString initial = description.trimmed().isEmpty() ? QStringLiteral("新建引导项") : QStringLiteral("%1 - 副本").arg(description.trimmed());
+    const QPointer<BootEditorTab> alive(this);
+    bool ok = false;
+    const QString newDescription = QInputDialog::getText(this, QStringLiteral("复制引导项"), QStringLiteral("新引导项描述："), QLineEdit::Normal, initial, &ok).trimmed();
+    if (!alive || !ok || newDescription.isEmpty()) return;
+    BcdCommandPlan plan;
+    plan.commands.push_back({{QStringLiteral("/copy"), identifier, QStringLiteral("/d"), newDescription}, QStringLiteral("复制引导项"), false});
+    plan.copyAndAppend = true;
+    plan.errorStyle = BcdErrorStyle::Copy;
+    plan.successTitle = QStringLiteral("复制引导项");
+    plan.successText = QStringLiteral("复制成功。");
+    queueBcdPlan(std::move(plan));
 }
 
 void BootEditorTab::deleteSelectedEntry()
 {
-    const BcdEntry* selectedEntry = currentEntry();
-    if (selectedEntry == nullptr)
-    {
-        QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。"));
-        return;
-    }
-
-    const QString identifierText = selectedEntry->identifierText.trimmed();
-    if (identifierText.compare(QStringLiteral("{bootmgr}"), Qt::CaseInsensitive) == 0)
-    {
-        QMessageBox::warning(this, QStringLiteral("删除引导项"), QStringLiteral("不允许删除 {bootmgr}。"));
-        return;
-    }
-    if (identifierText.compare(QStringLiteral("{current}"), Qt::CaseInsensitive) == 0)
-    {
-        QMessageBox::warning(this, QStringLiteral("删除引导项"), QStringLiteral("不允许删除 {current}。"));
-        return;
-    }
-
-    const int confirmResult = QMessageBox::warning(
-        this,
-        QStringLiteral("删除引导项"),
-        QStringLiteral("即将删除条目：%1\n该操作不可撤销，是否继续？").arg(identifierText),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmResult != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/delete"), identifierText },
-        QStringLiteral("删除引导项"),
-        true))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    if (m_commandPending) return;
+    const BcdEntry* entry = currentEntry();
+    if (!entry) { QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("请先选择一个引导条目。")); return; }
+    const QString identifier = entry->identifierText.trimmed();
+    if (identifier.compare(QStringLiteral("{bootmgr}"), Qt::CaseInsensitive) == 0)
+    { QMessageBox::warning(this, QStringLiteral("删除引导项"), QStringLiteral("不允许删除 {bootmgr}。")); return; }
+    if (identifier.compare(QStringLiteral("{current}"), Qt::CaseInsensitive) == 0)
+    { QMessageBox::warning(this, QStringLiteral("删除引导项"), QStringLiteral("不允许删除 {current}。")); return; }
+    const QPointer<BootEditorTab> alive(this);
+    const auto confirmed = QMessageBox::warning(this, QStringLiteral("删除引导项"),
+        QStringLiteral("即将删除条目：%1\n该操作不可撤销，是否继续？").arg(identifier), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!alive || confirmed != QMessageBox::Yes) return;
+    queueBcdCommand({QStringLiteral("/delete"), identifier}, QStringLiteral("删除引导项"));
 }
 
 void BootEditorTab::exportBcdStore()
 {
-    const QString defaultFileName = QStringLiteral("bcd_backup_%1.bcd")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-    const QString outputPath = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出 BCD"),
-        defaultFileName,
-        QStringLiteral("BCD 文件 (*.bcd);;所有文件 (*.*)"));
-    if (outputPath.trimmed().isEmpty())
-    {
-        return;
-    }
-
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/export"), outputPath },
-        QStringLiteral("导出 BCD"),
-        true))
-    {
-        return;
-    }
+    if (m_commandPending) return;
+    const QPointer<BootEditorTab> alive(this);
+    const QString name = QStringLiteral("bcd_backup_%1.bcd").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出 BCD"), name, QStringLiteral("BCD 文件 (*.bcd);;所有文件 (*.*)"));
+    if (!alive || path.trimmed().isEmpty()) return;
+    queueBcdCommand({QStringLiteral("/export"), path}, QStringLiteral("导出 BCD"), false);
 }
 
 void BootEditorTab::importBcdStore()
 {
-    const QString inputPath = QFileDialog::getOpenFileName(
-        this,
-        QStringLiteral("导入 BCD"),
-        QString(),
-        QStringLiteral("BCD 文件 (*.bcd);;所有文件 (*.*)"));
-    if (inputPath.trimmed().isEmpty())
-    {
-        return;
-    }
-
-    const int confirmResult = QMessageBox::warning(
-        this,
-        QStringLiteral("导入 BCD"),
-        QStringLiteral("导入会覆盖当前 BCD 存储，可能影响系统启动。\n确认继续吗？"),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmResult != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    if (!runBcdAndExpectSuccess(
-        QStringList{ QStringLiteral("/import"), inputPath },
-        QStringLiteral("导入 BCD"),
-        true))
-    {
-        return;
-    }
-    refreshBcdEntries();
+    if (m_commandPending) return;
+    const QPointer<BootEditorTab> alive(this);
+    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("导入 BCD"), QString(), QStringLiteral("BCD 文件 (*.bcd);;所有文件 (*.*)"));
+    if (!alive || path.trimmed().isEmpty()) return;
+    const auto confirmed = QMessageBox::warning(this, QStringLiteral("导入 BCD"),
+        QStringLiteral("导入会覆盖当前 BCD 存储，可能影响系统启动。\n确认继续吗？"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!alive || confirmed != QMessageBox::Yes) return;
+    queueBcdCommand({QStringLiteral("/import"), path}, QStringLiteral("导入 BCD"));
 }
 
 void BootEditorTab::executeCustomCommand()
 {
-    const QString rawCommandText = m_customCommandEdit->text().trimmed();
-    if (rawCommandText.isEmpty())
+    if (m_commandPending) return;
+    const QString raw = m_customCommandEdit->text().trimmed();
+    if (raw.isEmpty()) { QMessageBox::information(this, QStringLiteral("自定义命令"), QStringLiteral("请输入命令参数。")); return; }
+    QStringList args = QProcess::splitCommand(raw);
+    if (!args.isEmpty() && args.front().compare(QStringLiteral("bcdedit"), Qt::CaseInsensitive) == 0) args.removeFirst();
+    if (args.isEmpty()) { QMessageBox::information(this, QStringLiteral("自定义命令"), QStringLiteral("未解析到有效参数。")); return; }
+    BcdCommandPlan plan;
+    plan.commands.push_back({args, QStringLiteral("执行自定义 bcdedit"), false});
+    plan.errorStyle = BcdErrorStyle::Custom;
+    plan.successTitle = QStringLiteral("自定义命令");
+    plan.successText = QStringLiteral("命令执行成功。");
+    plan.refreshAfter = !raw.toLower().contains(QStringLiteral("/enum"));
+    queueBcdPlan(std::move(plan));
+}
+
+void BootEditorTab::queueBcdCommand(const QStringList& args, const QString& operation, const bool refreshAfter)
+{
+    BcdCommandPlan plan;
+    plan.commands.push_back({args, operation, false});
+    plan.successTitle = QStringLiteral("引导编辑器");
+    plan.successText = QStringLiteral("%1成功。").arg(operation);
+    plan.refreshAfter = refreshAfter;
+    queueBcdPlan(std::move(plan));
+}
+
+void BootEditorTab::queueBootMenuPolicy(const QString& identifierText, const QString& policyText, const QString& operation)
+{
+    const QString identifier = identifierText.trimmed();
+    const QString policy = policyText.trimmed();
+    if (identifier.isEmpty() || policy.isEmpty())
+    { QMessageBox::warning(this, QStringLiteral("传统引导"), QStringLiteral("参数无效：标识符或策略为空。")); return; }
+    BcdCommandPlan plan;
+    plan.commands.push_back({{QStringLiteral("/set"), identifier, QStringLiteral("bootmenupolicy"), policy}, operation, false});
+    plan.successTitle = QStringLiteral("传统引导");
+    plan.successText = QStringLiteral("%1成功。\n标识符：%2\n策略：%3").arg(operation, identifier, policy);
+    queueBcdPlan(std::move(plan));
+}
+
+void BootEditorTab::setBcdCommandBusy(const bool busy)
+{
+    m_commandPending = busy;
+    for (QWidget* widget : {m_toolbarWidget, m_editorPane, static_cast<QWidget*>(m_customCommandEdit),
+        static_cast<QWidget*>(m_runCustomCommandButton), static_cast<QWidget*>(m_applyEntryButton), static_cast<QWidget*>(m_applyBootMgrButton)})
+    { if (widget) widget->setEnabled(!busy); }
+}
+
+void BootEditorTab::queueBcdPlan(BcdCommandPlan plan)
+{
+    if (m_commandPending || plan.commands.empty()) return;
+    bool needsAdministrator = false;
+    for (const auto& command : plan.commands)
     {
-        QMessageBox::information(this, QStringLiteral("自定义命令"), QStringLiteral("请输入命令参数。"));
+        const QString verb = command.args.value(0).trimmed().toLower();
+        if (verb != QStringLiteral("/enum") && verb != QStringLiteral("/enumall") && verb != QStringLiteral("/v")) needsAdministrator = true;
+    }
+    if (needsAdministrator && !ks::ui::isCurrentProcessElevated())
+    {
+        (void)ks::ui::requestAdministratorRestartForFeature(this, QStringLiteral("修改 BCD 启动配置"));
         return;
     }
-
-    // 参数解析策略：
-    // - 支持“/set ...”；
-    // - 也支持“bcdedit /set ...”，会自动去掉前缀 program。
-    QStringList argumentList = QProcess::splitCommand(rawCommandText);
-    if (!argumentList.isEmpty()
-        && argumentList.front().compare(QStringLiteral("bcdedit"), Qt::CaseInsensitive) == 0)
+    setProperty(kEnumPendingGenerationProperty, QVariant());
+    setProperty(kEnumReadyResultProperty, QVariant());
+    setBcdCommandBusy(true);
+    struct StepReceipt { BcdPlannedCommand command; BcdCommandResult result; bool success = false; bool tolerated = false; bool optional = false; };
+    struct Receipt { std::vector<StepReceipt> steps; BcdCommandResult finalEnum; bool success = true; bool hasEnum = false; };
+    const auto accepted = m_commandOperation->submitTransaction<BcdCommandPlan, Receipt>(plan,
+        [](const BcdCommandPlan& request) {
+            Receipt receipt;
+            const auto execute = [](const BcdPlannedCommand& command) {
+                const QVariantMap map = runBcdEditInCallingThread(command.args, kDefaultCommandTimeoutMs);
+                BcdCommandResult result;
+                result.startSucceeded = map.value(QString::fromLatin1(kEnumResultStartSucceededKey)).toBool();
+                result.timeout = map.value(QString::fromLatin1(kEnumResultTimeoutKey)).toBool();
+                result.exitCode = map.value(QString::fromLatin1(kEnumResultExitCodeKey)).toInt();
+                result.standardOutputText = map.value(QString::fromLatin1(kEnumResultStandardOutputKey)).toString();
+                result.standardErrorText = map.value(QString::fromLatin1(kEnumResultStandardErrorKey)).toString();
+                result.mergedOutputText = result.standardOutputText;
+                if (!result.standardErrorText.trimmed().isEmpty())
+                {
+                    if (!result.mergedOutputText.trimmed().isEmpty()) result.mergedOutputText += QStringLiteral("\n");
+                    result.mergedOutputText += result.standardErrorText;
+                }
+                kLogEvent event;
+                if (!result.startSucceeded) err << event << "[BootEditor] 命令启动失败: " << command.operation.toStdString() << ", error=" << result.standardErrorText.toStdString() << eol;
+                else if (result.timeout) err << event << "[BootEditor] 命令执行超时: " << command.operation.toStdString() << ", timeoutMs=" << kDefaultCommandTimeoutMs << eol;
+                else if (result.exitCode == 0) info << event << "[BootEditor] 命令执行完成: " << command.operation.toStdString() << ", exitCode=" << result.exitCode << eol;
+                else warn << event << "[BootEditor] 命令返回非零: " << command.operation.toStdString() << ", exitCode=" << result.exitCode << eol;
+                return result;
+            };
+            for (const auto& command : request.commands)
+            {
+                StepReceipt step{command, execute(command)};
+                step.success = step.result.startSucceeded && !step.result.timeout && step.result.exitCode == 0;
+                const QString lower = step.result.mergedOutputText.toLower();
+                step.tolerated = !step.success && command.missingOkay &&
+                    (lower.contains(QStringLiteral("not found")) || lower.contains(QStringLiteral("cannot find")) || lower.contains(QStringLiteral("does not exist"))
+                     || lower.contains(QStringLiteral("找不到")) || lower.contains(QStringLiteral("不存在")) || lower.contains(QStringLiteral("未找到")));
+                if (step.tolerated)
+                {
+                    kLogEvent warning;
+                    warn << warning << "[BootEditor] deletevalue 字段不存在，按目标状态继续: element="
+                        << command.args.value(2).toStdString() << ", identifier=" << command.args.value(1).toStdString() << eol;
+                }
+                receipt.steps.push_back(std::move(step));
+                if (!receipt.steps.back().success && !receipt.steps.back().tolerated) { receipt.success = false; break; }
+            }
+            if (request.copyAndAppend && receipt.success)
+            {
+                const QRegularExpression regex(QStringLiteral("\\{[^\\}\\s]+\\}"));
+                auto matches = regex.globalMatch(receipt.steps.front().result.mergedOutputText);
+                QString identifier;
+                while (matches.hasNext()) identifier = matches.next().captured(0);
+                if (!identifier.trimmed().isEmpty())
+                {
+                    BcdPlannedCommand command{{QStringLiteral("/displayorder"), identifier.trimmed(), QStringLiteral("/addlast")}, QStringLiteral("追加到 displayorder"), false};
+                    StepReceipt step{command, execute(command)};
+                    step.success = step.result.startSucceeded && !step.result.timeout && step.result.exitCode == 0;
+                    step.optional = true; // Copy success remains true even if the optional displayorder update failed.
+                    receipt.steps.push_back(std::move(step));
+                }
+            }
+            if (request.refreshAfter)
+            {
+                receipt.finalEnum = execute({{QStringLiteral("/enum"), QStringLiteral("all"), QStringLiteral("/v")}, QStringLiteral("枚举全部 BCD 条目"), false});
+                receipt.hasEnum = true;
+            }
+            return receipt;
+        },
+        [this, plan](const Receipt& receipt, std::uint64_t) {
+            const QPointer<BootEditorTab> alive(this);
+            for (const auto& step : receipt.steps)
+            {
+                appendCommandLog(QStringLiteral("bcdedit %1").arg(step.command.args.join(' ')), step.result);
+                if (step.success || step.tolerated) continue;
+                const auto& result = step.result;
+                const QString operation = step.command.operation;
+                if (!step.optional && plan.errorStyle == BcdErrorStyle::Copy)
+                    QMessageBox::warning(this, QStringLiteral("复制引导项"), QStringLiteral("复制失败：\n%1").arg(result.mergedOutputText.trimmed()));
+                else if (!step.optional && plan.errorStyle == BcdErrorStyle::Custom)
+                    QMessageBox::warning(this, QStringLiteral("自定义命令"), QStringLiteral("命令执行失败：\n%1").arg(result.mergedOutputText.trimmed()));
+                else if (!result.startSucceeded)
+                    QMessageBox::warning(this, QStringLiteral("引导编辑器"), QStringLiteral("%1失败：命令未能启动。\n%2").arg(operation, result.mergedOutputText.trimmed()));
+                else if (result.timeout)
+                    QMessageBox::warning(this, QStringLiteral("引导编辑器"), QStringLiteral("%1失败：命令执行超时。").arg(operation));
+                else if (!ks::ui::promptForPrivilegeFailure(this, operation, result.mergedOutputText))
+                    QMessageBox::warning(this, QStringLiteral("引导编辑器"), QStringLiteral("%1失败：\n%2").arg(operation, result.mergedOutputText.trimmed()));
+                if (!alive) return true;
+            }
+            if (receipt.success && !plan.successText.isEmpty())
+            {
+                QMessageBox::information(this, plan.successTitle, plan.successText);
+                if (!alive) return true;
+            }
+            if (receipt.hasEnum)
+            {
+                appendCommandLog(QStringLiteral("bcdedit /enum all /v"), receipt.finalEnum);
+                applyBcdEnumResult(receipt.finalEnum);
+            }
+            setBcdCommandBusy(false);
+            return true;
+        },
+        [this](std::exception_ptr) {
+            setBcdCommandBusy(false);
+            m_statusLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"), QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
+        });
+    if (accepted == 0)
     {
-        argumentList.removeFirst();
-    }
-    if (argumentList.isEmpty())
-    {
-        QMessageBox::information(this, QStringLiteral("自定义命令"), QStringLiteral("未解析到有效参数。"));
-        return;
-    }
-
-    const BcdCommandResult commandResult = runBcdEdit(
-        argumentList,
-        kDefaultCommandTimeoutMs,
-        QStringLiteral("执行自定义 bcdedit"));
-    appendCommandLog(QStringLiteral("bcdedit %1").arg(argumentList.join(' ')), commandResult);
-
-    if (!commandResult.startSucceeded || commandResult.timeout || commandResult.exitCode != 0)
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("自定义命令"),
-            QStringLiteral("命令执行失败：\n%1").arg(commandResult.mergedOutputText.trimmed()));
-        return;
-    }
-
-    QMessageBox::information(this, QStringLiteral("自定义命令"), QStringLiteral("命令执行成功。"));
-
-    const QString normalizedCommandText = rawCommandText.toLower();
-    if (!normalizedCommandText.contains(QStringLiteral("/enum")))
-    {
-        refreshBcdEntries();
+        setBcdCommandBusy(false);
+        m_statusLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"), QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
     }
 }
 
@@ -894,19 +625,7 @@ void BootEditorTab::appendCommandLog(
     const QString& commandTitle,
     const BcdCommandResult& commandResult)
 {
-    // 异步占位结果不落日志：
-    // - 占位结果只是把上一轮缓存文本原样交还给刷新流程，用于让界面维持既有内容；
-    // - 后台真实结果回投后会再走一次刷新，那一次才写入日志，保证一次刷新只有一条记录。
-    if (g_placeholderLogOwnerObject == this)
-    {
-        g_placeholderLogOwnerObject = nullptr;
-        return;
-    }
-
-    // 日志块格式：
-    // - 首行展示时间与命令标题；
-    // - 第二行开始展示原始输出；
-    // - 末尾追加执行状态摘要。
+    // Only genuine command/enum receipts reach this canonical output document.
     const QString timestampText = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     QString statusText = QStringLiteral("start=%1, timeout=%2, exit=%3")
         .arg(commandResult.startSucceeded ? QStringLiteral("true") : QStringLiteral("false"))
@@ -928,11 +647,7 @@ BootEditorTab::BcdCommandResult BootEditorTab::runBcdEdit(
     const int timeoutMs,
     const QString& commandDescription)
 {
-    // 进入时先清掉占位日志标记：
-    // - 正常流程里 appendCommandLog 会紧跟着消费掉它；
-    // - 万一某个调用方没有写日志，这里兜底，避免误抑制下一条真实日志。
-    g_placeholderLogOwnerObject = nullptr;
-
+    // Only the dedicated read-only refresh path uses this compatibility entry.
     BcdCommandResult result;
     const QString commandVerb = argumentList.value(0).trimmed().toLower();
     const bool readOnlyCommand = commandVerb == QStringLiteral("/enum") ||
@@ -1059,12 +774,9 @@ BootEditorTab::BcdCommandResult BootEditorTab::runBcdEdit(
                                 return;
                             }
                             guardedSelf->setProperty(kEnumPendingGenerationProperty, QVariant());
-                            if (g_synchronousCommandDepth > 0)
+                            if (guardedSelf->m_commandPending)
                             {
-                                // 此刻正卡在写命令的同步等待里：
-                                // - 这份快照拍摄于写入之前，本来就已过期；
-                                // - 现在刷新还会重建表格并改写用户正在提交的编辑框内容；
-                                // - 直接丢弃，写入流程收尾时会自行调用 refreshBcdEntries 重取。
+                                // A pre-transaction query cannot replace the accepted transaction/readback.
                                 return;
                             }
                             guardedSelf->setProperty(kEnumReadyResultProperty, collectedResultMap);
@@ -1073,265 +785,16 @@ BootEditorTab::BcdCommandResult BootEditorTab::runBcdEdit(
                 });
         }
 
-        // 第三步：立刻返回占位结果。
-        // - 沿用上一轮原始枚举文本，等待期间表格与编辑区保持既有内容，不会闪成空表；
-        // - 标记占位日志归属，避免把缓存文本重复写进“原始输出”区。
-        result.startSucceeded = true;
-        result.timeout = false;
-        result.exitCode = 0;
-        result.standardOutputText = m_lastEnumRawText;
-        result.mergedOutputText = m_lastEnumRawText;
-        g_placeholderLogOwnerObject = this;
-
+        // 尚未收到真实回执时不把旧文本伪装成新快照；调用方保留表格、选择与编辑参数。
+        result.pending = true;
         if (m_lastEnumRawText.trimmed().isEmpty() && m_statusLabel != nullptr)
         {
-            // 首轮加载没有历史数据可沿用，refreshBcdEntries 会写出“总条目 0”的摘要；
-            // 这里在下一轮事件循环把状态栏改回“尚未加载”，避免被误读成系统真的没有引导项。
-            QTimer::singleShot(0, this, [this]()
-                {
-                    if (m_statusLabel == nullptr)
-                    {
-                        return;
-                    }
-                    if (property(kEnumPendingGenerationProperty).toULongLong() == 0)
-                    {
-                        return;
-                    }
-                    m_statusLabel->setText(QStringLiteral("状态：尚未加载 BCD 数据"));
-                });
+            m_statusLabel->setText(QStringLiteral("状态：尚未加载 BCD 数据"));
         }
         return result;
     }
 
-    // ============ 其余命令：信号驱动的有界等待 ============
-    // 说明：
-    // - 写操作的调用方按返回值决定是否继续后续写入，必须保留同步语义；
-    // - 但等待方式不再是 waitForStarted 硬阻塞 + waitForFinished/processEvents 忙轮询：
-    //   进程结束、启动失败与超时全部由信号驱动，嵌套事件循环排除用户输入事件，
-    //   堵住等待期间点击其它页签触发懒加载重入构造的路径。
-    QProcess process; // 刻意不设父对象：嵌套事件循环期间父控件若被销毁会造成悬垂。
-
-    process.setProgram(QStringLiteral("bcdedit"));
-    process.setArguments(argumentList);
-    process.setProcessChannelMode(QProcess::SeparateChannels);
-
-    process.start();
-
-    // buildStartFailureResult：
-    // - 作用：统一收敛“进程未能启动”的结果填充与错误日志；
-    // - 返回：已填好错误信息的命令结果。
-    const auto buildStartFailureResult = [&result, &process, &commandDescription]() -> BcdCommandResult
-        {
-            result.startSucceeded = false;
-            result.standardErrorText = process.errorString();
-            result.mergedOutputText = result.standardErrorText;
-            kLogEvent startFailedEvent;
-            err << startFailedEvent
-                << "[BootEditor] 命令启动失败: "
-                << commandDescription.toStdString()
-                << ", error="
-                << result.standardErrorText.toStdString()
-                << eol;
-            return result;
-        };
-
-    if (process.state() == QProcess::NotRunning)
-    {
-        // CreateProcess 直接失败时 QProcess 会同步退回 NotRunning，无需进入等待。
-        return buildStartFailureResult();
-    }
-
-    QEventLoop waitEventLoop;
-    QTimer waitTimeoutTimer;
-    waitTimeoutTimer.setSingleShot(true);
-    waitTimeoutTimer.setInterval(timeoutMs > 0 ? timeoutMs : kDefaultCommandTimeoutMs);
-
-    bool processFailedToStart = false;
-    bool waitTimedOut = false;
-
-    QObject::connect(&process, &QProcess::finished, &waitEventLoop,
-        [&waitEventLoop](int, QProcess::ExitStatus)
-        {
-            waitEventLoop.quit();
-        });
-    QObject::connect(&process, &QProcess::errorOccurred, &waitEventLoop,
-        [&waitEventLoop, &processFailedToStart](const QProcess::ProcessError processError)
-        {
-            if (processError != QProcess::FailedToStart)
-            {
-                return;
-            }
-            processFailedToStart = true;
-            waitEventLoop.quit();
-        });
-    QObject::connect(&waitTimeoutTimer, &QTimer::timeout, &waitEventLoop,
-        [&waitEventLoop, &waitTimedOut]()
-        {
-            waitTimedOut = true;
-            waitEventLoop.quit();
-        });
-
-    waitTimeoutTimer.start();
-    if (process.state() != QProcess::NotRunning)
-    {
-        // 嵌套等待期间标记同步深度：
-        // - 排除用户输入已经挡住“等待中点击其它页签触发懒加载重入构造”；
-        // - 深度标记再挡住异步枚举结果在此刻回投刷新，双保险。
-        ++g_synchronousCommandDepth;
-        waitEventLoop.exec(QEventLoop::ExcludeUserInputEvents);
-        --g_synchronousCommandDepth;
-    }
-    waitTimeoutTimer.stop();
-
-    if (processFailedToStart)
-    {
-        return buildStartFailureResult();
-    }
-    result.startSucceeded = true;
-
-    if (waitTimedOut)
-    {
-        result.timeout = true;
-        process.kill();
-        process.waitForFinished(kProcessKillWaitMs);
-
-        result.standardOutputText = QString::fromLocal8Bit(process.readAllStandardOutput());
-        result.standardErrorText = QString::fromLocal8Bit(process.readAllStandardError());
-        result.mergedOutputText = result.standardOutputText + QStringLiteral("\n") + result.standardErrorText;
-
-        kLogEvent timeoutEvent;
-        err << timeoutEvent
-            << "[BootEditor] 命令执行超时: "
-            << commandDescription.toStdString()
-            << ", timeoutMs="
-            << timeoutMs
-            << eol;
-        return result;
-    }
-
-    result.exitCode = process.exitCode();
-    result.standardOutputText = QString::fromLocal8Bit(process.readAllStandardOutput());
-    result.standardErrorText = QString::fromLocal8Bit(process.readAllStandardError());
-    result.mergedOutputText = result.standardOutputText;
-    if (!result.standardErrorText.trimmed().isEmpty())
-    {
-        if (!result.mergedOutputText.trimmed().isEmpty())
-        {
-            result.mergedOutputText += QStringLiteral("\n");
-        }
-        result.mergedOutputText += result.standardErrorText;
-    }
-
-    kLogEvent event;
-    if (result.exitCode == 0)
-    {
-        info << event
-            << "[BootEditor] 命令执行完成: "
-            << commandDescription.toStdString()
-            << ", exitCode="
-            << result.exitCode
-            << eol;
-    }
-    else
-    {
-        warn << event
-            << "[BootEditor] 命令返回非零: "
-            << commandDescription.toStdString()
-            << ", exitCode="
-            << result.exitCode
-            << eol;
-    }
     return result;
-}
-
-bool BootEditorTab::runBcdAndExpectSuccess(
-    const QStringList& argumentList,
-    const QString& operationText,
-    const bool showSuccessToast)
-{
-    const BcdCommandResult result = runBcdEdit(argumentList, kDefaultCommandTimeoutMs, operationText);
-    appendCommandLog(QStringLiteral("bcdedit %1").arg(argumentList.join(' ')), result);
-
-    if (!result.startSucceeded)
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("引导编辑器"),
-            QStringLiteral("%1失败：命令未能启动。\n%2").arg(operationText, result.mergedOutputText.trimmed()));
-        return false;
-    }
-    if (result.timeout)
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("引导编辑器"),
-            QStringLiteral("%1失败：命令执行超时。").arg(operationText));
-        return false;
-    }
-    if (result.exitCode != 0)
-    {
-        // privilegePromptHandled：权限恢复提示已覆盖本次失败时不再显示通用命令错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            operationText,
-            result.mergedOutputText);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("引导编辑器"),
-                QStringLiteral("%1失败：\n%2").arg(operationText, result.mergedOutputText.trimmed()));
-        }
-        return false;
-    }
-
-    if (showSuccessToast)
-    {
-        QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("%1成功。").arg(operationText));
-    }
-    return true;
-}
-
-bool BootEditorTab::applyBootMenuPolicyByIdentifier(
-    const QString& identifierText,
-    const QString& policyValueText,
-    const QString& operationText)
-{
-    // 公共策略写入：
-    // - 统一校验标识符与目标策略参数；
-    // - 成功后给出明确结果提示。
-    const QString normalizedIdentifierText = identifierText.trimmed();
-    const QString normalizedPolicyText = policyValueText.trimmed();
-    if (normalizedIdentifierText.isEmpty() || normalizedPolicyText.isEmpty())
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("传统引导"),
-            QStringLiteral("参数无效：标识符或策略为空。"));
-        return false;
-    }
-
-    if (!runBcdAndExpectSuccess(
-        QStringList{
-            QStringLiteral("/set"),
-            normalizedIdentifierText,
-            QStringLiteral("bootmenupolicy"),
-            normalizedPolicyText
-        },
-        operationText,
-        false))
-    {
-        return false;
-    }
-
-    QMessageBox::information(
-        this,
-        QStringLiteral("传统引导"),
-        QStringLiteral("%1成功。\n标识符：%2\n策略：%3")
-        .arg(operationText)
-        .arg(normalizedIdentifierText)
-        .arg(normalizedPolicyText));
-    return true;
 }
 
 QString BootEditorTab::normalizeElementKey(const QString& rawKeyText)

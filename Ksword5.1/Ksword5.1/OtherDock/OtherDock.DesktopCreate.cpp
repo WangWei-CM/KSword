@@ -628,6 +628,9 @@ void OtherDock::showCreateDesktopDialog()
             record.windowStationName = windowStationEdit->text().trimmed();
             record.desktopName = desktopName;
             record.desktopHandle = desktopHandle;
+            record.handleLease = std::shared_ptr<void>(desktopHandle, [](void* handle) {
+                if (handle) ::CloseDesktop(reinterpret_cast<HDESK>(handle));
+            });
             record.desiredAccess = desiredAccess;
             record.privateAccess = privateAccessCheck->isChecked();
             record.inheritableHandle = inheritHandleFlag != FALSE;

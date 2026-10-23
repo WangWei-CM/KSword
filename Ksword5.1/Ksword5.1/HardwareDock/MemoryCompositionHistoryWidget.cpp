@@ -130,6 +130,14 @@ void MemoryCompositionHistoryWidget::copyDisplayFrom(const MemoryCompositionHist
     m_animationProgress = source.m_animationProgress;
     m_hasPreviousSample = source.m_hasPreviousSample;
     m_floatingScaleFactor = 1.0;
+    // Continue from the source timeline; sparse mirroring must not freeze an eased middle frame.
+    if (source.m_sampleAnimation->state() == QAbstractAnimation::Running)
+    {
+        m_sampleAnimation->setDuration(source.m_sampleAnimation->duration());
+        m_sampleAnimation->setEasingCurve(source.m_sampleAnimation->easingCurve());
+        m_sampleAnimation->start();
+        m_sampleAnimation->setCurrentTime(source.m_sampleAnimation->currentTime());
+    }
     update();
 }
 

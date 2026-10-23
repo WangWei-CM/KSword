@@ -7073,18 +7073,29 @@ namespace ks::startup
         const StartupEnumerationProgressCallback& progressCallback,
         const StartupEnumerationStageResultCallback& stageResultCallback)
     {
+        return EnumerateAllStartupEntries(progressCallback, stageResultCallback, {});
+    }
+
+    std::vector<StartupEntry> EnumerateAllStartupEntries(
+        const StartupEnumerationProgressCallback& progressCallback,
+        const StartupEnumerationStageResultCallback& stageResultCallback,
+        const std::function<bool()>& shouldStop)
+    {
         std::vector<StartupEntry> entries;
         constexpr std::size_t stageCount = 9U;
-        auto append = [&entries, &progressCallback, &stageResultCallback, stageCount](
+        auto append = [&entries, &progressCallback, &stageResultCallback, &shouldStop, stageCount](
             const StartupEnumerationStage stage,
             const std::size_t stageIndex,
             auto&& enumerateStage)
         {
+            if (shouldStop && shouldStop()) return;
             if (progressCallback)
             {
                 progressCallback(stage, stageIndex, stageCount);
             }
+            if (shouldStop && shouldStop()) return;
             std::vector<StartupEntry> part = enumerateStage();
+            if (shouldStop && shouldStop()) return;
             if (stageResultCallback)
             {
                 stageResultCallback(stage, stageIndex, stageCount, part);

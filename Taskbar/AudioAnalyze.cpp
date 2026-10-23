@@ -35,6 +35,7 @@ bool AudioSpectrumAnalyzer::initialize() {
         std::lock_guard<std::mutex> lock(m_spectrumMutex);
         m_spectrumData.fill(0.0f, NUM_BANDS);
         m_previousSpectrum.fill(0.0f, NUM_BANDS);
+        ++m_spectrumRevision;
     }
     m_magnitudes.fill(0.0f, FFT_SIZE / 2);
     sample_rate = 48000;
@@ -678,9 +679,9 @@ void AudioSpectrumAnalyzer::calculateFrequencyBands() {
     {
         std::lock_guard<std::mutex> lock(m_spectrumMutex);
         m_spectrumData = nextSpectrum;
+        ++m_spectrumRevision;
     }
-    emit spectrumDataReady(nextSpectrum);
-    qDebug() << "Spectrum data signal emitted";
+    // GUI按显示节拍读取最新快照；每个FFT不再排入跨线程Qt消息。
 }
 void AudioSpectrumAnalyzer::createWindowFunction()
 {
@@ -694,4 +695,17 @@ QVector<float> AudioSpectrumAnalyzer::getSpectrumData() const
 {
     std::lock_guard<std::mutex> lock(m_spectrumMutex);
     return m_spectrumData;
+}
+
+
+bool AudioSpectrumAnalyzer::readLatestSpectrum(quint64& revision, QVector<float>& data) const
+{
+    std::lock_guard<std::mutex> lock(m_spectrumMutex);
+    if (revision == m_spectrumRevision)
+    {
+        return false;
+    }
+    revision = m_spectrumRevision;
+    data = m_spectrumData;
+    return true;
 }

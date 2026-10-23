@@ -6,6 +6,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace ks::misc
@@ -100,6 +101,14 @@ namespace ks::misc
             ForensicFileSystemKind fileSystem,
             const QString& path,
             std::uint32_t maximumEntries = 4096U);
+
+        // The returned value owns one mounted file state. Call serially for this read only;
+        // a new source/partition/filesystem/path must create a new session.
+        using FileReadSession = std::function<RawFileReadResult(std::uint64_t, std::uint32_t)>;
+        static FileReadSession createReadSession(
+            int diskIndex, unsigned long backend, std::uint64_t partitionOffset,
+            std::uint64_t partitionLength, std::uint32_t logicalSectorSize,
+            ForensicFileSystemKind fileSystem, const QString& path);
 
         static RawFileReadResult readFile(
             int diskIndex,

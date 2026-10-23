@@ -12,8 +12,10 @@
 #include "VirtualLocationBackend.h"
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QWidget>
+#include <functional>
 
 class QCheckBox;
 class QComboBox;
@@ -21,7 +23,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
 class QShowEvent;
-namespace ks::ui { class StructuredFieldView; }
+namespace ks::ui { class StructuredFieldView; class AsyncOperation; }
 
 namespace ks::misc
 {
@@ -33,7 +35,9 @@ namespace ks::misc
     public:
         // 构造函数：只建界面，不访问注册表，避免打开“杂项”就触发一次系统查询。
         explicit VirtualLocationPage(QWidget* parent = nullptr);
-        ~VirtualLocationPage() override = default;
+        ~VirtualLocationPage() override;
+        // Initial searchable values; creates no page or native backend.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
 
     protected:
         // 页面第一次真正可见时才读一次系统状态。
@@ -53,6 +57,12 @@ namespace ks::misc
 
         // refreshStatus：同步读取位置服务状态与当前默认位置，并刷新到界面。
         void refreshStatus();
+        void applyStatusSnapshot(const virtual_location::ServiceSnapshot& service,
+            const virtual_location::DefaultLocationSnapshot& location);
+        void showAsyncFailure();
+        void runMutation(std::function<virtual_location::OperationResult()> operation,
+            std::function<void(const virtual_location::OperationResult&,
+                const virtual_location::DefaultLocationSnapshot&)> applyReceipt);
         // applyVirtualLocation：把输入坐标换算到 WGS-84 后写入默认位置，并立即回读校验。
         void applyVirtualLocation();
         // clearVirtualLocation：删除默认位置的五个值，把系统恢复成未设置状态。
@@ -111,6 +121,10 @@ namespace ks::misc
         QPushButton* m_restartServiceButton = nullptr; // m_restartServiceButton：重启位置服务丢缓存。
 
         int m_lastCoordinateSystemIndex = 0;       // m_lastCoordinateSystemIndex：上一次选中的坐标系，用于切换时换算。
+        ks::ui::AsyncOperation* m_statusOperation = nullptr;
+        ks::ui::AsyncOperation* m_mutationOperation = nullptr;
+        bool m_statusPending = false;
+        bool m_mutationPending = false;
         bool m_busy = false;                       // m_busy：同步操作进行中。
         bool m_liveFixRunning = false;             // m_liveFixRunning：后台实况定位进行中。
         bool m_updatingInputs = false;             // m_updatingInputs：正在程序化回填数值框。

@@ -166,68 +166,81 @@ void KernelDriverStartIoTab::refreshAsync()
         ksword::ark::DriverClient client;
         if (workerOk)
         {
-            QSet<QString> seenDriverNames;
-            for (const KernelDeviceDriverObjectEntry& objectRow : objectRows)
+            auto moduleSnapshot = client.captureDriverObjectModules();
+            for (unsigned attempt = 0; attempt < 2; ++attempt)
             {
-                if (objectRow.isScopeEntry ||
-                    objectRow.objectTypeText.compare(QStringLiteral("Driver"), Qt::CaseInsensitive) != 0)
+                QSet<QString> seenDriverNames;
+                for (const KernelDeviceDriverObjectEntry& objectRow : objectRows)
                 {
-                    continue;
-                }
-                const QString driverPath = objectRow.fullPathText.trimmed();
-                const QString normalizedDriverPath = driverPath.toCaseFolded();
-                if (driverPath.isEmpty() || seenDriverNames.contains(normalizedDriverPath))
-                {
-                    continue;
-                }
-                seenDriverNames.insert(normalizedDriverPath);
+                    if (objectRow.isScopeEntry ||
+                        objectRow.objectTypeText.compare(QStringLiteral("Driver"), Qt::CaseInsensitive) != 0)
+                    {
+                        continue;
+                    }
+                    const QString driverPath = objectRow.fullPathText.trimmed();
+                    const QString normalizedDriverPath = driverPath.toCaseFolded();
+                    if (driverPath.isEmpty() || seenDriverNames.contains(normalizedDriverPath))
+                    {
+                        continue;
+                    }
+                    seenDriverNames.insert(normalizedDriverPath);
 
-                StartIoRow row;
-                row.driverName = driverPath;
-                // 本页只用 startIo 与 imagePath：startIo 在 R0 是无条件填充的，
-                // imagePath 只需要 INCLUDE_NAMES。不要用默认的 INCLUDE_ALL，
-                // 那会让 R0 对每个驱动走完整设备链并逐设备 ObQueryNameString，
-                // 结果全被本页丢弃。
-                const ksword::ark::DriverObjectQueryResult query =
-                    client.queryDriverObject(
-                        driverPath.toStdWString(),
-                        KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES,
-                        0UL,
-                        0UL);
-                row.lastStatus = static_cast<std::int32_t>(query.lastStatus);
-                if (!query.io.ok)
-                {
-                    ++snapshot.queryFailureCount;
-                    row.queryError = query.io.message.empty()
-                        ? QStringLiteral("DriverObject 查询失败")
-                        : QString::fromStdString(query.io.message);
+                    StartIoRow row;
+                    row.driverName = driverPath;
+                    // 本页只用 startIo 与 imagePath：保留默认 StartIo 读取，
+                    // imagePath 只需要 INCLUDE_NAMES。不要用默认的 INCLUDE_ALL，
+                    // 那会让 R0 对每个驱动走完整设备链并逐设备 ObQueryNameString，
+                    // 结果全被本页丢弃。
+                    const ksword::ark::DriverObjectQueryResult query =
+                        client.queryDriverObject(
+                            driverPath.toStdWString(),
+                            KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES,
+                            0UL,
+                            0UL,
+                            &moduleSnapshot);
+                    row.lastStatus = static_cast<std::int32_t>(query.lastStatus);
+                    if (!query.io.ok)
+                    {
+                        ++snapshot.queryFailureCount;
+                        row.queryError = query.io.message.empty()
+                            ? QStringLiteral("DriverObject 查询失败")
+                            : QString::fromStdString(query.io.message);
+                        snapshot.rows.push_back(std::move(row));
+                        continue;
+                    }
+
+                    row.driverObjectAddress = query.driverObjectAddress;
+                    row.imagePath = QString::fromStdWString(query.imagePath);
+                    row.state = query.startIo.state;
+                    row.startIoAddress = query.startIo.address;
+                    row.moduleBase = query.startIo.moduleBase;
+                    row.moduleName = QString::fromStdWString(query.startIo.moduleName);
+                    row.flags = query.startIo.flags;
+                    switch (row.state)
+                    {
+                    case KSWORD_ARK_DRIVER_START_IO_STATE_PRESENT:
+                        ++snapshot.presentCount;
+                        break;
+                    case KSWORD_ARK_DRIVER_START_IO_STATE_NULL:
+                        ++snapshot.nullCount;
+                        break;
+                    case KSWORD_ARK_DRIVER_START_IO_STATE_READ_FAILED:
+                        ++snapshot.readFailedCount;
+                        break;
+                    default:
+                        ++snapshot.notQueriedCount;
+                        break;
+                    }
                     snapshot.rows.push_back(std::move(row));
-                    continue;
                 }
-
-                row.driverObjectAddress = query.driverObjectAddress;
-                row.imagePath = QString::fromStdWString(query.imagePath);
-                row.state = query.startIo.state;
-                row.startIoAddress = query.startIo.address;
-                row.moduleBase = query.startIo.moduleBase;
-                row.moduleName = QString::fromStdWString(query.startIo.moduleName);
-                row.flags = query.startIo.flags;
-                switch (row.state)
-                {
-                case KSWORD_ARK_DRIVER_START_IO_STATE_PRESENT:
-                    ++snapshot.presentCount;
-                    break;
-                case KSWORD_ARK_DRIVER_START_IO_STATE_NULL:
-                    ++snapshot.nullCount;
-                    break;
-                case KSWORD_ARK_DRIVER_START_IO_STATE_READ_FAILED:
-                    ++snapshot.readFailedCount;
-                    break;
-                default:
-                    ++snapshot.notQueriedCount;
-                    break;
-                }
-                snapshot.rows.push_back(std::move(row));
+                // One after-batch validation prevents changed/redacted module data from
+                // labeling mixed generations. Retry once through the original R0 path.
+                if (moduleSnapshot.systemInformation.empty()
+                    || client.captureDriverObjectModules().systemInformation == moduleSnapshot.systemInformation) break;
+                moduleSnapshot.systemInformation.clear();
+                Snapshot retry;
+                retry.errorText = snapshot.errorText;
+                snapshot = std::move(retry);
             }
         }
 

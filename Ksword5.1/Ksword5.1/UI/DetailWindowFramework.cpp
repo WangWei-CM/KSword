@@ -15,6 +15,7 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHash>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
@@ -139,7 +140,8 @@ namespace
             {
                 prepareForShow();
             }
-            else if (event->type() == QEvent::ChildAdded)
+            else if (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved
+                || event->type() == QEvent::ParentChange)
             {
                 // 只监听页面/布局宿主。惰性页构造结束后整理这个子树，不因字段刷新遍历整窗。
                 auto* scope = qobject_cast<QWidget*>(object);
@@ -248,13 +250,29 @@ namespace
                     {
                         return;
                     }
-                    markStructureDirty(safeStack->currentWidget());
+                    QWidget* page = safeStack->currentWidget();
+                    if (page && !m_preparedPages.value(page, false))
+                    {
+                        markStructureDirty(page); // 首次激活仍在首绘前处理；热切只消费真实结构dirty。
+                    }
                     if (m_window && m_window->isVisible())
                     {
                         apply(); // 窗口隐藏时只留dirty，重开Show再处理，避免后台程序化切页消耗UI时间。
                     }
                 });
             }
+        }
+        void rememberPreparedPage(QWidget* page)
+        {
+            if (!page)
+            {
+                return;
+            }
+            if (!m_preparedPages.contains(page))
+            {
+                connect(page, &QObject::destroyed, this, [this, page]() { m_preparedPages.remove(page); });
+            }
+            m_preparedPages.insert(page, true);
         }
         void observeContainers(const WidgetList& widgets)
         {
@@ -291,6 +309,13 @@ namespace
             if (!scope || (scope != m_window && scope->window() != m_window) || keepsOwnLayout(scope))
             {
                 return;
+            }
+            for (auto page = m_preparedPages.begin(); page != m_preparedPages.end(); ++page)
+            {
+                if (page.key() == scope || scope->isAncestorOf(page.key()) || page.key()->isAncestorOf(scope))
+                {
+                    page.value() = false; // 宽scope只收集当前分支；隐藏页不能因dirty合并而丢掉失效。
+                }
             }
             for (const auto& pointer : m_dirtyScopes)
             {
@@ -546,7 +571,8 @@ namespace
         }
         void apply()
         {
-            if (!m_window || !m_window->layout() || m_applying || keepsOwnLayout(m_window))
+            if (!m_window || !m_window->layout() || m_applying || keepsOwnLayout(m_window)
+                || (m_prepared && m_dirtyScopes.isEmpty() && !m_styleDirty))
             {
                 return;
             }
@@ -599,6 +625,17 @@ namespace
                 prepareForms(widgets);
                 prepareScrollAreas(widgets);
                 observeContainers(widgets);
+                if (scope && qobject_cast<QStackedWidget*>(scope->parentWidget()))
+                {
+                    rememberPreparedPage(scope);
+                }
+                for (const auto& widget : widgets)
+                {
+                    if (auto* stack = qobject_cast<QStackedWidget*>(widget.data()))
+                    {
+                        rememberPreparedPage(stack->currentWidget());
+                    }
+                }
             }
             if (m_styleDirty)
             {
@@ -610,6 +647,7 @@ namespace
         QPointer<QWidget> m_window; // 原窗口保留身份、模态关系和业务关闭语义。
         QSet<QWidget*> m_observed; // 只观察布局宿主，字段/表格的普通事件不触发结构遍历。
         WidgetList m_dirtyScopes; // 惰性构造按最小宿主子树合并，销毁后自动失效。
+        QHash<QWidget*, bool> m_preparedPages; // 每个Stack页的结构完成状态；失效后仍保留唯一销毁连接。
         bool m_prepared = false; // 首帧前安装一次，重开不重挂原业务布局。
         bool m_styleDirty = false; // 主题刷新与结构更新分开。
         bool m_pending = false;

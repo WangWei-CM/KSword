@@ -42,6 +42,7 @@ namespace ks::winapi_monitor
         InjectionEndpoint endpoint;
         std::wstring rootStopPath;
         std::unordered_map<DWORD, Participant> participants;
+        std::unordered_map<DWORD, std::uint64_t> attemptedParticipants;
         HANDLE stopEvent = nullptr, pipe = INVALID_HANDLE_VALUE;
         std::thread worker;
         ~State() {
@@ -91,6 +92,9 @@ namespace ks::winapi_monitor
             }
             if (participants.size() >= 8192)
                 return platformFailure(error, L"injection session participant capacity reached", ERROR_NOT_ENOUGH_QUOTA);
+            if (!attemptedParticipants.contains(request.childPid) && attemptedParticipants.size() >= 8192)
+                return platformFailure(error, L"injection session participant capacity reached", ERROR_NOT_ENOUGH_QUOTA);
+            attemptedParticipants[request.childPid] = request.childCreation;
             if (!injectAgentNative(request.childPid, selected, error, request.childCreation, stopEvent)) return false;
             if (stopping()) return platformFailure(error, L"injection session stopped during load", ERROR_OPERATION_ABORTED);
             participants[request.childPid] = {request.childCreation, selected, session};
@@ -132,6 +136,17 @@ namespace ks::winapi_monitor
     InjectionBroker::InjectionBroker() = default;
     InjectionBroker::~InjectionBroker() = default;
     void InjectionBroker::stop() { m_state.reset(); }
+    std::vector<InjectionParticipant> InjectionBroker::stopAndTakeParticipants()
+    {
+        if (!m_state) return {};
+        if (m_state->stopEvent) ::SetEvent(m_state->stopEvent);
+        if (m_state->worker.joinable()) m_state->worker.join();
+        std::vector<InjectionParticipant> result;
+        result.reserve(m_state->attemptedParticipants.size());
+        for (const auto& [pid, creation] : m_state->attemptedParticipants) result.push_back({pid, creation});
+        m_state.reset();
+        return result;
+    }
     InjectionEndpoint InjectionBroker::endpoint() const { return m_state ? m_state->endpoint : InjectionEndpoint{}; }
     bool InjectionBroker::start(DWORD rootPid, const std::wstring& agentPath, const std::wstring& session,
         const std::wstring& rootStopPath, std::wstring* error)

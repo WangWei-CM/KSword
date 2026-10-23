@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 #include <QList>
 #include <QPointer>
 
@@ -14,10 +15,17 @@ namespace ks::misc
     class ThemeCheckPage final : public QWidget
     {
     public:
+        static QStringList navigationRootSearchTexts();
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+        static ks::ui::PageNavigationCatalog navigationCatalog(const ThemeCheckPage* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         explicit ThemeCheckPage(QWidget* parent = nullptr);
     protected:
         void showEvent(QShowEvent* event) override;
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         void addDynamicControls(); // 在已显示页面追加原生控件，验证运行时自动接入。
         void refreshChecks(); // 读取真实绑定/尺寸，不把这些检查当作像素视觉验收。
         QLabel* m_status = nullptr; // 检查结果与当前背景模式。

@@ -42,8 +42,6 @@ public:
     // 按与背景绘制相同的缩放及 alpha 采样面板底色；透明桌面内容不在此快照内。
     QColor effectivePanelBackground(const QWidget* panel, const QColor& fillColor, int opacityPercent) const;
 
-    QPixmap captureContent(); // 捕获当前内容为图像
-
 signals:
     void backdropChanged(); // 背景图片、透明度或面板位置变化后重算前景配色。
 
@@ -76,7 +74,6 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    void paintEvent(QPaintEvent* event) override;
 
 private:
     struct HudConfig
@@ -106,14 +103,9 @@ private:
     QPropertyAnimation* m_showAnimation;
     OpenGLWidget* m_glWidget;
 
-    QPixmap m_cachedContent;
-    QPixmap m_lastStableContent;
-    qreal m_contentScale;
 
     // 调试相关
     QElapsedTimer m_debugTimer;
-    int m_paintFrameCount;
-    int m_animationFrameCount;
 
     void toggleVisibility();
     void initializeAnimations();
@@ -121,10 +113,7 @@ private:
     void applyHudConfig(const HudConfig& config);
     void refreshPaneColors(); // 仅刷新前景对比色，保留原始背景与普通行用户字体。
     HudConfig m_hudConfig; // 当前独立 HUD 配置，供背景尺寸变化后的颜色重算使用。
-    void cacheWindowContent(bool refreshFromLiveScene = true);
     void debugOutput(const QString& message);
-    void clearCache();
-    void forceUpdateCache();
 
     HardwareMonitor* m_hwMonitor = nullptr;    // 旧硬件监控对象（已停用）
     QTimer* m_updateTimer = nullptr;           // 旧定时器（已停用）

@@ -3,6 +3,7 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <atomic>
 #include <cstdint>
@@ -18,6 +19,8 @@ class QLineEdit;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
+class QShowEvent;
 struct ScannerAsyncState;
 
 namespace ks::ui
@@ -39,6 +42,9 @@ namespace ks::scanner
 class ScannerDock final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ScannerDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：建立扫描器界面并进入“等待选择文件”状态。
     // 参数 parent：Qt 父控件；返回值：无。
     explicit ScannerDock(QWidget* parent = nullptr);
@@ -50,8 +56,14 @@ protected:
     // changeEvent 作用：语言切换时重译固定控件和已显示的扫描结果。
     // 参数 event：Qt 事件；返回值：无。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
+    static const ks::ui::PageNavigationTabDefinition& navigationDefinition(int index);
+    void addResultNavigationTab(QWidget* page, const QString& title);
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+    ks::ui::PageNavigationCatalog m_resultNavigationSchema;
+
     // 以下函数分别负责构建/重译界面、选择目标，以及启动异步扫描或写入。
     void buildUi();
     void buildAnalysisUi();
@@ -80,12 +92,14 @@ private:
     // renderResult 作用：把格式中立模型渲染为摘要、头、结构表和诊断页。
     void renderResult(const ks::scanner::BinaryScanResult& result);
     void clearResultTabs();
+    void prepareResultPresentation();
+    void refreshResultLanguage();
 
     // createReadOnlyTable 作用：创建统一只读表格；调用方负责填充行列。
     QTableWidget* createReadOnlyTable(QWidget* parent = nullptr) const;
 
     // createStructuredTablePage 作用：为宽表建立互补 A/B/C 列组和表头列菜单。
-    QWidget* createStructuredTablePage(QTableWidget* table, int columnCount) const;
+    QWidget* createStructuredTablePage(QTableView* table, int columnCount) const;
 
     // createAttackPathPage 作用：展示规则结论、评分和逐条可复核证据。
     QWidget* createAttackPathPage(const ks::scanner::BinaryScanResult& result) const;
@@ -150,6 +164,9 @@ private:
     QPushButton* m_applyPatchButton = nullptr; // m_applyPatchButton：执行安全写入。
 
     std::shared_ptr<ks::scanner::BinaryScanResult> m_lastResult; // m_lastResult：语言切换时重绘的最近结果。
+    std::shared_ptr<const ks::scanner::BinaryScanResult> m_presentedResult;
+    bool m_resultPresentationDirty = false;
+    bool m_resultLanguageDirty = false;
     QString m_statusKey; // m_statusKey：当前状态对应的语言包键。
     QString m_statusFallback; // m_statusFallback：语言包缺失时使用的中文文本。
     QStringList m_statusArguments; // m_statusArguments：依次替换状态文本中的占位符。

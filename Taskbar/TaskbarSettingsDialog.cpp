@@ -9,10 +9,12 @@
 #include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QIcon>
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -132,16 +134,46 @@ TaskbarSettingsDialog::TaskbarSettingsDialog(TaskbarNotificationService* notific
         connect(m_notificationService, &TaskbarNotificationService::settingsChanged, this,
             &TaskbarSettingsDialog::refreshFromService);
         connect(m_notificationService, &TaskbarNotificationService::sourceStatusesChanged, this,
-            &TaskbarSettingsDialog::refreshSourceDiagnostics);
+            &TaskbarSettingsDialog::scheduleSourceDiagnostics);
     }
 
     // 对话框可见时每秒刷新一次连接状态，既有实时诊断也不会给 WebSocket 线程增加轮询负担。
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(1000);
     connect(m_refreshTimer, &QTimer::timeout, this, &TaskbarSettingsDialog::refreshSourceDiagnostics);
-    m_refreshTimer->start();
+    refreshFromService();
+}
+
+void TaskbarSettingsDialog::showEvent(QShowEvent* event)
+{
     refreshFromService();
     refreshSourceDiagnostics();
+    m_refreshTimer->start();
+    QDialog::showEvent(event);
+}
+
+void TaskbarSettingsDialog::hideEvent(QHideEvent* event)
+{
+    m_refreshTimer->stop();
+    m_sourceDiagnosticsDirty = true;
+    QDialog::hideEvent(event);
+}
+
+void TaskbarSettingsDialog::scheduleSourceDiagnostics()
+{
+    m_sourceDiagnosticsDirty = true;
+    if (!isVisible() || m_sourceDiagnosticsPending)
+    {
+        return;
+    }
+    m_sourceDiagnosticsPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_sourceDiagnosticsPending = false;
+        if (m_sourceDiagnosticsDirty)
+        {
+            refreshSourceDiagnostics();
+        }
+    });
 }
 
 void TaskbarSettingsDialog::applyClipboardSetting(bool enabled)
@@ -199,17 +231,30 @@ void TaskbarSettingsDialog::refreshFromService()
 
 void TaskbarSettingsDialog::refreshSourceDiagnostics()
 {
+    // 隐藏时只保留脏状态；网络接收和通知业务继续运行。
+    if (!isVisible())
+    {
+        m_sourceDiagnosticsDirty = true;
+        return;
+    }
+    m_sourceDiagnosticsDirty = false;
+    const auto setDiagnosticsText = [this](const QString& text) {
+        if (m_sourceStatusLabel->text() != text)
+        {
+            m_sourceStatusLabel->setText(text);
+        }
+    };
     // 将所有来源的状态压缩成多行文本，连接成功后显示最近包时间和已测得的 RTT。
     if (m_notificationService == nullptr)
     {
-        m_sourceStatusLabel->setText(QStringLiteral("地震预警服务不可用。"));
+        setDiagnosticsText(QStringLiteral("地震预警服务不可用。"));
         return;
     }
 
     const QList<TaskbarEarthquakeSourceStatus> statuses = m_notificationService->sourceStatuses();
     if (statuses.isEmpty())
     {
-        m_sourceStatusLabel->setText(QStringLiteral("正在初始化地震预警来源。"));
+        setDiagnosticsText(QStringLiteral("正在初始化地震预警来源。"));
         return;
     }
 
@@ -239,7 +284,7 @@ void TaskbarSettingsDialog::refreshSourceDiagnostics()
         }
         lines.push_back(QStringLiteral("%1: %2").arg(status.name, state));
     }
-    m_sourceStatusLabel->setText(lines.join(QLatin1Char('\n')));
+    setDiagnosticsText(lines.join(QLatin1Char('\n')));
 }
 
 void TaskbarSettingsDialog::restartTaskbar()

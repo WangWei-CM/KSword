@@ -136,7 +136,7 @@ namespace ks::ui
             showEditError(EncodeFailureText(status, rowData), true);
             return;
         }
-        stageEdit(rowData, bytes, text.trimmed());
+        stageEdit(rowData, bytes, text);
     }
 
     // Esc 或点到别处取消：不产生任何暂存，清掉上一次的错误消息。
@@ -191,49 +191,52 @@ namespace ks::ui
 
         if (!unchanged)
         {
-            // 暂存：唯一的写入入口，成功时画布自己发 editStaged 并排队 contentChanged。
-            // 被拒绝时画布已发 editRejected，这里只显示原因（不再发第二遍），编辑器保持打开方便修改。
             QByteArray payload(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size()));
-            QString reason;
-            QPointer<HexInspectorPanel> self(this);
-            QPointer<HexCanvas> source(canvasPointer);
+            const QPointer<HexInspectorPanel> self(this);
+            const QPointer<HexCanvas> source(canvasPointer);
             const auto stagedRevision = m_editSourceRevision;
             const auto* stagedOverlay = m_editOverlay;
             const std::string stagedIdentity = m_editIdentityKey;
-            const bool staged = canvasPointer->stageBytes(editAddress, payload, &reason);
-            if (!self)
+            const int editedRow = m_editRow;
+            const auto resolved = [self, source, stagedRevision, stagedOverlay, stagedIdentity,
+                editedRow, row, typedText, editAddress, length = bytes.size()](bool ok,const QString& reason)
             {
-                return false;
-            }
-            // editStaged 的同步槽可进入写入确认并换目标；返回后不能关闭新目标的编辑器或覆盖其状态。
-            if (!source || m_canvas != source || source->sourceRevision() != stagedRevision
-                || source->overlay() != stagedOverlay || stagedOverlay->IdentityKey() != stagedIdentity)
-            {
-                return false;
-            }
-            if (!staged)
-            {
-                showEditError(reason, false);
-                return false;
-            }
+                if (!self || !source || self->m_canvas != source || source->sourceRevision() != stagedRevision
+                    || source->overlay() != stagedOverlay || !stagedOverlay || stagedOverlay->IdentityKey() != stagedIdentity)
+                    return;
+                self->m_rows->endEdit(); self->m_editRow = -1;
+                self->refresh(true);
+                if (!self) return;
+                if (ok)
+                {
+                    self->m_status->setMessage(HexInspectorStatusBar::Kind::Info,
+                        QStringLiteral("已暂存 %1 = %2（%3 个字节，地址 0x%4）")
+                            .arg(row.typeName).arg(typedText.trimmed()).arg(length)
+                            .arg(QString::number(editAddress,16).toUpper()));
+                    return;
+                }
+                // A CPU-stage failure is still an editing failure: restore
+                // exactly the submitted text, never claim it was staged.
+                if (source->isEditable() && self->m_rows->beginEdit(editedRow,typedText))
+                {
+                    self->m_editRow = editedRow;
+                    self->m_editAddress = editAddress;
+                    self->m_editSourceRevision = stagedRevision;
+                    self->m_editOverlay = stagedOverlay;
+                    self->m_editIdentityKey = stagedIdentity;
+                }
+                self->showEditError(reason,false);
+            };
+            QString reason;
+            // Callback is synchronous for legacy hosts and completion-based
+            // for a workbench. Success text waits for actual value projection.
+            return canvasPointer->stageBytes(editAddress,payload,&reason,{},resolved);
         }
 
-        // 成功（或值没有变化）：关闭编辑器、刷新自己并显示结果。
         m_rows->endEdit();
         m_editRow = -1;
         refresh(true);
-        if (unchanged)
-        {
-            m_status->setMessage(HexInspectorStatusBar::Kind::Info, QStringLiteral("值没有变化，没有产生暂存"));
-            return true;
-        }
-        m_status->setMessage(
-            HexInspectorStatusBar::Kind::Info,
-            QStringLiteral("已暂存 %1 = %2（%3 个字节，地址 0x%4）")
-                .arg(row.typeName)
-                .arg(typedText)
-                .arg(bytes.size())
-                .arg(QString::number(editAddress, 16).toUpper()));
+        m_status->setMessage(HexInspectorStatusBar::Kind::Info, QStringLiteral("值没有变化，没有产生暂存"));
         return true;
     }
 

@@ -3,6 +3,7 @@
 #include "../UI/DetailPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
 
 #include "KernelDock.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -17,6 +18,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QScopedValueRollback>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -58,7 +60,13 @@ KernelDriverDispatchEditorDialog::KernelDriverDispatchEditorDialog(
       m_requestedDriverName(driverObjectName.trimmed())
 {
     initializeUi();
+    m_readOperation = new ks::ui::AsyncOperation(this);
     QTimer::singleShot(0, this, [this]() { refreshDriverSnapshot(); });
+}
+
+KernelDriverDispatchEditorDialog::~KernelDriverDispatchEditorDialog()
+{
+    if (m_readOperation != nullptr) m_readOperation->close();
 }
 
 void KernelDriverDispatchEditorDialog::initializeUi()
@@ -219,7 +227,7 @@ void KernelDriverDispatchEditorDialog::initializeUi()
         refreshDriverSnapshot();
     });
     connect(m_querySlotButton, &QPushButton::clicked, this, [this]() {
-        refreshSelectedTransaction();
+        refreshSelectedTransactionAsync();
     });
     connect(m_applyButton, &QPushButton::clicked, this, [this]() {
         applySelectedDispatch();
@@ -238,7 +246,7 @@ void KernelDriverDispatchEditorDialog::initializeUi()
             m_desiredAddressEdit->setText(currentItem != nullptr
                 ? currentItem->text()
                 : QString());
-            refreshSelectedTransaction();
+            refreshSelectedTransactionAsync();
         }
     });
     setActionsEnabled(false);
@@ -248,13 +256,35 @@ void KernelDriverDispatchEditorDialog::initializeUi()
 
 void KernelDriverDispatchEditorDialog::refreshDriverSnapshot()
 {
+    if (m_mutationBusy) return;
+    m_identityRefreshPending = true;
     setActionsEnabled(false);
-    setStatus(
-        kernelText("kernel.driver_dispatch.status.querying", QStringLiteral("状态：正在查询 DriverObject...")),
-        KswordTheme::PrimaryBlueHex);
+    setStatus(kernelText("kernel.driver_dispatch.status.querying", QStringLiteral("状态：正在查询 DriverObject...")), KswordTheme::PrimaryBlueHex);
+    const auto ticket = m_readOperation->submit<std::wstring, ksword::ark::DriverObjectQueryResult>(m_requestedDriverName.toStdWString(),
+        [](const std::wstring& name, const ks::ui::AsyncOperationToken&) {
+            const ksword::ark::DriverClient client;
+            return client.queryDriverObject(name, KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_MAJOR_FUNCTIONS | KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES);
+        },
+        [this](const ksword::ark::DriverObjectQueryResult& result, std::uint64_t) {
+            m_identityRefreshPending = false;
+            applyDriverSnapshot(result);
+            return true;
+        },
+        [this](std::exception_ptr) {
+            m_identityRefreshPending = false;
+            setActionsEnabled(false);
+            setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+        });
+    if (ticket == 0)
+    {
+        m_identityRefreshPending = false;
+        setActionsEnabled(false);
+        setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+    }
+}
 
-    const ksword::ark::DriverClient client;
-    const auto result = client.queryDriverObject(m_requestedDriverName.toStdWString());
+void KernelDriverDispatchEditorDialog::applyDriverSnapshot(const ksword::ark::DriverObjectQueryResult& result)
+{
     if (!result.io.ok)
     {
         setStatus(
@@ -338,7 +368,7 @@ void KernelDriverDispatchEditorDialog::refreshDriverSnapshot()
         KswordTheme::SuccessHex());
     if (m_table->rowCount() > 0)
     {
-        (void)refreshSelectedTransaction();
+        refreshSelectedTransactionAsync();
     }
 }
 
@@ -357,6 +387,14 @@ bool KernelDriverDispatchEditorDialog::refreshSelectedTransaction()
         m_canonicalDriverName.toStdWString(),
         major,
         m_driverObjectAddress);
+    return applyTransactionResult(result);
+}
+
+bool KernelDriverDispatchEditorDialog::applyTransactionResult(const ksword::ark::DriverDispatchControlResult& result)
+{
+    const int row = selectedRow();
+    const std::uint32_t major = selectedMajorFunction();
+    if (row < 0) return false;
     if (!result.io.ok)
     {
         setStatus(
@@ -417,8 +455,48 @@ bool KernelDriverDispatchEditorDialog::refreshSelectedTransaction()
     return querySucceeded;
 }
 
+bool KernelDriverDispatchEditorDialog::isCurrentReadTarget(const SlotQuery& request) const
+{
+    return !m_mutationBusy && !m_identityRefreshPending && selectedRow() >= 0
+        && selectedMajorFunction() == request.major && m_moduleBase == request.moduleBase
+        && m_driverObjectAddress == request.driverObject && m_canonicalDriverName.toStdWString() == request.driverName;
+}
+
+void KernelDriverDispatchEditorDialog::refreshSelectedTransactionAsync()
+{
+    if (m_mutationBusy || m_identityRefreshPending || selectedRow() < 0 || m_moduleBase == 0U || m_driverObjectAddress == 0U) return;
+    const SlotQuery request{m_moduleBase, m_driverObjectAddress, selectedMajorFunction(), m_canonicalDriverName.toStdWString()};
+    setActionsEnabled(false);
+    setStatus(kernelText("kernel.driver_dispatch.status.slot_querying", QStringLiteral("状态：正在查询所选 MajorFunction 事务...")), KswordTheme::PrimaryBlueHex);
+    const auto ticket = m_readOperation->submit<SlotQuery, ksword::ark::DriverDispatchControlResult>(request,
+        [](const SlotQuery& value, const ks::ui::AsyncOperationToken&) {
+            const ksword::ark::DriverClient client;
+            return client.queryDriverDispatch(value.moduleBase, value.driverName, value.major, value.driverObject);
+        },
+        [this, request](const ksword::ark::DriverDispatchControlResult& result, std::uint64_t) {
+            if (isCurrentReadTarget(request))
+            {
+                if (!applyTransactionResult(result)) m_querySlotButton->setEnabled(true);
+            }
+            return true;
+        },
+        [this, request](std::exception_ptr) {
+            if (!isCurrentReadTarget(request)) return;
+            m_querySlotButton->setEnabled(true);
+            setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+        });
+    if (ticket == 0 && isCurrentReadTarget(request))
+    {
+        m_querySlotButton->setEnabled(true);
+        setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+    }
+}
+
 void KernelDriverDispatchEditorDialog::applySelectedDispatch()
 {
+    if (m_identityRefreshPending || m_readOperation->isInFlight() || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     std::uint64_t desiredAddress = 0;
     const std::uint32_t major = selectedMajorFunction();
     if (selectedRow() < 0 || !parsePointer(m_desiredAddressEdit->text(), desiredAddress))
@@ -486,7 +564,7 @@ void KernelDriverDispatchEditorDialog::applySelectedDispatch()
         .arg(result.generation);
     if (!selfControlChannel && result.lastStatus >= 0)
     {
-        refreshDriverSnapshot();
+        QTimer::singleShot(0, this, [this]() { refreshDriverSnapshot(); });
     }
     setStatus(
         resultText,
@@ -497,6 +575,9 @@ void KernelDriverDispatchEditorDialog::applySelectedDispatch()
 
 void KernelDriverDispatchEditorDialog::restoreSelectedDispatch()
 {
+    if (m_identityRefreshPending || m_readOperation->isInFlight() || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     if (selectedRow() < 0)
     {
         return;
@@ -525,7 +606,7 @@ void KernelDriverDispatchEditorDialog::restoreSelectedDispatch()
         .arg(result.generation);
     if (result.lastStatus >= 0)
     {
-        refreshDriverSnapshot();
+        QTimer::singleShot(0, this, [this]() { refreshDriverSnapshot(); });
     }
     setStatus(
         resultText,
@@ -536,6 +617,9 @@ void KernelDriverDispatchEditorDialog::restoreSelectedDispatch()
 
 void KernelDriverDispatchEditorDialog::abandonSelectedRecord()
 {
+    if (m_identityRefreshPending || m_readOperation->isInFlight() || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     if (selectedRow() < 0)
     {
         return;
@@ -574,7 +658,7 @@ void KernelDriverDispatchEditorDialog::abandonSelectedRecord()
         .arg(pointerText(result.currentDispatchAddress));
     if (result.lastStatus >= 0)
     {
-        refreshDriverSnapshot();
+        QTimer::singleShot(0, this, [this]() { refreshDriverSnapshot(); });
     }
     setStatus(
         resultText,

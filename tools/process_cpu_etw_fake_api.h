@@ -1,0 +1,36 @@
+#pragma once
+#include "__CPU_HEADER__"
+ULONG WINAPI CpuFakeStartTraceW(PTRACEHANDLE,LPCWSTR,PEVENT_TRACE_PROPERTIES);
+ULONG WINAPI CpuFakeControlTraceW(TRACEHANDLE,LPCWSTR,PEVENT_TRACE_PROPERTIES,ULONG);
+ULONG WINAPI CpuFakeQueryAllTracesW(PEVENT_TRACE_PROPERTIES*,ULONG,PULONG);
+PROCESSTRACE_HANDLE WINAPI CpuFakeOpenTraceW(PEVENT_TRACE_LOGFILEW);
+ULONG WINAPI CpuFakeCloseTrace(PROCESSTRACE_HANDLE);
+ULONG WINAPI CpuFakeProcessTrace(PROCESSTRACE_HANDLE*,ULONG,LPFILETIME,LPFILETIME);
+WORD WINAPI CpuFakeGetActiveProcessorGroupCount();
+DWORD WINAPI CpuFakeGetActiveProcessorCount(WORD);
+DWORD WINAPI CpuFakeGetCurrentProcessId();
+VOID WINAPI CpuFakeGetSystemInfo(LPSYSTEM_INFO);
+BOOL WINAPI CpuFakeQueryPerformanceCounter(LARGE_INTEGER*);
+DWORD WINAPI CpuFakeGetLastError();
+HANDLE WINAPI CpuFakeOpenThread(DWORD,BOOL,DWORD);
+DWORD WINAPI CpuFakeGetProcessIdOfThread(HANDLE);
+BOOL WINAPI CpuFakeCloseHandle(HANDLE);
+HANDLE WINAPI CpuFakeOpenProcess(DWORD,BOOL,DWORD);
+DWORD WINAPI CpuFakeWaitForSingleObject(HANDLE,DWORD);
+#define StartTraceW CpuFakeStartTraceW
+#define ControlTraceW CpuFakeControlTraceW
+#define QueryAllTracesW CpuFakeQueryAllTracesW
+#define OpenTraceW CpuFakeOpenTraceW
+#define CloseTrace CpuFakeCloseTrace
+#define ProcessTrace CpuFakeProcessTrace
+#define GetActiveProcessorGroupCount CpuFakeGetActiveProcessorGroupCount
+#define GetActiveProcessorCount CpuFakeGetActiveProcessorCount
+#define GetCurrentProcessId CpuFakeGetCurrentProcessId
+#define GetSystemInfo CpuFakeGetSystemInfo
+#define QueryPerformanceCounter CpuFakeQueryPerformanceCounter
+#define GetLastError CpuFakeGetLastError
+#define OpenThread CpuFakeOpenThread
+#define GetProcessIdOfThread CpuFakeGetProcessIdOfThread
+#define CloseHandle CpuFakeCloseHandle
+#define OpenProcess CpuFakeOpenProcess
+#define WaitForSingleObject CpuFakeWaitForSingleObject

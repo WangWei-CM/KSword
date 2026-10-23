@@ -1,6 +1,7 @@
 #pragma once
 
 class QTableWidget;
+class QTableView;
 
 namespace ks::ui
 {
@@ -21,4 +22,9 @@ namespace ks::ui
     void SetTableHeaderClickSortingEnabled(
         QTableWidget* tableWidget,
         bool enabled);
+    // Model views retain their existing model/proxy and selection model.
+    // Configure the model comparator and disable dynamic sorting as appropriate.
+    // Install after setModel; repeated install and later model/header replacement are safe.
+    void InstallTableHeaderClickSorting(QTableView* tableView);
+    void SetTableHeaderClickSortingEnabled(QTableView* tableView, bool enabled);
 }

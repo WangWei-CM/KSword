@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
 
 namespace Ksword::Features::Monitor {
 namespace {
@@ -34,9 +35,10 @@ constexpr int kClearButtonId = 52004;
 constexpr int kExportButtonId = 52007;
 constexpr int kListId = 52005;
 constexpr int kLocalFilterBarId = 52006;
-constexpr UINT kStatusMessage = WM_APP + 62;
 constexpr UINT kLocalFilterMessage = WM_APP + 63;
 constexpr UINT kExternalProcessFilterMessage = WM_APP + 64;
+constexpr UINT kSessionControlMessage = WM_APP + 65;
+constexpr UINT kIconsReadyMessage = WM_APP + 66;
 constexpr UINT_PTR kEventFlushTimerId = 52061;
 constexpr UINT kEventFlushIntervalMs = 150;
 constexpr std::size_t kMaxEventRows = 5000;
@@ -194,7 +196,8 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
 EtwMonitorView::EtwMonitorView() = default;
 
 EtwMonitorView::~EtwMonitorView() {
-    controller_.stop();
+    iconLoader_.reset();
+    retireSession();
     if (eventImageList_ != nullptr) {
         ImageList_Destroy(eventImageList_);
         eventImageList_ = nullptr;
@@ -248,6 +251,11 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         ::SetTimer(hwnd_, kEventFlushTimerId, kEventFlushIntervalMs, nullptr);
         updateButtonState();
         return 0;
+    case WM_SHOWWINDOW:
+        if (wParam && eventProjectionDirty_) {
+            commitEventProjection(deferredViewAnchor_);
+        }
+        break;
     case WM_SIZE:
         layout();
         return 0;
@@ -310,21 +318,41 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
         break;
+    case Ksword::Ui::kBeginNativeRetirementMessage:
+        retirementCancelled_ = false;
+        retireSession();
+        return 0;
+    case Ksword::Ui::kPollNativeRetirementMessage:
+        return pollRetirement() ? 0 : 1;
+    case Ksword::Ui::kCancelNativeRetirementMessage:
+        retirementCancelled_ = true;
+        pollRetirement();
+        return 0;
     case WM_TIMER:
         if (wParam == kEventFlushTimerId) {
+            if (retirementCancelled_) pollRetirement();
             flushPendingEvents();
             return 0;
         }
         break;
-    case kStatusMessage: {
-        auto* statusText = reinterpret_cast<std::wstring*>(lParam);
-        if (statusText != nullptr) {
-            updateStatusText(*statusText);
-            updateButtonState();
-            delete statusText;
+    case kSessionControlMessage:
+        if (sessionTask_) sessionTask_->consume(hwnd, wParam, lParam);
+        return 0;
+    case kIconsReadyMessage:
+        if (iconLoader_) {
+            const auto changed = iconLoader_->consume(wParam);
+            const std::unordered_set<std::wstring> keys(changed.begin(), changed.end());
+            const int top = (std::max)(0, ListView_GetTopIndex(eventList_));
+            const int end = (std::min)(static_cast<int>(visibleEventIndexes_.size()),
+                top + ListView_GetCountPerPage(eventList_) + 1);
+            for (int item = top; item < end; ++item) {
+                const auto index = visibleEventIndexes_[static_cast<std::size_t>(item)];
+                if (index < eventRows_.size() && keys.contains(std::to_wstring(eventRows_[index]->processId))) {
+                    ListView_RedrawItems(eventList_, item, item);
+                }
+            }
         }
         return 0;
-    }
     case kLocalFilterMessage:
         if (localFilterTask_ && localFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -346,11 +374,12 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
     }
     case WM_DESTROY:
+        iconLoader_.reset();
         ::KillTimer(hwnd_, kEventFlushTimerId);
         if (localFilterTask_) {
             localFilterTask_->cancel();
         }
-        controller_.stop();
+        retireSession();
         return 0;
     case WM_NCDESTROY:
         if (deleteOnDestroy_) {
@@ -394,6 +423,7 @@ void EtwMonitorView::createControls() {
         64,
         64);
     if (eventImageList_ != nullptr) {
+        iconLoader_ = std::make_unique<Ksword::Ui::AsyncShellIconLoader>(eventImageList_, hwnd_, kIconsReadyMessage);
         ListView_SetImageList(eventList_, eventImageList_, LVSIL_SMALL);
     }
     InsertColumn(eventList_, 0, L"PID", 96);
@@ -406,13 +436,17 @@ void EtwMonitorView::createControls() {
     ::SendMessageW(eventList_, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     localFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>>(hwnd_, kLocalFilterMessage);
 
-    controller_.setEventCallback([this](const EtwEvent& eventRow) {
-        enqueueEventFromWorker(eventRow);
+    sessionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<std::wstring>>(hwnd_, kSessionControlMessage);
+    const auto inbox = inbox_;
+    session_->controller.setEventCallback([inbox](const EtwEvent& eventRow) {
+        std::lock_guard lock(inbox->mutex);
+        if (!inbox->accepting) return;
+        inbox->events.push_back(eventRow);
+        while (inbox->events.size() > kMaxEventRows) inbox->events.pop_front();
     });
-    controller_.setStatusCallback([this](const std::wstring& text) {
-        if (hwnd_ != nullptr) {
-            ::PostMessageW(hwnd_, kStatusMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
-        }
+    session_->controller.setStatusCallback([inbox](const std::wstring& text) {
+        std::lock_guard lock(inbox->mutex);
+        if (inbox->accepting) inbox->status = text;
     });
 }
 
@@ -427,20 +461,99 @@ void EtwMonitorView::layout() {
 }
 
 void EtwMonitorView::startSession() {
-    if (controller_.running()) {
-        return;
-    }
+    if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (sessionRetired_ || sessionControlPending_ || !sessionTask_ || session_->controller.running()) return;
+    sessionControlPending_ = true;
     updateStatusText(L"正在启动 ETW...");
-    if (!controller_.start(filterModel_.state())) {
-        updateStatusText(controller_.lastError());
-    }
     updateButtonState();
+    const auto session = session_;
+    const auto filter = filterModel_.state();
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) { sessionControlPending_ = false; updateButtonState(); return; }
+    const auto pending = Ksword::Ui::HoldPendingOperation(session);
+    sessionTask_->request(
+        [session, filter, lease, pending] {
+            std::lock_guard lock(session->operationMutex);
+            return session->controller.start(filter) ? std::wstring{} : session->controller.lastError();
+        },
+        [this](std::uint64_t, std::optional<std::wstring>&& errorText, std::exception_ptr error) {
+            sessionControlPending_ = false;
+            if (error) updateStatusText(session_->controller.lastError());
+            else if (errorText && !errorText->empty()) updateStatusText(*errorText);
+            updateButtonState();
+        });
 }
 
 void EtwMonitorView::stopSession() {
-    controller_.stop();
-    flushPendingEvents();
+    if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (sessionRetired_ && retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+        return;
+    }
+    if (sessionRetired_ || sessionControlPending_ || !sessionTask_) return;
+    sessionControlPending_ = true;
     updateButtonState();
+    const auto session = session_;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) { sessionControlPending_ = false; updateButtonState(); return; }
+    const auto pending = Ksword::Ui::HoldPendingOperation(session);
+    sessionTask_->request(
+        [session, lease, pending] {
+            std::lock_guard lock(session->operationMutex);
+            return session->controller.stopChecked() ? std::wstring{} : session->controller.lastError();
+        },
+        [this](std::uint64_t, std::optional<std::wstring>&& errorText, std::exception_ptr error) {
+            sessionControlPending_ = false;
+            if (error) updateStatusText(session_->controller.lastError());
+            else if (errorText && !errorText->empty()) updateStatusText(*errorText);
+            flushPendingEvents();
+            updateButtonState();
+        });
+}
+
+void EtwMonitorView::retireSession() {
+    if (sessionRetired_) return;
+    sessionRetired_ = true;
+    session_->retiring.store(true, std::memory_order_release);
+    const auto session = session_;
+    const auto inbox = inbox_;
+    retirement_ = Ksword::Ui::RunBackgroundRetirement([session, inbox] {
+        std::unique_lock lock(session->operationMutex);
+        session->idle.wait(lock, [&] { return session->pending.load(std::memory_order_acquire) == 0; });
+        const bool stopped = session->controller.stopChecked();
+        // STOP joins the event producer first. Already accepted rows remain in
+        // this inbox and are drained into the retained canonical view on UI.
+        std::lock_guard inboxLock(inbox->mutex);
+        if (stopped) inbox->accepting = false;
+        const auto evidence = session->controller.evidence();
+        const bool closeFailed = evidence.closeAttempted && evidence.closeStatus != ERROR_SUCCESS &&
+            evidence.closeStatus != ERROR_CTX_CLOSE_PENDING && evidence.closeStatus != ERROR_INVALID_HANDLE;
+        session->stopError.store(stopped ? ERROR_SUCCESS : closeFailed ? evidence.closeStatus :
+            (evidence.stopStatuses.empty() ? ERROR_GEN_FAILURE : evidence.stopStatuses.back()));
+        return stopped;
+    });
+    updateButtonState();
+}
+
+bool EtwMonitorView::pollRetirement() {
+    if (!sessionRetired_) return true;
+    Ksword::Ui::BackgroundWorkRegistry::global().retry();
+    flushPendingEvents();
+    if (retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        updateStatusText(L"ETW 停止失败：Win32=" + std::to_wstring(session_->stopError.load()) + L" / Retry cleanup.");
+    }
+    bool inboxEmpty = false;
+    { std::lock_guard lock(inbox_->mutex); inboxEmpty = inbox_->events.empty(); }
+    const bool ready = retirement_ && retirement_->complete() && !sessionControlPending_ && inboxEmpty;
+    if (ready && retirementCancelled_) {
+        sessionRetired_ = false;
+        session_->retiring.store(false, std::memory_order_release);
+        { std::lock_guard lock(inbox_->mutex); inbox_->accepting = true; }
+        retirementCancelled_ = false;
+        updateStatusText(L"已停止采集；请手动开始。 / Stopped; start manually to resume.");
+        updateButtonState();
+    }
+    return ready;
 }
 
 void EtwMonitorView::openFilterDialog() {
@@ -448,7 +561,7 @@ void EtwMonitorView::openFilterDialog() {
     EtwFilterDialog dialog(hwnd_, editedState);
     if (dialog.showModal(editedState)) {
         filterModel_.setState(editedState);
-        updateStatusText(controller_.running()
+        updateStatusText(session_->controller.running()
             ? L"筛选器已更新；重新开始 ETW 后对 Provider 生效。"
             : L"筛选器已更新。");
     }
@@ -459,10 +572,10 @@ void EtwMonitorView::enqueueEventFromWorker(const EtwEvent& eventRow) {
     // - input: one ETW row on the ETW processing thread;
     // - processing: bounded append to a private queue protected by a mutex;
     // - return: none.  WM_TIMER later performs all UI work on the UI thread.
-    std::lock_guard<std::mutex> lock(pendingEventMutex_);
-    pendingEvents_.push_back(eventRow);
-    while (pendingEvents_.size() > kMaxEventRows) {
-        pendingEvents_.pop_front();
+    std::lock_guard<std::mutex> lock(inbox_->mutex);
+    inbox_->events.push_back(eventRow);
+    while (inbox_->events.size() > kMaxEventRows) {
+        inbox_->events.pop_front();
     }
 }
 
@@ -472,18 +585,24 @@ void EtwMonitorView::flushPendingEvents() {
     // - processing: drain at most kMaxEventsPerFlush rows per timer tick;
     // - return: none.  Remaining rows stay queued for the next timer tick.
     std::vector<EtwEvent> batch;
+    std::optional<std::wstring> status;
     {
-        std::lock_guard<std::mutex> lock(pendingEventMutex_);
-        const std::size_t takeCount = std::min<std::size_t>(pendingEvents_.size(), kMaxEventsPerFlush);
+        std::lock_guard<std::mutex> lock(inbox_->mutex);
+        status.swap(inbox_->status);
+        const std::size_t takeCount = std::min<std::size_t>(inbox_->events.size(), kMaxEventsPerFlush);
         batch.reserve(takeCount);
         for (std::size_t index = 0; index < takeCount; ++index) {
-            batch.push_back(std::move(pendingEvents_.front()));
-            pendingEvents_.pop_front();
+            batch.push_back(std::move(inbox_->events.front()));
+            inbox_->events.pop_front();
         }
     }
 
+    if (status) {
+        updateStatusText(*status);
+        updateButtonState();
+    }
     if (!batch.empty()) {
-        appendEventsToView(batch);
+        appendEventsToView(std::move(batch));
     }
 }
 
@@ -492,13 +611,67 @@ void EtwMonitorView::clearPendingEvents() {
     // - input: none;
     // - processing: discard queued rows that have not reached the ListView;
     // - return: none.  Historical rendered rows are cleared by the caller.
-    std::lock_guard<std::mutex> lock(pendingEventMutex_);
-    pendingEvents_.clear();
+    std::lock_guard<std::mutex> lock(inbox_->mutex);
+    inbox_->events.clear();
+}
+
+EtwMonitorView::ViewAnchor EtwMonitorView::captureViewAnchor() const {
+    if (eventProjectionDirty_) return deferredViewAnchor_;
+    ViewAnchor anchor;
+    const auto sequenceAt = [this](const int item) {
+        return item >= 0 && static_cast<std::size_t>(item) < visibleEventIndexes_.size()
+            ? firstEventSequence_ + visibleEventIndexes_[static_cast<std::size_t>(item)] : UINT64_MAX;
+    };
+    for (int item = ListView_GetNextItem(eventList_, -1, LVNI_SELECTED); item >= 0;
+         item = ListView_GetNextItem(eventList_, item, LVNI_SELECTED)) {
+        anchor.selected.push_back(sequenceAt(item));
+    }
+    const int top = ListView_GetTopIndex(eventList_);
+    anchor.top = sequenceAt(top);
+    anchor.followTail = visibleEventIndexes_.empty() ||
+        top + ListView_GetCountPerPage(eventList_) >= static_cast<int>(visibleEventIndexes_.size()) - 1;
+    return anchor;
+}
+
+void EtwMonitorView::commitEventProjection(const ViewAnchor& anchor) {
+    if (!::IsWindowVisible(hwnd_)) {
+        deferredViewAnchor_ = anchor;
+        eventProjectionDirty_ = true;
+        return;
+    }
+    eventProjectionDirty_ = false;
+    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    ListView_SetItemState(eventList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    int topItem = -1;
+    bool focused = false;
+    const std::unordered_set<std::uint64_t> selected(anchor.selected.begin(), anchor.selected.end());
+    for (std::size_t item = 0; item < visibleEventIndexes_.size(); ++item) {
+        const auto sequence = firstEventSequence_ + visibleEventIndexes_[item];
+        if (sequence == anchor.top) topItem = static_cast<int>(item);
+        if (selected.contains(sequence)) {
+            ListView_SetItemState(eventList_, static_cast<int>(item),
+                LVIS_SELECTED | (focused ? 0 : LVIS_FOCUSED), LVIS_SELECTED | LVIS_FOCUSED);
+            focused = true;
+        }
+    }
+    if (anchor.followTail && !visibleEventIndexes_.empty()) {
+        ListView_EnsureVisible(eventList_, static_cast<int>(visibleEventIndexes_.size()) - 1, FALSE);
+    } else if (topItem >= 0) {
+        ListView_EnsureVisible(eventList_, topItem, FALSE);
+    }
+    ::InvalidateRect(eventList_, nullptr, FALSE);
 }
 
 void EtwMonitorView::requestLocalFilter(std::wstring query) {
+    const ViewAnchor anchor = captureViewAnchor();
+    const bool useRegex = Ksword::Ui::GetFilterBarRegexEnabled(localFilterBar_);
+    const bool changed = query != localFilterQuery_ || useRegex != localFilterUseRegex_;
     localFilterQuery_ = std::move(query);
-    localFilterUseRegex_ = Ksword::Ui::GetFilterBarRegexEnabled(localFilterBar_);
+    localFilterUseRegex_ = useRegex;
+    if (changed) {
+        ++localFilterGeneration_;
+        filteredThroughSequence_ = firstEventSequence_;
+    }
     if (eventList_ == nullptr) {
         return;
     }
@@ -507,18 +680,26 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
         for (std::size_t index = 0; index < visibleEventIndexes_.size(); ++index) {
             visibleEventIndexes_[index] = index;
         }
-        ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-        ::InvalidateRect(eventList_, nullptr, FALSE);
+        commitEventProjection(anchor);
         return;
     }
     if (!localFilterTask_) {
         return;
     }
-    const auto snapshot = std::make_shared<const std::vector<EtwEvent>>(eventRows_);
-    const std::uint64_t generation = eventGeneration_;
-    const bool useRegex = localFilterUseRegex_;
+    // Arriving data never supersedes a matching in-flight segment. Only a
+    // different query invalidates it; the accepted segment schedules its tail.
+    if (!changed && localFilterTask_->running()) {
+        return;
+    }
+    const std::uint64_t firstSequence = (std::max)(filteredThroughSequence_, firstEventSequence_);
+    if (firstSequence >= nextEventSequence_) {
+        return;
+    }
+    const auto begin = eventRows_.begin() + static_cast<std::ptrdiff_t>(firstSequence - firstEventSequence_);
+    const auto snapshot = std::make_shared<const std::vector<std::shared_ptr<const EtwEvent>>>(begin, eventRows_.end());
+    const std::uint64_t generation = localFilterGeneration_;
     localFilterTask_->request(
-        [snapshot, generation, useRegex, query = localFilterQuery_]() mutable {
+        [snapshot, generation, useRegex, firstSequence, query = localFilterQuery_]() mutable {
             EtwEventFilterResult result{};
             result.generation = generation;
             result.query = std::move(query);
@@ -533,10 +714,12 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
                     regexReady = false;
                 }
             }
-            result.visibleIndexes.reserve(snapshot->size());
+            result.firstSequence = firstSequence;
+            result.endSequence = firstSequence + snapshot->size();
+            result.visibleSequences.reserve(snapshot->size());
             for (std::size_t index = 0; index < snapshot->size(); ++index) {
-                if (MatchesEvent((*snapshot)[index], result.query, regexReady ? &compiled : nullptr)) {
-                    result.visibleIndexes.push_back(index);
+                if (MatchesEvent(*(*snapshot)[index], result.query, regexReady ? &compiled : nullptr)) {
+                    result.visibleSequences.push_back(firstSequence + index);
                 }
             }
             return result;
@@ -551,28 +734,46 @@ void EtwMonitorView::requestLocalFilter(std::wstring query) {
 }
 
 void EtwMonitorView::applyLocalFilter(EtwEventFilterResult result) {
-    if (result.generation != eventGeneration_ || result.query != localFilterQuery_ ||
+    if (result.generation != localFilterGeneration_ || result.query != localFilterQuery_ ||
         result.useRegex != localFilterUseRegex_) {
+        requestLocalFilter(localFilterQuery_);
         return;
     }
-    visibleEventIndexes_ = std::move(result.visibleIndexes);
-    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    updateStatusText(L"ETW 本地筛选结果：" + std::to_wstring(visibleEventIndexes_.size()) + L" 项。");
-    ::InvalidateRect(eventList_, nullptr, FALSE);
+    const ViewAnchor anchor = captureViewAnchor();
+    if (appliedFilterGeneration_ != result.generation) {
+        visibleEventIndexes_.clear();
+        appliedFilterGeneration_ = result.generation;
+    }
+    for (const std::uint64_t sequence : result.visibleSequences) {
+        if (sequence >= firstEventSequence_ && sequence < nextEventSequence_) {
+            visibleEventIndexes_.push_back(static_cast<std::size_t>(sequence - firstEventSequence_));
+        }
+    }
+    filteredThroughSequence_ = (std::max)(filteredThroughSequence_, result.endSequence);
+    commitEventProjection(anchor);
+    if (::IsWindowVisible(hwnd_)) {
+        updateStatusText(L"ETW 本地筛选结果：" + std::to_wstring(visibleEventIndexes_.size()) + L" 项。");
+    }
+    requestLocalFilter(localFilterQuery_);
 }
 
-void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
+void EtwMonitorView::appendEventsToView(std::vector<EtwEvent> events) {
     if (events.empty() || eventList_ == nullptr) {
         return;
     }
 
-    const int itemCountBefore = static_cast<int>(visibleEventIndexes_.size());
-    const bool followTail = itemCountBefore == 0 ||
-        ListView_GetTopIndex(eventList_) + ListView_GetCountPerPage(eventList_) >= itemCountBefore - 1;
-    eventRows_.insert(eventRows_.end(), events.begin(), events.end());
+    const ViewAnchor anchor = captureViewAnchor();
+    for (auto& event : events) {
+        eventRows_.push_back(std::make_shared<const EtwEvent>(std::move(event)));
+        ++nextEventSequence_;
+    }
     if (eventRows_.size() > kMaxEventRows) {
         const std::size_t trimmed = eventRows_.size() - kMaxEventRows;
         eventRows_.erase(eventRows_.begin(), eventRows_.begin() + static_cast<std::ptrdiff_t>(trimmed));
+        firstEventSequence_ += trimmed;
+        visibleEventIndexes_.erase(std::remove_if(visibleEventIndexes_.begin(), visibleEventIndexes_.end(),
+            [trimmed](const std::size_t index) { return index < trimmed; }), visibleEventIndexes_.end());
+        for (auto& index : visibleEventIndexes_) index -= trimmed;
     }
     ++eventGeneration_;
     if (localFilterQuery_.empty()) {
@@ -583,11 +784,7 @@ void EtwMonitorView::appendEventsToView(const std::vector<EtwEvent>& events) {
     } else {
         requestLocalFilter(localFilterQuery_);
     }
-    ListView_SetItemCountEx(eventList_, static_cast<int>(visibleEventIndexes_.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    if (followTail && !visibleEventIndexes_.empty()) {
-        ListView_EnsureVisible(eventList_, static_cast<int>(visibleEventIndexes_.size() - 1), FALSE);
-    }
-    ::InvalidateRect(eventList_, nullptr, FALSE);
+    commitEventProjection(anchor);
 }
 
 // handleVirtualEventDisplayInfo answers only the ListView's visible-cell
@@ -603,7 +800,7 @@ bool EtwMonitorView::handleVirtualEventDisplayInfo(NMLVDISPINFOW* displayInfo) {
     if (sourceIndex >= eventRows_.size()) {
         return false;
     }
-    const EtwEvent& eventRow = eventRows_[sourceIndex];
+    const EtwEvent& eventRow = *eventRows_[sourceIndex];
     if ((displayInfo->item.mask & LVIF_TEXT) != 0) {
         switch (displayInfo->item.iSubItem) {
         case 0: eventTextScratch_ = NumberText(eventRow.processId); break;
@@ -633,6 +830,12 @@ void EtwMonitorView::clearEventList() {
     // - return: none.  No historical rows are reinserted or repainted.
     visibleEventIndexes_.clear();
     ++eventGeneration_;
+    ++localFilterGeneration_;
+    firstEventSequence_ = nextEventSequence_;
+    filteredThroughSequence_ = nextEventSequence_;
+    appliedFilterGeneration_ = localFilterGeneration_;
+    eventProjectionDirty_ = false;
+    deferredViewAnchor_ = {};
     ListView_SetItemCountEx(eventList_, 0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     ::InvalidateRect(eventList_, nullptr, FALSE);
 }
@@ -644,45 +847,24 @@ void EtwMonitorView::updateStatusText(const std::wstring& text) {
 }
 
 void EtwMonitorView::updateButtonState() {
-    const BOOL running = controller_.running() ? TRUE : FALSE;
-    ::EnableWindow(startButton_, running ? FALSE : TRUE);
-    ::EnableWindow(stopButton_, running ? TRUE : FALSE);
+    const BOOL running = session_->controller.running() ? TRUE : FALSE;
+    ::EnableWindow(startButton_, !sessionRetired_ && !sessionControlPending_ && !running);
+    const bool retryStop = retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation;
+    ::EnableWindow(stopButton_, retryStop || (!sessionRetired_ && !sessionControlPending_ &&
+        (running || session_->controller.cleanupPending())));
 }
 
-int EtwMonitorView::iconIndexForProcessId(std::uint32_t processId) {
-    if (eventImageList_ == nullptr) {
-        return -1;
-    }
-
-    const auto cached = processIconCache_.find(processId);
-    if (cached != processIconCache_.end()) {
-        return cached->second;
-    }
-
-    const std::wstring imagePath = processImagePath(processId);
-    SHFILEINFOW shellInfo{};
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    const wchar_t* queryPath = imagePath.empty() ? L".exe" : imagePath.c_str();
-    if (imagePath.empty()) {
-        flags |= SHGFI_USEFILEATTRIBUTES;
-    }
-
-    int imageIndex = -1;
-    if (::SHGetFileInfoW(queryPath,
-            imagePath.empty() ? FILE_ATTRIBUTE_NORMAL : 0,
-            &shellInfo,
-            sizeof(shellInfo),
-            flags) && shellInfo.hIcon != nullptr) {
-        imageIndex = ImageList_AddIcon(eventImageList_, shellInfo.hIcon);
-        ::DestroyIcon(shellInfo.hIcon);
-    }
-
-    processIconCache_[processId] = imageIndex;
-    return imageIndex;
-}
-
-std::wstring EtwMonitorView::processImagePath(std::uint32_t processId) const {
-    return ks::r3::process::QueryEventProcessImagePath(processId);
+int EtwMonitorView::iconIndexForProcessId(const std::uint32_t processId) {
+    if (!iconLoader_) return -1;
+    // ETW carries a historical PID, not creation time. Resolve the current
+    // process image and its creation identity only on the read-only worker;
+    // periodically revalidate PID reuse rather than treating this icon as proof.
+    return iconLoader_->indexFor(std::to_wstring(processId), [processId] {
+        ks::r3::process::ProcessImageEvidence evidence;
+        auto path = ks::r3::process::QueryEventProcessImagePath(processId, &evidence);
+        return Ksword::Ui::AsyncShellIconLoader::Source{ std::move(path),
+            evidence.timeKnown ? std::to_wstring(evidence.creationTime) : std::wstring{} };
+    }, 2000);
 }
 
 void EtwMonitorView::openSelectedEventDetail() {
@@ -767,7 +949,7 @@ bool EtwMonitorView::selectedEvent(EtwEvent* eventRow) const {
         return false;
     }
     if (eventRow) {
-        *eventRow = eventRows_[sourceIndex];
+        *eventRow = *eventRows_[sourceIndex];
     }
     return true;
 }
@@ -829,7 +1011,7 @@ void EtwMonitorView::copyVisibleEventRows() {
         if (sourceIndex >= eventRows_.size()) {
             continue;
         }
-        const EtwEvent& eventRow = eventRows_[sourceIndex];
+        const EtwEvent& eventRow = *eventRows_[sourceIndex];
         output << eventRow.timeText << L'\t'
                << eventRow.providerText << L'\t'
                << eventRow.processId << L'\t'
@@ -842,7 +1024,17 @@ void EtwMonitorView::copyVisibleEventRows() {
 }
 
 void EtwMonitorView::exportVisibleEventRows() {
-    const std::wstring text = BuildVisibleEtwEventsTsv(eventRows_, visibleEventIndexes_);
+    std::vector<EtwEvent> exportRows;
+    std::vector<std::size_t> exportIndexes;
+    exportRows.reserve(visibleEventIndexes_.size());
+    exportIndexes.reserve(visibleEventIndexes_.size());
+    for (const auto index : visibleEventIndexes_) {
+        if (index < eventRows_.size()) {
+            exportIndexes.push_back(exportRows.size());
+            exportRows.push_back(*eventRows_[index]);
+        }
+    }
+    const std::wstring text = BuildVisibleEtwEventsTsv(exportRows, exportIndexes);
     if (text.empty()) {
         updateStatusText(L"没有可导出的 ETW 可见结果。");
         return;
@@ -934,8 +1126,8 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
     }
     HMENU sessionMenu = ::CreatePopupMenu();
     if (sessionMenu) {
-        ::AppendMenuW(sessionMenu, MF_STRING | (controller_.running() ? MF_GRAYED : 0U), kEtwMenuStart, L"开始");
-        ::AppendMenuW(sessionMenu, MF_STRING | (controller_.running() ? 0U : MF_GRAYED), kEtwMenuStop, L"停止");
+        ::AppendMenuW(sessionMenu, MF_STRING | (session_->controller.running() ? MF_GRAYED : 0U), kEtwMenuStart, L"开始");
+        ::AppendMenuW(sessionMenu, MF_STRING | ((session_->controller.running() || session_->controller.cleanupPending()) ? 0U : MF_GRAYED), kEtwMenuStop, L"停止");
         ::AppendMenuW(sessionMenu, MF_STRING, kEtwMenuFilter, L"筛选器...");
         ::AppendMenuW(sessionMenu, MF_SEPARATOR, 0, nullptr);
         ::AppendMenuW(sessionMenu, MF_STRING, kEtwMenuClear, L"清空列表");

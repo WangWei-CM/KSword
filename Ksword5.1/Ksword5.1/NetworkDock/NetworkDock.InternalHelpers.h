@@ -96,6 +96,8 @@ namespace network_dock_detail
 
     // createPacketCell 作用：
     // - 创建统一的只读表格单元格。
+    QString packetSourceDisplayText(const ks::network::PacketRecord& packetRecord);
+
     QTableWidgetItem* createPacketCell(const QString& cellText);
 
     // installCopyCurrentRowMenu 作用：

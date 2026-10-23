@@ -130,12 +130,13 @@ namespace
 
 namespace ks::misc
 {
-    DisableDsePage::DisableDsePage(QWidget* parent)
+    DisableDsePage::DisableDsePage(QWidget* parent, const std::optional<BlockReason> initialReason)
         : QWidget(parent)
     {
         initializeUi();
         initializeConnections();
-        updateStateDisplay();
+        if (initialReason) applyStateDisplay(*initialReason);
+        else updateStateDisplay();
         updateButtons();
         // 沿本页明确的父链固定主窗口，不枚举其它页面或顶层窗口。
         for (QWidget* host = parentWidget(); host != nullptr; host = host->parentWidget())
@@ -1175,7 +1176,12 @@ namespace ks::misc
 
     void DisableDsePage::updateStateDisplay()
     {
-        m_blockReason = disable_dse::evaluateBlockReason(m_posture, m_location);
+        applyStateDisplay(disable_dse::evaluateBlockReason(m_posture, m_location));
+    }
+
+    void DisableDsePage::applyStateDisplay(const BlockReason reason)
+    {
+        m_blockReason = reason;
         if (m_blockReason == disable_dse::BlockReason::None
             && m_location.ok && !m_valueMatched && m_hasCurrentValue)
         {

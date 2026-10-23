@@ -12,97 +12,77 @@ using namespace ksword::memory_dock_internal;
 // 作用：承载首次/再次扫描流程与后台扫描执行逻辑。
 // ============================================================
 
+struct MemoryDock::FirstScanPreparation {
+    ParsedSearchPattern pattern;
+    FirstScanOptions options;
+    std::shared_ptr<const std::vector<RegionEntry>> source;
+    std::vector<RegionEntry> filtered;
+    std::atomic_bool cancel{false}, done{false};
+    bool waiting = true, success = false;
+    QString error;
+};
+
 void MemoryDock::startFirstScan()
 {
-    // 首次扫描入口日志：记录当前附加 PID 与扫描参数。
-    kLogEvent firstScanStartEvent;
-    info << firstScanStartEvent
-        << "[MemoryDock] startFirstScan: 请求开始首次扫描, attachedPid="
-        << m_attachedPid
-        << ", scanThreadCount="
-        << m_scanThreadCount
-        << ", scanChunkSizeKB="
-        << m_scanChunkSizeKB
-        << eol;
+    if (m_scanInProgress.load()) { QMessageBox::information(this, "内存扫描", "当前已有扫描任务正在执行。"); return; }
+    if (!m_attachedProcessHandle || m_attachedPid == 0) { QMessageBox::warning(this, "内存扫描", "请先附加目标进程。"); return; }
+    auto preparation = ks::memory_detail::ValueStorage<FirstScanPreparation>();
+    QString error;
+    if (!parseSearchPatternFromUi(preparation->pattern, error) || !captureFirstScanOptions(preparation->options, error)) { QMessageBox::warning(this, "内存扫描", error); return; }
+    m_firstScanPreparation = preparation; m_scanInProgress.store(true); m_scanCancelRequested.store(false);
+    const QPointer<MemoryDock> owner(this);
+    for (auto* button : {m_firstScanButton, m_nextScanButton, m_resetScanButton}) { if (button) { button->setEnabled(false); } if (!owner) { return; } }
+    m_cancelScanButton->setEnabled(true); if (!owner) { return; }
+    m_scanProgressBar->setValue(0); if (!owner) { return; }
+    m_scanStatusLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Preparing scan regions..."))); if (!owner) { return; }
+    m_coreProjectionPoll->start(); requestFirstScanRegions();
+}
 
-    // 正在扫描时不允许重复发起，避免多个后台线程并发读同一状态。
-    if (m_scanInProgress.load())
-    {
-        kLogEvent firstScanBusyEvent;
-        warn << firstScanBusyEvent
-            << "[MemoryDock] startFirstScan: 已有扫描在执行，拒绝重复启动。"
-            << eol;
-        QMessageBox::information(this, "内存扫描", "当前已有扫描任务正在执行。");
-        return;
-    }
+void MemoryDock::acceptFirstScanRegionSnapshot(const std::shared_ptr<const std::vector<RegionEntry>>& rows, const std::uint32_t error)
+{
+    const auto preparation = m_firstScanPreparation;
+    if (!preparation || !preparation->waiting) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || preparation->cancel.load()) { cancelFirstScanPreparation(); return; }
+    if (error != 0) { finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Region enumeration is partial (Win32: %1)")).arg(error)); return; }
+    if (!rows || rows->empty()) { finishFirstScanPreparation(QStringLiteral("当前没有可用的内存区域，请先刷新区域列表。")); return; }
+    preparation->waiting = false; preparation->source = rows;
+    try { QThreadPool::globalInstance()->start([preparation] {
+        try { preparation->success = filterFirstScanRegions(preparation->options, *preparation->source, preparation->filtered, preparation->error, [preparation] { return preparation->cancel.load(); }); }
+        catch (...) { preparation->error = QStringLiteral("Memory table projection failed"); }
+        preparation->done.store(true);
+    }); } catch (...) { preparation->error = QStringLiteral("Memory table projection failed"); preparation->done.store(true); }
+}
 
-    // 首次扫描前必须附加进程。
-    if (m_attachedProcessHandle == nullptr || m_attachedPid == 0)
-    {
-        kLogEvent firstScanNoAttachEvent;
-        warn << firstScanNoAttachEvent
-            << "[MemoryDock] startFirstScan: 未附加进程，无法扫描。"
-            << eol;
-        QMessageBox::warning(this, "内存扫描", "请先附加目标进程。");
-        return;
-    }
+void MemoryDock::finishFirstScanPreparation(const QString& error, const bool cancelled)
+{
+    m_firstScanPreparation.reset(); m_scanInProgress.store(false); m_scanCancelRequested.store(false);
+    const QPointer<MemoryDock> owner(this);
+    for (auto* button : {m_firstScanButton, m_resetScanButton}) { if (button) { button->setEnabled(true); } if (!owner) { return; } }
+    m_nextScanButton->setEnabled(!m_searchResultCache->empty()); if (!owner) { return; }
+    m_cancelScanButton->setEnabled(false); if (!owner) { return; }
+    m_scanStatusLabel->setText(cancelled ? ks::i18n::packedSourceText(QStringLiteral("扫描已取消。")) : ks::i18n::sourceText(error));
+}
 
-    // 先解析输入值，再收集扫描区域，两步都可能失败并反馈可读错误。
-    ParsedSearchPattern pattern{};
-    QString parseError;
-    if (!parseSearchPatternFromUi(pattern, parseError))
-    {
-        kLogEvent firstScanParseFailEvent;
-        warn << firstScanParseFailEvent
-            << "[MemoryDock] startFirstScan: 解析扫描值失败, error="
-            << parseError.toStdString()
-            << eol;
-        QMessageBox::warning(this, "内存扫描", parseError);
-        return;
-    }
+void MemoryDock::cancelFirstScanPreparation()
+{
+    if (!m_firstScanPreparation) { return; }
+    m_firstScanPreparation->cancel.store(true); finishFirstScanPreparation({}, true);
+}
 
-    std::vector<RegionEntry> scanRegions;
-    QString regionError;
-    if (!collectSearchRegionsFromUi(scanRegions, regionError))
-    {
-        kLogEvent firstScanCollectFailEvent;
-        warn << firstScanCollectFailEvent
-            << "[MemoryDock] startFirstScan: 收集扫描区域失败, error="
-            << regionError.toStdString()
-            << eol;
-        QMessageBox::warning(this, "内存扫描", regionError);
-        return;
-    }
-
-    // 首次扫描会重置上一轮结果，并把“最近扫描类型”更新为当前下拉框类型。
-    m_lastSearchValueType = pattern.valueType;
-    m_searchResultCache.clear();
-    rebuildSearchResultTable();
-
-    // UI 状态切换：禁用发起按钮，启用取消按钮，展示准备中的提示文本。
-    m_scanInProgress.store(true);
-    m_scanCancelRequested.store(false);
-    m_firstScanButton->setEnabled(false);
-    m_nextScanButton->setEnabled(false);
-    m_resetScanButton->setEnabled(false);
-    m_cancelScanButton->setEnabled(true);
-    m_scanProgressBar->setValue(0);
-    m_scanStatusLabel->setText(
-        QString("扫描中：区域=%1，线程=%2")
-        .arg(scanRegions.size())
-        .arg(m_scanThreadCount));
-
-    // 首次扫描准备就绪日志：记录模式字节长度与区域总数。
-    kLogEvent firstScanPreparedEvent;
-    info << firstScanPreparedEvent
-        << "[MemoryDock] startFirstScan: 准备完成, patternBytes="
-        << pattern.exactBytes.size()
-        << ", regionCount="
-        << scanRegions.size()
-        << eol;
-
-    // 进入后台扫描线程，避免 ReadProcessMemory 循环阻塞主界面。
-    scanMemoryRegionsInBackground(scanRegions, pattern);
+void MemoryDock::pollFirstScanPreparation()
+{
+    const auto preparation = m_firstScanPreparation;
+    if (!preparation) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || preparation->cancel.load()) { cancelFirstScanPreparation(); return; }
+    if (!preparation->done.load()) { return; }
+    if (!preparation->success) { finishFirstScanPreparation(preparation->error); return; }
+    m_firstScanPreparation.reset();
+    m_lastSearchValueType = preparation->pattern.valueType; m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>();
+    const QPointer<MemoryDock> owner(this);
+    rebuildSearchResultTable(); if (!owner) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || m_scanCancelRequested.load()) { finishFirstScanPreparation({}, true); return; }
+    m_scanStatusLabel->setText(QString("扫描中：区域=%1，线程=%2").arg(preparation->filtered.size()).arg(preparation->options.threads)); if (!owner) { return; }
+    scanMemoryRegionsInBackground(std::move(preparation->filtered), preparation->pattern, preparation->options);
 }
 
 void MemoryDock::startNextScan()
@@ -111,7 +91,7 @@ void MemoryDock::startNextScan()
     kLogEvent nextScanStartEvent;
     info << nextScanStartEvent
         << "[MemoryDock] startNextScan: 开始再次扫描, cachedResultCount="
-        << m_searchResultCache.size()
+        << m_searchResultCache->size()
         << ", compareIndex="
         << m_nextScanCompareCombo->currentIndex()
         << eol;
@@ -126,14 +106,14 @@ void MemoryDock::startNextScan()
         QMessageBox::information(this, "再次扫描", "当前正在执行扫描，请稍候。");
         return;
     }
-    if (m_attachedProcessHandle == nullptr || m_searchResultCache.empty())
+    if (m_attachedProcessHandle == nullptr || m_searchResultCache->empty())
     {
         kLogEvent nextScanPrerequisiteFailEvent;
         warn << nextScanPrerequisiteFailEvent
             << "[MemoryDock] startNextScan: 前置条件不满足, attachedPid="
             << m_attachedPid
             << ", cachedResultCount="
-            << m_searchResultCache.size()
+            << m_searchResultCache->size()
             << eol;
         QMessageBox::warning(this, "再次扫描", "请先完成首次扫描并保留结果。");
         return;
@@ -346,12 +326,17 @@ void MemoryDock::startNextScan()
 
     // 再次扫描只对上一轮命中地址逐个复查。读取目标进程内存必须在后台完成，
     // 否则命中数量较大时会长期占用 GUI 线程，且 processEvents 会引入重入。
-    const HANDLE processHandle = m_attachedProcessHandle;
+    const auto processLease = duplicateAttachedProcessHandleForWorker();
+    if (!processLease) { finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); return; }
+    const HANDLE processHandle = static_cast<HANDLE>(processLease.get());
     const SearchValueType valueType = m_lastSearchValueType;
-    std::vector<SearchResultEntry> previousResultCache = m_searchResultCache;
-    const int totalCount = static_cast<int>(previousResultCache.size());
+    const auto previousResultCache = m_searchResultCache;
+    const int totalCount = static_cast<int>(previousResultCache->size());
     const QPointer<MemoryDock> selfGuard(this);
+    m_scanTaskState = std::make_shared<MemoryScanTaskState>();
     const std::shared_ptr<MemoryScanTaskState> taskState = m_scanTaskState;
+    taskState->processLease = processLease;
+    m_scanLastProgress = -1;
 
     // 与首次扫描同理：后端与 DDMA 会话在 UI 线程按值快照，worker 不读活配置。
     const ksword::memory_backend::MemoryAccessBackend scanBackend = currentSearchBackend();
@@ -379,14 +364,89 @@ void MemoryDock::startNextScan()
     m_scanProgressBar->setValue(0);
     m_scanStatusLabel->setText(QString("再次扫描中：总计 %1 条").arg(totalCount));
 
-    // 在线程启动前登记任务，关闭/分离路径据此等待，避免只靠 QPointer 判断生命周期。
-    {
-        std::lock_guard<std::mutex> lock(taskState->mutex);
-        ++taskState->activeTaskCount;
-    }
+    // 在线程启动前登记物理任务，关闭/分离只发出取消，资源保持到 worker 完成。
+    const std::weak_ptr<MemoryScanTaskState> weakTask(taskState);
+    taskState->cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weakTask] { if (const auto task = weakTask.lock()) { task->cancelRequested.store(true); } });
+    if (!taskState->cleanupLease) { taskState->processLease.reset(); finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); return; }
+    m_coreProjectionPoll->start();
 
-    std::thread([selfGuard,
-        taskState,
+
+    taskState->next = true;
+    m_scanCompletion = [selfGuard, taskState, scanBackendName, finishedMessage, cancelledMessage, readProblemMessage] {
+        if (!selfGuard || selfGuard->m_scanTaskState != taskState) { return; }
+        if (!taskState->failureText.isEmpty()) { selfGuard->finishFirstScanPreparation(taskState->failureText); return; }
+        const auto cancelled = taskState->cancelled || taskState->cancelRequested.load();
+        const auto elapsedMs = taskState->elapsedMs;
+        const auto resultsSnapshot = taskState->results;
+        const auto firstReadFailure = taskState->firstReadFailure;
+        const auto skippedBytes = taskState->skippedBytes, skippedEntries = taskState->skippedEntries;
+
+            if (selfGuard == nullptr || selfGuard->m_scanTaskState != taskState)
+            {
+                return;
+            }
+
+            auto commitSnapshot = [selfGuard, taskState, cancelled, elapsedMs, resultsSnapshot,
+                skippedBytes, skippedEntries, firstReadFailure, scanBackendName,
+                finishedMessage, cancelledMessage, readProblemMessage]() mutable
+            {
+                if (selfGuard == nullptr || selfGuard->m_scanTaskState != taskState)
+                {
+                    return;
+                }
+
+                // 事件可能因表格菜单冻结而延后，提交前再次吸收期间到达的取消请求。
+                const bool effectiveCancelled =
+                    cancelled || taskState->cancelRequested.load();
+                selfGuard->m_scanInProgress.store(false);
+                selfGuard->m_scanCancelRequested.store(false);
+                selfGuard->m_firstScanButton->setEnabled(true);
+                selfGuard->m_resetScanButton->setEnabled(true);
+                selfGuard->m_cancelScanButton->setEnabled(false);
+
+                if (!effectiveCancelled)
+                {
+                    selfGuard->m_searchResultCache = resultsSnapshot;
+                    selfGuard->rebuildSearchResultTable();
+                }
+
+                selfGuard->m_nextScanButton->setEnabled(!selfGuard->m_searchResultCache->empty());
+                QString finishText = (effectiveCancelled ? cancelledMessage : finishedMessage)
+                    .arg(scanBackendName).arg(selfGuard->m_searchResultCache->size())
+                    .arg(elapsedMs).arg(skippedBytes).arg(skippedEntries);
+                if (!firstReadFailure.isEmpty())
+                {
+                    finishText += QLatin1Char(' ') + readProblemMessage.arg(
+                        ks::i18n::sourceText(firstReadFailure));
+                }
+                if (selfGuard->m_searchResultCache->size() > selfGuard->m_searchResultVisibleCount)
+                {
+                    finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
+                }
+                selfGuard->m_scanStatusLabel->setText(finishText);
+
+                kLogEvent nextScanFinishEvent;
+                info << nextScanFinishEvent
+                    << "[MemoryDock] startNextScan: 完成, remainingCount="
+                    << selfGuard->m_searchResultCache->size()
+                    << ", elapsedMs="
+                    << elapsedMs
+                    << ", cancelled="
+                    << (effectiveCancelled ? "true" : "false")
+                    << eol;
+            };
+
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
+                selfGuard.data(),
+                QStringLiteral("memory-search-next-scan"),
+                { selfGuard->m_searchResultTable },
+                commitSnapshot))
+            {
+                return;
+            }
+            commitSnapshot();
+            };
+    try { std::thread([taskState,
         processHandle,
         valueType,
         previousResultCache = std::move(previousResultCache),
@@ -406,43 +466,36 @@ void MemoryDock::startNextScan()
         readProblemMessage,
         incompleteMessage]() mutable
     {
-        const auto finishScanTask = [taskState]()
-        {
-            std::lock_guard<std::mutex> lock(taskState->mutex);
-            if (taskState->activeTaskCount > 0)
-            {
-                --taskState->activeTaskCount;
-                if (taskState->activeTaskCount == 0)
-                {
-                    taskState->completion.notify_all();
-                }
-            }
-        };
+        struct Completion final { std::shared_ptr<MemoryScanTaskState> task; ~Completion() { task->processLease.reset(); task->cleanupLease.reset(); task->done.store(true); } } completed{taskState};
+        try {
 
-        if (selfGuard == nullptr || processHandle == nullptr)
+
+
+        if (taskState->cancelRequested.load() || processHandle == nullptr)
         {
-            finishScanTask();
             return;
         }
 
         const auto scanStartTime = std::chrono::steady_clock::now();
-        const int workerTotalCount = static_cast<int>(previousResultCache.size());
+        const int workerTotalCount = static_cast<int>(previousResultCache->size());
         std::vector<SearchResultEntry> nextResultCache;
-        nextResultCache.reserve(previousResultCache.size());
+        nextResultCache.reserve(previousResultCache->size());
         int processedCount = 0;
         bool cancelled = false;
         std::uint64_t skippedBytes = 0;
         std::size_t skippedEntries = 0;
         QString firstReadFailure;
 
-        for (const SearchResultEntry& oldEntry : previousResultCache)
+        for (const SearchResultEntry& oldEntry : *previousResultCache)
         {
-            if (selfGuard->m_scanCancelRequested.load())
+            if (taskState->cancelRequested.load())
             {
                 cancelled = true;
                 break;
             }
 
+            DWORD targetExitCode = 0;
+            if (!GetExitCodeProcess(processHandle, &targetExitCode) || targetExitCode != STILL_ACTIVE) { taskState->cancelRequested.store(true); cancelled = true; break; }
             const std::size_t readLength = std::max<std::size_t>(
                 1,
                 static_cast<std::size_t>(oldEntry.currentValueBytes.size()));
@@ -565,103 +618,18 @@ void MemoryDock::startNextScan()
             {
                 const int progressPercent = workerTotalCount <= 0
                     ? 100
-                    : (processedCount * 100 / workerTotalCount);
-                QMetaObject::invokeMethod(selfGuard.data(), [selfGuard, progressPercent, processedCount, workerTotalCount]()
-                {
-                    if (selfGuard == nullptr)
-                    {
-                        return;
-                    }
-                    selfGuard->m_scanProgressBar->setValue(progressPercent);
-                    selfGuard->m_scanStatusLabel->setText(
-                        QString("再次扫描中：%1 / %2 条").arg(processedCount).arg(workerTotalCount));
-                }, Qt::QueuedConnection);
+                    : static_cast<int>(static_cast<std::uint64_t>(processedCount) * 100 / workerTotalCount);
+                taskState->progressDone.store(processedCount); taskState->progressTotal.store(workerTotalCount); taskState->progressPercent.store(progressPercent);
             }
         }
 
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - scanStartTime).count();
-        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard,
-            cancelled,
-            elapsedMs,
-            skippedBytes,
-            skippedEntries,
-            firstReadFailure,
-            scanBackendName,
-            finishedMessage,
-            cancelledMessage,
-            readProblemMessage,
-            nextResultCache = std::move(nextResultCache)]() mutable
-        {
-            if (selfGuard == nullptr)
-            {
-                return;
-            }
-
-            auto resultsSnapshot =
-                std::make_shared<std::vector<SearchResultEntry>>(std::move(nextResultCache));
-            auto commitSnapshot = [selfGuard, cancelled, elapsedMs, resultsSnapshot,
-                skippedBytes, skippedEntries, firstReadFailure, scanBackendName,
-                finishedMessage, cancelledMessage, readProblemMessage]() mutable
-            {
-                if (selfGuard == nullptr)
-                {
-                    return;
-                }
-
-                // 事件可能因表格菜单冻结而延后，提交前再次吸收期间到达的取消请求。
-                const bool effectiveCancelled =
-                    cancelled || selfGuard->m_scanCancelRequested.load();
-                selfGuard->m_scanInProgress.store(false);
-                selfGuard->m_scanCancelRequested.store(false);
-                selfGuard->m_firstScanButton->setEnabled(true);
-                selfGuard->m_resetScanButton->setEnabled(true);
-                selfGuard->m_cancelScanButton->setEnabled(false);
-
-                if (!effectiveCancelled)
-                {
-                    selfGuard->m_searchResultCache = std::move(*resultsSnapshot);
-                    selfGuard->rebuildSearchResultTable();
-                }
-
-                selfGuard->m_nextScanButton->setEnabled(!selfGuard->m_searchResultCache.empty());
-                QString finishText = (effectiveCancelled ? cancelledMessage : finishedMessage)
-                    .arg(scanBackendName).arg(selfGuard->m_searchResultCache.size())
-                    .arg(elapsedMs).arg(skippedBytes).arg(skippedEntries);
-                if (!firstReadFailure.isEmpty())
-                {
-                    finishText += QLatin1Char(' ') + readProblemMessage.arg(
-                        ks::i18n::sourceText(firstReadFailure));
-                }
-                if (selfGuard->m_searchResultCache.size() > selfGuard->m_searchResultVisibleCount)
-                {
-                    finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
-                }
-                selfGuard->m_scanStatusLabel->setText(finishText);
-
-                kLogEvent nextScanFinishEvent;
-                info << nextScanFinishEvent
-                    << "[MemoryDock] startNextScan: 完成, remainingCount="
-                    << selfGuard->m_searchResultCache.size()
-                    << ", elapsedMs="
-                    << elapsedMs
-                    << ", cancelled="
-                    << (effectiveCancelled ? "true" : "false")
-                    << eol;
-            };
-
-            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                selfGuard.data(),
-                QStringLiteral("memory-search-next-scan"),
-                { selfGuard->m_searchResultTable },
-                commitSnapshot))
-            {
-                return;
-            }
-            commitSnapshot();
-        }, Qt::QueuedConnection);
-        finishScanTask();
-    }).detach();
+        const auto resultsSnapshot = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>(std::move(nextResultCache));
+        taskState->results = resultsSnapshot; taskState->cancelled = cancelled;
+        taskState->elapsedMs = static_cast<std::uint64_t>(elapsedMs); taskState->skippedBytes = skippedBytes; taskState->skippedEntries = skippedEntries; taskState->firstReadFailure = firstReadFailure;
+            } catch (...) { taskState->failureText = QStringLiteral("Memory table projection failed"); }
+}).detach(); } catch (...) { taskState->failureText = QStringLiteral("Memory table projection failed"); taskState->processLease.reset(); taskState->cleanupLease.reset(); taskState->done.store(true); }
 }
 
 void MemoryDock::resetScanState()
@@ -673,12 +641,13 @@ void MemoryDock::resetScanState()
         << eol;
 
     // 重置动作会先发起取消请求，避免后台线程晚到结果覆盖清空状态。
-    cancelCurrentScan();
+    cancelMemoryScanTasks();
 
-    m_searchResultCache.clear();
+    m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>();
     m_lastSearchValueType = SearchValueType::Byte;
     rebuildSearchResultTable();
 
+    if (!m_searchResultTable) { return; }
     // 恢复按钮状态，并把进度条与状态文本还原到“就绪”。
     m_scanProgressBar->setValue(0);
     m_scanStatusLabel->setText("已重置，等待首次扫描。");
@@ -690,11 +659,13 @@ void MemoryDock::resetScanState()
 
 void MemoryDock::cancelCurrentScan()
 {
+    if (m_firstScanPreparation) { cancelFirstScanPreparation(); return; }
     // 仅当扫描进行中才设置取消标志；空闲状态下无需修改。
     if (m_scanInProgress.load())
     {
         m_scanCancelRequested.store(true);
-        m_scanStatusLabel->setText("正在请求取消扫描...");
+        if (m_scanTaskState) { m_scanTaskState->cancelRequested.store(true); }
+        if (m_scanStatusLabel) { m_scanStatusLabel->setText("正在请求取消扫描..."); }
         kLogEvent cancelScanEvent;
         warn << cancelScanEvent
             << "[MemoryDock] cancelCurrentScan: 已设置取消标志。"
@@ -702,103 +673,70 @@ void MemoryDock::cancelCurrentScan()
     }
 }
 
-void MemoryDock::cancelAndWaitForMemoryScanTasks()
+void MemoryDock::cancelMemoryScanTasks()
 {
-    // 关闭句柄或析构前必须等待协调线程退出，不能让 detached worker 继续访问控件。
     cancelCurrentScan();
-    m_scanCancelRequested.store(true);
+    if (m_scanTaskState) { m_scanTaskState->cancelRequested.store(true); }
+    m_scanTaskState = std::make_shared<MemoryScanTaskState>();
+    m_scanCompletion = {}; m_scanInProgress.store(false); m_scanCancelRequested.store(true);
+    if (m_firstScanButton) { m_firstScanButton->setEnabled(true); }
+    if (m_nextScanButton) { m_nextScanButton->setEnabled(!m_searchResultCache->empty()); }
+    if (m_resetScanButton) { m_resetScanButton->setEnabled(true); }
+    if (m_cancelScanButton) { m_cancelScanButton->setEnabled(false); }
+}
 
-    const std::shared_ptr<MemoryScanTaskState> taskState = m_scanTaskState;
-    std::unique_lock<std::mutex> lock(taskState->mutex);
-    taskState->completion.wait(lock, [taskState]()
-    {
-        return taskState->activeTaskCount == 0;
-    });
+void MemoryDock::pollMemoryScanTask()
+{
+    const auto task = m_scanTaskState;
+    if (!task || !m_scanCompletion) { return; }
+    if (task->done.load()) {
+        auto apply = std::move(m_scanCompletion); m_scanCompletion = {};
+        apply(); return;
+    }
+    const int progress = task->progressPercent.load();
+    if (progress >= 0 && progress != m_scanLastProgress) {
+        m_scanLastProgress = progress;
+        const QPointer<MemoryDock> owner(this);
+        m_scanProgressBar->setValue(progress); if (!owner) { return; }
+        m_scanStatusLabel->setText((task->next ? QString("再次扫描中：%1 / %2 条") : QString("扫描中：%1 / %2 区域")).arg(task->progressDone.load()).arg(task->progressTotal.load()));
+    }
 }
 
 void MemoryDock::rebuildSearchResultTable()
 {
-    // 重建结果表入口日志：记录结果规模与显示类型。
-    kLogEvent rebuildResultEvent;
-    dbg << rebuildResultEvent
-        << "[MemoryDock] rebuildSearchResultTable: 结果重建, count="
-        << m_searchResultCache.size()
-        << ", valueType="
-        << static_cast<int>(m_lastSearchValueType)
-        << eol;
+    if (!m_searchResultTable) { return; }
+    constexpr std::size_t displayLimit = 10000;
+    m_searchResultVisibleCount = (std::min)(m_searchResultCache->size(), displayLimit);
+    const auto hidden = m_searchResultCache->size() - m_searchResultVisibleCount;
+    m_searchResultTable->setToolTip(hidden ? QString("结果总数 %1，当前仅显示前 %2 条以保持界面响应。").arg(m_searchResultCache->size()).arg(m_searchResultVisibleCount) : QString());
+    requestCoreProjection(CoreKind::SearchResults, false);
+    m_nextScanButton->setEnabled(!m_searchResultCache->empty() && !m_scanInProgress.load());
+}
 
-    // 为避免超大结果集导致界面长时间冻结，UI 层仅展示前 N 条。
-    constexpr std::size_t kSearchResultDisplayLimit = 10000;
-    const std::size_t totalCount = m_searchResultCache.size();
-    const std::size_t visibleCount = std::min<std::size_t>(totalCount, kSearchResultDisplayLimit);
-    const std::size_t hiddenCount = totalCount - visibleCount;
-    m_searchResultVisibleCount = visibleCount;
-
-    // 表格重建前先关闭排序与绘制，降低批量 setItem 开销。
-    m_searchResultTable->setSortingEnabled(false);
-    m_searchResultTable->setUpdatesEnabled(false);
-    m_searchResultTable->clearContents();
-    m_searchResultTable->setRowCount(static_cast<int>(visibleCount));
-
-    for (int row = 0; row < static_cast<int>(visibleCount); ++row)
-    {
-        const SearchResultEntry& entry = m_searchResultCache[static_cast<std::size_t>(row)];
-
-        // 地址列用数值排序项：显示的是定宽十六进制文本，排序必须按真实数值走，
-        // 否则点表头排序会退化成字符串序。Qt::UserRole 仍保留给既有跳转逻辑读取。
-        QTableWidgetItem* addressItem = new ks::ui::NumericTableItem(
-            formatAddress(entry.address),
-            static_cast<qulonglong>(entry.address));
-        addressItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(entry.address)));
-        m_searchResultTable->setItem(row, 0, addressItem);
-
-        m_searchResultTable->setItem(
-            row,
-            1,
-            new QTableWidgetItem(bytesToDisplayString(entry.currentValueBytes, m_lastSearchValueType)));
-
-        m_searchResultTable->setItem(
-            row,
-            2,
-            new QTableWidgetItem(bytesToDisplayString(entry.previousValueBytes, m_lastSearchValueType)));
-
-        m_searchResultTable->setItem(row, 3, new QTableWidgetItem(entry.noteText));
-    }
-    m_searchResultTable->setUpdatesEnabled(true);
-    // 填表结束后恢复排序能力：构造期开启的排序在批量写入前被临时关掉，这里必须还原，
-    // 否则结果表在第一次扫描之后就永远不能再按地址排序。
-    m_searchResultTable->setSortingEnabled(true);
-
-    // 当结果被截断显示时，在工具提示中给出明确说明。
-    if (hiddenCount > 0)
-    {
-        m_searchResultTable->setToolTip(
-            QString("结果总数 %1，当前仅显示前 %2 条以保持界面响应。")
-            .arg(totalCount)
-            .arg(visibleCount));
-    }
-    else
-    {
-        m_searchResultTable->setToolTip(QString());
-    }
-
-    // 有结果时允许再次扫描；无结果时禁用该按钮避免误操作。
-    m_nextScanButton->setEnabled(!m_searchResultCache.empty() && !m_scanInProgress.load());
-
-    kLogEvent rebuildResultFinishEvent;
-    dbg << rebuildResultFinishEvent
-        << "[MemoryDock] rebuildSearchResultTable: 重建完成, nextScanEnabled="
-        << (m_nextScanButton->isEnabled() ? "true" : "false")
-        << ", visibleCount="
-        << visibleCount
-        << ", hiddenCount="
-        << hiddenCount
-        << eol;
+void MemoryDock::captureSearchResultProjection(CoreProjectionData& data) const
+{
+    const auto source = m_searchResultCache;
+    data.extraSource = source; data.extraCount = (std::min)(source->size(), std::size_t{10000}); data.extraDiagnosticRow = false;
+    data.extraMatches = [](std::size_t) { return true; };
+    data.extraKey = [source](std::size_t row) { return QString::number((*source)[row].address); };
+    data.extraCell = [source, type = m_lastSearchValueType, language = data.language](std::size_t row, int column, int role) -> QVariant {
+        const auto& entry = (*source)[row];
+        if (column == 0 && role == Qt::UserRole) { return QVariant::fromValue<qulonglong>(entry.address); }
+        const bool numeric = role == ks::ui::NumericSortRole;
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return numeric ? QVariant::fromValue<qulonglong>(entry.address) : QVariant(formatAddress(entry.address));
+        case 1: return bytesToDisplayString(entry.currentValueBytes, type);
+        case 2: return bytesToDisplayString(entry.previousValueBytes, type);
+        case 3: return language.sourceText(entry.noteText);
+        default: return {};
+        }
+    };
 }
 
 void MemoryDock::scanMemoryRegionsInBackground(
-    const std::vector<RegionEntry>& scanRegions,
-    const ParsedSearchPattern& pattern)
+    std::vector<RegionEntry> scanRegions,
+    const ParsedSearchPattern& pattern, const FirstScanOptions& options)
 {
     // 后台扫描入口日志：记录区域总数、线程数和匹配模式字节数。
     kLogEvent scanBackgroundStartEvent;
@@ -815,22 +753,27 @@ void MemoryDock::scanMemoryRegionsInBackground(
     const QPointer<MemoryDock> selfGuard(this);
 
     // 扫描参数固定为值捕获，避免 UI 后续修改导致后台线程读到变化中的对象。
-    const HANDLE processHandle = m_attachedProcessHandle;
-    const std::vector<RegionEntry> regions = scanRegions;
+    const auto processLease = duplicateAttachedProcessHandleForWorker();
+    if (!processLease) { finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); return; }
+    const HANDLE processHandle = static_cast<HANDLE>(processLease.get());
+    auto regions = std::move(scanRegions);
     const ParsedSearchPattern scanPattern = pattern;
-    const std::uint32_t threadCount = std::max<std::uint32_t>(1, m_scanThreadCount);
+    const std::uint32_t threadCount = std::max<std::uint32_t>(1, options.threads);
     // 所有后端使用协议允许的完整分片，避免 R0 因扫描配置超出单次上限而全程跳过。
     const std::size_t chunkSize = static_cast<std::size_t>(
-        (std::min)(static_cast<std::uint64_t>((std::max)(64U, m_scanChunkSizeKB)) * 1024ULL,
+        (std::min)(static_cast<std::uint64_t>((std::max)(64U, options.chunkKB)) * 1024ULL,
             static_cast<std::uint64_t>(KSWORD_ARK_MEMORY_READ_MAX_BYTES)));
     const auto startTime = std::chrono::steady_clock::now();
+    m_scanTaskState = std::make_shared<MemoryScanTaskState>();
     const std::shared_ptr<MemoryScanTaskState> taskState = m_scanTaskState;
+    taskState->processLease = processLease;
+    m_scanLastProgress = -1;
 
     // 后端选择与 DDMA 会话必须在 UI 线程上按值快照下来：worker 跑起来之后
     // 用户随时可能改这两处配置，后台线程读一个变化中的会话会得到半新半旧的参数。
-    const ksword::memory_backend::MemoryAccessBackend scanBackend = currentSearchBackend();
-    const ksword::memory_backend::DdmaSession scanDdmaSession = currentDdmaSession();
-    const std::uint32_t scanTargetPid = m_attachedPid;
+    const ksword::memory_backend::MemoryAccessBackend scanBackend = options.backend;
+    const ksword::memory_backend::DdmaSession scanDdmaSession = options.ddma;
+    const std::uint32_t scanTargetPid = options.pid;
     const QString scanBackendName = ks::i18n::sourceText(
         ksword::memory_backend::backendDisplayName(scanBackend));
     const QString finishedMessage = ks::i18n::sourceText(QStringLiteral(
@@ -843,35 +786,114 @@ void MemoryDock::scanMemoryRegionsInBackground(
         "读取结果不完整，已跳过该范围。"));
 
     // 外层协调线程会等待其内部 worker，因此登记这一层即可覆盖整轮首次扫描。
-    {
-        std::lock_guard<std::mutex> lock(taskState->mutex);
-        ++taskState->activeTaskCount;
-    }
+    const std::weak_ptr<MemoryScanTaskState> weakTask(taskState);
+    taskState->cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weakTask] { if (const auto task = weakTask.lock()) { task->cancelRequested.store(true); } });
+    if (!taskState->cleanupLease) { taskState->processLease.reset(); finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); return; }
+    m_coreProjectionPoll->start();
+
 
     // 后台主线程只负责拉起 worker 并汇总结果，不直接操作 UI 控件。
-    std::thread([selfGuard, taskState, processHandle, regions, scanPattern, threadCount, chunkSize, startTime,
+    taskState->next = false;
+    m_scanCompletion = [selfGuard, taskState, scanBackendName, finishedMessage, cancelledMessage, readProblemMessage] {
+        if (!selfGuard || selfGuard->m_scanTaskState != taskState) { return; }
+        if (!taskState->failureText.isEmpty()) { selfGuard->finishFirstScanPreparation(taskState->failureText); return; }
+        const auto cancelled = taskState->cancelled || taskState->cancelRequested.load();
+        const auto elapsedMs = taskState->elapsedMs;
+        const auto resultsSnapshot = taskState->results;
+        const auto firstReadFailure = taskState->firstReadFailure;
+        const auto skippedByteCount = taskState->skippedBytes, skippedRequestCount = taskState->skippedEntries;
+
+            if (selfGuard == nullptr || selfGuard->m_scanTaskState != taskState)
+            {
+                return;
+            }
+
+            auto commitSnapshot = [selfGuard, taskState, cancelled, elapsedMs, resultsSnapshot,
+                skippedByteCount, skippedRequestCount, firstReadFailure, scanBackendName,
+                finishedMessage, cancelledMessage, readProblemMessage]() mutable
+            {
+                if (selfGuard == nullptr || selfGuard->m_scanTaskState != taskState)
+                {
+                    return;
+                }
+
+                // 延迟提交期间的取消同样有效，避免旧扫描结果覆盖用户当前状态。
+                const bool effectiveCancelled =
+                    cancelled || taskState->cancelRequested.load();
+                selfGuard->m_scanInProgress.store(false);
+                selfGuard->m_scanCancelRequested.store(false);
+                selfGuard->m_firstScanButton->setEnabled(true);
+                selfGuard->m_resetScanButton->setEnabled(true);
+                selfGuard->m_cancelScanButton->setEnabled(false);
+
+                if (effectiveCancelled)
+                {
+                    QString cancelledText = cancelledMessage.arg(scanBackendName)
+                        .arg(skippedByteCount).arg(skippedRequestCount);
+                    if (!firstReadFailure.isEmpty())
+                    {
+                        cancelledText += QLatin1Char(' ') + readProblemMessage.arg(
+                            ks::i18n::sourceText(firstReadFailure));
+                    }
+                    selfGuard->m_scanStatusLabel->setText(cancelledText);
+                    kLogEvent scanBackgroundCancelledUiEvent;
+                    warn << scanBackgroundCancelledUiEvent
+                        << "[MemoryDock] scanMemoryRegionsInBackground: 主线程收到取消结果。"
+                        << eol;
+                    return;
+                }
+
+                selfGuard->m_scanProgressBar->setValue(100);
+                selfGuard->m_searchResultCache = resultsSnapshot;
+                selfGuard->rebuildSearchResultTable();
+                QString finishText = finishedMessage.arg(scanBackendName)
+                    .arg(selfGuard->m_searchResultCache->size()).arg(elapsedMs)
+                    .arg(skippedByteCount).arg(skippedRequestCount);
+                if (!firstReadFailure.isEmpty())
+                {
+                    finishText += QLatin1Char(' ') + readProblemMessage.arg(
+                        ks::i18n::sourceText(firstReadFailure));
+                }
+                if (selfGuard->m_searchResultCache->size() > selfGuard->m_searchResultVisibleCount)
+                {
+                    finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
+                }
+                selfGuard->m_scanStatusLabel->setText(finishText);
+
+                // UI 提交完成日志：确认结果已落地到缓存与表格。
+                kLogEvent scanBackgroundUiFinishEvent;
+                info << scanBackgroundUiFinishEvent
+                    << "[MemoryDock] scanMemoryRegionsInBackground: 主线程提交完成, resultCount="
+                    << selfGuard->m_searchResultCache->size()
+                    << ", elapsedMs="
+                    << elapsedMs
+                    << eol;
+            };
+
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
+                selfGuard.data(),
+                QStringLiteral("memory-search-first-scan"),
+                { selfGuard->m_searchResultTable },
+                commitSnapshot))
+            {
+                return;
+            }
+            commitSnapshot();
+                };
+    try { std::thread([taskState, processHandle, regions = std::move(regions), scanPattern, threadCount, chunkSize, startTime,
                  scanBackend, scanDdmaSession, scanTargetPid, scanBackendName,
                  finishedMessage, cancelledMessage, readProblemMessage, incompleteMessage]() {
-        const auto finishScanTask = [taskState]()
-        {
-            std::lock_guard<std::mutex> lock(taskState->mutex);
-            if (taskState->activeTaskCount > 0)
-            {
-                --taskState->activeTaskCount;
-                if (taskState->activeTaskCount == 0)
-                {
-                    taskState->completion.notify_all();
-                }
-            }
-        };
+        struct Completion final { std::shared_ptr<MemoryScanTaskState> task; ~Completion() { task->processLease.reset(); task->cleanupLease.reset(); task->done.store(true); } } completed{taskState};
+        try {
 
-        if (selfGuard == nullptr || processHandle == nullptr)
+
+
+        if (taskState->cancelRequested.load() || processHandle == nullptr)
         {
             kLogEvent scanBackgroundGuardFailEvent;
             warn << scanBackgroundGuardFailEvent
                 << "[MemoryDock] scanMemoryRegionsInBackground: selfGuard 或 processHandle 无效，线程直接返回。"
                 << eol;
-            finishScanTask();
             return;
         }
 
@@ -890,16 +912,7 @@ void MemoryDock::scanMemoryRegionsInBackground(
             err << scanBackgroundPatternEmptyEvent
                 << "[MemoryDock] scanMemoryRegionsInBackground: patternLength 为 0，终止扫描。"
                 << eol;
-            QMetaObject::invokeMethod(selfGuard.data(), [selfGuard]() {
-                if (selfGuard == nullptr) return;
-                selfGuard->m_scanInProgress.store(false);
-                selfGuard->m_scanCancelRequested.store(false);
-                selfGuard->m_firstScanButton->setEnabled(true);
-                selfGuard->m_resetScanButton->setEnabled(true);
-                selfGuard->m_cancelScanButton->setEnabled(false);
-                selfGuard->m_scanStatusLabel->setText("扫描失败：匹配模式为空。");
-                }, Qt::QueuedConnection);
-            finishScanTask();
+            taskState->failureText = QStringLiteral("扫描失败：匹配模式为空。");
             return;
         }
 
@@ -923,6 +936,7 @@ void MemoryDock::scanMemoryRegionsInBackground(
 
         // 每个 worker 处理“下标同余”的区域切片，实现低成本负载均衡。
         const auto workerBody = [&](const std::uint32_t workerId) {
+            try {
             // 单个 worker 的命中计数，仅用于日志统计。
             std::vector<SearchResultEntry> localResults;
             localResults.reserve(256);
@@ -930,7 +944,7 @@ void MemoryDock::scanMemoryRegionsInBackground(
 
             for (std::size_t regionIndex = workerId; regionIndex < regions.size(); regionIndex += threadCount)
             {
-                if (selfGuard->m_scanCancelRequested.load())
+                if (taskState->cancelRequested.load())
                 {
                     break;
                 }
@@ -946,8 +960,10 @@ void MemoryDock::scanMemoryRegionsInBackground(
                 std::uint64_t remainBytes = region.regionSize;
                 QByteArray carryBytes;
 
-                while (remainBytes > 0 && !selfGuard->m_scanCancelRequested.load())
+                while (remainBytes > 0 && !taskState->cancelRequested.load())
                 {
+                    DWORD targetExitCode = 0;
+                    if (!GetExitCodeProcess(processHandle, &targetExitCode) || targetExitCode != STILL_ACTIVE) { taskState->cancelRequested.store(true); break; }
                     const std::size_t requestSize = static_cast<std::size_t>(
                         std::min<std::uint64_t>(remainBytes, static_cast<std::uint64_t>(chunkSize)));
                     const auto readOutcome = ksword::memory_backend::readVirtual(
@@ -997,6 +1013,7 @@ void MemoryDock::scanMemoryRegionsInBackground(
                             static_cast<std::size_t>(mergedBuffer.size()) - patternLength;
                         for (std::size_t offset = startOffset; offset <= maxOffset; ++offset)
                         {
+                            if ((offset & 4095U) == 0U && taskState->cancelRequested.load()) { break; }
                             const char* candidatePtr = mergedBuffer.constData() + static_cast<int>(offset);
                             if (!matchesPatternAt(candidatePtr))
                             {
@@ -1041,18 +1058,7 @@ void MemoryDock::scanMemoryRegionsInBackground(
                 const std::size_t finishedCount = ++finishedRegionCount;
                 if ((finishedCount % 16 == 0) || finishedCount == regions.size())
                 {
-                    QMetaObject::invokeMethod(selfGuard.data(), [selfGuard, finishedCount, totalCount = regions.size()]() {
-                        if (selfGuard == nullptr || totalCount == 0)
-                        {
-                            return;
-                        }
-                        const int progress = static_cast<int>((finishedCount * 100) / totalCount);
-                        selfGuard->m_scanProgressBar->setValue(progress);
-                        selfGuard->m_scanStatusLabel->setText(
-                            QString("扫描中：%1 / %2 区域")
-                            .arg(finishedCount)
-                            .arg(totalCount));
-                        }, Qt::QueuedConnection);
+                    taskState->progressDone.store(finishedCount); taskState->progressTotal.store(regions.size()); taskState->progressPercent.store(regions.empty() ? 100 : static_cast<int>(finishedCount * 100 / regions.size()));
                 }
             }
 
@@ -1064,17 +1070,19 @@ void MemoryDock::scanMemoryRegionsInBackground(
                 << ", hitCount="
                 << workerHitCount
                 << eol;
+            } catch (...) { taskState->cancelRequested.store(true); std::lock_guard<std::mutex> lock(resultMutex); taskState->failureText = QStringLiteral("Memory table projection failed"); }
             };
 
         // 拉起 worker 线程组；线程数不会超过区域数，避免空转。
         std::vector<std::thread> workers;
+        struct JoinWorkers final { std::vector<std::thread>& threads; ~JoinWorkers() { for (auto& thread : threads) { if (thread.joinable()) { thread.join(); } } } } joined{workers};
         workers.reserve(threadCount);
         const std::uint32_t realThreadCount = static_cast<std::uint32_t>(
             std::min<std::size_t>(regions.size(), static_cast<std::size_t>(threadCount)));
-        for (std::uint32_t workerId = 0; workerId < realThreadCount; ++workerId)
+        try { for (std::uint32_t workerId = 0; workerId < realThreadCount; ++workerId)
         {
             workers.emplace_back(workerBody, workerId);
-        }
+        } } catch (...) { taskState->cancelRequested.store(true); throw; }
 
         for (std::thread& worker : workers)
         {
@@ -1085,11 +1093,8 @@ void MemoryDock::scanMemoryRegionsInBackground(
         }
 
         // 统一按地址升序排列，便于用户浏览和“再次扫描”时的稳定结果顺序。
-        std::sort(mergedResults.begin(), mergedResults.end(), [](const SearchResultEntry& left, const SearchResultEntry& right) {
-            return left.address < right.address;
-            });
-
-        const bool cancelled = selfGuard->m_scanCancelRequested.load();
+        const bool cancelled = taskState->cancelRequested.load();
+        if (!cancelled) { std::sort(mergedResults.begin(), mergedResults.end(), [](const SearchResultEntry& left, const SearchResultEntry& right) { return left.address < right.address; }); }
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - startTime).count();
 
@@ -1104,92 +1109,10 @@ void MemoryDock::scanMemoryRegionsInBackground(
             << elapsedMs
             << eol;
 
+        const auto resultsSnapshot = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>(cancelled ? std::vector<SearchResultEntry>{} : std::move(mergedResults));
         // 所有 UI 修改统一切回主线程执行。
-        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard, cancelled, elapsedMs,
-            skippedByteCount = skippedBytes.load(std::memory_order_relaxed),
-            skippedRequestCount = skippedRequests.load(std::memory_order_relaxed),
-            firstReadFailure, scanBackendName, finishedMessage, cancelledMessage,
-            readProblemMessage, finalResults = std::move(mergedResults)]() mutable {
-            if (selfGuard == nullptr)
-            {
-                return;
-            }
-
-            auto resultsSnapshot =
-                std::make_shared<std::vector<SearchResultEntry>>(std::move(finalResults));
-            auto commitSnapshot = [selfGuard, cancelled, elapsedMs, resultsSnapshot,
-                skippedByteCount, skippedRequestCount, firstReadFailure, scanBackendName,
-                finishedMessage, cancelledMessage, readProblemMessage]() mutable
-            {
-                if (selfGuard == nullptr)
-                {
-                    return;
-                }
-
-                // 延迟提交期间的取消同样有效，避免旧扫描结果覆盖用户当前状态。
-                const bool effectiveCancelled =
-                    cancelled || selfGuard->m_scanCancelRequested.load();
-                selfGuard->m_scanInProgress.store(false);
-                selfGuard->m_scanCancelRequested.store(false);
-                selfGuard->m_firstScanButton->setEnabled(true);
-                selfGuard->m_resetScanButton->setEnabled(true);
-                selfGuard->m_cancelScanButton->setEnabled(false);
-
-                if (effectiveCancelled)
-                {
-                    QString cancelledText = cancelledMessage.arg(scanBackendName)
-                        .arg(skippedByteCount).arg(skippedRequestCount);
-                    if (!firstReadFailure.isEmpty())
-                    {
-                        cancelledText += QLatin1Char(' ') + readProblemMessage.arg(
-                            ks::i18n::sourceText(firstReadFailure));
-                    }
-                    selfGuard->m_scanStatusLabel->setText(cancelledText);
-                    kLogEvent scanBackgroundCancelledUiEvent;
-                    warn << scanBackgroundCancelledUiEvent
-                        << "[MemoryDock] scanMemoryRegionsInBackground: 主线程收到取消结果。"
-                        << eol;
-                    return;
-                }
-
-                selfGuard->m_scanProgressBar->setValue(100);
-                selfGuard->m_searchResultCache = std::move(*resultsSnapshot);
-                selfGuard->rebuildSearchResultTable();
-                QString finishText = finishedMessage.arg(scanBackendName)
-                    .arg(selfGuard->m_searchResultCache.size()).arg(elapsedMs)
-                    .arg(skippedByteCount).arg(skippedRequestCount);
-                if (!firstReadFailure.isEmpty())
-                {
-                    finishText += QLatin1Char(' ') + readProblemMessage.arg(
-                        ks::i18n::sourceText(firstReadFailure));
-                }
-                if (selfGuard->m_searchResultCache.size() > selfGuard->m_searchResultVisibleCount)
-                {
-                    finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
-                }
-                selfGuard->m_scanStatusLabel->setText(finishText);
-
-                // UI 提交完成日志：确认结果已落地到缓存与表格。
-                kLogEvent scanBackgroundUiFinishEvent;
-                info << scanBackgroundUiFinishEvent
-                    << "[MemoryDock] scanMemoryRegionsInBackground: 主线程提交完成, resultCount="
-                    << selfGuard->m_searchResultCache.size()
-                    << ", elapsedMs="
-                    << elapsedMs
-                    << eol;
-            };
-
-            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                selfGuard.data(),
-                QStringLiteral("memory-search-first-scan"),
-                { selfGuard->m_searchResultTable },
-                commitSnapshot))
-            {
-                return;
-            }
-            commitSnapshot();
-            }, Qt::QueuedConnection);
-        finishScanTask();
-    }).detach();
+        taskState->results = resultsSnapshot; taskState->cancelled = cancelled;
+        taskState->elapsedMs = static_cast<std::uint64_t>(elapsedMs); taskState->skippedBytes = skippedBytes.load(std::memory_order_relaxed); taskState->skippedEntries = skippedRequests.load(std::memory_order_relaxed); taskState->firstReadFailure = firstReadFailure;
+            } catch (...) { taskState->failureText = QStringLiteral("Memory table projection failed"); }
+}).detach(); } catch (...) { taskState->failureText = QStringLiteral("Memory table projection failed"); taskState->processLease.reset(); taskState->cleanupLease.reset(); taskState->done.store(true); }
 }
-

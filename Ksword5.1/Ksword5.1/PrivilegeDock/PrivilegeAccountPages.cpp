@@ -4,7 +4,7 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../Internationalization/LanguageManager.h"
-#include "../UI/VisibleTableWidget.h"
+#include "../UI/ImmutableValueTable.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
 
@@ -29,6 +29,7 @@
 #include <QSplitter>
 #include <QThreadPool>
 #include <QVBoxLayout>
+#include <QVariant>
 
 #include <algorithm>
 #include <exception>
@@ -53,6 +54,21 @@ namespace
     QString privilegeText(const char* key, const QString& source)
     {
         return ks::i18n::contextText(QString::fromLatin1(key), source);
+    }
+
+    // Every runRows job owns a frozen context. Unscoped exported collectors retain
+    // source text instead of consulting the mutable LanguageManager from a worker.
+    thread_local const ks::i18n::SourceTextSnapshot* workerTranslation = nullptr;
+    struct WorkerTranslationScope
+    {
+        const ks::i18n::SourceTextSnapshot* previous;
+        explicit WorkerTranslationScope(const ks::i18n::SourceTextSnapshot& value)
+            : previous(std::exchange(workerTranslation, &value)) {}
+        ~WorkerTranslationScope() { workerTranslation = previous; }
+    };
+    QString privilegeWorkerText(const char* key, const QString& source)
+    {
+        return workerTranslation ? workerTranslation->contextText(QString::fromLatin1(key), source) : source;
     }
 
     QString winError(DWORD code)
@@ -89,7 +105,7 @@ namespace
         const QString value = input.trimmed();
         if (value.isEmpty())
         {
-            result.error = privilegeText("privilege.workbench.groups.error.account_empty", QStringLiteral("请输入账户名或 SID。"));
+            result.error = privilegeWorkerText("privilege.workbench.groups.error.account_empty", QStringLiteral("请输入账户名或 SID。"));
             return result;
         }
         if (value.startsWith(QStringLiteral("S-1-"), Qt::CaseInsensitive))
@@ -149,6 +165,7 @@ namespace
         QString detail;
         QString extra;
         bool disabled = false;
+        QString detailRight;
     };
     struct RowsResult
     {
@@ -162,30 +179,114 @@ namespace
         target += error;
     }
 
+    template<class Value> void retireAccountValue(Value value) noexcept
+    {
+        try
+        {
+            auto task = std::unique_ptr<QRunnable>(QRunnable::create([value = std::move(value)] {}));
+            QThreadPool::globalInstance()->start(task.get());
+            task.release();
+        }
+        catch (...) {}
+    }
+
     // QtCore-only asynchronous jobs: the future owns the result. Destroying a page destroys its
     // watcher and disconnects the completion; workers never dereference or invoke a UI pointer.
     template<class Work, class Done>
-    void runRows(QWidget* page, Work work, Done done)
+    void runRows(QObject* page, Work work, Done done)
     {
-        auto promise = std::make_shared<QPromise<RowsResult>>();
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        using Result = std::shared_ptr<const RowsResult>;
+        auto promise = std::make_shared<QPromise<Result>>();
         promise->start();
-        auto* watcher = new QFutureWatcher<RowsResult>(page);
-        QObject::connect(watcher, &QFutureWatcher<RowsResult>::finished, page, [watcher, done]()
+        auto* watcher = new QFutureWatcher<Result>(page);
+        QObject::connect(watcher, &QFutureWatcher<Result>::finished, page, [watcher, done, owner = QPointer<QObject>(page)]()
         {
-            const RowsResult result = watcher->result();
-            watcher->deleteLater();
-            done(result);
+            // Detaching a finished future posts another finished notification.
+            // Disconnect before reset so this completion can only consume one result.
+            QObject::disconnect(watcher, nullptr, owner.data(), nullptr);
+            auto result = watcher->result();
+            const QPointer<QObject> alive(watcher);
+            watcher->setFuture({});
+            if (alive) watcher->deleteLater();
+            if (owner) done(*result);
+            retireAccountValue(std::move(result));
         });
         watcher->setFuture(promise->future());
-        QThreadPool::globalInstance()->start(QRunnable::create([promise, work]()
+        QThreadPool::globalInstance()->start(QRunnable::create([promise, work, translator]()
         {
+            const WorkerTranslationScope scope(translator);
             RowsResult result;
             try { result = work(); }
             catch (const std::exception& exception) { result.error = QString::fromUtf8(exception.what()); }
-            catch (...) { result.error = privilegeText("privilege.workbench.groups.worker_exception", QStringLiteral("后台任务发生异常。")); }
-            promise->addResult(result);
+            catch (...) { result.error = privilegeWorkerText("privilege.workbench.groups.worker_exception", QStringLiteral("后台任务发生异常。")); }
+            promise->addResult(std::make_shared<const RowsResult>(std::move(result)));
             promise->finish();
         }));
+    }
+
+    // 替换性只读查询每个语义通道至多一个在途、一个最新待执行意图。
+    // 变更预览与已接受写事务仍走 runRows，绝不覆盖或丢弃事务。
+    class LatestRowsLane final : public QObject
+    {
+    public:
+        explicit LatestRowsLane(QObject* parent) : QObject(parent) {}
+        void invalidate()
+        {
+            ++m_revision;
+            m_pending = {};
+        }
+        template<class Work, class Done>
+        void submit(Work work, Done done)
+        {
+            const auto revision = ++m_revision;
+            m_pending = [this, revision, work, done]()
+            {
+                runRows(this, work, [this, revision, done](const RowsResult& result)
+                {
+                    m_running = false;
+                    const QPointer<LatestRowsLane> guard(this);
+                    if (revision == m_revision) done(result);
+                    if (guard) startPending();
+                });
+            };
+            startPending();
+        }
+    private:
+        void startPending()
+        {
+            if (m_running || !m_pending) return;
+            m_running = true;
+            auto next = std::move(m_pending);
+            m_pending = {};
+            next();
+        }
+        bool m_running = false;
+        quint64 m_revision = 0;
+        std::function<void()> m_pending;
+    };
+
+    LatestRowsLane* rowsLane(QObject* page, const char* key)
+    {
+        const QByteArray property = QByteArrayLiteral("ksword_latest_rows_") + key;
+        auto* lane = static_cast<LatestRowsLane*>(page->property(property.constData()).value<QObject*>());
+        if (lane == nullptr)
+        {
+            lane = new LatestRowsLane(page);
+            page->setProperty(property.constData(), QVariant::fromValue(static_cast<QObject*>(lane)));
+        }
+        return lane;
+    }
+
+    template<class Work, class Done>
+    void runLatestRows(QObject* page, const char* key, Work work, Done done)
+    {
+        rowsLane(page, key)->submit(std::move(work), std::move(done));
+    }
+
+    void invalidateLatestRows(QObject* page, const char* key)
+    {
+        rowsLane(page, key)->invalidate();
     }
 
     QString machineName()
@@ -390,18 +491,25 @@ namespace
         return value;
     }
 
+    QString knownRightDescription(const QString& right)
+    {
+        if (right == QStringLiteral("SeInteractiveLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.interactive", QStringLiteral("允许本地交互登录"));
+        if (right == QStringLiteral("SeNetworkLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.network", QStringLiteral("允许从网络访问此计算机"));
+        if (right == QStringLiteral("SeBatchLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.batch", QStringLiteral("允许作为批处理作业登录"));
+        if (right == QStringLiteral("SeServiceLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.service", QStringLiteral("允许作为服务登录"));
+        if (right == QStringLiteral("SeRemoteInteractiveLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.remote", QStringLiteral("允许通过远程桌面登录"));
+        if (right == QStringLiteral("SeDenyInteractiveLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.deny_interactive", QStringLiteral("拒绝本地交互登录"));
+        if (right == QStringLiteral("SeDenyNetworkLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.deny_network", QStringLiteral("拒绝从网络访问此计算机"));
+        if (right == QStringLiteral("SeDenyBatchLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.deny_batch", QStringLiteral("拒绝作为批处理作业登录"));
+        if (right == QStringLiteral("SeDenyServiceLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.deny_service", QStringLiteral("拒绝作为服务登录"));
+        if (right == QStringLiteral("SeDenyRemoteInteractiveLogonRight")) return privilegeWorkerText("privilege.workbench.rights.logon.deny_remote", QStringLiteral("拒绝通过远程桌面登录"));
+        return {};
+    }
+
     QString rightDescription(const QString& right)
     {
-        if (right == QStringLiteral("SeInteractiveLogonRight")) return privilegeText("privilege.workbench.rights.logon.interactive", QStringLiteral("允许本地交互登录"));
-        if (right == QStringLiteral("SeNetworkLogonRight")) return privilegeText("privilege.workbench.rights.logon.network", QStringLiteral("允许从网络访问此计算机"));
-        if (right == QStringLiteral("SeBatchLogonRight")) return privilegeText("privilege.workbench.rights.logon.batch", QStringLiteral("允许作为批处理作业登录"));
-        if (right == QStringLiteral("SeServiceLogonRight")) return privilegeText("privilege.workbench.rights.logon.service", QStringLiteral("允许作为服务登录"));
-        if (right == QStringLiteral("SeRemoteInteractiveLogonRight")) return privilegeText("privilege.workbench.rights.logon.remote", QStringLiteral("允许通过远程桌面登录"));
-        if (right == QStringLiteral("SeDenyInteractiveLogonRight")) return privilegeText("privilege.workbench.rights.logon.deny_interactive", QStringLiteral("拒绝本地交互登录"));
-        if (right == QStringLiteral("SeDenyNetworkLogonRight")) return privilegeText("privilege.workbench.rights.logon.deny_network", QStringLiteral("拒绝从网络访问此计算机"));
-        if (right == QStringLiteral("SeDenyBatchLogonRight")) return privilegeText("privilege.workbench.rights.logon.deny_batch", QStringLiteral("拒绝作为批处理作业登录"));
-        if (right == QStringLiteral("SeDenyServiceLogonRight")) return privilegeText("privilege.workbench.rights.logon.deny_service", QStringLiteral("拒绝作为服务登录"));
-        if (right == QStringLiteral("SeDenyRemoteInteractiveLogonRight")) return privilegeText("privilege.workbench.rights.logon.deny_remote", QStringLiteral("拒绝通过远程桌面登录"));
+        const QString known = knownRightDescription(right);
+        if (!known.isEmpty()) return known;
         DWORD count = 0, language = 0;
         ::LookupPrivilegeDisplayNameW(nullptr, reinterpret_cast<LPCWSTR>(right.utf16()), nullptr, &count, &language);
         if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER || count > 32768) return right;
@@ -427,6 +535,7 @@ namespace
                 row.name = QString::fromWCharArray(data[index].Buffer, data[index].Length / sizeof(wchar_t));
                 row.sid = sidText(sid);
                 row.detail = rightDescription(row.name);
+                row.detailRight = row.name;
                 result.rows.push_back(row);
             }
         if (data) ::LsaFreeMemory(data);
@@ -491,37 +600,73 @@ namespace
         };
     }
 
-    QTableWidget* makeTable(QWidget* parent, const QStringList& headers)
+    using ValueTable = ks::ui::ImmutableValueTable;
+    using TableHeader = ks::ui::ImmutableTableHeader;
+
+    QString accountRowKey(const QString& name, const QString& sid)
     {
-        auto* table = new ks::ui::VisibleTableWidget(parent);
-        table->setColumnCount(headers.size());
-        table->setHorizontalHeaderLabels(headers);
-        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        table->setSelectionBehavior(QAbstractItemView::SelectRows);
-        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        // SID is the object identity even when its display name changes.
+        return sid.isEmpty() ? QString::number(name.size()) + QLatin1Char(':') + name : sid;
+    }
+
+    ks::ui::ImmutableTableSource prepareAccountRows(const QVector<Row>& rows, bool account,
+        bool membership, int columns, const ks::i18n::SourceTextSnapshot& translator)
+    {
+        const WorkerTranslationScope scope(translator);
+        QVector<ks::ui::ImmutableTableRow> prepared;
+        prepared.reserve(rows.size());
+        for (const auto& row : rows)
+        {
+            QString detail = row.detailRight.isEmpty() ? QString() : knownRightDescription(row.detailRight);
+            if (detail.isEmpty()) detail = row.detail;
+            if (membership) detail = row.extra == QStringLiteral("unknown")
+                ? privilegeWorkerText("privilege.workbench.groups.source_unknown", QStringLiteral("来源未知（直接查询不完整）"))
+                : row.extra == QStringLiteral("direct")
+                ? privilegeWorkerText("privilege.workbench.groups.direct", QStringLiteral("直接成员"))
+                : privilegeWorkerText("privilege.workbench.groups.indirect", QStringLiteral("间接成员（全局组）"));
+            QStringList cells{row.name, row.sid, detail, row.extra};
+            if (account) cells = {row.name, row.sid, row.disabled
+                ? privilegeWorkerText("privilege.workbench.groups.disabled", QStringLiteral("已禁用"))
+                : privilegeWorkerText("privilege.workbench.groups.enabled", QStringLiteral("已启用")), detail};
+            while (cells.size() > columns) cells.removeLast();
+            ks::ui::ImmutableTableRow value;
+            value.key = row.detailRight.isEmpty() ? accountRowKey(row.name, row.sid)
+                : QString::number(row.name.size()) + QLatin1Char(':') + row.name + row.sid;
+            value.cells = std::move(cells);
+            value.roles.insert(Qt::UserRole, row.sid);
+            value.roles.insert(Qt::UserRole + 1, row.disabled);
+            prepared.push_back(std::move(value));
+        }
+        return ks::ui::MakeImmutableTableSource(std::move(prepared));
+    }
+
+    ValueTable* makeTable(QWidget* parent, QVector<TableHeader> headers)
+    {
+        auto* table = new ValueTable(parent, std::move(headers));
         table->setAlternatingRowColors(true);
-        table->verticalHeader()->hide();
-        table->horizontalHeader()->setStretchLastSection(true);
-        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        table->setSortingEnabled(true);
+        // Preserve QTableWidget's initial section-0 descending order; later user
+        // header choices are retained by the immutable view across source refreshes.
+        table->sortByColumn(0, Qt::DescendingOrder);
         table->setMinimumSize(0, 0);
         table->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(table, &QWidget::customContextMenuRequested, table, [table](const QPoint& point)
         {
             const QModelIndex index = table->indexAt(point);
             if (!index.isValid()) return;
-            table->setCurrentCell(index.row(), index.column());
-            const QString sid = table->item(index.row(), 0)->data(Qt::UserRole).toString();
+            const QString sid = table->cell(index.row(), 0, Qt::UserRole).toString();
             QStringList values;
             for (int column = 0; column < table->columnCount(); ++column)
-                values.push_back(table->item(index.row(), column) ? table->item(index.row(), column)->text() : QString());
-            // A non-blocking popup keeps worker commits outside an exec() nested event loop.
+                values.push_back(table->cell(index.row(), column).toString());
+            const QPointer<ValueTable> alive(table);
+            table->setCurrentIndex(index);
+            if (!alive) return;
             auto* menu = new QMenu(table);
             menu->setAttribute(Qt::WA_DeleteOnClose);
             QAction* copySid = menu->addAction(privilegeText("privilege.workbench.groups.copy_sid", QStringLiteral("复制 SID")));
             copySid->setEnabled(!sid.isEmpty());
             QObject::connect(copySid, &QAction::triggered, menu, [sid]() { QApplication::clipboard()->setText(sid); });
             QAction* copyRow = menu->addAction(privilegeText("privilege.workbench.groups.copy_row", QStringLiteral("复制行")));
-            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
             QObject::connect(copyRow, &QAction::triggered, menu, [values]() { QApplication::clipboard()->setText(values.join(QLatin1Char('\t'))); });
             menu->popup(table->viewport()->mapToGlobal(point));
@@ -529,42 +674,20 @@ namespace
         return table;
     }
 
-    void fillTable(QTableWidget* table, const QVector<Row>& rows, bool account = false)
+    bool fillTable(ValueTable* table, const QVector<Row>& rows, bool account = false, bool membership = false)
     {
-        table->setSortingEnabled(false);
-        table->setRowCount(rows.size());
-        for (qsizetype index = 0; index < rows.size(); ++index)
-        {
-            const Row& row = rows[index];
-            QStringList values{row.name, row.sid, row.detail, row.extra};
-            if (account) values = {row.name, row.sid, row.disabled
-                ? privilegeText("privilege.workbench.groups.disabled", QStringLiteral("已禁用"))
-                : privilegeText("privilege.workbench.groups.enabled", QStringLiteral("已启用")), row.detail};
-            for (int column = 0; column < table->columnCount(); ++column)
-            {
-                auto* item = new QTableWidgetItem(values.value(column));
-                item->setToolTip(values.value(column));
-                if (column == 0)
-                {
-                    item->setData(Qt::UserRole, row.sid);
-                    item->setData(Qt::UserRole + 1, row.disabled);
-                }
-                table->setItem(static_cast<int>(index), column, item);
-            }
-        }
-        table->setSortingEnabled(true);
+        const QPointer<ValueTable> alive(table);
+        const int columns = table->columnCount();
+        table->setSourceFactory([rows, account, membership, columns](const auto& translator) {
+            return prepareAccountRows(rows, account, membership, columns, translator);
+        });
+        return !alive.isNull();
     }
 
-    void filterTable(QTableWidget* table, const QString& query)
-    {
-        for (int row = 0; row < table->rowCount(); ++row)
-        {
-            bool match = query.isEmpty();
-            for (int column = 0; !match && column < table->columnCount(); ++column)
-                match = table->item(row, column) && table->item(row, column)->text().contains(query, Qt::CaseInsensitive);
-            table->setRowHidden(row, !match);
-        }
-    }
+    bool filterTable(ValueTable* table, const QString& query)
+    { const QPointer<ValueTable> alive(table); table->setQuery(query); return !alive.isNull(); }
+    bool clearRows(ValueTable* table)
+    { const QPointer<ValueTable> alive(table); table->clearRows(); return !alive.isNull(); }
 
     QPushButton* button(QWidget* page, const char* key, const QString& text)
     {
@@ -575,21 +698,12 @@ namespace
 
     void showResult(QLabel* status, const RowsResult& result)
     {
+        const QPointer<QLabel> alive(status);
         status->setText(result.error.isEmpty()
             ? privilegeText("privilege.workbench.groups.completed", QStringLiteral("查询完成，共 %1 项。")).arg(result.rows.size())
             : result.error);
+        if (!alive) return;
         ks::ui::ApplyStatusRole(status, result.error.isEmpty() ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Warning);
-    }
-
-    QVector<Row> membershipRows(QVector<Row> rows)
-    {
-        for (Row& row : rows)
-            row.detail = row.extra == QStringLiteral("unknown")
-                ? privilegeText("privilege.workbench.groups.source_unknown", QStringLiteral("来源未知（直接查询不完整）"))
-                : row.extra == QStringLiteral("direct")
-                ? privilegeText("privilege.workbench.groups.direct", QStringLiteral("直接成员"))
-                : privilegeText("privilege.workbench.groups.indirect", QStringLiteral("间接成员（全局组）"));
-        return rows;
     }
 
     class AccountPage final : public QWidget
@@ -625,13 +739,13 @@ namespace
             QObject::connect(viewGroups, &QPushButton::clicked, this, [this]() { navigateTo(QStringLiteral("groups")); });
             QObject::connect(viewRights, &QPushButton::clicked, this, [this]() { navigateTo(QStringLiteral("rights")); });
             QObject::connect(viewSessions, &QPushButton::clicked, this, [this]() { navigateTo(QStringLiteral("sessions")); });
-            m_table = makeTable(this, {privilegeText("privilege.workbench.groups.account", QStringLiteral("账户")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.state", QStringLiteral("状态")), privilegeText("privilege.workbench.groups.description", QStringLiteral("说明"))});
+            m_table = makeTable(this, {TableHeader(QStringLiteral("privilege.workbench.groups.account"), QStringLiteral("账户")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.state"), QStringLiteral("状态")), TableHeader(QStringLiteral("privilege.workbench.groups.description"), QStringLiteral("说明"))});
             m_table->setObjectName(QStringLiteral("privilege_accounts_table"));
             // 账户清单保留快照；所属组仅是当前账户的关联详情。
             ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
-            m_groups = makeTable(this, {privilegeText("privilege.workbench.groups.group", QStringLiteral("用户组")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.membership", QStringLiteral("成员来源"))});
+            m_groups = makeTable(this, {TableHeader(QStringLiteral("privilege.workbench.groups.group"), QStringLiteral("用户组")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.membership"), QStringLiteral("成员来源"))});
             ks::ui::SetTableActionBarMode(m_groups, ks::ui::TableActionBarMode::Compact);
             auto* splitter = new QSplitter(Qt::Vertical, this);
             splitter->addWidget(m_table); splitter->addWidget(m_groups);
@@ -639,8 +753,17 @@ namespace
             layout->addWidget(splitter, 1);
             m_status = new QLabel(this); m_status->setWordWrap(true); layout->addWidget(m_status);
             QObject::connect(refresh, &QPushButton::clicked, this, [this]() { refreshUsers(); });
-            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& query) { filterTable(m_table, query); });
-            QObject::connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() { refreshGroups(); });
+            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& query) { if (!filterTable(m_table, query)) return; });
+            m_table->currentRowChanged = [this]() {
+                const QString key = m_table->rowKey(m_table->currentRow());
+                if (key.isEmpty() && !m_lastAccountKey.isEmpty())
+                {
+                    const auto source = m_table->canonicalSource();
+                    if (source && source->byKey.contains(m_lastAccountKey)) return; // Filtering keeps the related result.
+                }
+                if (m_lastAccountKey != key) refreshGroups();
+            };
+            m_table->sourceReady = [this]() { refreshGroups(); };
             QObject::connect(enable, &QPushButton::clicked, this, [this]() { setEnabledState(true); });
             QObject::connect(disable, &QPushButton::clicked, this, [this]() { setEnabledState(false); });
         }
@@ -654,42 +777,44 @@ namespace
         void navigateTo(const QString& target)
         {
             const int row = m_table->currentRow();
-            if (!m_navigate || row < 0 || m_table->isRowHidden(row)) return;
-            const QString sid = m_table->item(row, 0)->data(Qt::UserRole).toString();
+            if (!m_navigate || row < 0) return;
+            const QString sid = m_table->cell(row, 0, Qt::UserRole).toString();
             if (!sid.isEmpty()) m_navigate(target, sid);
         }
         void refreshUsers()
         {
             const quint64 generation = ++m_userGeneration;
             ++m_groupGeneration;
-            m_groups->setRowCount(0);
-            runRows(this, []() { return enumerateUsers(); }, [this, generation](const RowsResult& result)
+            invalidateLatestRows(this, "account_groups");
+            if (!clearRows(m_groups)) return;
+            runLatestRows(this, "users", []() { return enumerateUsers(); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_userGeneration) return;
-                fillTable(m_table, result.rows, true); filterTable(m_table, m_search->text()); showResult(m_status, result);
+                if (!fillTable(m_table, result.rows, true)) return; if (!filterTable(m_table, m_search->text())) return; showResult(m_status, result);
             });
         }
         void refreshGroups()
         {
+            m_lastAccountKey = m_table->rowKey(m_table->currentRow());
             const quint64 generation = ++m_groupGeneration;
             const int row = m_table->currentRow();
-            m_groups->setRowCount(0);
-            if (row < 0 || m_table->isRowHidden(row)) return;
-            const QString account = m_table->item(row, 0)->text();
-            runRows(this, [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
+            if (!clearRows(m_groups)) return;
+            if (row < 0) { invalidateLatestRows(this, "account_groups"); return; }
+            const QString account = m_table->cell(row, 0).toString();
+            runLatestRows(this, "account_groups", [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_groupGeneration) return;
-                fillTable(m_groups, membershipRows(result.rows)); showResult(m_status, result);
+                if (!fillTable(m_groups, result.rows, false, true)) return; showResult(m_status, result);
             });
         }
         void setEnabledState(bool enabled)
         {
             const int row = m_table->currentRow();
-            if (row < 0 || m_table->isRowHidden(row)) return;
-            const QString account = m_table->item(row, 0)->text();
-            const QString sid = m_table->item(row, 0)->data(Qt::UserRole).toString();
+            if (row < 0) return;
+            const QString account = m_table->cell(row, 0).toString();
+            const QString sid = m_table->cell(row, 0, Qt::UserRole).toString();
             if (sid.isEmpty()) return;
-            const QString before = m_table->item(row, 2)->text();
+            const QString before = m_table->cell(row, 2).toString();
             const QString after = enabled ? privilegeText("privilege.workbench.groups.enabled", QStringLiteral("已启用"))
                 : privilegeText("privilege.workbench.groups.disabled", QStringLiteral("已禁用"));
             const QPointer<QWidget> pageGuard(this);
@@ -698,6 +823,8 @@ namespace
                     .arg(account, sid, before, after), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
             if (!pageGuard) return;
             ++m_userGeneration; ++m_groupGeneration;
+            invalidateLatestRows(this, "users");
+            invalidateLatestRows(this, "account_groups");
             setEnabled(false);
             runRows(this, [account, sid, enabled]()
             {
@@ -706,7 +833,7 @@ namespace
                 if (!current.error.isEmpty()) { result.error = current.error; return result; }
                 if (sidText(current.sid()) != sid)
                 {
-                    result.error = privilegeText("privilege.workbench.groups.identity_changed", QStringLiteral("账户身份已变化，请刷新后重试。"));
+                    result.error = privilegeWorkerText("privilege.workbench.groups.identity_changed", QStringLiteral("账户身份已变化，请刷新后重试。"));
                     return result;
                 }
                 if (!setLocalAccountEnabled(account, enabled, &result.error)) return result;
@@ -714,15 +841,18 @@ namespace
                 return result;
             }, [this](const RowsResult& result)
             {
+                const QPointer<QWidget> enabledOwner(this);
                 setEnabled(true);
-                if (result.error.isEmpty()) { fillTable(m_table, result.rows, true); filterTable(m_table, m_search->text()); }
+                if (!enabledOwner) return;
+                if (result.error.isEmpty()) { if (!fillTable(m_table, result.rows, true)) return; if (!filterTable(m_table, m_search->text())) return; }
                 showResult(m_status, result);
             });
         }
         QLineEdit* m_search = nullptr;
-        QTableWidget* m_table = nullptr;
-        QTableWidget* m_groups = nullptr;
+        ValueTable* m_table = nullptr;
+        ValueTable* m_groups = nullptr;
         QLabel* m_status = nullptr;
+        QString m_lastAccountKey;
         quint64 m_userGeneration = 0, m_groupGeneration = 0;
         bool m_loaded = false;
         std::function<void(const QString&, const QString&)> m_navigate;
@@ -741,10 +871,10 @@ namespace
             auto* refresh = button(this, "privilege.workbench.groups.refresh", QStringLiteral("刷新用户组"));
             toolbar->addWidget(m_search, 1); toolbar->addWidget(refresh); layout->addLayout(toolbar);
             ks::ui::NormalizeToolbarRow(toolbar);
-            m_groups = makeTable(this, {privilegeText("privilege.workbench.groups.group", QStringLiteral("用户组")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.description", QStringLiteral("说明"))});
-            m_members = makeTable(this, {privilegeText("privilege.workbench.groups.member", QStringLiteral("成员")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.sid_type", QStringLiteral("SID 类型值"))});
+            m_groups = makeTable(this, {TableHeader(QStringLiteral("privilege.workbench.groups.group"), QStringLiteral("用户组")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.description"), QStringLiteral("说明"))});
+            m_members = makeTable(this, {TableHeader(QStringLiteral("privilege.workbench.groups.member"), QStringLiteral("成员")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.sid_type"), QStringLiteral("SID 类型值"))});
             // 本地组是主清单；成员及查询所属组是依附当前选择的辅助结果。
             ks::ui::SetTableActionBarMode(m_groups, ks::ui::TableActionBarMode::Full);
             ks::ui::SetTableActionBarMode(m_members, ks::ui::TableActionBarMode::Compact);
@@ -765,27 +895,36 @@ namespace
             auto* query = button(this, "privilege.workbench.groups.lookup", QStringLiteral("查询所属组"));
             lookup->addWidget(m_account, 1); lookup->addWidget(query); layout->addLayout(lookup);
             ks::ui::NormalizeToolbarRow(lookup);
-            m_memberships = makeTable(this, {privilegeText("privilege.workbench.groups.group", QStringLiteral("用户组")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.membership", QStringLiteral("成员来源"))});
+            m_memberships = makeTable(this, {TableHeader(QStringLiteral("privilege.workbench.groups.group"), QStringLiteral("用户组")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.membership"), QStringLiteral("成员来源"))});
             layout->addWidget(m_memberships, 1);
             ks::ui::SetTableActionBarMode(m_memberships, ks::ui::TableActionBarMode::Compact);
             m_status = new QLabel(this); m_status->setWordWrap(true); layout->addWidget(m_status);
             QObject::connect(refresh, &QPushButton::clicked, this, [this]() { refreshGroups(); });
-            QObject::connect(m_groups, &QTableWidget::itemSelectionChanged, this, [this]() { refreshMembers(); });
-            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& value) { filterTable(m_groups, value); filterTable(m_members, value); });
+            m_groups->currentRowChanged = [this]() {
+                const QString key = m_groups->rowKey(m_groups->currentRow());
+                if (key.isEmpty() && !m_lastGroupKey.isEmpty())
+                {
+                    const auto source = m_groups->canonicalSource();
+                    if (source && source->byKey.contains(m_lastGroupKey)) return; // Filtering keeps the related result.
+                }
+                if (m_lastGroupKey != key) refreshMembers();
+            };
+            m_groups->sourceReady = [this]() { refreshMembers(); };
+            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& value) { if (!filterTable(m_groups, value)) return; if (!filterTable(m_members, value)) return; });
             QObject::connect(add, &QPushButton::clicked, this, [this]() { changeMember(true); });
             QObject::connect(remove, &QPushButton::clicked, this, [this]() { changeMember(false); });
             QObject::connect(query, &QPushButton::clicked, this, [this]() { lookupAccount(); });
             QObject::connect(m_account, &QLineEdit::returnPressed, this, [this]() { lookupAccount(); });
-            QObject::connect(m_memberships, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* item)
+            m_memberships->rowDoubleClicked = [this](int row)
             {
-                const QString sid = m_memberships->item(item->row(), 0)->data(Qt::UserRole).toString();
-                for (int row = 0; row < m_groups->rowCount(); ++row)
-                    if (m_groups->item(row, 0)->data(Qt::UserRole).toString() == sid)
-                    {
-                        m_search->clear(); m_groups->setCurrentCell(row, 0); m_groups->selectRow(row); break;
-                    }
-            });
+                const QString name = m_memberships->cell(row, 0).toString();
+                const QString sid = m_memberships->cell(row, 0, Qt::UserRole).toString();
+                const QPointer<QWidget> alive(this);
+                m_search->clear();
+                if (!alive) return;
+                m_groups->selectKey(accountRowKey(name, sid));
+            };
         }
         void selectAccount(const QString& account) { m_account->setText(account); lookupAccount(); }
     protected:
@@ -799,54 +938,58 @@ namespace
         {
             const quint64 generation = ++m_groupsGeneration;
             ++m_membersGeneration;
-            m_members->setRowCount(0);
-            runRows(this, []() { return enumerateGroups(); }, [this, generation](const RowsResult& result)
+            invalidateLatestRows(this, "members");
+            if (!clearRows(m_members)) return;
+            runLatestRows(this, "groups", []() { return enumerateGroups(); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_groupsGeneration) return;
-                fillTable(m_groups, result.rows); filterTable(m_groups, m_search->text()); showResult(m_status, result);
+                if (!fillTable(m_groups, result.rows)) return; if (!filterTable(m_groups, m_search->text())) return; showResult(m_status, result);
             });
         }
         void refreshMembers()
         {
+            m_lastGroupKey = m_groups->rowKey(m_groups->currentRow());
             const quint64 generation = ++m_membersGeneration;
-            m_members->setRowCount(0);
+            if (!clearRows(m_members)) return;
             const int row = m_groups->currentRow();
-            if (row < 0 || m_groups->isRowHidden(row)) return;
-            const QString group = m_groups->item(row, 0)->text();
-            runRows(this, [group]() { return enumerateMembers(group); }, [this, generation](const RowsResult& result)
+            if (row < 0) { invalidateLatestRows(this, "members"); return; }
+            const QString group = m_groups->cell(row, 0).toString();
+            runLatestRows(this, "members", [group]() { return enumerateMembers(group); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_membersGeneration) return;
-                fillTable(m_members, result.rows); filterTable(m_members, m_search->text()); showResult(m_status, result);
+                if (!fillTable(m_members, result.rows)) return; if (!filterTable(m_members, m_search->text())) return; showResult(m_status, result);
             });
         }
         void lookupAccount()
         {
             const quint64 generation = ++m_lookupGeneration;
             const QString account = m_account->text().trimmed();
-            m_memberships->setRowCount(0);
-            runRows(this, [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
+            if (!clearRows(m_memberships)) return;
+            runLatestRows(this, "account_groups", [account]() { return accountGroups(account); }, [this, generation](const RowsResult& result)
             {
                 if (generation != m_lookupGeneration) return;
-                fillTable(m_memberships, membershipRows(result.rows)); showResult(m_status, result);
+                if (!fillTable(m_memberships, result.rows, false, true)) return; showResult(m_status, result);
             });
         }
         void changeMember(bool add)
         {
             const int groupRow = m_groups->currentRow();
-            if (groupRow < 0 || m_groups->isRowHidden(groupRow)) return;
-            const QString group = m_groups->item(groupRow, 0)->text();
-            const QString groupSid = m_groups->item(groupRow, 0)->data(Qt::UserRole).toString();
+            if (groupRow < 0) return;
+            const QString group = m_groups->cell(groupRow, 0).toString();
+            const QString groupSid = m_groups->cell(groupRow, 0, Qt::UserRole).toString();
             if (groupSid.isEmpty()) return;
             QString member = m_member->text().trimmed();
             if (!add)
             {
                 const int row = m_members->currentRow();
-                if (row < 0 || m_members->isRowHidden(row)) return;
-                member = m_members->item(row, 0)->data(Qt::UserRole).toString();
+                if (row < 0) return;
+                member = m_members->cell(row, 0, Qt::UserRole).toString();
             }
             if (member.isEmpty()) return;
             // Resolve and show a concrete SID before approval; never resolve names on the UI thread.
             ++m_membersGeneration; ++m_groupsGeneration;
+            invalidateLatestRows(this, "members");
+            invalidateLatestRows(this, "groups");
             setEnabled(false);
             runRows(this, [member]()
             {
@@ -857,7 +1000,9 @@ namespace
                 return result;
             }, [this, group, groupSid, add](const RowsResult& resolved)
             {
+                const QPointer<QWidget> enabledOwner(this);
                 setEnabled(true);
+                if (!enabledOwner) return;
                 if (!resolved.error.isEmpty() || resolved.rows.isEmpty()) { showResult(m_status, resolved); return; }
                 const Row memberRow = resolved.rows.first();
                 const QString action = add ? privilegeText("privilege.workbench.groups.action_add", QStringLiteral("加入"))
@@ -876,7 +1021,7 @@ namespace
                     if (!identity.error.isEmpty() || !memberSid.error.isEmpty())
                     { result.error = identity.error + memberSid.error; return result; }
                     if (sidText(identity.sid()) != groupSid)
-                    { result.error = privilegeText("privilege.workbench.groups.identity_changed", QStringLiteral("账户身份已变化，请刷新后重试。")); return result; }
+                    { result.error = privilegeWorkerText("privilege.workbench.groups.identity_changed", QStringLiteral("账户身份已变化，请刷新后重试。")); return result; }
                     LOCALGROUP_MEMBERS_INFO_0 value = {}; value.lgrmi0_sid = memberSid.sid();
                     const NET_API_STATUS status = add
                         ? ::NetLocalGroupAddMembers(nullptr, reinterpret_cast<LPCWSTR>(group.utf16()), 0, reinterpret_cast<LPBYTE>(&value), 1)
@@ -884,28 +1029,31 @@ namespace
                     if (status != NERR_Success) { result.error = winError(status); return result; }
                     result = enumerateMembers(group);
                     if (!result.error.isEmpty())
-                        result.error = privilegeText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(result.error);
+                        result.error = privilegeWorkerText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(result.error);
                     else
                     {
                         const bool present = std::any_of(result.rows.cbegin(), result.rows.cend(), [&sidString](const Row& row) { return row.sid == sidString; });
                         if (present != add)
-                            result.error = privilegeText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
+                            result.error = privilegeWorkerText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
                     }
                     return result;
                 }, [this, group](const RowsResult& result)
                 {
-                    setEnabled(true);
+                    const QPointer<QWidget> enabledOwner(this);
+                setEnabled(true);
+                if (!enabledOwner) return;
                     const int selected = m_groups->currentRow();
-                    if (selected >= 0 && m_groups->item(selected, 0)->text() == group)
-                    { fillTable(m_members, result.rows); filterTable(m_members, m_search->text()); }
+                    if (selected >= 0 && m_groups->cell(selected, 0).toString() == group)
+                    { if (!fillTable(m_members, result.rows)) return; if (!filterTable(m_members, m_search->text())) return; }
                     showResult(m_status, result);
-                    m_memberships->setRowCount(0); ++m_lookupGeneration;
+                    if (!clearRows(m_memberships)) return; ++m_lookupGeneration;
                 });
             });
         }
         QLineEdit *m_search = nullptr, *m_member = nullptr, *m_account = nullptr;
-        QTableWidget *m_groups = nullptr, *m_members = nullptr, *m_memberships = nullptr;
+        ValueTable *m_groups = nullptr, *m_members = nullptr, *m_memberships = nullptr;
         QLabel* m_status = nullptr;
+        QString m_lastGroupKey;
         quint64 m_groupsGeneration = 0, m_membersGeneration = 0, m_lookupGeneration = 0;
         bool m_loaded = false;
     };
@@ -943,13 +1091,13 @@ namespace
             auto* splitter = new QSplitter(Qt::Horizontal, this);
             auto* accountPane = new QWidget(splitter); auto* accountLayout = new QVBoxLayout(accountPane); accountLayout->setContentsMargins(0, 0, 0, 0);
             accountLayout->addWidget(new QLabel(privilegeText("privilege.workbench.rights.direct_caption", QStringLiteral("账户的直接策略分配")), accountPane));
-            m_rights = makeTable(accountPane, {privilegeText("privilege.workbench.rights.right", QStringLiteral("权限名称")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.groups.description", QStringLiteral("说明"))});
+            m_rights = makeTable(accountPane, {TableHeader(QStringLiteral("privilege.workbench.rights.right"), QStringLiteral("权限名称")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.groups.description"), QStringLiteral("说明"))});
             accountLayout->addWidget(m_rights);
             auto* rightPane = new QWidget(splitter); auto* rightLayout = new QVBoxLayout(rightPane); rightLayout->setContentsMargins(0, 0, 0, 0);
             rightLayout->addWidget(new QLabel(privilegeText("privilege.workbench.rights.assigned_caption", QStringLiteral("此权限的直接分配账户")), rightPane));
-            m_accounts = makeTable(rightPane, {privilegeText("privilege.workbench.groups.account", QStringLiteral("账户")), QStringLiteral("SID"),
-                privilegeText("privilege.workbench.rights.right", QStringLiteral("权限名称"))});
+            m_accounts = makeTable(rightPane, {TableHeader(QStringLiteral("privilege.workbench.groups.account"), QStringLiteral("账户")), QStringLiteral("SID"),
+                TableHeader(QStringLiteral("privilege.workbench.rights.right"), QStringLiteral("权限名称"))});
             rightLayout->addWidget(m_accounts); splitter->addWidget(accountPane); splitter->addWidget(rightPane); layout->addWidget(splitter, 1);
             // 双向权限查询已有业务操作，两个辅助结果仅保留紧凑导出入口。
             ks::ui::SetTableActionBarMode(m_rights, ks::ui::TableActionBarMode::Compact);
@@ -958,11 +1106,11 @@ namespace
             QObject::connect(queryAccount, &QPushButton::clicked, this, [this]() { refreshRights(); });
             QObject::connect(queryRight, &QPushButton::clicked, this, [this]() { refreshAccounts(); });
             QObject::connect(m_account, &QLineEdit::returnPressed, this, [this]() { refreshRights(); });
-            QObject::connect(m_rights, &QTableWidget::itemSelectionChanged, this, [this]()
-            { const int row = m_rights->currentRow(); if (row >= 0) m_right->setCurrentText(m_rights->item(row, 0)->text()); });
-            QObject::connect(m_accounts, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* item)
-            { m_account->setText(m_accounts->item(item->row(), 0)->data(Qt::UserRole).toString()); refreshRights(); });
-            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& value) { filterTable(m_rights, value); filterTable(m_accounts, value); });
+            m_rights->currentRowChanged = [this]()
+            { const int row = m_rights->currentRow(); if (row >= 0) m_right->setCurrentText(m_rights->cell(row, 0).toString()); };
+            m_accounts->rowDoubleClicked = [this](int row)
+            { m_account->setText(m_accounts->cell(row, 0, Qt::UserRole).toString()); refreshRights(); };
+            QObject::connect(m_search, &QLineEdit::textChanged, this, [this](const QString& value) { if (!filterTable(m_rights, value)) return; if (!filterTable(m_accounts, value)) return; });
             QObject::connect(add, &QPushButton::clicked, this, [this]() { changeRight(true); });
             QObject::connect(remove, &QPushButton::clicked, this, [this]() { changeRight(false); });
             QObject::connect(m_right, &QComboBox::currentTextChanged, this, [this]()
@@ -984,17 +1132,17 @@ namespace
         void refreshRights()
         {
             const QString account = m_account->text().trimmed(); const quint64 generation = ++m_rightsGeneration;
-            m_rights->setRowCount(0);
-            runRows(this, [account]() { return queryRights(account); }, [this, generation](const RowsResult& result)
-            { if (generation != m_rightsGeneration) return; fillTable(m_rights, result.rows); filterTable(m_rights, m_search->text()); showResult(m_status, result); });
+            if (!clearRows(m_rights)) return;
+            runLatestRows(this, "rights", [account]() { return queryRights(account); }, [this, generation](const RowsResult& result)
+            { if (generation != m_rightsGeneration) return; if (!fillTable(m_rights, result.rows)) return; if (!filterTable(m_rights, m_search->text())) return; showResult(m_status, result); });
         }
         void refreshAccounts()
         {
             const QString right = m_right->currentText().trimmed(); const quint64 generation = ++m_accountsGeneration;
-            m_accounts->setRowCount(0);
-            if (right.isEmpty()) return;
-            runRows(this, [right]() { return assignedAccounts(right); }, [this, generation](const RowsResult& result)
-            { if (generation != m_accountsGeneration) return; fillTable(m_accounts, result.rows); filterTable(m_accounts, m_search->text()); showResult(m_status, result); });
+            if (!clearRows(m_accounts)) return;
+            if (right.isEmpty()) { invalidateLatestRows(this, "assigned_accounts"); return; }
+            runLatestRows(this, "assigned_accounts", [right]() { return assignedAccounts(right); }, [this, generation](const RowsResult& result)
+            { if (generation != m_accountsGeneration) return; if (!fillTable(m_accounts, result.rows)) return; if (!filterTable(m_accounts, m_search->text())) return; showResult(m_status, result); });
         }
         void changeRight(bool add)
         {
@@ -1004,6 +1152,8 @@ namespace
                 m_status->setText(privilegeText("privilege.workbench.rights.invalid_right", QStringLiteral("请选择目录中的有效权限名称。"))); return;
             }
             ++m_rightsGeneration; ++m_accountsGeneration;
+            invalidateLatestRows(this, "rights");
+            invalidateLatestRows(this, "assigned_accounts");
             setEnabled(false);
             runRows(this, [account, right]()
             {
@@ -1016,7 +1166,9 @@ namespace
                 return result;
             }, [this, right, add](const RowsResult& resolved)
             {
+                const QPointer<QWidget> enabledOwner(this);
                 setEnabled(true);
+                if (!enabledOwner) return;
                 if (!resolved.error.isEmpty() || resolved.rows.isEmpty()) { showResult(m_status, resolved); return; }
                 const Row accountRow = resolved.rows.first();
                 const bool before = accountRow.extra == QStringLiteral("assigned");
@@ -1043,25 +1195,27 @@ namespace
                         : ::LsaRemoveAccountRights(policy.handle, sid.sid(), FALSE, &value, 1);
                     if (status != 0) { result.error = winError(::LsaNtStatusToWinError(status)); return result; }
                     result = directRights(policy.handle, sid.sid());
-                    if (!result.error.isEmpty()) result.error = privilegeText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(result.error);
+                    if (!result.error.isEmpty()) result.error = privilegeWorkerText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(result.error);
                     else
                     {
                         const bool assigned = std::any_of(result.rows.cbegin(), result.rows.cend(), [&right](const Row& row) { return row.name == right; });
-                        if (assigned != add) result.error = privilegeText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
+                        if (assigned != add) result.error = privilegeWorkerText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
                     }
                     return result;
                 }, [this, sidString, right](const RowsResult& result)
                 {
-                    setEnabled(true); m_account->setText(sidString); m_right->setCurrentText(right);
-                    fillTable(m_rights, result.rows); filterTable(m_rights, m_search->text());
-                    m_accounts->setRowCount(0); showResult(m_status, result);
+                    const QPointer<QWidget> enabledOwner(this);
+                setEnabled(true);
+                if (!enabledOwner) return; m_account->setText(sidString); m_right->setCurrentText(right);
+                    if (!fillTable(m_rights, result.rows)) return; if (!filterTable(m_rights, m_search->text())) return;
+                    if (!clearRows(m_accounts)) return; showResult(m_status, result);
                     if (result.error.isEmpty()) refreshAccounts();
                 });
             });
         }
         QLineEdit *m_account = nullptr, *m_search = nullptr;
         QComboBox* m_right = nullptr;
-        QTableWidget *m_rights = nullptr, *m_accounts = nullptr;
+        ValueTable *m_rights = nullptr, *m_accounts = nullptr;
         QLabel* m_status = nullptr;
         QLabel* m_description = nullptr;
         quint64 m_rightsGeneration = 0, m_accountsGeneration = 0;
@@ -1084,7 +1238,7 @@ bool setLocalAccountEnabled(const QString& account, bool enabled, QString* error
     const QString name = localName(account);
     if (name.isEmpty())
     {
-        if (error) *error = privilegeText("privilege.workbench.groups.local_only", QStringLiteral("只能修改本机本地账户。"));
+        if (error) *error = privilegeWorkerText("privilege.workbench.groups.local_only", QStringLiteral("只能修改本机本地账户。"));
         return false;
     }
     LPUSER_INFO_1 current = nullptr;
@@ -1100,21 +1254,25 @@ bool setLocalAccountEnabled(const QString& account, bool enabled, QString* error
     status = ::NetUserGetInfo(nullptr, reinterpret_cast<LPCWSTR>(name.utf16()), 1, reinterpret_cast<LPBYTE*>(&current));
     if (status != NERR_Success)
     {
-        if (error) *error = privilegeText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(winError(status));
+        if (error) *error = privilegeWorkerText("privilege.workbench.groups.readback_failed", QStringLiteral("变更已提交，但回读失败：%1")).arg(winError(status));
         return false;
     }
     const bool readbackEnabled = (current->usri1_flags & UF_ACCOUNTDISABLE) == 0;
     ::NetApiBufferFree(current);
     if (readbackEnabled != enabled)
     {
-        if (error) *error = privilegeText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
+        if (error) *error = privilegeWorkerText("privilege.workbench.groups.readback_mismatch", QStringLiteral("变更已提交，但回读状态与请求不一致，请刷新检查。"));
         return false;
     }
     return true;
 }
 
-QJsonObject captureAccountPolicySnapshot()
+QJsonObject captureAccountPolicySnapshot(const ks::i18n::SourceTextSnapshot* translator)
 {
+    // The caller captures the value before dispatch. Preserve an existing nested
+    // worker context; a legacy no-context entry keeps source text without GUI access.
+    const ks::i18n::SourceTextSnapshot sourceOnly;
+    const WorkerTranslationScope scope(translator ? *translator : workerTranslation ? *workerTranslation : sourceOnly);
     QJsonArray entries, errors;
     const auto addError = [&errors](const QString& message) { if (!message.isEmpty()) errors.push_back(message); };
     const auto entry = [&entries](const QString& key, const QJsonValue& value)

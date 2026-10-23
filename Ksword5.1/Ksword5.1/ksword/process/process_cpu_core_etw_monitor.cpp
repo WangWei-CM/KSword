@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 #pragma comment(lib, "Advapi32.lib")
@@ -40,11 +42,149 @@ namespace
         wchar_t loggerName[EtwSessionNameCapacity]{};
     };
 
-    GUID buildSessionGuid()
+    GUID buildSessionGuid(const DWORD processId)
     {
         GUID sessionGuid = KswordCpuCoreSessionGuidBase;
-        sessionGuid.Data1 ^= static_cast<unsigned long>(::GetCurrentProcessId());
+        sessionGuid.Data1 ^= static_cast<unsigned long>(processId);
         return sessionGuid;
+    }
+
+    GUID buildSessionGuid()
+    {
+        return buildSessionGuid(::GetCurrentProcessId());
+    }
+
+    // Query buffers must also accommodate unrelated sessions' maximum-length names.
+    struct TraceQueryPropertiesBlock
+    {
+        EVENT_TRACE_PROPERTIES properties{};
+        wchar_t loggerName[1025]{};
+        wchar_t logFileName[1025]{};
+    };
+
+    void initializeTraceQueryProperties(TraceQueryPropertiesBlock& block)
+    {
+        block = TraceQueryPropertiesBlock{};
+        block.properties.Wnode.BufferSize = sizeof(TraceQueryPropertiesBlock);
+        block.properties.LoggerNameOffset = static_cast<ULONG>(offsetof(TraceQueryPropertiesBlock, loggerName));
+        block.properties.LogFileNameOffset = static_cast<ULONG>(offsetof(TraceQueryPropertiesBlock, logFileName));
+    }
+
+    bool identifyKswordSystemLogger(const TraceQueryPropertiesBlock& block, DWORD& processId)
+    {
+        if (block.properties.LoggerNameOffset != offsetof(TraceQueryPropertiesBlock, loggerName)
+            || block.properties.LogFileMode != (EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE)
+            || block.properties.EnableFlags != (EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_CSWITCH)
+            || block.properties.Wnode.HistoricalContext == 0)
+        {
+            return false;
+        }
+        std::size_t length = 0;
+        while (length < 1025 && block.loggerName[length] != L'\0') { ++length; }
+        if (length == 1025) { return false; }
+        const std::wstring_view name(block.loggerName, length);
+        constexpr std::wstring_view prefix = L"KSword.ProcessCpuCore.";
+        if (name.size() <= prefix.size() || name.substr(0, prefix.size()) != prefix
+            || name[prefix.size()] < L'1' || name[prefix.size()] > L'9')
+        {
+            return false;
+        }
+        DWORD ownerPid = 0;
+        for (std::size_t i = prefix.size(); i < name.size(); ++i)
+        {
+            if (name[i] < L'0' || name[i] > L'9') { return false; }
+            const DWORD digit = static_cast<DWORD>(name[i] - L'0');
+            if (ownerPid > (MAXDWORD - digit) / 10U) { return false; }
+            ownerPid = ownerPid * 10U + digit;
+        }
+        if (ownerPid == ::GetCurrentProcessId()
+            || !::IsEqualGUID(block.properties.Wnode.Guid, buildSessionGuid(ownerPid)))
+        {
+            return false;
+        }
+        processId = ownerPid;
+        return true;
+    }
+
+    bool openExitedProcess(const DWORD processId, HANDLE& process)
+    {
+        process = ::OpenProcess(SYNCHRONIZE, FALSE, processId);
+        if (process == nullptr)
+        {
+            // Only a nonexistent nonzero PID proves absence; access denied and
+            // every other error leave that session alone.
+            return processId != 0 && ::GetLastError() == ERROR_INVALID_PARAMETER;
+        }
+        return ::WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+    }
+
+    bool stopExitedKswordSystemLoggers()
+    {
+        try
+        {
+            std::vector<TraceQueryPropertiesBlock> blocks(64);
+            std::vector<PEVENT_TRACE_PROPERTIES> properties(blocks.size());
+            const auto prepare = [&]() {
+                for (std::size_t i = 0; i < blocks.size(); ++i)
+                {
+                    initializeTraceQueryProperties(blocks[i]);
+                    properties[i] = &blocks[i].properties;
+                }
+            };
+            prepare();
+            ULONG count = 0;
+            ULONG status = ::QueryAllTracesW(properties.data(), static_cast<ULONG>(properties.size()), &count);
+            // One bounded retry covers the documented configurable system cap.
+            if (status == ERROR_MORE_DATA && count > blocks.size() && count <= 256U)
+            {
+                blocks.resize(count);
+                properties.resize(count);
+                prepare();
+                status = ::QueryAllTracesW(properties.data(), static_cast<ULONG>(properties.size()), &count);
+            }
+            if (status != ERROR_SUCCESS || count > blocks.size()) { return false; }
+
+            bool stopped = false;
+            for (ULONG i = 0; i < count; ++i)
+            {
+                const TraceQueryPropertiesBlock& candidate = blocks[i];
+                DWORD ownerPid = 0;
+                if (!identifyKswordSystemLogger(candidate, ownerPid)) { continue; }
+                HANDLE ownerProcess = nullptr;
+                const bool exited = openExitedProcess(ownerPid, ownerProcess);
+                if (exited)
+                {
+                    // Re-query the exact enumerated session before STOP and
+                    // reject any observed identity or session-handle change.
+                    const TRACEHANDLE handle = candidate.properties.Wnode.HistoricalContext;
+                    TraceQueryPropertiesBlock current;
+                    initializeTraceQueryProperties(current);
+                    current.properties.Wnode.Guid = candidate.properties.Wnode.Guid;
+                    DWORD currentPid = 0;
+                    const ULONG queryStatus = ::ControlTraceW(handle, candidate.loggerName,
+                        &current.properties, EVENT_TRACE_CONTROL_QUERY);
+                    if (queryStatus == ERROR_SUCCESS && identifyKswordSystemLogger(current, currentPid)
+                        && currentPid == ownerPid && current.properties.Wnode.HistoricalContext == handle
+                        // A retained exited-process handle prevents PID reuse;
+                        // absent PIDs must be checked again after the query.
+                        && (ownerProcess != nullptr || openExitedProcess(ownerPid, ownerProcess)))
+                    {
+                        current.properties.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+                        current.properties.LogFileNameOffset = 0;
+                        const ULONG stopStatus = ::ControlTraceW(handle, candidate.loggerName,
+                            &current.properties, EVENT_TRACE_CONTROL_STOP);
+                        stopped = stopped || stopStatus == ERROR_SUCCESS;
+                    }
+                }
+                if (ownerProcess != nullptr) { ::CloseHandle(ownerProcess); }
+            }
+            return stopped;
+        }
+        catch (const std::bad_alloc&)
+        {
+            // Keep the original StartTrace error when recovery cannot allocate.
+            return false;
+        }
     }
 
     std::vector<ks::process::EtwLogicalProcessorCoordinate> enumerateActiveProcessors()
@@ -115,7 +255,7 @@ namespace
         return L"KSword.ProcessCpuCore." + std::to_wstring(::GetCurrentProcessId());
     }
 
-    void stopOwnedTraceSession(
+    ULONG stopOwnedTraceSession(
         const TRACEHANDLE sessionHandle,
         const std::wstring& sessionName,
         const std::size_t processorCount,
@@ -123,7 +263,7 @@ namespace
     {
         if (sessionName.empty())
         {
-            return;
+            return ERROR_SUCCESS;
         }
 
         TracePropertiesBlock propertiesBlock;
@@ -137,6 +277,7 @@ namespace
         {
             *eventsLostOut = static_cast<std::uint64_t>(propertiesBlock.properties.EventsLost);
         }
+        return stopStatus;
     }
 
     std::string makeEtwErrorText(const char* const operation, const ULONG errorCode)
@@ -187,6 +328,9 @@ namespace ks::process
     ProcessCpuCoreEtwMonitor::~ProcessCpuCoreEtwMonitor()
     {
         Stop();
+        // Compatibility fallback for legacy owners; checked callers retain this
+        // value on failure, so their GUI path never enters this final join.
+        if (m_consumerThread.joinable()) m_consumerThread.join();
     }
 
     bool ProcessCpuCoreEtwMonitor::Start()
@@ -197,15 +341,7 @@ namespace ks::process
             return true;
         }
 
-        if (m_consumerThread.joinable())
-        {
-            m_consumerThread.join();
-        }
-        std::uint64_t ignoredEventsLost = 0;
-        stopOwnedTraceSession(m_sessionHandle, m_sessionName, m_processors.size(), &ignoredEventsLost);
-        m_sessionHandle = 0;
-        m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-        m_sessionName.clear();
+        if (!stopLocked()) return false; // never overwrite an incomplete cleanup identity
         setLastErrorText(std::string());
         m_bufferEventsLost.store(0, std::memory_order_relaxed);
         m_sessionEventsLost.store(0, std::memory_order_relaxed);
@@ -224,25 +360,46 @@ namespace ks::process
         }
 
         const std::wstring sessionName = buildSessionName();
+        // Freeze the only allocating identity publication before any native ownership.
+        // After StartTrace succeeds, handle and receipt publication cannot throw.
+        m_sessionName = sessionName;
         // 清理由同一 PID 上一次异常终止遗留的同名会话。当前实例若仍在运行已在
         // 函数入口返回，因此这里不会停止另一个存活进程拥有的会话。
         std::uint64_t ignoredOrphanLoss = 0;
-        stopOwnedTraceSession(0, sessionName, m_processors.size(), &ignoredOrphanLoss);
+        const ULONG orphanStopStatus = stopOwnedTraceSession(0, sessionName, m_processors.size(), &ignoredOrphanLoss);
+        if (orphanStopStatus != ERROR_SUCCESS && orphanStopStatus != ERROR_WMI_INSTANCE_NOT_FOUND)
+        {
+            // The pre-frozen name preserves the same-PID private cleanup target.
+            m_sessionReleased.store(false, std::memory_order_release);
+            m_cleanupPending.store(true, std::memory_order_release);
+            m_stopError.store(orphanStopStatus, std::memory_order_release);
+            setLastErrorText(makeEtwErrorText("ControlTraceW(STOP)", orphanStopStatus), orphanStopStatus, true);
+            return false;
+        }
+        m_stopError.store(ERROR_SUCCESS, std::memory_order_release);
         TracePropertiesBlock propertiesBlock;
         initializeTraceProperties(&propertiesBlock, sessionName, m_processors.size());
 
         TRACEHANDLE sessionHandle = 0;
-        const ULONG startStatus = ::StartTraceW(
+        ULONG startStatus = ::StartTraceW(
             &sessionHandle,
             sessionName.c_str(),
             &propertiesBlock.properties);
+        if (startStatus == ERROR_NO_SYSTEM_RESOURCES && stopExitedKswordSystemLoggers())
+        {
+            initializeTraceProperties(&propertiesBlock, sessionName, m_processors.size());
+            sessionHandle = 0;
+            startStatus = ::StartTraceW(&sessionHandle, sessionName.c_str(), &propertiesBlock.properties);
+        }
         if (startStatus != ERROR_SUCCESS)
         {
-            setLastErrorText(makeEtwErrorText("StartTraceW(CSwitch)", startStatus));
+            setLastErrorText(makeEtwErrorText("StartTraceW(CSwitch)", startStatus), startStatus, true);
             return false;
         }
 
-        m_sessionName = sessionName;
+        m_sessionHandle = sessionHandle;
+        m_sessionReleased.store(false, std::memory_order_release);
+        m_cleanupPending.store(true, std::memory_order_release);
         EVENT_TRACE_LOGFILEW traceLog{};
         traceLog.LoggerName = const_cast<wchar_t*>(m_sessionName.c_str());
         traceLog.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
@@ -254,15 +411,13 @@ namespace ks::process
         if (consumerHandle == INVALID_PROCESSTRACE_HANDLE)
         {
             const ULONG openTraceError = ::GetLastError();
-            std::uint64_t ignoredLoss = 0;
-            stopOwnedTraceSession(sessionHandle, sessionName, m_processors.size(), &ignoredLoss);
-            m_sessionName.clear();
-            setLastErrorText(makeEtwErrorText("OpenTraceW(CSwitch)", openTraceError));
+            (void)stopLocked();
+            setLastErrorText(makeEtwErrorText("OpenTraceW(CSwitch)", openTraceError), openTraceError, true);
             return false;
         }
 
-        m_sessionHandle = sessionHandle;
-        m_consumerHandle = consumerHandle;
+        m_consumerHandle.store(consumerHandle, std::memory_order_release);
+        m_consumerFinished.store(false, std::memory_order_release);
         m_running.store(true, std::memory_order_release);
         try
         {
@@ -270,17 +425,14 @@ namespace ks::process
                 &ProcessCpuCoreEtwMonitor::consumeTrace,
                 this,
                 consumerHandle,
+                sessionHandle,
                 m_sessionName);
         }
         catch (...)
         {
             m_running.store(false, std::memory_order_release);
-            (void)::CloseTrace(consumerHandle);
-            std::uint64_t ignoredLoss = 0;
-            stopOwnedTraceSession(sessionHandle, sessionName, m_processors.size(), &ignoredLoss);
-            m_sessionHandle = 0;
-            m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-            m_sessionName.clear();
+            m_consumerFinished.store(true, std::memory_order_release);
+            (void)stopLocked();
             setLastErrorText("failed to create CSwitch ETW consumer thread");
             return false;
         }
@@ -289,29 +441,73 @@ namespace ks::process
 
     void ProcessCpuCoreEtwMonitor::Stop()
     {
-        std::lock_guard<std::mutex> lifecycleGuard(m_lifecycleMutex);
-        m_stopRequested.store(true, std::memory_order_release);
+        (void)StopChecked();
+    }
 
-        if (m_sessionHandle != 0 && !m_sessionName.empty())
+    bool ProcessCpuCoreEtwMonitor::StopChecked()
+    {
+        std::lock_guard<std::mutex> lifecycleGuard(m_lifecycleMutex);
+        return stopLocked();
+    }
+
+    bool ProcessCpuCoreEtwMonitor::closeOwnedConsumer()
+    {
+        const auto handle = m_consumerHandle.exchange(INVALID_PROCESSTRACE_HANDLE, std::memory_order_acq_rel);
+        if (handle == INVALID_PROCESSTRACE_HANDLE) return true;
+        const ULONG result = ::CloseTrace(handle);
+        if (result == ERROR_SUCCESS || result == ERROR_CTX_CLOSE_PENDING || result == ERROR_INVALID_HANDLE) return true;
+        auto empty = INVALID_PROCESSTRACE_HANDLE;
+        (void)m_consumerHandle.compare_exchange_strong(empty, handle, std::memory_order_acq_rel);
+        setLastErrorText(makeEtwErrorText("CloseTrace", result), result, true);
+        return false;
+    }
+
+    bool ProcessCpuCoreEtwMonitor::stopLocked()
+    {
+        m_stopRequested.store(true, std::memory_order_release);
+        m_running.store(false, std::memory_order_release);
+        if (!m_sessionReleased.load(std::memory_order_acquire) && !m_sessionName.empty())
         {
             std::uint64_t sessionEventsLost = 0;
-            stopOwnedTraceSession(
-                m_sessionHandle,
-                m_sessionName,
-                m_processors.size(),
-                &sessionEventsLost);
-            m_sessionEventsLost.store(sessionEventsLost, std::memory_order_relaxed);
+            const ULONG result = stopOwnedTraceSession(m_sessionHandle, m_sessionName, m_processors.size(), &sessionEventsLost);
+            if (result == ERROR_SUCCESS || result == ERROR_WMI_INSTANCE_NOT_FOUND)
+            {
+                if (result == ERROR_SUCCESS) m_sessionEventsLost.store(sessionEventsLost, std::memory_order_relaxed);
+                m_sessionReleased.store(true, std::memory_order_release);
+                m_stopError.store(ERROR_SUCCESS, std::memory_order_release);
+            }
+            else
+            {
+                m_stopError.store(result, std::memory_order_release);
+                setLastErrorText(makeEtwErrorText("ControlTraceW(STOP)", result), result, true);
+            }
         }
-
-        if (m_consumerThread.joinable())
+        const bool consumerClosed = closeOwnedConsumer();
+        if (!consumerClosed && !m_consumerFinished.load(std::memory_order_acquire)) return false;
+        if (m_consumerThread.joinable()) m_consumerThread.join();
+        const bool complete = m_sessionReleased.load(std::memory_order_acquire)
+            && m_consumerHandle.load(std::memory_order_acquire) == INVALID_PROCESSTRACE_HANDLE;
+        if (complete)
         {
-            m_consumerThread.join();
+            m_sessionHandle = 0;
+            m_sessionName.clear();
+            m_cleanupPending.store(false, std::memory_order_release);
         }
+        return complete;
+    }
 
-        m_sessionHandle = 0;
-        m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-        m_sessionName.clear();
-        m_running.store(false, std::memory_order_release);
+    ProcessCpuCoreEtwHealth ProcessCpuCoreEtwMonitor::SnapshotHealth() const
+    {
+        ProcessCpuCoreEtwHealth health;
+        health.isRunning = IsRunning();
+        health.cleanupPending = m_cleanupPending.load(std::memory_order_acquire);
+        health.stopError = m_stopError.load(std::memory_order_acquire);
+        health.stopErrorKnown = health.stopError != ERROR_SUCCESS;
+        std::lock_guard<std::mutex> errorGuard(m_errorMutex);
+        health.errorCodeKnown = m_lastErrorCodeKnown;
+        health.errorCode = m_lastErrorCode;
+        health.errorText = m_lastErrorText;
+        return health;
     }
 
     bool ProcessCpuCoreEtwMonitor::IsRunning() const
@@ -481,21 +677,28 @@ namespace ks::process
 
     void ProcessCpuCoreEtwMonitor::consumeTrace(
         const PROCESSTRACE_HANDLE consumerHandle,
+        const TRACEHANDLE sessionHandle,
         std::wstring sessionName)
     {
         PROCESSTRACE_HANDLE activeConsumerHandle = consumerHandle;
         const ULONG processStatus = ::ProcessTrace(&activeConsumerHandle, 1, nullptr, nullptr);
-        (void)::CloseTrace(consumerHandle);
+        (void)closeOwnedConsumer();
 
         if (!m_stopRequested.load(std::memory_order_acquire) &&
             processStatus != ERROR_SUCCESS &&
             processStatus != ERROR_CANCELLED)
         {
-            setLastErrorText(makeEtwErrorText("ProcessTrace(CSwitch)", processStatus));
+            setLastErrorText(makeEtwErrorText("ProcessTrace(CSwitch)", processStatus), processStatus, true);
             std::uint64_t eventsLost = 0;
-            stopOwnedTraceSession(m_sessionHandle, sessionName, m_processors.size(), &eventsLost);
-            m_sessionEventsLost.store(eventsLost, std::memory_order_relaxed);
+            const ULONG result = stopOwnedTraceSession(sessionHandle, sessionName, m_processors.size(), &eventsLost);
+            if (result == ERROR_SUCCESS || result == ERROR_WMI_INSTANCE_NOT_FOUND)
+            {
+                if (result == ERROR_SUCCESS) m_sessionEventsLost.store(eventsLost, std::memory_order_relaxed);
+                m_sessionReleased.store(true, std::memory_order_release);
+            }
+            else m_stopError.store(result, std::memory_order_release);
         }
+        m_consumerFinished.store(true, std::memory_order_release);
         m_running.store(false, std::memory_order_release);
     }
 
@@ -672,9 +875,11 @@ namespace ks::process
         std::fill(m_currentThreadKnownByProcessor.begin(), m_currentThreadKnownByProcessor.end(), false);
     }
 
-    void ProcessCpuCoreEtwMonitor::setLastErrorText(std::string errorText)
+    void ProcessCpuCoreEtwMonitor::setLastErrorText(std::string errorText, const ULONG errorCode, const bool codeKnown)
     {
         std::lock_guard<std::mutex> errorGuard(m_errorMutex);
         m_lastErrorText = std::move(errorText);
+        m_lastErrorCode = errorCode;
+        m_lastErrorCodeKnown = codeKnown;
     }
 } // namespace ks::process

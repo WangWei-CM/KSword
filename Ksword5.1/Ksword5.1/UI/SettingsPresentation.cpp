@@ -14,6 +14,13 @@
 
 namespace
 {
+    // 完整最终规则逐值比较：语言/重复palette事件不使同一设置子树再次repolish。
+    // 不依赖主题代次，避免遗漏显式局部规则被替换后的重新接管。
+    void applySettingsRules(QWidget* widget, const QString& rules)
+    {
+        if (widget->styleSheet() != rules) widget->setStyleSheet(rules);
+    }
+
     // 只追踪已登记的设置表单。字体或复合控件尺寸变化后，同步左右两列的视觉中心。
     class SettingsFormMetrics final : public QObject
     {
@@ -173,7 +180,7 @@ namespace ks::ui
             rules.replace(QStringLiteral("__DISABLED__"), KswordTheme::TextDisabledColor().name());
             rules.replace(QStringLiteral("__SECONDARY__"), KswordTheme::EnsureTextContrast(
                 KswordTheme::TextSecondaryColor(), KswordTheme::WindowColor(), 4.5).name());
-            owner->setStyleSheet(rules);
+            applySettingsRules(owner, rules);
         }, ThemePalettePolicy::PreserveLocal);
     }
 
@@ -194,7 +201,7 @@ namespace ks::ui
             if (target)
             {
                 const QColor input = KswordTheme::BlendColors(KswordTheme::WindowColor(), KswordTheme::SurfaceAltColor(), 70);
-                target->setStyleSheet(QStringLiteral(
+                applySettingsRules(target, QStringLiteral(
                     "QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:5px;padding:3px 8px;font-weight:400;}"
                     "QPushButton:hover{border-color:%4;}"
                     "QPushButton:disabled{color:%5;}")
@@ -235,7 +242,7 @@ namespace ks::ui
             if (target)
             {
                 const QColor base = KswordTheme::WindowColor();
-                target->setStyleSheet(QStringLiteral(
+                applySettingsRules(target, QStringLiteral(
                     "QAbstractButton{background:transparent;color:%1;border:0;padding:3px 6px;font-weight:400;}"
                     "QAbstractButton:hover{background:%2;border-radius:4px;}"
                     "QAbstractButton:disabled{color:%3;}")

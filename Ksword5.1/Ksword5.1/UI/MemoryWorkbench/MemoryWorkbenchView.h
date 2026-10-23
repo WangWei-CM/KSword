@@ -73,6 +73,7 @@ class QMenu;
 class QEvent;
 class QResizeEvent;
 class QShowEvent;
+class QHideEvent;
 class QStackedWidget;
 class QSplitter;
 class QTimer;
@@ -163,12 +164,12 @@ namespace ks::ui
         // setMemoryDebugMode：在 loadSettings 后配置独立进程内存调试页。
         // enabled=true 时恒为进程范围、初始 R3、忽略 Dock 跟随并隐藏 int3 工具。
         // 本接口不建立 Windows 调试会话；上层通过 target().requestPin 选择进程。
-        // 返回 false：内嵌模式冲突、离开守卫拒绝或视图在守卫期间被销毁。
-        bool setMemoryDebugMode(bool enabled);
+        // 返回 Rejected：策略冲突、守卫拒绝或视图销毁；Pending 完成后才应用原配置。
+        LeaveEntryStatus setMemoryDebugMode(bool enabled, LeaveCompletion completion = {});
         // isMemoryDebugMode：查询当前是否使用独立进程内存调试策略。
         bool isMemoryDebugMode() const noexcept;
         // clearMemoryDebugTarget：关闭独立内存会话；取消保留目标和待写补丁。
-        bool clearMemoryDebugTarget();
+        LeaveEntryStatus clearMemoryDebugTarget(LeaveCompletion completion = {});
 
         // showDisassemblyAt：在当前目标地址定位 HEX 基线，再显式显示同址反汇编。
         // 传入 address：当前目标的虚拟地址；返回正式导航结果，不创建或附加调试器。
@@ -213,19 +214,20 @@ namespace ks::ui
         // requestLeave：对外暴露 target().requestLeave 的薄包装，供
         // confirmDiscardMemoryEditsForProcessChange 等旧集成点直接调用（target.md
         // §2.2）。
-        bool requestLeave(LeaveReason reason);
+        LeaveEntryStatus requestLeave(LeaveReason reason, LeaveCompletion completion = {});
 
         // confirmQuit：主窗口关闭前的最后一次询问（MemoryDock::confirmWorkbenchQuit 经
         // MainWindow::closeEvent 最前调用——关闭路径的后半段会停 R0 驱动，守卫晚了 int3 还原必失败）。
         // 与离开守卫共用同一条三阶段原子逻辑（见 runLeaveSequence）：暂存里有未提交补丁时先问
         // "应用并离开/丢弃并离开/取消"，再问 int3 账本里当前目标未还原的补丁（全部还原后继续/
         // 保留补丁继续/取消），两个都同意之后才真正应用或丢弃暂存。
-        // 传出：true=可以继续退出；false=用户取消（或应用失败），此时暂存与 int3 都原封不动。
-        // 无暂存、无未还原 int3 时不弹任何框，直接返回 true。只在 UI 线程调用。
-        bool confirmQuit();
+        // Completed 才允许退出；Pending 由 continuation 给出最终许可；失败保留未验证的暂存与 int3。
+        // 无暂存、无未还原 int3 时不弹任何框，直接返回 Completed。只在 UI 线程调用。
+        LeaveEntryStatus confirmQuit(LeaveCompletion completion = {});
 
         // 多窗口退出被其他窗口取消时，撤回仅供这次关闭使用的保留补丁许可。
         void cancelQuitPreparation();
+        bool quitPreparationCurrent();
 
         // focusAddress：十六进制子页当前的插入点地址，供旧页面取"用户正在看哪里"当默认值
         // （例如 PTE 页的默认地址）。没有可用目标（进程范围且未附加）或画布无数据时返回空，
@@ -327,6 +329,8 @@ namespace ks::ui
         // 只有一份当前目标，主 Dock 的视图与内嵌进程详情窗口的视图共用它；视图被切到前台、
         // 窗口被激活时重新声明一次，面板上的"写入/还原"才会作用在用户眼前这个目标上。
         void showEvent(QShowEvent* event) override;
+        void hideEvent(QHideEvent* event) override;
+        bool eventFilter(QObject* watched, QEvent* event) override;
         void changeEvent(QEvent* event) override;
 
     private slots:
@@ -366,7 +370,19 @@ namespace ks::ui
         // runLeaveSequence：离开守卫（installLeaveGuard 注册的回调）与 confirmQuit 共用的三阶段
         // 原子逻辑。传入：reasonText 拼进"有未提交修改"确认框正文的原因短句；scenario 传给 int3
         // 退出提示的场景。传出：true=可以离开/退出；false=用户取消或应用失败（暂存与 int3 不动）。
-        bool runLeaveSequence(const QString& reasonText, Int3LeaveScenario scenario);
+        LeaveEntryStatus runLeaveSequence(const QString& reasonText, Int3LeaveScenario scenario, LeaveCompletion completion);
+        void finishEmbeddedProcessMode(bool embedded);
+        void finishMemoryDebugMode(bool enabled);
+        bool canPresentWriteConfirmation() const;
+        void schedulePendingWriteConfirmation();
+        QPointer<QWidget> confirmationWindow_;
+        bool pageExposed_ = false;
+        bool windowExposed_ = false;
+        bool confirmationResumeQueued_ = false;
+        std::optional<TargetCapture> quitCapture_;
+        bool leaveSequencePending_ = false;
+        std::uint64_t leaveSequenceTicket_ = 0;
+        NavStatus finishOpenAt(const NavRequest& request, std::uint64_t previousAddressBeforeIdentity, bool identityActuallyChanged);
 
         // applyInt3Context / syncInt3Context：把会话声明为 int3 账本的当前目标（内容一致时不重复写，
         // 免得面板无谓重建）；前者收已取得的会话引用，后者自己取 target_->session()。

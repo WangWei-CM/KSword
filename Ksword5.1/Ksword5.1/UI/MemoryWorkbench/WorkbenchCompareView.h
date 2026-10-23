@@ -37,6 +37,7 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 class QLabel;
@@ -130,6 +131,11 @@ namespace ks::ui
         // setWindow：设置要对比的字节区间（通常跟随十六进制页当前可见范围）。
         void setWindow(std::uint64_t address, std::uint64_t length);
 
+        // Only immutable snapshot hosts may opt into this cache. The revision must
+        // change whenever current/baseline/previous bytes or their validity change.
+        // Live providers keep using setWindow/refreshView and are never cached.
+        void setSnapshotWindow(std::uint64_t address, std::uint64_t length, std::uint64_t revision);
+
         // reset：回到"尚未定位"的初始状态（清窗口，状态行回到占位文案）。换目标时由宿主调用。
         void reset();
 
@@ -186,6 +192,9 @@ namespace ks::ui
         std::uint64_t m_length = 0;                        // 当前窗口长度
         std::uint64_t m_totalChanged = 0;                   // 整范围已确认变化字节数。
         std::uint64_t m_compared = 0;                       // 两侧有效、实际已比较的字节数。
+        std::optional<std::uint64_t> m_snapshotRevision;
+        bool m_snapshotRowsReady = false;
+        std::uint64_t m_rebuildGeneration = 0;
         bool m_hasWindow = false;                          // 是否已经设置过窗口
     };
 }

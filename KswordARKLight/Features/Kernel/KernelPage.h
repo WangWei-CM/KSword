@@ -3,13 +3,17 @@
 #include "KernelFacade.h"
 #include "KernelCallbackEventReceiver.h"
 #include "KernelModel.h"
+#include "KernelDynamicProjection.h"
+#include "KernelProjectionValues.h"
 #include "../../Core/Win32Lean.h"
+#include <CommCtrl.h>
 #include "../../Ui/AsyncTask.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Ksword::Features::Kernel {
@@ -19,14 +23,7 @@ struct KernelObjectNamespaceTreeNodeState;
 // KernelR0EvidenceSnapshot is the immutable result of a client-side R0
 // evidence projection. Worker tasks own this value completely before the UI
 // applies it to the owner-data ListView.
-struct KernelR0EvidenceSnapshot {
-    KernelFeatureId featureId = KernelFeatureId::CpuHardwareSnapshot;
-    std::vector<std::wstring> columns;
-    std::vector<std::vector<std::wstring>> rows;
-    std::wstring statusText;
-    std::wstring selectedRowSignature;
-    int topRow = 0;
-};
+
 
 enum class CallbackFileIoOperation {
     ImportConfig,
@@ -104,10 +101,11 @@ private:
     KernelRequest BuildCurrentRequest(KernelFeatureId featureId) const;
     KernelActionRequest BuildCurrentActionRequest(KernelActionId actionId) const;
     void RenderDescriptor(const KernelFeatureDescriptor& descriptor);
-    void RenderResult(const KernelOperationResult& result);
+    void RenderResult(const KernelOperationResult& result, KernelDynamicProjection* prepared);
     void RebuildObjectNamespaceListFromCache(KernelFeatureId featureId);
     void ToggleObjectNamespaceListNode(int rowIndex);
     void RebuildObjectNamespaceTreeFromCurrentRows();
+    void SelectObjectNamespaceTree(KernelFeatureId featureId);
     void SelectObjectNamespaceTreeItem(LPARAM itemData);
     void SelectObjectNamespaceTreeRow(LPARAM rowIndex);
     void RebuildAtomTableFromCache();
@@ -115,13 +113,16 @@ private:
     void RebuildDiagnosticDualTableFromCache(KernelFeatureId featureId);
     void RebuildCallbackEnumerationListFromCache();
     void RebuildKernelHookListFromCache(KernelFeatureId featureId);
+    void RequestCachedValueProjection(KernelFeatureId featureId);
+    void ApplyCachedValueProjection(std::shared_ptr<KernelValueProjection> projection);
+    std::shared_ptr<const KernelProjectionSource> CachedProjectionSource(KernelFeatureId featureId);
     void RebuildKernelMemoryScanListFromCache(KernelFeatureId featureId);
     void RebuildCrossViewListFromCache(KernelFeatureId featureId);
     void RebuildIntegrityEvidenceListFromCache(KernelFeatureId featureId);
     void RebuildR0EvidenceListFromCache(KernelFeatureId featureId);
-    void ScheduleR0EvidenceFilter(KernelFeatureId featureId);
+    void ScheduleCachedFilter(KernelFeatureId featureId);
+    void ApplyCachedFilter(KernelFeatureId featureId);
     void RequestR0EvidenceRebuild(KernelFeatureId featureId);
-    void ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot);
     const KernelFeatureDescriptor* CurrentDescriptor() const;
     const KernelFeatureDescriptor* FeatureById(KernelFeatureId featureId) const;
     void RebuildSecondLevelTabs();
@@ -129,6 +130,7 @@ private:
     bool SelectFeatureById(KernelFeatureId featureId);
     void ParkCurrentFeatureViewCache();
     void SaveCurrentFeatureViewCache(bool transferDataToCache);
+    bool RetireCurrentKernelValues();
     void InvalidateCurrentFeatureViewCache();
     bool RestoreFeatureViewCache(KernelFeatureId featureId);
     void ResetVisibleResultRows();
@@ -143,6 +145,7 @@ private:
     void AddDynamicResultRow(int rowIndex, const KernelResultRow& resultRow, const std::vector<std::wstring>& orderedColumns);
     void RebuildResultListFromCache();
     void SortResultRowsByColumn(int columnIndex);
+    void RequestResultSort(int columnIndex, bool ascending);
     void UpdateSelectedRowDetail();
     LRESULT HandleResultListCustomDraw(LPARAM lParam);
     void UpdatePropertyTableFromSelection();
@@ -279,12 +282,27 @@ private:
     HWND refreshButton_ = nullptr;
     HWND locateButton_ = nullptr;
     HWND copyDiagnosticButton_ = nullptr;
+    struct ObjectNamespaceTreeCache {
+        HWND hwnd = nullptr;
+        bool initialized = false;
+        std::shared_ptr<KernelValueProjection> projection;
+    };
+    std::unordered_map<KernelFeatureId, ObjectNamespaceTreeCache> objectNamespaceTrees_;
     HWND objectNamespaceTree_ = nullptr;
     int objectNamespaceSelectedRow_ = -1;
     std::wstring objectNamespaceSelectedKind_;
     std::wstring objectNamespaceSelectedPath_;
     std::wstring objectNamespaceSelectedDescription_;
-    std::vector<std::unique_ptr<KernelObjectNamespaceTreeNodeState>> objectNamespaceTreeNodeStorage_;
+    std::shared_ptr<KernelValueProjection> objectNamespaceProjection_;
+    struct ObjectTreeProjectionCommit {
+        HWND host=nullptr;
+        std::shared_ptr<KernelValueProjection> projection,replacement,retired;
+        std::size_t next=0;bool adopted=false,oldTreeEmpty=false;HTREEITEM deleteCursor=nullptr;
+    };
+    std::array<std::shared_ptr<ObjectTreeProjectionCommit>,2> treeProjectionCommits_;
+    bool committingTreeProjection_=false;
+    void BeginObjectTreeProjection(std::shared_ptr<KernelValueProjection> projection);
+    void PumpObjectTreeProjection();
     HWND resultList_ = nullptr;
     HWND propertyList_ = nullptr;
     HWND summaryList_ = nullptr;
@@ -355,17 +373,18 @@ private:
     KernelFeatureId directFeatureId_ = KernelFeatureId::ObjectNamespaceOverview;
     bool hasDirectFeatureId_ = false;
     std::vector<std::wstring> currentColumns_;
-    std::vector<std::vector<std::wstring>> currentRows_;
+    Ksword::Ui::ImmutableTextRows currentRows_;
     std::vector<int> currentRowIndents_;
     std::vector<std::wstring> collapsedObjectPaths_;
     std::vector<std::wstring> currentRawColumns_;
-    std::vector<std::vector<std::wstring>> currentRawRows_;
+    using KernelRows = std::vector<std::vector<std::wstring>>;
+    std::shared_ptr<const KernelRows> currentRawRows_ = std::make_shared<const KernelRows>();
     struct KernelFeatureViewCache {
         std::vector<std::wstring> columns;
-        std::vector<std::vector<std::wstring>> rows;
+        Ksword::Ui::ImmutableTextRows rows;
         std::vector<int> rowIndents;
         std::vector<std::wstring> rawColumns;
-        std::vector<std::vector<std::wstring>> rawRows;
+        std::shared_ptr<const KernelRows> rawRows;
         std::vector<std::wstring> collapsedObjectPaths;
         std::vector<std::vector<std::wstring>> propertyRows;
         std::vector<std::vector<std::wstring>> summaryRows;
@@ -377,6 +396,9 @@ private:
         std::wstring objectNamespaceSelectedKind;
         std::wstring objectNamespaceSelectedPath;
         std::wstring objectNamespaceSelectedDescription;
+        std::shared_ptr<const KernelProjectionSource> projectionSource;
+        std::shared_ptr<const KernelRawSummaryIndex> rawSummary;
+        std::vector<int> projectionWidths;
         int sortColumn = -1;
         bool sortAscending = true;
         int selectedRow = -1;
@@ -418,7 +440,6 @@ private:
     std::unique_ptr<CallbackEventReceiver> callbackEventReceiver_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> callbackAnswerTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>> callbackFileIoTask_;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>> r0EvidenceFilterTask_;
     std::vector<CallbackEventSnapshot> callbackPendingEvents_;
     std::uint32_t nextCallbackGroupId_ = 2;
     std::uint32_t nextCallbackRuleId_ = 1;
@@ -426,12 +447,35 @@ private:
     int contextColumn_ = -1;
     int sortColumn_ = -1;
     bool sortAscending_ = true;
+    struct ChoiceProjectionCommit {
+        std::shared_ptr<KernelValueProjection> projection;
+        std::array<HWND,4> windows{};
+        std::size_t choice=0,next=0;bool cleared=false;
+    };
+    std::shared_ptr<ChoiceProjectionCommit> choiceProjectionCommit_;
+    const KernelValueProjection* completingChoiceProjection_=nullptr;
+    void BeginChoiceProjection(std::shared_ptr<KernelValueProjection> projection);
+    void PumpChoiceProjection();
+    void ResumeChoiceProjection();
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>> cachedProjectionTask_;
+    std::uint64_t cachedProjectionRequestId_ = 0, projectionSourceSerial_ = 0;
+    std::shared_ptr<const KernelProjectionSource> currentProjectionSource_;
+    std::shared_ptr<const KernelRawSummaryIndex> currentRawSummary_;
+    std::unordered_map<KernelFeatureId,std::shared_ptr<const KernelProjectionSource>> pendingProjectionSources_;
+    std::shared_ptr<KernelValueProjection> deferredProjection_;
+    std::vector<int> currentProjectionWidths_;
+    bool applyingCachedProjection_ = false;
+    std::uint64_t rowsRevision_ = 0;
+    std::uint64_t sortRequestId_ = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>> sortTask_;
+    std::unordered_map<KernelFeatureId, std::pair<int, bool>> pendingSorts_;
     std::uint64_t queryRequestId_ = 0;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> queryTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> queryTask_;
     std::uint64_t actionRequestId_ = 0;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> actionTask_;
     KernelFeatureId pendingR0EvidenceFeatureId_ = KernelFeatureId::CpuHardwareSnapshot;
     bool hasPendingR0EvidenceFilter_ = false;
+    std::unordered_set<KernelFeatureId> pendingCachedFilterFeatures_;
     KernelFacade facade_;
 };
 

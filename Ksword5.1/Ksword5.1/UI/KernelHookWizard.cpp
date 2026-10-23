@@ -170,6 +170,19 @@ namespace
         result.plan = plan;
         auto& owned = result.plan;
 
+        // 原子提交没有Backup；这里只重试已有记录的注销，不能把资源清理说成原字节恢复。
+        // 每成功一个就移除一个，后续失败时把剩余记录完整交还UI继续持有退出责任。
+        while (!owned.atomicCleanupRecordIds.isEmpty())
+        {
+            const auto released = rxpf::unregisterPage(owned.atomicCleanupRecordIds.first(), true);
+            if (!pageSucceeded(released))
+            {
+                result.failure = pageFailure(released);
+                return result;
+            }
+            owned.atomicCleanupRecordIds.removeFirst();
+        }
+
         // 原准备记录持有整页原始Backup，默认注销即可恢复；不重注册捕获补丁。
         if (owned.recordId != 0ULL && !owned.recoveryRecord)
         {
@@ -277,7 +290,7 @@ namespace
         owned.payloadPending = false;
         owned.recoveryRecord = false;
         owned.originalBytesWritten = false;
-        owned.restored = true;
+        owned.restored = !owned.atomicOriginalBytesUnverified;
         result.ok = true;
         return result;
     }
@@ -711,6 +724,24 @@ namespace ks::ui
     // ========================================================================
     // setBusy / appendTrace：工具函数
     // ========================================================================
+    bool KernelHookWizard::beginOperation()
+    {
+        if (m_busy) return false;
+        // 与其它事务页面共用退出协调：在派发前登记，已有记录的恢复重用原 lease。
+        // 主窗口已经开始收尾时不接受新工作；取消退出后无需重建向导即可再次操作。
+        if (!m_shutdownLease)
+        {
+            m_shutdownLease = AsyncCleanupRegistry::global().acquire();
+            if (!m_shutdownLease)
+            {
+                appendTrace(ks::i18n::displayText(QStringLiteral("主程序正在退出，请取消退出后再开始新的操作。")));
+                return false;
+            }
+        }
+        setBusy(true);
+        return true;
+    }
+
     void KernelHookWizard::setBusy(bool busy)
     {
         m_busy = busy;
@@ -726,6 +757,9 @@ namespace ks::ui
         if (m_restoreBtn) { m_restoreBtn->setEnabled(!busy); }
         if (m_verifyBtn)  { m_verifyBtn->setEnabled(!busy); }
         updateNavButtons();
+        // 后台结束仍可能留下记录或待恢复字节；只有回执已归集且资源已清空才允许退出。
+        if (!m_busy && !m_plan.hasPendingCleanup())
+            m_shutdownLease.reset();
     }
 
     void KernelHookWizard::appendTrace(const QString& text)
@@ -772,7 +806,7 @@ namespace ks::ui
             event->ignore();
             return;
         }
-        if (m_plan.recordId != 0ULL || m_plan.payloadPending)
+        if (m_plan.hasPendingCleanup())
         {
             event->ignore();
             m_closeAfterCleanup = true;
@@ -793,7 +827,7 @@ namespace ks::ui
         const bool hostClosing = parentWidget() && watched == parentWidget()->window()
             && event->type() == QEvent::Close;
         if ((quitting || hostClosing)
-            && (m_busy || m_plan.recordId != 0ULL || m_plan.payloadPending))
+            && (m_busy || m_plan.hasPendingCleanup()))
         {
             event->ignore();
             appendTrace(QStringLiteral("请先完成当前向导的恢复与资源清理，再关闭主程序。"));
@@ -815,13 +849,13 @@ namespace ks::ui
         if (!baseOk || requested.moduleBase == 0ULL || !offsetOk
             || requested.targetOffset > UINT64_MAX - requested.moduleBase)
         {
-            if (m_plan.recordId == 0ULL && !m_plan.payloadPending) m_plan.targetVa = 0ULL;
+            if (!m_plan.hasPendingCleanup()) m_plan.targetVa = 0ULL;
             m_vaLabel->setText(QStringLiteral("绝对 VA：模块未加载或偏移格式错误"));
             return;
         }
         requested.targetVa = requested.moduleBase + requested.targetOffset;
         m_requestedTarget = requested;
-        if ((m_plan.recordId != 0ULL || m_plan.payloadPending)
+        if (m_plan.hasPendingCleanup()
             && requested.targetVa != m_plan.targetVa)
         {
             m_targetChangePending = true;
@@ -840,7 +874,7 @@ namespace ks::ui
     void KernelHookWizard::onPrepareClicked()
     {
         if (m_busy) return;
-        if (m_plan.recordId != 0ULL || m_plan.payloadPending)
+        if (m_plan.hasPendingCleanup())
         {
             m_prepareAfterCleanup = true;
             onRestoreClicked();
@@ -854,6 +888,7 @@ namespace ks::ui
         // 新一轮准备只沿用目标参数，不沿用上一轮的局部备份或完成标记。
         updateTargetFromInputs();
         if (m_plan.targetVa == 0ULL) return;
+        if (!beginOperation()) return;
         m_plan = m_requestedTarget;
         struct PrepareResult
         {
@@ -861,7 +896,6 @@ namespace ks::ui
             rxpf::BackupInfo preview;
             quint64 recordId = 0ULL;
         };
-        setBusy(true);
         const quint64 va = m_plan.targetVa;
         appendTrace(QStringLiteral("Register(EXTERNAL_IMAGE, CAPTURE_BACKUP) target=%1")
             .arg(formatHex8(va)));
@@ -926,7 +960,7 @@ namespace ks::ui
         };
         const auto offset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
         const quint64 rid = m_plan.recordId;
-        setBusy(true);
+        if (!beginOperation()) return;
         appendTrace(QStringLiteral("Write(offset=0x%1, len=%2) bytes=%3")
             .arg(static_cast<quint64>(offset), 0, 16)
             .arg(payload.size()).arg(bytesToHex(payload)));
@@ -1030,10 +1064,13 @@ namespace ks::ui
         }
 
         // 3) 把本次选择塞进 plan（原子路径不走 Backup，recordId 保持 0）
+        if (!beginOperation()) return;
+        // 原子请求不产生原字节备份，不能沿用此前分步记录的验证结论。
+        m_plan.atomicOriginalBytesUnverified = true;
+        m_plan.restored = false;
         m_plan.payload = payload;
         m_plan.payloadOffset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
 
-        setBusy(true);
         m_writeStatusLabel->setText(QStringLiteral("状态：原子提交中..."));
         appendTrace(QStringLiteral(
             "AtomicCommit(va=0x%1, offset=0x%2, len=%3) bytes=%4")
@@ -1051,6 +1088,17 @@ namespace ks::ui
             [this, w]() {
                 const auto info = w->result();
                 w->deleteLater();
+                // 只有完整回执中的ERROR记录仍由驱动保留；归集必须早于setBusy(false)归还lease。
+                // 独立保存身份，保留用户已有分步记录；重复回执不会重复注销。
+                if (info.ioSuccess && info.state == KSWORD_ARK_RXPF_PAGE_STATE_ERROR
+                    && info.recordId != 0ULL)
+                {
+                    if (!m_plan.atomicCleanupRecordIds.contains(info.recordId))
+                        m_plan.atomicCleanupRecordIds.append(info.recordId);
+                    m_plan.atomicOriginalBytesUnverified = true;
+                    m_plan.restored = false;
+                    appendTrace(QStringLiteral("原子提交遗留记录 %1，需重试资源清理。").arg(info.recordId));
+                }
                 if (!info.ioSuccess) {
                     appendTrace(QStringLiteral("AtomicCommit 失败：%1").arg(info.ioErrorText));
                     m_writeStatusLabel->setText(QStringLiteral("状态：原子提交失败"));
@@ -1088,7 +1136,7 @@ namespace ks::ui
             appendTrace(QStringLiteral("请先完成第 3 步 Write"));
             return;
         }
-        setBusy(true);
+        if (!beginOperation()) return;
         const quint64 rid = m_plan.recordId;
         appendTrace(QStringLiteral("Unregister(FLAG_SKIP_BACKUP_RESTORE) recordId=%1")
             .arg(rid));
@@ -1116,7 +1164,7 @@ namespace ks::ui
     void KernelHookWizard::onRestoreClicked()
     {
         if (m_busy) return;
-        setBusy(true);
+        if (!beginOperation()) return;
         const KernelHookPlan snapshot = m_plan;
         m_finalStatusLabel->setText(QStringLiteral("状态：恢复中..."));
         auto* watcher = new QFutureWatcher<RecoveryResult>(this);
@@ -1133,7 +1181,9 @@ namespace ks::ui
                 appendTrace(result.failure);
                 return;
             }
-            m_finalStatusLabel->setText(QStringLiteral("状态：原字节及资源清理已完成；执行权限以驱动恢复回执为准。"));
+            m_finalStatusLabel->setText(m_plan.atomicOriginalBytesUnverified
+                ? QStringLiteral("状态：资源清理已完成；原子提交没有原字节备份，尚未证实原字节恢复。")
+                : QStringLiteral("状态：原字节及资源清理已完成；执行权限以驱动恢复回执为准。"));
             if (m_targetChangePending)
             {
                 m_targetChangePending = false;
@@ -1160,7 +1210,7 @@ namespace ks::ui
     {
         if (m_busy) return;
         const KernelHookPlan snapshot = m_plan;
-        setBusy(true);
+        if (!beginOperation()) return;
         auto* watcher = new QFutureWatcher<QString>(this);
         connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher]() {
             const QString failure = watcher->result();
@@ -1170,7 +1220,8 @@ namespace ks::ui
             setBusy(false);
         });
         watcher->setFuture(QtConcurrent::run([snapshot]() -> QString {
-            if (snapshot.restoreRanges.isEmpty() || snapshot.hasUncachedWrites)
+            if (snapshot.restoreRanges.isEmpty() || snapshot.hasUncachedWrites
+                || snapshot.atomicOriginalBytesUnverified)
                 return QStringLiteral("缺少完整原字节证据，无法证实恢复。请保留当前窗口并处理目标页面。");
             for (const auto& range : snapshot.restoreRanges)
             {

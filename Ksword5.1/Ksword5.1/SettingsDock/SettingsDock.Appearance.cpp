@@ -1,4 +1,4 @@
-﻿#include "SettingsDock.h"
+#include "SettingsDock.h"
 #include "./SettingsDock.Layout.h"
 #include "../Framework.h"
 #include "../Internationalization/LanguageManager.h"
@@ -289,6 +289,25 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("settings.background.opacity.short"), QStringLiteral("背景图透明度")),
         ks::settings::ui::ControlRow(opacityLayout, backgroundGroupBox));
 
+    auto* controlOpacityLayout = new QHBoxLayout();
+    m_controlBackgroundOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
+    m_controlBackgroundOpacitySlider->setRange(0, 100);
+    m_controlBackgroundOpacitySlider->setSingleStep(1);
+    m_controlBackgroundOpacitySlider->setPageStep(5);
+    languageManager.bindToolTip(m_controlBackgroundOpacitySlider,
+        QStringLiteral("settings.background.control_opacity.tooltip"),
+        QStringLiteral("统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。"));
+    controlOpacityLayout->addWidget(m_controlBackgroundOpacitySlider, 1);
+    m_controlBackgroundOpacityValueLabel = new QLabel(QStringLiteral("75%"), backgroundGroupBox);
+    controlOpacityLayout->addWidget(m_controlBackgroundOpacityValueLabel);
+    ks::settings::ui::SliderLegend(controlOpacityLayout, m_controlBackgroundOpacitySlider,
+        m_controlBackgroundOpacityValueLabel, backgroundGroupBox,
+        QStringLiteral("settings.background.control_opacity.legend"),
+        QStringLiteral("越低越透明，文字和图标保持不透明"));
+    backgroundForm->addRow(ks::settings::ui::Label(backgroundGroupBox,
+        QStringLiteral("settings.background.control_opacity.short"), QStringLiteral("控件背景不透明度")),
+        ks::settings::ui::ControlRow(controlOpacityLayout, backgroundGroupBox));
+
     // 透明窗口效果单独成区，避免把系统合成参数与图片参数混在一起。
     auto* transparencyGroupBox = new QGroupBox(m_appearanceTab);
     languageManager.bindText(transparencyGroupBox,
@@ -449,6 +468,23 @@ void SettingsDock::initializeAppearanceTab()
     interactionLayout->setSpacing(8);
     auto* interactionForm = ks::settings::ui::Form(interactionLayout, 176);
 
+    // 总开关放在平滑滚动之前：关闭后滚动、页签、菜单等过渡动画立即到位。
+    m_uiAnimationsCheckBox = new QCheckBox(
+        QStringLiteral("启用界面动画"),
+        interactionGroupBox);
+    languageManager.bindText(
+        m_uiAnimationsCheckBox,
+        QStringLiteral("settings.animation.enabled"),
+        QStringLiteral("启用界面动画"));
+    m_uiAnimationsCheckBox->setToolTip(
+        QStringLiteral("关闭后滚动缓动、页签切换、菜单弹出等界面过渡立即到位，不做缓动、位移或淡入淡出"));
+    languageManager.bindToolTip(
+        m_uiAnimationsCheckBox,
+        QStringLiteral("settings.animation.enabled.tooltip"),
+        QStringLiteral("关闭后滚动缓动、页签切换、菜单弹出等界面过渡立即到位，不做缓动、位移或淡入淡出"));
+    ks::settings::ui::ToggleRow(interactionForm, m_uiAnimationsCheckBox,
+        QStringLiteral("settings.animation.enabled"), QStringLiteral("启用界面动画"));
+
     m_smoothScrollingCheckBox = new QCheckBox(
         QStringLiteral("启用全局平滑滚动"),
         interactionGroupBox);
@@ -464,6 +500,16 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("对标签栏、表格、列表、文本区和滚动页的鼠标滚轮滚动使用缓动动画"));
     ks::settings::ui::ToggleRow(interactionForm, m_smoothScrollingCheckBox,
         QStringLiteral("settings.scroll.smooth"), QStringLiteral("启用全局平滑滚动"));
+    // 总开关关闭时平滑滚动不再生效，勾选框置灰以说明从属关系。
+    if (m_uiAnimationsCheckBox != nullptr && m_smoothScrollingCheckBox != nullptr)
+    {
+        connect(m_uiAnimationsCheckBox, &QCheckBox::toggled, m_smoothScrollingCheckBox,
+            [smoothScrollingCheckBox = m_smoothScrollingCheckBox](const bool enabled)
+            {
+                smoothScrollingCheckBox->setEnabled(enabled);
+            });
+        m_smoothScrollingCheckBox->setEnabled(m_uiAnimationsCheckBox->isChecked());
+    }
 
     m_sliderWheelAdjustCheckBox = new QCheckBox(QStringLiteral("允许滚轮调整控件值和切换标签页"), interactionGroupBox);
     languageManager.bindText(m_sliderWheelAdjustCheckBox, QStringLiteral("settings.slider.wheel"), QStringLiteral("允许滚轮调整控件值和切换标签页"));

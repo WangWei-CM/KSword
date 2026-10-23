@@ -188,16 +188,18 @@ namespace
 // - 输出：通过统一详情动作反馈报告方法日志与最终退出结果。
 void ProcessDetailWindow::executeTerminateProcessComboAction()
 {
-    // targetPid/actionEvent 用途：冻结本次目标并让整个动作共享日志事件。
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    kLogEvent actionEvent;
+    const auto targetPid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const kLogEvent actionEvent;
+    submitDetailAction(QStringLiteral("结束进程(组合方法链)"), actionEvent,
+        [targetPid, creationTime, actionEvent]() -> DetailActionResult
+    {
     // identityHold/identityDetailText 用途：持续引用已核验的进程实例及校验错误。
     DetailProcessIdentityHold identityHold;
     std::string identityDetailText;
-    if (!identityHold.acquire(targetPid, m_baseRecord.creationTime100ns, &identityDetailText))
+    if (!identityHold.acquire(targetPid, creationTime, &identityDetailText))
     {
-        showActionResultMessage(QStringLiteral("结束进程(组合方法链)"), false, identityDetailText, actionEvent);
-        return;
+        return DetailActionResult{false, identityDetailText};
     }
 
     // 方法表仍是列表页与两个详情页的唯一来源，避免恢复旧的重复方法清单。
@@ -238,12 +240,8 @@ void ProcessDetailWindow::executeTerminateProcessComboAction()
         }
     }
 
-    // identityHold 在最终反馈前仍存活，PID-only 的共享方法不会误指向复用实例。
-    showActionResultMessage(
-        QStringLiteral("结束进程(组合方法链)"),
-        processExited,
-        actionDetailStream.str(),
-        actionEvent);
+        return DetailActionResult{processExited, actionDetailStream.str()};
+    });
 }
 
 void ProcessDetailWindow::executeSetPriorityActionById(const int priorityActionId)

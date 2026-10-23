@@ -1,4 +1,5 @@
 #include "HandleDock.h"
+#include <utility>
 #include "../UI/StructuredFieldView.h"
 
 // ============================================================
@@ -74,8 +75,9 @@ void HandleDock::showObjectTypeDetailByCurrentRow()
     m_objectTypeDetailFields->setDocument(document);
 }
 
-HandleDock::HandleRow* HandleDock::selectedHandleRow()
+const HandleDock::HandleRow* HandleDock::selectedHandleRow()
 {
+    if (m_handleFilterPreparationPending || m_handleFilterProjectionDirty) return nullptr;
     QTreeWidgetItem* currentItem = m_tableWidget->currentItem();
     if (currentItem == nullptr)
     {
@@ -96,7 +98,7 @@ HandleDock::HandleRow* HandleDock::selectedHandleRow()
     {
         return nullptr;
     }
-    return &m_allRows[rowIndex];
+    return &m_allRows.at(static_cast<qsizetype>(rowIndex));
 }
 
 void HandleDock::copyCurrentHandleCell()
@@ -194,7 +196,7 @@ void HandleDock::closeHandleRow(const HandleRow& selectedRow, const bool useDriv
 
 void HandleDock::closeSameTypeHandlesInCurrentProcess()
 {
-    HandleRow* selectedRow = selectedHandleRow();
+    const HandleRow* selectedRow = selectedHandleRow();
     if (selectedRow == nullptr)
     {
         return;
@@ -203,7 +205,7 @@ void HandleDock::closeSameTypeHandlesInCurrentProcess()
     std::vector<HandleRow> targetRows;
     targetRows.reserve(128);
     // 批量关闭范围使用完整快照 m_allRows，避免受当前过滤条件影响。
-    for (const HandleRow& row : m_allRows)
+    for (const HandleRow& row : std::as_const(m_allRows))
     {
         if (row.processId == selectedRow->processId && row.typeIndex == selectedRow->typeIndex)
         {

@@ -11,6 +11,8 @@
 #include "../Framework.h"
 #include "ProcessAffinityModel.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/ImmutableValueTable.h"
+#include <QImage>
 #include "../UI/StructuredFieldView.h"
 
 #include <QHash>
@@ -22,6 +24,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 #include "../../../shared/driver/KswordArkKeyboardIoctl.h"
@@ -35,6 +38,7 @@
 namespace ksword::ark
 {
     struct ProcessRuntimeDetailResult;
+    struct VirtualAddressTranslateResult;
 }
 
 class QCheckBox;
@@ -173,10 +177,18 @@ signals:
     void requestOpenFileDetailByPath(const QString& filePath);
 
 private:
+    struct ModuleRowValue
+    {
+        ks::process::ProcessModuleRecord record;
+        QImage icon; // Worker-owned pixel value; GUI delegates create pixmaps only when drawn.
+    };
+
     // ModuleRefreshResult：模块页后台刷新结果数据结构。
     struct ModuleRefreshResult
     {
-        ks::process::ProcessModuleSnapshot moduleSnapshot; // 模块 + 线程快照。
+        ks::process::ProcessModuleSnapshot moduleSnapshot; // 诊断与线程快照。
+        std::shared_ptr<const std::vector<ModuleRowValue>> moduleRows;
+        std::size_t moduleCount = 0, threadCount = 0;
         std::uint64_t elapsedMs = 0;                       // 后台刷新耗时（毫秒）。
         bool includeSignatureCheck = false;                // 本轮是否执行签名校验。
     };
@@ -221,7 +233,9 @@ private:
     // ThreadInspectRefreshResult：线程细节异步刷新结果。
     struct ThreadInspectRefreshResult
     {
-        std::vector<ThreadInspectItem> rows; // 线程行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime100ns = 0;
+        std::shared_ptr<const std::vector<ThreadInspectItem>> rows; // 完整不可变线程行。
         QString diagnosticText;              // 诊断文本。
         std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
     };
@@ -289,7 +303,9 @@ private:
     // HotkeyInspectRefreshResult：进程热键异步刷新结果。
     struct HotkeyInspectRefreshResult
     {
-        std::vector<HotkeyInspectItem> rows; // 热键行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime = 0, ticket = 0;
+        std::shared_ptr<const std::vector<HotkeyInspectItem>> rows; // 热键行数据。
         QString diagnosticText;              // 诊断文本。
         std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
     };
@@ -312,8 +328,10 @@ private:
     // KeyboardInspectRefreshResult：键盘页异步刷新结果。
     struct KeyboardInspectRefreshResult
     {
-        std::vector<HotkeyInspectItem> hotkeyRows;     // 热键行数据。
-        std::vector<KeyboardHookInspectItem> hookRows; // 钩子行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime = 0, ticket = 0;
+        std::shared_ptr<const std::vector<HotkeyInspectItem>> hotkeyRows;     // 热键行数据。
+        std::shared_ptr<const std::vector<KeyboardHookInspectItem>> hookRows; // 钩子行数据。
         QString diagnosticText;                        // 诊断文本。
         std::uint64_t elapsedMs = 0;                   // 刷新耗时（毫秒）。
     };
@@ -354,6 +372,9 @@ private:
     // closeEvent：关闭独立详情窗前询问内嵌工作台的暂存/int3；取消则保留窗口与附加目标。
     // 调用方式：Qt 关闭窗口时自动调用；event 为本次关闭请求，放行交给 QWidget，拒绝则 ignore。
     void closeEvent(QCloseEvent* event) override;
+    bool m_workbenchCloseApproved = false;
+    bool m_workbenchClosePending = false;
+    std::uint64_t m_workbenchCloseTicket = 0;
 
     // changeEvent 作用：
     // - 监听调色板/样式变化；
@@ -362,8 +383,9 @@ private:
     // 参数 event：变更事件对象。
     // 返回：无。
     void changeEvent(QEvent* event) override;
-    // 仅观察性能/核心页的显示事件，在首次可见时提交隐藏期间保留的最新图形投影。
+    // Observe actual chart-host exposure; native minimized widgets may remain logically visible.
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void scheduleChartPresentationRestore();
 
     void initializeUi();
     // applyThemeStyle 作用：
@@ -434,7 +456,7 @@ private:
     // 在 UI 线程执行。失败一律写进状态行说明原因，不静默返回。
     void applyKernelFieldWatch(
         const ksword::ark::ProcessRuntimeDetailResult& detail,
-        KernelFieldWatchTarget target);
+        KernelFieldWatchTarget target, const ksword::ark::VirtualAddressTranslateResult* preparedPte);
     // initializeHotkeyTab 作用：
     // - 构建“进程热键”页面；
     // - 覆盖窗口激活热键、菜单快捷键、PE Accelerator 资源和 .lnk 快捷方式热键。
@@ -513,7 +535,9 @@ private:
     void refreshParentProcessSection();
     void updateWindowTitle();
     void requestAsyncThreadInspectRefresh();
-    void applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult);
+    void applyThreadInspectResult(std::uint64_t ticket, const ThreadInspectRefreshResult& refreshResult);
+    void rebuildThreadInspectTable();
+    void finishThreadInspectPresentation(const ThreadInspectRefreshResult& refreshResult, std::size_t rowCount);
     void updateThreadInspectStatusLabel(const QString& statusText, bool refreshing);
     // requestAsyncSelectedThreadRuntimeSample 作用：
     // - 对线程表当前选中 TID 执行 PDB deep runtime 小字段采样；
@@ -555,7 +579,7 @@ private:
     // 调用方式：热键页首刷或点击刷新按钮。
     // 参数：无。
     // 返回：无。
-    void requestAsyncHotkeyRefresh();
+    void requestAsyncHotkeyRefresh(bool refreshExisting = true);
     // applyHotkeyRefreshResult 作用：
     // - 在主线程回填热键检测结果；
     // - 重建表格并更新状态标签。
@@ -569,7 +593,7 @@ private:
     void editSelectedHotkey();
     void rebuildHotkeyTable();
     void updateHotkeyStatusLabel(const QString& statusText, bool refreshing);
-    void requestAsyncKeyboardRefresh();
+    void requestAsyncKeyboardRefresh(bool refreshHotkeys = true);
     void applyKeyboardRefreshResult(const KeyboardInspectRefreshResult& refreshResult);
     void rebuildKeyboardHotkeyTable();
     void rebuildKeyboardHookTable();
@@ -612,11 +636,12 @@ private:
 
     // ======== 模块页刷新 ========
     void requestAsyncModuleRefresh(bool forceRefresh);
-    void applyModuleRefreshResult(const ModuleRefreshResult& refreshResult);
+    void applyModuleRefreshResult(const std::shared_ptr<const ModuleRefreshResult>& refreshResult);
     // 回填及菜单延期重放前重新核验代次和进程实例；false 表示仍在等待屏障。
     bool tryApplyModuleRefreshResult(std::uint64_t ticket, std::uint32_t processId,
-        std::uint64_t creationTime, const ModuleRefreshResult& refreshResult);
+        std::uint64_t creationTime, const std::shared_ptr<const ModuleRefreshResult>& refreshResult);
     void rebuildModuleTable();
+    void finishModuleRefreshPresentation(const ModuleRefreshResult& refreshResult);
     // filterModuleTable 作用：按搜索框内容隐藏不匹配的模块表行。
     void filterModuleTable(const QString& filterText);
     void updateModuleStatusLabel(const QString& statusText, bool refreshing);
@@ -644,6 +669,10 @@ private:
     void terminateCurrentModuleThread();
 
     // ======== 操作页动作 ========
+    struct DetailActionResult { bool ok = false; std::string detail; bool conflict = false; };
+    void submitDetailAction(const QString& title, const kLogEvent& actionEvent,
+        std::function<DetailActionResult()> action, bool refreshModules = false,
+        std::function<void(const DetailActionResult&)> completed = {});
     void executeSingleTerminateMethodAction(std::size_t methodIndex);
     // executeTerminateProcessComboAction：校验当前实例后执行有界共享方法链并复核退出。
     void executeTerminateProcessComboAction();
@@ -746,17 +775,17 @@ private:
     // 调用方式：由注入动作函数传入 actionEvent，以保证“动作+文件读取”日志链路一致。
     // 参数 filePath：文件路径；bufferOut：输出缓冲区；errorTextOut：错误信息；actionEvent：同链路日志事件对象。
     // 返回值：读取成功返回 true，失败返回 false。
-    bool readBinaryFile(
+    static bool readBinaryFile(
         const QString& filePath,
         std::vector<std::uint8_t>& bufferOut,
         std::string& errorTextOut,
-        const kLogEvent& actionEvent) const;
+        const kLogEvent& actionEvent, std::size_t maxBytes = 0);
     // showActionResultMessage 作用：统一记录动作结果（不弹框），并复用外层传入的同一 kLogEvent 维持调用链。
     // 调用方式：动作函数先创建 kLogEvent，再将该事件对象传入本函数。
     // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：同链路日志事件对象。
     // 返回值：无。
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
-    ks::process::ProcessModuleRecord* selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* selectedModuleRecord();
 
 private:
     // ======== 当前绑定进程基础数据 ========
@@ -831,6 +860,7 @@ private:
     QWidget* m_performanceGpuChart = nullptr;          // GPU 图表。
     std::deque<PerformanceHistorySample> m_performanceHistory; // 当前详情窗口的定长历史序列。
     bool m_performanceChartsDirty = true; // 历史始终保留，隐藏时只延后拆分图表向量。
+    bool m_chartPresentationRestoreQueued = false; // Coalesce lifetime-owned native restore retries.
 
     // ======== CPU 核心页控件与区间快照 ========
     QLabel* m_cpuCoreTitleLabel = nullptr;             // 页面标题，主题切换时刷新前景色。
@@ -848,7 +878,7 @@ private:
     QPushButton* m_refreshThreadInspectButton = nullptr; // 刷新线程细节按钮。
     QPushButton* m_sampleThreadRuntimeButton = nullptr; // 当前线程 PDB 字段采样按钮。
     QLabel* m_threadInspectStatusLabel = nullptr; // 线程细节刷新状态。
-    QTableWidget* m_threadInspectTable = nullptr; // 线程细节表格。
+    ks::ui::ImmutableValueTable* m_threadInspectTable = nullptr; // 线程细节表格。
     ks::ui::StructuredFieldView* m_threadRuntimeSampleOutput = nullptr; // 当前线程 PDB deep 采样详情。
 
     // ======== 操作页控件 ========
@@ -914,9 +944,9 @@ private:
     QCheckBox* m_signatureCheckBox = nullptr;  // 是否刷新时做签名校验。
     QLineEdit* m_moduleFilterEdit = nullptr;   // 模块列表筛选输入框。
     QLabel* m_moduleStatusLabel = nullptr;     // 模块刷新状态标签。
-    QTreeWidget* m_moduleTable = nullptr;      // 模块表格。
+    ks::ui::ImmutableValueTable* m_moduleTable = nullptr;      // 模块表格。
 
-    std::vector<ks::process::ProcessModuleRecord> m_moduleRecords; // 当前模块数据缓存。
+    std::shared_ptr<const std::vector<ModuleRowValue>> m_moduleRecords; // 当前模块数据缓存。
 
     // ======== 内嵌句柄审计页 ========
     QVBoxLayout* m_embeddedHandleLayout = nullptr; // 句柄审计页容器布局。
@@ -956,7 +986,8 @@ private:
     bool m_threadRuntimeSampleRefreshing = false;  // 当前线程 PDB 采样是否正在进行。
     std::uint64_t m_threadRuntimeSampleTicket = 0; // 当前线程 PDB 采样防乱序序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
-    std::vector<ThreadInspectItem> m_threadInspectRows; // 线程详情页最近一次刷新缓存。
+    std::shared_ptr<const std::vector<ThreadInspectItem>> m_threadInspectRows = std::make_shared<const std::vector<ThreadInspectItem>>(); // 线程详情页最近一次刷新缓存。
+    std::shared_ptr<const std::vector<ThreadInspectItem>> m_threadInspectPublishedRows;
 
     // ======== Process Detail Evidence 页控件 ========
     QVBoxLayout* m_kernelObjectLayout = nullptr; // Process Detail Evidence 页总布局。
@@ -988,6 +1019,8 @@ private:
     QPushButton* m_watchProtectionButton = nullptr;         // 谁改了 PPL 保护级别。
     QPushButton* m_watchImageNameButton = nullptr;          // 谁改了 EPROCESS 里的进程名。
     QPushButton* m_watchProcessPteButton = nullptr;         // 谁改了 EPROCESS 那一页的映射。
+    std::unique_ptr<ks::ui::AsyncOperation> m_detailActionOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_kernelFieldWatchOperation;
     QLabel* m_watchStatusLabel = nullptr;                   // 地址换算结果与失败原因。
     QLabel* m_sectionInfoStatusLabel = nullptr; // Section/ControlArea 查询状态。
     ks::ui::StructuredFieldView* m_sectionInfoOutput = nullptr; // Section/ControlArea 详情文本输出。
@@ -1002,26 +1035,27 @@ private:
     QPushButton* m_refreshHotkeyButton = nullptr; // 刷新热键按钮。
     QPushButton* m_editHotkeyButton = nullptr;    // 编辑当前支持来源的热键。
     QLabel* m_hotkeyStatusLabel = nullptr;       // 热键扫描状态。
-    QTableWidget* m_hotkeyTable = nullptr;       // 热键结果表。
+    ks::ui::ImmutableValueTable* m_hotkeyTable = nullptr;       // 热键结果表。
     bool m_hotkeyRefreshing = false;             // 热键扫描是否进行中。
     bool m_hotkeyInitialRefreshStarted = false;  // 热键页首次扫描是否已经按需启动。
     std::uint64_t m_hotkeyRefreshTicket = 0;     // 热键扫描序号。
     int m_hotkeyRefreshProgressPid = 0;          // 热键扫描 kPro 任务 PID。
-    std::vector<HotkeyInspectItem> m_hotkeyRows; // 热键结果缓存。
+    std::shared_ptr<const std::vector<HotkeyInspectItem>> m_hotkeyRows; // 热键结果缓存。
 
     // ======== 键盘页控件与状态 ========
     QVBoxLayout* m_keyboardLayout = nullptr;       // 键盘页总布局。
     QPushButton* m_refreshKeyboardButton = nullptr; // 刷新键盘按钮。
     QLabel* m_keyboardStatusLabel = nullptr;       // 键盘页扫描状态。
     QTabWidget* m_keyboardInnerTabWidget = nullptr; // 键盘页内部热键/钩子分栏。
-    QTableWidget* m_keyboardHotkeyTable = nullptr; // 键盘页热键表。
-    QTableWidget* m_keyboardHookTable = nullptr;   // 键盘钩子结果表。
+    ks::ui::ImmutableValueTable* m_keyboardHotkeyTable = nullptr; // 键盘页热键表。
+    ks::ui::ImmutableValueTable* m_keyboardHookTable = nullptr;   // 键盘钩子结果表。
+    bool m_keyboardRefreshPending = false;
     bool m_keyboardRefreshing = false;             // 键盘页扫描是否进行中。
     bool m_keyboardInitialRefreshStarted = false;  // 键盘页首次扫描是否已启动。
     std::uint64_t m_keyboardRefreshTicket = 0;     // 键盘页扫描序号。
     int m_keyboardRefreshProgressPid = 0;          // 键盘页扫描 kPro 任务 PID。
-    std::vector<HotkeyInspectItem> m_keyboardHotkeyRows; // 键盘页热键缓存。
-    std::vector<KeyboardHookInspectItem> m_keyboardHookRows; // 键盘页钩子缓存。
+    std::shared_ptr<const std::vector<HotkeyInspectItem>> m_keyboardHotkeyRows; // 键盘页热键缓存。
+    std::shared_ptr<const std::vector<KeyboardHookInspectItem>> m_keyboardHookRows; // 键盘页钩子缓存。
 
     // ======== 令牌页控件与状态 ========
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。

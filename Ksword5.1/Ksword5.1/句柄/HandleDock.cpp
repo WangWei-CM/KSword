@@ -60,6 +60,13 @@
 #include <Shellapi.h>
 #include <objbase.h>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kHandleDockNavigation[] = {
+    {"handle.table", "", "", "Handle Table", true},
+    {"handle.header", "", "", "Object Header", false},
+    {"handle.type", "", "", "Object Type", false}
+};
+}
 namespace
 {
     // buildBlueButtonStyle 作用：
@@ -501,6 +508,10 @@ void HandleDock::focusProcessIds(const QVector<quint32>& processIds, const bool 
         && (normalizedIds.size() != 1 || normalizedIds.front() != m_snapshotScopedProcessId);
     if (triggerRefresh || cachedSnapshotCannotServeTemporaryRule)
     {
+        ++m_handleFilterRevision;
+        if (m_handleFilterOperation) m_handleFilterOperation->cancel();
+        m_handleFilterPreparationPending = true;
+        m_tableWidget->setEnabled(false);
         requestAsyncRefresh(true);
     }
     else
@@ -512,6 +523,7 @@ void HandleDock::focusProcessIds(const QVector<quint32>& processIds, const bool 
 void HandleDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    ensureHandleFilterProjection();
     if (m_initialRefreshDone)
     {
         return;
@@ -638,7 +650,7 @@ void HandleDock::initializeHandleListTab()
     m_handleListLayout->addWidget(m_statusLabel);
     m_handleListLayout->addWidget(m_tableWidget, 1);
 
-    m_tabWidget->addTab(m_handleListPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("Handle Table"));
+    m_navigationTabs.add(kHandleDockNavigation[0], m_tabWidget, m_handleListPage, QIcon(":/Icon/process_list.svg"));
 }
 
 void HandleDock::initializeObjectHeaderTab()
@@ -662,7 +674,7 @@ void HandleDock::initializeObjectHeaderTab()
     m_objectHeaderLayout->addWidget(
         ks::ui::CreateDetailFieldProjection(m_handleDetailFields, m_objectHeaderPage), 1);
 
-    m_tabWidget->addTab(m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("Object Header"));
+    m_navigationTabs.add(kHandleDockNavigation[1], m_tabWidget, m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"));
     // Object Header 页只做只读证据展示，不承载关闭/修改类动作；页面职责挂到页签提示上，不再占用版面。
     m_tabWidget->setTabToolTip(
         m_tabWidget->indexOf(m_objectHeaderPage),
@@ -715,7 +727,7 @@ void HandleDock::initializeObjectTypeTab()
     m_objectTypeLayout->addWidget(
         ks::ui::CreateDetailFieldProjection(m_objectTypeDetailFields, m_objectTypePage), 2);
 
-    m_tabWidget->addTab(m_objectTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("Object Type"));
+    m_navigationTabs.add(kHandleDockNavigation[2], m_tabWidget, m_objectTypePage, QIcon(":/Icon/process_tree.svg"));
 }
 
 void HandleDock::initializeHandleTable()
@@ -807,6 +819,7 @@ void HandleDock::initializeObjectTypeTable()
 
 void HandleDock::initializeConnections()
 {
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int) { ensureHandleFilterProjection(); });
     connect(m_refreshButton, &QPushButton::clicked, this, [this]()
         {
             requestAsyncRefresh(true);
@@ -1142,7 +1155,13 @@ void HandleDock::applyHandleRefreshResult(
         }
     }
 
-    m_allRows = refreshResult.rows;
+    m_handleFilterPreparationPending = true;
+    m_tableWidget->setEnabled(false);
+    ++m_processIconResolveGeneration;
+    if (m_processIconResolveCancelFlag) m_processIconResolveCancelFlag->store(true);
+    auto retiredRows = std::move(m_allRows);
+    m_allRows = refreshResult.rows; // Implicit sharing; no full GUI copy.
+    QThreadPool::globalInstance()->start([rows = std::move(retiredRows)]() {});
     m_snapshotScopedToTemporarySinglePid = refreshResult.snapshotScopedToPid;
     m_snapshotScopedProcessId = refreshResult.scopedProcessId;
     m_lastEnumeratedHandleCount = refreshResult.totalHandleCount;
@@ -1155,20 +1174,6 @@ void HandleDock::applyHandleRefreshResult(
     const bool canRenderAfterTypeMapping = !m_typeNameMapByIndexFromObjectTab.empty();
     const bool canRenderWithoutTypeMapping =
         !canRenderAfterTypeMapping && !m_objectTypeRefreshInProgress;
-    if (canRenderAfterTypeMapping)
-    {
-        // 对象类型映射已经可用时，先把 typeIndex 翻译成稳定类型名，再触发表格渲染。
-        // 这样首轮刷新可在后台完成对象名解析后一次性呈现最终行数据。
-        for (HandleRow& row : m_allRows)
-        {
-            const auto typeIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
-            if (typeIt != m_typeNameMapByIndexFromObjectTab.end() && !typeIt->second.empty())
-            {
-                row.typeName = QString::fromStdString(typeIt->second);
-            }
-        }
-    }
-    refreshTypeFilterItemsFromAllRows();
     if (canRenderAfterTypeMapping || canRenderWithoutTypeMapping)
     {
         // 正常路径：对象类型映射已就绪后渲染一次。
@@ -1225,7 +1230,10 @@ void HandleDock::applyHandleRefreshResult(
                 ? QStringLiteral("无")
                 : refreshResult.diagnosticText));
     }
-    updateHandleSummaryStatus();
+    if (m_handleFilterPreparationPending)
+        updateHandleStatusLabel(ks::i18n::sourceText(QStringLiteral("● 正在准备句柄筛选结果...")), true);
+    else
+        updateHandleSummaryStatus();
 
     m_refreshInProgress = false;
     kPro.set(m_refreshProgressPid, "句柄刷新完成", 0, 100.0f);
@@ -1676,7 +1684,7 @@ QTreeWidgetItem* HandleDock::createHandleTreeRow(const std::size_t sourceRowInde
         return nullptr;
     }
 
-    const HandleRow& row = m_allRows[sourceRowIndex];
+    const HandleRow& row = m_allRows.at(sourceRowIndex);
     auto* item = new ks::ui::NumericTreeItem();
     item->setData(0, ks::handle::HandleTreeItemKindRole,
         static_cast<int>(ks::handle::HandleTreeItemKind::HandleRow));
@@ -1810,7 +1818,7 @@ void HandleDock::scheduleProcessIconResolution(
         {
             continue;
         }
-        const HandleRow& row = m_allRows[sourceRowIndex];
+        const HandleRow& row = m_allRows.at(sourceRowIndex);
         const QString identityKey =
             buildHandleProcessIdentityKey(row.processId, row.processCreationTime);
         if (identityKey.isEmpty() || m_processIconCacheByIdentity.contains(identityKey))
@@ -1983,3 +1991,17 @@ HandleDock::HandleRefreshOptions HandleDock::collectHandleRefreshOptions() const
 
     return options;
 }
+
+ks::ui::PageNavigationCatalog HandleDock::navigationCatalog(const HandleDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kHandleDockNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* HandleDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kHandleDockNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<HandleDock>(QStringLiteral("handle")); }

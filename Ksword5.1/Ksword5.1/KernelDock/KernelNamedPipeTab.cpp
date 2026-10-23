@@ -4,6 +4,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
 
 #include <memory>
@@ -39,8 +41,12 @@
 #include <QSize>
 #include <QStringList>
 #include <QThreadPool>
-#include <QTreeWidget>
-#include <QTreeWidgetItem>
+#include <QTableView>
+#include <QSortFilterProxyModel>
+#include <QItemSelectionModel>
+#include <QPersistentModelIndex>
+#include <QTimer>
+#include <QShowEvent>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -107,6 +113,37 @@ namespace
     }
 }
 
+class KernelNamedPipeTab::PipeFilter final : public QSortFilterProxyModel
+{
+public:
+    explicit PipeFilter(Model* source, QObject* parent) : QSortFilterProxyModel(parent), m_source(source)
+    {
+        setSortLocaleAware(true);
+        setSortCaseSensitivity(Qt::CaseSensitive);
+        setSourceModel(source);
+    }
+    void setNeedle(QString needle)
+    {
+        needle = needle.trimmed().toCaseFolded();
+        if (m_needle == needle) return;
+        m_needle = std::move(needle);
+        invalidateFilter();
+    }
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex&) const override
+    {
+        if (m_needle.isEmpty()) return true;
+        const auto* row = m_source->rowAt(sourceRow);
+        if (row == nullptr) return false;
+        for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
+            if (tableColumnText(*row, static_cast<TableColumn>(column)).toCaseFolded().contains(m_needle)) return true;
+        return false;
+    }
+private:
+    Model* m_source = nullptr;
+    QString m_needle;
+};
+
 KernelNamedPipeTab::KernelNamedPipeTab(QWidget* parent)
     : QWidget(parent)
 {
@@ -168,28 +205,30 @@ void KernelNamedPipeTab::initializeUi()
     m_rootLayout->addLayout(m_toolbarLayout);
     m_rootLayout->addWidget(m_statusLabel);
 
-    m_resultTable = new QTreeWidget(this);
-    m_resultTable->setColumnCount(static_cast<int>(TableColumn::Count));
-    m_resultTable->setHeaderLabels(QStringList{
-        QStringLiteral("Pipe Name"),
-        QStringLiteral("NT Path"),
-        QStringLiteral("Attributes"),
-        QStringLiteral("LastWriteTime"),
-        QStringLiteral("Status"),
-        QStringLiteral("Source")
-        });
-    m_resultTable->setRootIsDecorated(false);
-    m_resultTable->setItemsExpandable(false);
+    m_resultTable = new ks::ui::TableActionTableView(this);
+    ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::Full);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_resultTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    m_model = new Model({{QStringLiteral("Pipe Name")}, {QStringLiteral("NT Path")},
+        {QStringLiteral("Attributes")}, {QStringLiteral("LastWriteTime")},
+        {QStringLiteral("Status")}, {QStringLiteral("Source")}},
+        [](const KernelNamedPipeEntry& row, int column, int role) -> QVariant {
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole)
+                return tableColumnText(row, static_cast<TableColumn>(column));
+            return {};
+        }, m_resultTable);
+    m_proxy = new PipeFilter(m_model, m_resultTable);
+    m_resultTable->setModel(m_proxy);
+    m_resultTable->verticalHeader()->setVisible(false);
     m_resultTable->setAlternatingRowColors(true);
     m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_resultTable->setSortingEnabled(true);
     m_resultTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    if (m_resultTable->header() != nullptr)
+    if (m_resultTable->horizontalHeader() != nullptr)
     {
-        m_resultTable->header()->setSectionResizeMode(QHeaderView::Interactive);
-        m_resultTable->header()->setStretchLastSection(false);
+        m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_resultTable->horizontalHeader()->setStretchLastSection(false);
     }
 
     // m_detailEdit 使用项目内置 ks::ui::StructuredFieldView：
@@ -230,15 +269,16 @@ void KernelNamedPipeTab::initializeConnections()
         {
             updateDetailPanel();
         });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]()
-        {
-            applyFilter();
-        });
-    connect(m_resultTable, &QTreeWidget::itemSelectionChanged, this, [this]()
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
+    connect(m_resultTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
         {
             updateDetailPanel();
         });
-    connect(m_resultTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+    connect(m_resultTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition)
         {
             showContextMenu(localPosition);
         });
@@ -264,7 +304,7 @@ void KernelNamedPipeTab::requestRefresh(const bool forceRefresh)
     QPointer<KernelNamedPipeTab> guardThis(this);
     auto* refreshTask = QRunnable::create([guardThis, currentTicket]()
         {
-            const KernelNamedPipeSnapshot snapshot = runKernelNamedPipeSnapshotTask();
+            auto snapshot = std::make_shared<KernelNamedPipeSnapshot>(runKernelNamedPipeSnapshotTask());
             if (guardThis == nullptr)
             {
                 return;
@@ -288,7 +328,7 @@ void KernelNamedPipeTab::requestRefresh(const bool forceRefresh)
 
 void KernelNamedPipeTab::applySnapshot(
     const std::uint64_t refreshTicket,
-    const KernelNamedPipeSnapshot& snapshot)
+    std::shared_ptr<KernelNamedPipeSnapshot> snapshot)
 {
     if (refreshTicket < m_refreshTicket)
     {
@@ -296,8 +336,7 @@ void KernelNamedPipeTab::applySnapshot(
     }
 
     const QPointer<KernelNamedPipeTab> guardThis(this);
-    const auto deferredSnapshot =
-        std::make_shared<KernelNamedPipeSnapshot>(snapshot);
+    const auto deferredSnapshot = snapshot;
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
         this,
         QStringLiteral("kernel-named-pipe-snapshot-apply"),
@@ -306,15 +345,15 @@ void KernelNamedPipeTab::applySnapshot(
         {
             if (!guardThis.isNull())
             {
-                guardThis->applySnapshot(refreshTicket, *deferredSnapshot);
+                guardThis->applySnapshot(refreshTicket, deferredSnapshot);
             }
         }))
     {
         return;
     }
 
-    m_lastSnapshot = snapshot;
-    m_rows = snapshot.rows;
+    m_model->setRows(std::move(snapshot->rows));
+    m_lastSnapshot = std::move(*snapshot);
     rebuildTable();
     applyFilter();
     updateDetailPanel();
@@ -322,17 +361,17 @@ void KernelNamedPipeTab::applySnapshot(
     m_refreshInProgress = false;
     m_refreshButton->setEnabled(true);
 
-    QString statusText = snapshot.taskSucceeded
-        ? kernelText("kernel.named_pipe.status.completed", QStringLiteral("● 刷新完成 | %1")).arg(snapshot.summaryText)
-        : kernelText("kernel.named_pipe.status.failed", QStringLiteral("● 刷新失败 | %1")).arg(snapshot.errorText);
-    if (!snapshot.errorText.trimmed().isEmpty() && snapshot.taskSucceeded)
+    QString statusText = m_lastSnapshot.taskSucceeded
+        ? kernelText("kernel.named_pipe.status.completed", QStringLiteral("● 刷新完成 | %1")).arg(m_lastSnapshot.summaryText)
+        : kernelText("kernel.named_pipe.status.failed", QStringLiteral("● 刷新失败 | %1")).arg(m_lastSnapshot.errorText);
+    if (!m_lastSnapshot.errorText.trimmed().isEmpty() && m_lastSnapshot.taskSucceeded)
     {
-        statusText += kernelText("kernel.named_pipe.status.additional_error", QStringLiteral(" | %1")).arg(snapshot.errorText);
+        statusText += kernelText("kernel.named_pipe.status.additional_error", QStringLiteral(" | %1")).arg(m_lastSnapshot.errorText);
     }
     m_statusLabel->setText(statusText);
     m_statusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;")
-        .arg(snapshot.anyQuerySucceeded ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+        .arg(m_lastSnapshot.anyQuerySucceeded ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
     if (m_refreshPending)
     {
@@ -349,62 +388,23 @@ void KernelNamedPipeTab::applySnapshot(
 
 void KernelNamedPipeTab::rebuildTable()
 {
-    if (m_resultTable == nullptr)
-    {
-        return;
-    }
-
+    if (m_resultTable == nullptr) return;
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEdit);
-
-    m_resultTable->setSortingEnabled(false);
-    m_resultTable->clear();
-
-    for (std::size_t rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex)
-    {
-        const KernelNamedPipeEntry& row = m_rows[rowIndex];
-        auto* item = new QTreeWidgetItem();
-        for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
-        {
-            item->setText(column, tableColumnText(row, static_cast<TableColumn>(column)));
-        }
-        item->setData(static_cast<int>(TableColumn::PipeName), Qt::UserRole, static_cast<qulonglong>(rowIndex));
-        m_resultTable->addTopLevelItem(item);
-    }
-
-    if (m_resultTable->topLevelItemCount() > 0)
-    {
-        m_resultTable->setCurrentItem(m_resultTable->topLevelItem(0));
-    }
-
+    applyFilter();
+    // The old tree selected the first canonical row before sorting was restored.
+    if (m_model->rowCount() > 0)
+        m_resultTable->setCurrentIndex(m_proxy->mapFromSource(m_model->index(0, 0)));
     applyAdaptiveColumnWidths();
-    m_resultTable->setSortingEnabled(true);
 }
 
 void KernelNamedPipeTab::applyFilter()
 {
-    if (m_resultTable == nullptr || m_filterEdit == nullptr)
-    {
-        return;
-    }
-
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEdit);
-
-    const QString filterText = m_filterEdit->text().trimmed().toCaseFolded();
-    for (int rowIndex = 0; rowIndex < m_resultTable->topLevelItemCount(); ++rowIndex)
-    {
-        QTreeWidgetItem* item = m_resultTable->topLevelItem(rowIndex);
-        if (item == nullptr)
-        {
-            continue;
-        }
-
-        bool matched = filterText.isEmpty();
-        for (int column = 0; !matched && column < static_cast<int>(TableColumn::Count); ++column)
-        {
-            matched = item->text(column).toCaseFolded().contains(filterText);
-        }
-        item->setHidden(!matched);
-    }
+    if (m_resultTable == nullptr || m_filterEdit == nullptr) return;
+    const QPointer<KernelNamedPipeTab> guard(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-named-pipe-filter"),
+        {m_resultTable}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    if (!isVisible()) return;
+    m_proxy->setNeedle(m_filterEdit->text());
 }
 
 void KernelNamedPipeTab::updateDetailPanel()
@@ -428,86 +428,49 @@ void KernelNamedPipeTab::updateDetailPanel()
 
 void KernelNamedPipeTab::copyCurrentRow()
 {
-    if (m_resultTable == nullptr || m_resultTable->currentItem() == nullptr)
-    {
-        return;
-    }
-
+    const auto* row = selectedRow();
+    if (row == nullptr) return;
     QStringList fields;
     for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
-    {
-        fields.push_back(m_resultTable->currentItem()->text(column));
-    }
+        fields.push_back(tableColumnText(*row, static_cast<TableColumn>(column)));
     QApplication::clipboard()->setText(fields.join('\t'));
 }
 
 void KernelNamedPipeTab::showContextMenu(const QPoint& localPosition)
 {
-    if (m_resultTable == nullptr)
-    {
-        return;
-    }
-
-    QTreeWidgetItem* clickedItem = m_resultTable->itemAt(localPosition);
-    if (clickedItem == nullptr)
-    {
-        return;
-    }
-    m_resultTable->setCurrentItem(clickedItem);
-
+    if (m_resultTable == nullptr) return;
+    const QPersistentModelIndex clicked(m_resultTable->indexAt(localPosition));
+    if (!clicked.isValid()) return;
+    m_resultTable->setCurrentIndex(clicked);
+    const QPointer<KernelNamedPipeTab> guard(this);
+    const QPointer<QTableView> table(m_resultTable);
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), kernelText("kernel.named_pipe.menu.copy_row", QStringLiteral("复制当前行")));
-    // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
     QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), kernelText("kernel.named_pipe.menu.refresh_detail", QStringLiteral("刷新详情")));
-
-    QAction* selectedAction = menu.exec(m_resultTable->viewport()->mapToGlobal(localPosition));
-    if (selectedAction == nullptr)
-    {
-        return;
-    }
-    if (selectedAction == copyRowAction)
-    {
-        copyCurrentRow();
-        return;
-    }
-    if (selectedAction == detailAction)
-    {
-        updateDetailPanel();
-    }
+    QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(localPosition));
+    if (guard.isNull() || table.isNull() || !clicked.isValid() || clicked.model() != table->model()) return;
+    table->setCurrentIndex(clicked);
+    if (selectedAction == copyRowAction) copyCurrentRow();
+    else if (selectedAction == detailAction) updateDetailPanel();
 }
 
 const KernelNamedPipeEntry* KernelNamedPipeTab::selectedRow() const
 {
-    if (m_resultTable == nullptr || m_resultTable->currentItem() == nullptr)
-    {
-        return nullptr;
-    }
-
-    const QVariant rowIndexValue =
-        m_resultTable->currentItem()->data(static_cast<int>(TableColumn::PipeName), Qt::UserRole);
-    if (!rowIndexValue.isValid())
-    {
-        return nullptr;
-    }
-
-    const std::size_t rowIndex = static_cast<std::size_t>(rowIndexValue.toULongLong());
-    if (rowIndex >= m_rows.size())
-    {
-        return nullptr;
-    }
-    return &m_rows[rowIndex];
+    if (m_resultTable == nullptr || m_resultTable->model() != m_proxy) return nullptr;
+    const auto source = m_proxy->mapToSource(m_resultTable->currentIndex());
+    return source.isValid() ? m_model->rowAt(source.row()) : nullptr;
 }
 
 void KernelNamedPipeTab::applyAdaptiveColumnWidths()
 {
-    if (m_resultTable == nullptr || m_resultTable->header() == nullptr)
+    if (m_resultTable == nullptr || m_resultTable->horizontalHeader() == nullptr)
     {
         return;
     }
 
-    QHeaderView* header = m_resultTable->header();
+    QHeaderView* header = m_resultTable->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Interactive);
 
     const int viewportWidth = m_resultTable->viewport()->width();
@@ -535,4 +498,10 @@ void KernelNamedPipeTab::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     applyAdaptiveColumnWidths();
+}
+
+void KernelNamedPipeTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    applyFilter();
 }

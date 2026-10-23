@@ -9,6 +9,8 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/ThemeBinding.h"
 #include "../theme.h"
 
@@ -24,6 +26,8 @@
 #include <QPushButton>
 #include <QShowEvent>
 #include <QTableWidget>
+#include <QTimer>
+#include <QScrollBar>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
@@ -196,6 +200,7 @@ void KernelPatchHookAuditTab::initializeUi()
 
     // --- 结果表格 ---
     m_resultTable = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_resultTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 统一审计结果需要留存和导出。
     ks::ui::SetTableActionBarMode(
         m_resultTable, ks::ui::TableActionBarMode::Full);
@@ -226,6 +231,7 @@ void KernelPatchHookAuditTab::initializeUi()
     m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_resultTable->setAlternatingRowColors(true);
     m_resultTable->verticalHeader()->setVisible(false);
+    m_resultTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_resultTable->horizontalHeader()->setSectionResizeMode(
         QHeaderView::ResizeToContents);
     m_resultTable->horizontalHeader()->setStretchLastSection(true);
@@ -235,6 +241,11 @@ void KernelPatchHookAuditTab::initializeUi()
         {ColCategory, ColModule, ColTarget, ColRisk, ColDetail},
         {ColTarget, ColAddress, ColExpected, ColCurrentBytes, ColBaselineBytes});
 
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+
     // --- 信号连接 ---
     connect(m_scanButton, &QPushButton::clicked,
             this, [this]() { startFullAudit(); });
@@ -243,12 +254,12 @@ void KernelPatchHookAuditTab::initializeUi()
     // 过滤器变更时重新填表。
     connect(m_categoryFilterCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) { populateTable(); });
+            this, [this](int) { applyFilter(); });
     connect(m_riskFilterCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) { populateTable(); });
+            this, [this](int) { applyFilter(); });
     connect(m_filterEdit, &QLineEdit::textChanged,
-            this, [this](const QString&) { populateTable(); });
+            this, [this](const QString&) { m_filterTimer->start(); });
 }
 
 // ----------------------------------------------------------------
@@ -265,6 +276,10 @@ void KernelPatchHookAuditTab::startFullAudit()
     m_scanButton->setEnabled(false);
     m_cancelButton->setEnabled(true);
     m_allEntries.clear();
+    m_filterTimer->stop();
+    ks::ui::ApplyTableRowFilter(m_resultTable, {});
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
     m_resultTable->setRowCount(0);
     m_summaryLabel->clear();
     m_summaryLabel->setToolTip(QString());
@@ -403,37 +418,19 @@ void KernelPatchHookAuditTab::cancelAudit()
 
 void KernelPatchHookAuditTab::populateTable()
 {
+    const QPointer<KernelPatchHookAuditTab> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("patch-audit-snapshot"),
+        {m_resultTable}, [guard]() { if (guard) guard->populateTable(); })) return;
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    ks::ui::ApplyTableRowFilter(m_resultTable, {});
+    const bool sorting = m_resultTable->isSortingEnabled();
+    m_resultTable->setSortingEnabled(false);
     m_resultTable->setRowCount(0);
-
-    // 读取过滤条件。
-    const int categoryFilter = m_categoryFilterCombo->currentData().toInt(); // 稳定业务值。
-    const int riskIndex = m_riskFilterCombo->currentIndex();
-    const QString riskFilter =
-        (riskIndex > 0) ? m_riskFilterCombo->currentText() : QString();
-    const QString textFilter = m_filterEdit->text().trimmed();
-
-    // 过滤并填表。
     int row = 0;
     for (const auto& entry : m_allEntries)
     {
-        // 类别过滤。
-        if (categoryFilter >= 0 && static_cast<int>(entry.category) != categoryFilter)
-        {
-            continue;
-        }
-        // 风险过滤。
-        if (!riskFilter.isEmpty() && entry.riskLevel != riskFilter)
-        {
-            continue;
-        }
-        // 文本过滤——匹配模块名或目标名。
-        if (!textFilter.isEmpty()
-            && !entry.moduleName.contains(textFilter, Qt::CaseInsensitive)
-            && !entry.targetName.contains(textFilter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-
         // 通过过滤，插入行。
         m_resultTable->insertRow(row);
         m_resultTable->setItem(row, ColCategory,
@@ -458,9 +455,70 @@ void KernelPatchHookAuditTab::populateTable()
                                readOnlyItem(entry.baselineBytes));
         m_resultTable->setItem(row, ColDetail,
                                readOnlyItem(ks::i18n::sourceText(entry.detail)));
+        m_resultTable->item(row, 0)->setData(Qt::UserRole, static_cast<qulonglong>(row));
         ++row;
     }
+    m_resultTable->setSortingEnabled(sorting);
+    if (!m_columnsSized && !m_allEntries.empty())
+    {
+        m_resultTable->resizeColumnsToContents();
+        m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_columnsSized = true;
+    }
+    applyFilter(false);
 }
+
+void KernelPatchHookAuditTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelPatchHookAuditTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("patch-audit-filter"),
+        {m_resultTable}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const int categoryFilter = m_categoryFilterCombo->currentData().toInt();
+    const int riskIndex = m_riskFilterCombo->currentIndex();
+    const QString riskFilter = riskIndex > 0 ? m_riskFilterCombo->currentText() : QString();
+    const QString textFilter = m_filterEdit->text().trimmed();
+    const bool active = categoryFilter >= 0 || !riskFilter.isEmpty() || !textFilter.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_resultTable->currentIndex();
+        m_unfilteredHorizontalScroll = m_resultTable->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_resultTable->verticalScrollBar()->value();
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_resultTable->rowCount(); ++row)
+    {
+        const auto* item = m_resultTable->item(row, 0);
+        const auto sourceIndex = item != nullptr ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : m_allEntries.size();
+        bool visible = false;
+        if (sourceIndex < m_allEntries.size())
+        {
+            const auto& entry = m_allEntries[sourceIndex];
+            visible = (categoryFilter < 0 || static_cast<int>(entry.category) == categoryFilter)
+                && (riskFilter.isEmpty() || entry.riskLevel == riskFilter)
+                && (textFilter.isEmpty() || entry.moduleName.contains(textFilter, Qt::CaseInsensitive)
+                    || entry.targetName.contains(textFilter, Qt::CaseInsensitive));
+        }
+        if (!visible) excluded.insert(m_resultTable->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_resultTable, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_resultTable->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_resultTable->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_resultTable, m_resultTable->currentRow()))
+    {
+        if (firstVisible >= 0) m_resultTable->selectRow(firstVisible);
+        else { m_resultTable->setCurrentItem(nullptr); m_resultTable->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_resultTable->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_resultTable->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
+}
+
 
 // ================================================================
 // 子扫描函数——均为 static，不访问成员，可在后台线程安全调用。

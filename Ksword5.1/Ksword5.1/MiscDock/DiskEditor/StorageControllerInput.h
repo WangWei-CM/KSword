@@ -6,6 +6,21 @@
 
 namespace ks::misc::detail
 {
+    // Full editable document: fixed 32-byte lines, uppercase, no trailing empty block.
+    inline std::wstring formatControllerHex(const std::vector<std::uint8_t>& bytes)
+    {
+        constexpr wchar_t digits[] = L"0123456789ABCDEF";
+        std::wstring text;
+        text.reserve(bytes.size() * 3U);
+        for (std::size_t index = 0; index < bytes.size(); ++index)
+        {
+            if (index != 0U) text.push_back(index % 32U == 0U ? L'\n' : L' ');
+            text.push_back(digits[bytes[index] >> 4U]);
+            text.push_back(digits[bytes[index] & 0xFU]);
+        }
+        return text;
+    }
+
     // Reject malformed input instead of silently discarding invalid characters
     // or odd nibbles as QByteArray::fromHex does.
     inline bool parseControllerHex(const std::wstring& text,

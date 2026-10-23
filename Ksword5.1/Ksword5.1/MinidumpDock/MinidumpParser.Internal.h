@@ -20,6 +20,8 @@
 #include <windows.h>
 #include <minidumpapiset.h>
 
+#include <unordered_map>
+
 namespace ks::minidump::detail
 {
     // kMaxListEntries：线程/模块/句柄等列表的解析上限，防止畸形计数拖垮 UI。
@@ -113,17 +115,23 @@ namespace ks::minidump::detail
         std::vector<StackScanInput>* scanInputsOut,
         DumpMemoryReader* memory);
 
+    // 补充流共用稳定索引；重复 ThreadId 保留原先的首个匹配语义。
+    using ThreadIdIndex = std::unordered_map<std::uint32_t, std::size_t>;
+    ThreadIdIndex BuildThreadIdIndex(const std::vector<ThreadEntry>& threads);
+
     // ParseThreadInfoList 作用：把 ThreadInfoListStream 的起始地址/CPU 时间合入线程表。
     void ParseThreadInfoList(
         const DumpFileView& view,
         const MINIDUMP_LOCATION_DESCRIPTOR& location,
-        DumpParseResult& result);
+        DumpParseResult& result,
+        const ThreadIdIndex& threadIndex);
 
     // ParseThreadNames 作用：把 ThreadNamesStream 的线程名合入线程表。
     void ParseThreadNames(
         const DumpFileView& view,
         const MINIDUMP_LOCATION_DESCRIPTOR& location,
-        DumpParseResult& result);
+        DumpParseResult& result,
+        const ThreadIdIndex& threadIndex);
 
     // ParseModuleList 作用：解析 ModuleListStream 为模块数组（含版本与 PDB）。
     void ParseModuleList(

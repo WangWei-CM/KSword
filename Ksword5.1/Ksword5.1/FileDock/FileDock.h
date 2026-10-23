@@ -11,8 +11,10 @@
 #include "../Framework.h"
 #include "ManualFileSystemParser.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QStringList>
+#include <QSet>
 #include <QWidget>
 
 #include <cstdint>     // std::uint64_t：文件大小统计。
@@ -23,6 +25,8 @@
 #include <vector>      // std::vector：导航历史记录容器。
 
 // Qt 前置声明：降低头文件耦合。
+namespace ks::ui { class AsyncOperation; }
+
 class QCheckBox;
 class QAbstractTableModel;
 class QComboBox;
@@ -43,6 +47,9 @@ class QSplitter;
 class QStatusBar;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
+class QTimer;
+struct FileRecoverySnapshot;
 class QToolButton;
 class QTreeView;
 class QVBoxLayout;
@@ -78,6 +85,11 @@ public:
     // - 作用：初始化双栏 UI 并设置默认目录。
     // - 参数 parent：Qt 父控件。
     explicit FileDock(QWidget* parent = nullptr);
+
+    // Pure catalog data shares the actual root-page factory definitions. No
+    // business page is instantiated while collecting/searching a cold Dock.
+    static ks::ui::PageNavigationCatalog navigationCatalog(const FileDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
     // 析构函数：
     // - 作用：关闭后台 UI 投递，排空受管理线程，再由 Qt 释放子控件。
@@ -162,6 +174,8 @@ private:
 
         std::vector<QString> history;          // 路径历史列表。
         int historyIndex = -1;                 // 当前历史索引。
+        ks::ui::AsyncOperation* navigationOperation = nullptr; // One probe and latest pending per panel.
+        std::uint64_t navigationGeneration = 0; // Successful/attempted navigation identity for mutation refresh.
         QString currentPath;                   // 当前目录路径。
         QString pendingSelectionPath;          // 返回上级后待恢复选中的子目录路径。
         QString manualLoadedPath;              // 手动解析模型当前已加载目录路径。
@@ -177,6 +191,8 @@ private:
         bool manualResultPartial = false;       // R0 分页/名称边界导致结果不完整时为 true。
         QString manualSourceDetail;             // 当前平铺模型的真实解析来源摘要。
         QStringList manualSuspiciousNames;      // 只有绕过路径可见的条目名（疑似被隐藏）。
+        std::shared_ptr<std::atomic_bool> manualParseCanceled; // Worker reads only this frozen cancellation token.
+        bool manualParseResultPending = false; // Parser lane is idle while a menu holds its immutable result.
         bool manualParseInProgress = false;    // 手动解析后台任务是否正在运行。
         bool manualParsePending = false;       // 手动解析是否有待执行请求。
         bool manualParsePendingShowWarning = false; // 待执行请求是否需要失败弹框。
@@ -210,6 +226,11 @@ private:
     // - 作用：绑定单个面板的信号槽交互逻辑。
     // - 参数 panel：目标面板。
     void initializeConnections(FilePanelWidgets& panel);
+
+    struct NavigationPageDefinition;
+    static const std::vector<NavigationPageDefinition>& navigationPageDefinitions();
+    void initializeManagerPage();
+    void initializeStorageControllerPage();
 
     // initializeRecoveryPage：
     // - 作用：初始化“文件恢复”竖排 Tab 页面。
@@ -360,7 +381,8 @@ private:
         bool& usedWinApiFallbackOut,
         bool& partialOut,
         QString& sourceDetailOut,
-        QStringList& suspiciousNamesOut);
+        QStringList& suspiciousNamesOut,
+        const ks::file::DirectoryCancellationCallback& canceled = {});
 
     // ======================= 文件操作 =========================
     // showPanelContextMenu：
@@ -439,7 +461,8 @@ private:
     void setSelectedFileIntegrityLevel(
         FilePanelWidgets& panel,
         unsigned long integrityRid,
-        const QString& levelDisplayText);
+        const QString& levelDisplayText,
+        const std::vector<QString>& menuPaths);
 
     // unlockSelectedItemsByDriver：
     // - 作用：扫描选中路径占用进程，列出候选进程并按用户选择用 R3/R0 结束；
@@ -530,6 +553,13 @@ private:
     // - 参数 scanPaths：待扫描文件路径集合。
     void openMappedProcessScanWindow(const std::vector<QString>& scanPaths);
 
+    void commitFileNavigation(FilePanelWidgets& panel, const QString& normalizedPath,
+        const QString& parentOfPrevious, bool recordHistory);
+
+    void submitFileMutation(FilePanelWidgets& panel, std::vector<QString> paths,
+        const QString& destination, unsigned long integrityRid, const QString& displayText,
+        int kind, const QString& directory, std::uint64_t directoryGeneration);
+
     // ======================= 工具函数 =========================
     // currentIndexPath：
     // - 作用：获取面板当前选中索引对应的绝对路径。
@@ -564,6 +594,8 @@ private:
     // recoverSelectedDeletedFilesAsync：
     // - 作用：异步恢复选中删除项，避免恢复过程阻塞 UI。
     void recoverSelectedDeletedFilesAsync();
+    void recoverDeletedFileEntriesAsync(const QString& sourceVolume,
+        std::vector<ks::file::NtfsDeletedFileEntry> selectedItems);
 
     // installRecoveryTableMenu：
     // - 作用：为删除项表格安装右键菜单（复制行 / 文件属性 / 恢复选中）。
@@ -571,12 +603,12 @@ private:
 
     // showDeletedFilePropertiesDialog：
     // - 作用：展示单条删除项的完整取证属性（记录号、序列号、恢复能力等）。
-    // - 入参 rowIndex：表格行号，越界时不弹窗。
-    void showDeletedFilePropertiesDialog(int rowIndex);
+    // - 入参 entry：菜单打开前冻结的完整删除项值。
+    void showDeletedFilePropertiesDialog(const ks::file::NtfsDeletedFileEntry& entry);
 
     // applyRecoveryFilter：
     // - 作用：按查找框内容筛选删除项表格，支持子串与正则两种模式；
-    // - 说明：只改行可见性，不动缓存顺序，右键与恢复入口的行号映射保持有效。
+    // - 说明：后台生成纯值源行投影；动作始终绑定不可变快照记录。
     void applyRecoveryFilter();
 
     // updateRecoveryViewState：
@@ -636,7 +668,7 @@ private:
     QPushButton* m_recoveryRefreshButton = nullptr; // 刷新卷按钮。
     QPushButton* m_recoveryScanButton = nullptr;    // 扫描按钮。
     QPushButton* m_recoveryExportButton = nullptr;  // 恢复导出按钮。
-    QTableWidget* m_recoveryTable = nullptr;        // 删除项结果表格。
+    QTableView* m_recoveryTable = nullptr;        // 删除项结果表格。
     QLabel* m_recoveryStatusLabel = nullptr;        // 扫描状态标签。
     QLineEdit* m_recoveryFilterEdit = nullptr;      // 结果查找输入框。
     QToolButton* m_recoveryFilterRegexButton = nullptr; // 查找的正则开关。
@@ -645,7 +677,21 @@ private:
     QWidget* m_recoveryEmptyPage = nullptr;         // 空状态引导页容器。
     QPushButton* m_recoveryEmptyScanButton = nullptr; // 引导页中央扫描按钮。
     QLabel* m_recoveryEmptyHintLabel = nullptr;     // 引导页说明文字。
-    std::vector<ks::file::NtfsDeletedFileEntry> m_deletedRecoveryItems; // 删除项缓存（含 resident 数据）。
+    QAbstractTableModel* m_recoveryModel = nullptr; // 不可变完整候选和纯值行投影。
+    std::shared_ptr<const FileRecoverySnapshot> m_recoveryPendingSnapshot;
+    ks::ui::AsyncOperation* m_recoveryScanOperation = nullptr;
+    ks::ui::AsyncOperation* m_recoveryProjectionOperation = nullptr;
+    QTimer* m_recoveryFilterTimer = nullptr; // 输入合并；到时只派发最后条件。
+    std::uint64_t m_recoverySnapshotRevision = 0;
+    QSet<int> m_recoverySelectedSourceRows; // 包括临时筛选隐藏的已选记录。
+    int m_recoveryCurrentSourceRow = -1;
+    bool m_recoveryProjectionCommit = false;
+    int m_recoverySortColumn = -1;
+    Qt::SortOrder m_recoverySortOrder = Qt::AscendingOrder;
+    QString m_recoveryAppliedFilterText;
+    bool m_recoveryAppliedFilterRegex = false;
+    int m_recoveryAppliedSortColumn = -1;
+    Qt::SortOrder m_recoveryAppliedSortOrder = Qt::AscendingOrder;
     bool m_recoveryScanInProgress = false;          // 误删扫描后台任务运行状态。
     bool m_recoveryRecoverInProgress = false;       // 误删恢复后台任务运行状态。
 
@@ -654,11 +700,19 @@ private:
     FilePanelWidgets m_rightPanel;             // 右侧面板状态。
     bool m_transferInProgress = false;         // 跨面板复制/移动后台任务是否运行。
 
+    ks::ui::AsyncOperation* m_fileMenuOperation = nullptr;
+    ks::ui::AsyncOperation* m_shortNameOperation = nullptr;
+    QMetaObject::Connection m_shortNameClipboardConnection;
+    ks::ui::AsyncOperation* m_fileMutationOperation = nullptr; // Approved write lane; reject overlap.
+    ks::ui::AsyncOperation* m_fileAnalysisOperation = nullptr; // 单个值化分析任务，析构先关闭。
+
     // 文件解锁器后台线程状态。
     std::thread m_unlockerWorkerThread;
     std::atomic_bool m_unlockerWorkerStopRequested{ false };
     std::atomic_bool m_unlockerWorkerRunning{ false };
     mutable std::mutex m_unlockerWorkerMutex;
+
+    QStringList m_releasingOplockPaths; // UI-only path leases until background retirement completes.
 
     // Oplock 持有状态。
     std::vector<std::shared_ptr<FileOplockEntry>> m_activeOplocks;

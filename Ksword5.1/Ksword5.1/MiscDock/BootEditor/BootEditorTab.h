@@ -11,6 +11,8 @@
 #include "../../Framework.h"
 
 #include <QMap>
+#include "../../UI/PageNavigationCatalog.h"
+#include <functional>
 #include <QWidget>
 
 #include <vector>
@@ -31,18 +33,21 @@ class QTableWidget;
 class QTabWidget;
 class QToolButton;
 class QVBoxLayout;
+namespace ks::ui { class AsyncOperation; }
 
 class BootEditorTab final : public QWidget
 {
     Q_OBJECT
 
 public:
+    static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
     // 构造函数：
     // - 作用：只初始化引导编辑器 UI 与信号连接，不做任何 BCD 枚举。
     // - 参数 parent：Qt 父控件。
     // - 返回：无（构造函数）。
     explicit BootEditorTab(QWidget* parent = nullptr);
-    ~BootEditorTab() override = default;
+    ~BootEditorTab() override;
 
 protected:
     // showEvent：
@@ -69,6 +74,7 @@ private:
     // - 作用：承接单条 bcdedit 执行结果，统一反馈到 UI 与日志。
     struct BcdCommandResult
     {
+        bool pending = false;         // pending：只读枚举尚在后台执行，保留当前界面状态。
         bool startSucceeded = false;  // startSucceeded：进程是否成功启动。
         bool timeout = false;         // timeout：命令是否超时。
         int exitCode = -1;            // exitCode：bcdedit 进程退出码。
@@ -120,14 +126,22 @@ private:
         const QStringList& argumentList,
         int timeoutMs,
         const QString& commandDescription);
-    bool runBcdAndExpectSuccess(
-        const QStringList& argumentList,
-        const QString& operationText,
-        bool showSuccessToast);
-    bool applyBootMenuPolicyByIdentifier(
-        const QString& identifierText,
-        const QString& policyValueText,
-        const QString& operationText);
+    enum class BcdErrorStyle { Generic, Copy, Custom };
+    struct BcdPlannedCommand { QStringList args; QString operation; bool missingOkay = false; };
+    struct BcdCommandPlan
+    {
+        std::vector<BcdPlannedCommand> commands;
+        QString successTitle;
+        QString successText;
+        BcdErrorStyle errorStyle = BcdErrorStyle::Generic;
+        bool refreshAfter = true;
+        bool copyAndAppend = false;
+    };
+    void queueBcdPlan(BcdCommandPlan plan);
+    void queueBcdCommand(const QStringList& args, const QString& operation, bool refreshAfter = true);
+    void queueBootMenuPolicy(const QString& identifier, const QString& policy, const QString& operation);
+    void setBcdCommandBusy(bool busy);
+    void applyBcdEnumResult(const BcdCommandResult& result);
 
     // ===================== 解析函数 =====================
     static QString normalizeElementKey(const QString& rawKeyText);
@@ -199,5 +213,7 @@ private:
     QString m_defaultIdentifierText;        // m_defaultIdentifierText：当前默认启动项标识符缓存。
 
     // ===================== 首轮加载状态 =====================
+    ks::ui::AsyncOperation* m_commandOperation = nullptr;
+    bool m_commandPending = false;
     bool m_firstShowHandled = false;        // m_firstShowHandled：是否已在首次可见时排队过首轮 BCD 枚举。
 };

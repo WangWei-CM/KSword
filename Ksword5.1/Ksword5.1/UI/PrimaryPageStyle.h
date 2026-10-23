@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QString>
+
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -7,6 +9,10 @@ class QWidget;
 
 namespace ks::ui
 {
+    // Pure QSS composition: preserve the existing standalone rule and position.
+    QString WithStandaloneInputGeometry(QString style);
+    QString WithParameterInputGeometry(QString style);
+
     // 页面显式登记组合框，完整维护中性底、文字、箭头与交互态；不改变选项或业务信号。
     void StylePrimaryCombo(QComboBox* combo);
 

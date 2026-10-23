@@ -15,6 +15,9 @@
 
 #include <QPoint>
 #include <QWidget>
+#include <QPersistentModelIndex>
+#include <QStringList>
+#include <array>
 
 #include <atomic>
 #include <cstdint>
@@ -121,6 +124,7 @@ private:
     // - 按过滤关键字重建结果表；
     // - 只读显示，不允许编辑或操作。
     void rebuildTable();
+    void applyFilter(bool allowDeferred = true);
 
     // showContextMenu：
     // - 显示复制菜单；
@@ -175,7 +179,7 @@ private:
     // rowMatchesFilter：
     // - 按文本关键字筛选；
     // - 过滤字段覆盖类型、PID/TID、地址、状态和详情摘要。
-    bool rowMatchesFilter(const CidEvidenceRow& row) const;
+    QStringList searchableFields(const CidEvidenceRow& row) const;
 
     static QTableWidgetItem* readOnlyItem(const QString& text);
     static QString formatHex32(std::uint32_t value);
@@ -207,6 +211,14 @@ private:
     QLabel* m_statusLabel = nullptr;
     QTableWidget* m_table = nullptr;
     ks::ui::StructuredFieldView* m_detailEditor = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    std::array<QTableWidgetItem*, 14> m_diagnosticItems{};
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    bool m_filterActive = false;
+    bool m_lastSnapshotSuccess = true;
+    QString m_lastSnapshotError;
     QTimer* m_detailRequestTimer = nullptr;     // detailRequestTimer：R0 对象摘要请求的去抖定时器。
 
     std::atomic_bool m_refreshing{ false };

@@ -16,6 +16,7 @@
 #include <limits>
 #include <utility>
 
+#include <QEvent>
 #include <QAction>
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
@@ -434,7 +435,26 @@ void LogDockWidget::initializeUi()
         },
         this,
         LogTableModel::FlagsResolver(),
-        logRowKey);
+        logRowKey,
+        [](const kEvent& before, const kEvent& after)
+        {
+            std::vector<LogTableModel::ColumnChange> changes;
+            const auto changed = [&](int column, QList<int> roles)
+                { changes.push_back({column, column, std::move(roles)}); };
+            if (before.timestamp != after.timestamp) changed(TimeColumn, {Qt::DisplayRole});
+            if (before.content != after.content) changed(ContentColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.fileLocation != after.fileLocation) changed(FileColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.functionName != after.functionName) changed(FunctionColumn, {Qt::DisplayRole, Qt::ToolTipRole});
+            if (before.level != after.level)
+            {
+                changed(LevelColumn, {Qt::DecorationRole, Qt::ToolTipRole});
+                const auto colorClass = [](kLogLevel level)
+                    { return level == kLogLevel::Fatal ? 2 : level == kLogLevel::Error ? 1 : 0; };
+                if (colorClass(before.level) != colorClass(after.level))
+                    changes.push_back({0, TotalColumns - 1, {Qt::BackgroundRole, Qt::ForegroundRole}});
+            }
+            return changes;
+        });
 
     m_logTable = new ks::ui::TableActionTableView(this);
     m_logTable->setModel(m_logModel);
@@ -577,7 +597,7 @@ void LogDockWidget::refreshTableFromManager(const bool forceRefresh)
     // 从全局日志管理器读取“最近 N 条匹配日志”而不是完整快照：
     // - KswordARKEventEntry 内部仍然保留全量历史，导出/清空行为不变；
     // - UI 只拿当前等级/GUID 筛选后的最近 visibleLogLimit() 条，避免表格模型和行高计算被海量日志拖死；
-    // - 用户把 200 调大到 1000 时，这里会重新扫描内部历史并立刻补齐之前已经记录的日志。
+    // - 用户把 200 调大到 1000 时，从等级/GUID索引补齐先前记录；无关来源更新不会重建旧投影。
     std::uint32_t enabledLevelMask = 0;
     for (const kLogLevel level : {
         kLogLevel::Debug,
@@ -593,11 +613,16 @@ void LogDockWidget::refreshTableFromManager(const bool forceRefresh)
     }
 
     // filteredEvents 之后交给模型持有；复制与追踪逻辑通过 visibleEvents()/visibleEventAt() 读取模型快照。
-    std::vector<kEvent> filteredEvents = KswordARKEventEntry.SnapshotRecent(
+    ks::log::RecentSnapshot snapshot = KswordARKEventEntry.SnapshotRecentIfChanged(
         static_cast<std::size_t>(visibleLogLimit()),
         enabledLevelMask,
-        m_isTracking ? &m_trackingGuid : nullptr);
-    rebuildTable(std::move(filteredEvents));
+        m_isTracking ? &m_trackingGuid : nullptr,
+        forceRefresh ? nullptr : &m_recentSnapshotToken);
+    m_recentSnapshotToken = snapshot.token;
+    if (snapshot.changed)
+    {
+        rebuildTable(std::move(snapshot.events));
+    }
 }
 
 void LogDockWidget::rebuildTable(std::vector<kEvent> filteredEvents)
@@ -1209,4 +1234,26 @@ void LogDockWidget::clearAllLogsWithDoubleConfirm()
     m_isTracking = false;
     m_trackingGuid = GUID{};
     refreshTableFromManager(true);
+}
+
+void LogDockWidget::changeEvent(QEvent* event)
+{
+    const QPointer<LogDockWidget> alive(this);
+    QWidget::changeEvent(event);
+    if (!alive || !event || !m_logModel) return;
+    const bool language = event->type() == QEvent::LanguageChange;
+    const bool color = event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange;
+    const bool font = event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange;
+    if (!language && !color && !font) return;
+    const QPointer<QAbstractItemModel> model(m_logModel);
+    const int columns = model->columnCount();
+    if (language && columns > 0) emit model->headerDataChanged(Qt::Horizontal, 0, columns - 1);
+    if (!alive || !model || m_logModel != model.data()) return;
+    QList<int> roles;
+    if (language) roles << Qt::DisplayRole << Qt::ToolTipRole;
+    if (color) roles << Qt::BackgroundRole << Qt::ForegroundRole << Qt::DecorationRole;
+    if (font) roles << Qt::FontRole << Qt::SizeHintRole;
+    const int rows = model->rowCount();
+    if (rows > 0 && columns > 0)
+        emit model->dataChanged(model->index(0, 0), model->index(rows - 1, columns - 1), roles);
 }

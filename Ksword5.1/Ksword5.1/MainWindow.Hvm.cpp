@@ -15,6 +15,7 @@
 
 #include "Framework/DestructiveActionConfirmation.h"
 #include "Internationalization/LanguageManager.h"
+#include "MemoryDock/MemoryAccessBackend.h"
 #include "UI/HvmControl.h"
 #include "UI/HvmCrPolicyDialog.h"
 #include "UI/HvmEventDialog.h"
@@ -35,6 +36,7 @@
 #include <QPushButton>
 
 #include <thread>
+#include <exception>
 #include <utility>
 
 namespace
@@ -277,29 +279,97 @@ void MainWindow::applyHvmButtonState()
         : m_hvmTooltip);
 }
 
+void MainWindow::bindMemoryHvmAvailabilityConsumer()
+{
+    if (!m_memoryWidget) { return; }
+    const QPointer<MainWindow> owner(this);
+    const QPointer<MemoryDock> consumer(m_memoryWidget);
+    const std::weak_ptr<std::atomic_bool> weakLifetime = m_r0NotificationLifetime;
+    consumer->requestHvmMemoryAvailability = [owner, consumer, weakLifetime]() {
+        const std::shared_ptr<std::atomic_bool> lifetime = weakLifetime.lock();
+        if (!owner || !consumer || !lifetime || !lifetime->load(std::memory_order_acquire)
+            || owner->m_memoryWidget != consumer
+            || !consumer->needsHvmMemoryAvailability())
+        {
+            return;
+        }
+        if (!owner->m_r0DriverServiceRunning)
+        {
+            consumer->applyHvmMemoryAvailability(consumer->hvmMemoryAvailabilityEpoch(), false,
+                QStringLiteral("KswordARK 驱动未运行。请先点击 R0 启动驱动服务。"));
+            return;
+        }
+        if (!owner->canRefreshHvmMemoryAvailability()) { return; }
+        owner->refreshHvmStatusAsync();
+    };
+}
+
 void MainWindow::refreshHvmStatusAsync()
 {
+    const QPointer<MemoryDock> memoryConsumer(m_memoryWidget);
+    const bool queryMemory = canRefreshHvmMemoryAvailability() && memoryConsumer
+        && memoryConsumer->needsHvmMemoryAvailability();
+    const quint64 memoryEpoch = queryMemory ? memoryConsumer->hvmMemoryAvailabilityEpoch() : 0;
     // 合并并发查询：权限按钮刷新是周期性的，堆积请求只会拖慢驱动。
     if (m_hvmQueryInFlight || m_hvmOperationRunning)
     {
+        if (queryMemory && (!m_hvmQueryIncludesMemoryAvailability
+            || m_hvmMemoryAvailabilityQueryEpoch != memoryEpoch))
+        {
+            m_hvmMemoryAvailabilityFollowupPending = true;
+        }
         return;
     }
     m_hvmQueryInFlight = true;
+    m_hvmQueryIncludesMemoryAvailability = queryMemory;
+    m_hvmMemoryAvailabilityQueryEpoch = memoryEpoch;
+    m_hvmMemoryAvailabilityFollowupPending = false;
+    const quint64 memoryGeneration = m_hvmMemoryAvailabilityGeneration;
+    const std::weak_ptr<std::atomic_bool> weakLifetime = m_r0NotificationLifetime;
     QPointer<MainWindow> safeThis(this);
-    std::thread([safeThis]() {
+    std::thread([safeThis, weakLifetime, memoryConsumer, queryMemory, memoryEpoch, memoryGeneration]() {
         const ksword::hvm::HvmState state = ksword::hvm::queryState();
+        QString memoryReason;
+        // The private memory window has its own readiness, independent of resident admission.
+        bool memoryUsable = false;
+        if (queryMemory)
+        {
+            try
+            {
+                memoryUsable = ksword::memory_backend::isHvmMemoryUsable(&memoryReason);
+            }
+            catch (const std::exception& error)
+            {
+                memoryReason = QStringLiteral("查询 R-1 内存窗口失败：%1")
+                    .arg(QString::fromUtf8(error.what()));
+            }
+            catch (...)
+            {
+                memoryReason = QStringLiteral("查询 R-1 内存窗口失败：%1")
+                    .arg(QStringLiteral("后台任务发生异常。"));
+            }
+        }
         if (safeThis == nullptr)
         {
             return;
         }
         QMetaObject::invokeMethod(
             safeThis,
-            [safeThis, state]() {
+            [safeThis, weakLifetime, state, memoryConsumer, queryMemory, memoryEpoch,
+                memoryGeneration, memoryUsable, memoryReason]() {
                 if (safeThis == nullptr)
                 {
                     return;
                 }
                 safeThis->m_hvmQueryInFlight = false;
+                safeThis->m_hvmQueryIncludesMemoryAvailability = false;
+                const bool memoryFollowup = std::exchange(
+                    safeThis->m_hvmMemoryAvailabilityFollowupPending, false);
+                const std::shared_ptr<std::atomic_bool> lifetime = weakLifetime.lock();
+                if (!lifetime || !lifetime->load(std::memory_order_acquire))
+                {
+                    return;
+                }
                 safeThis->m_hvmResidentActive = state.residentActive;
                 /*
                  * 保留完整的可用性取值，不再压成一个布尔量。
@@ -316,6 +386,22 @@ void MainWindow::refreshHvmStatusAsync()
                 safeThis->m_hvmNestedSupported = state.nestedSupported;
                 safeThis->m_hvmTooltip = state.detail;
                 safeThis->applyHvmButtonState();
+                if (!safeThis) { return; }
+                if (queryMemory && memoryConsumer && safeThis->m_memoryWidget == memoryConsumer
+                    && safeThis->canRefreshHvmMemoryAvailability()
+                    && safeThis->m_hvmMemoryAvailabilityGeneration == memoryGeneration
+                    && memoryConsumer->needsHvmMemoryAvailability()
+                    && memoryConsumer->hvmMemoryAvailabilityEpoch() == memoryEpoch)
+                {
+                    memoryConsumer->applyHvmMemoryAvailability(memoryEpoch, memoryUsable, memoryReason);
+                }
+                // A show/target request during an unrelated query needs one fresh worker.
+                if (safeThis && memoryFollowup && safeThis->canRefreshHvmMemoryAvailability()
+                    && safeThis->m_memoryWidget
+                    && safeThis->m_memoryWidget->needsHvmMemoryAvailability())
+                {
+                    safeThis->refreshHvmStatusAsync();
+                }
             },
             Qt::QueuedConnection);
     }).detach();

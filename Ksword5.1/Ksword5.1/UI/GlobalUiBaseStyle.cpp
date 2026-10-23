@@ -17,34 +17,27 @@ namespace ks::ui
 
             // ---------- 按钮基线 ----------
             // 未被局部样式接管的普通按钮统一为“中性表面 + 主题色交互”。
+            // 相同 selector 的九个颜色声明由末尾 FlatButton 配方完全覆盖，仅保留
+            // 仍需独立核对的 border/default/flat 规则与圆角，不跨 shorthand 盲删。
             // 基线只允许颜色/边框属性：min-height、padding 等几何属性会穿透
             // 局部样式改变紧凑布局（如标题栏图标按钮）的尺寸，一律禁止。
             "QPushButton{"
-            "  background-color:__SURFACE_ALT__;"
-            "  color:__TEXT__;"
             "  border:1px solid __BORDER__;"
             "  border-radius:5px;"
             "}"
             "QPushButton:hover{"
-            "  background-color:__SURFACE_MUTED__;"
             "  border-color:__ACCENT__;"
             "}"
             "QPushButton:pressed{"
-            "  background-color:__ACCENT_PRESSED__;"
-            "  color:__ON_ACCENT_PRESSED__;"
             "  border-color:__ACCENT_PRESSED__;"
             "}"
             "QPushButton:checked{"
-            "  background-color:__ACCENT__;"
-            "  color:__ON_ACCENT__;"
             "  border-color:__ACCENT__;"
             "}"
             "QPushButton:default{"
             "  border-color:__ACCENT__;"
             "}"
             "QPushButton:disabled{"
-            "  background-color:__SURFACE_MUTED__;"
-            "  color:__TEXT_DISABLED__;"
             "  border-color:__BORDER__;"
             "}"
             "QPushButton:flat{"
@@ -281,7 +274,6 @@ namespace ks::ui
         baseControlStyle.replace(QStringLiteral("__END_MARKER__"), QString::fromLatin1(kBaseControlStyleEndMarker));
         baseControlStyle.replace(QStringLiteral("__WINDOW__"), KswordTheme::MainBackgroundColorHex());
         baseControlStyle.replace(QStringLiteral("__SURFACE__"), KswordTheme::SurfaceColorHex());
-        baseControlStyle.replace(QStringLiteral("__SURFACE_ALT__"), KswordTheme::SurfaceAltColorHex());
         baseControlStyle.replace(QStringLiteral("__SURFACE_MUTED__"), KswordTheme::SurfaceMutedColorHex());
         // 同一中性输入面配方同时用于搜索、数值框和组合框，不改变面板边界角色。
         baseControlStyle.replace(QStringLiteral("__INPUT_SURFACE__"), KswordTheme::ControlInputSurfaceColor().name());
@@ -303,9 +295,6 @@ namespace ks::ui
             QStringLiteral("__ON_ACCENT__"),
             KswordTheme::ThemeColorName(
                 KswordTheme::OnAccentColor(KswordTheme::ControlAccentColor())));
-        baseControlStyle.replace(
-            QStringLiteral("__ON_ACCENT_PRESSED__"),
-            KswordTheme::OnAccentHex(KswordTheme::ControlAccentPressedColor()));
         // 所有默认规则都在同一个拥有块内，反复换肤只替换一次，不能向末尾不断堆副本。
         const QString standardControls = BuildFlatButtonStyle(FlatButtonTone::Neutral)
             + BuildPageTabsStyleSheet(false) + BuildStandardSliderStyle();

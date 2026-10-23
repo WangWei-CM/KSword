@@ -5,6 +5,7 @@
 // 当前值与基线，高亮被修改或重定向的服务项。
 
 #include <QWidget>
+#include <QPersistentModelIndex>
 #include "KernelServiceAuditUi.h"
 
 #include <atomic>
@@ -19,6 +20,7 @@ class QLineEdit;
 class QPushButton;
 class QShowEvent;
 class QTableWidget;
+class QTimer;
 
 // KernelShadowComparisonTab — 内核 Shadow 比较页。
 //
@@ -63,6 +65,7 @@ private:
 
     // populateTable：按当前过滤条件将 m_entries 填入表格。
     void populateTable();
+    void applyFilter(bool allowDeferred = true);
 
     // hex64：格式化 64 位值为 "0x" 前缀十六进制。
     static QString hex64(std::uint64_t value);
@@ -76,6 +79,13 @@ private:
     QLabel* m_statusLabel = nullptr;        // m_statusLabel：扫描状态。
     QLabel* m_summaryLabel = nullptr;       // m_summaryLabel：汇总统计。
     QTableWidget* m_resultTable = nullptr;  // m_resultTable：比较结果表。
+
+    QTimer* m_filterTimer = nullptr;
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    bool m_filterActive = false;
+    bool m_columnsSized = false;
 
     // --- 数据 ---
     std::vector<CompareEntry> m_entries;    // m_entries：全量比较结果。

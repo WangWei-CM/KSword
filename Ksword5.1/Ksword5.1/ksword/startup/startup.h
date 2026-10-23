@@ -265,6 +265,13 @@ namespace ks::startup
         const StartupEnumerationProgressCallback& progressCallback,
         const StartupEnumerationStageResultCallback& stageResultCallback);
 
+    // Stop only at safe source boundaries; an already-entered backend call owns its resources until return.
+    std::vector<StartupEntry> EnumerateAllStartupEntries(
+        const StartupEnumerationProgressCallback& progressCallback,
+        const StartupEnumerationStageResultCallback& stageResultCallback,
+        const std::function<bool()>& shouldStop);
+
+
     // SetStartupEntryEnabled performs a warning-gated operation using actionKind/actionLocator only.
     ActionResult SetStartupEntryEnabled(const StartupEntry& entry, bool enabled);
 

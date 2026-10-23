@@ -1,11 +1,15 @@
 #include "LanguageManager.h"
 
 #include <QAbstractItemModel>
+#include <QAbstractProxyModel>
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
 #include <QAbstractButton>
 #include <QAction>
+#include <QActionEvent>
 #include <QApplication>
 #include <QChildEvent>
+#include <QCache>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
@@ -23,10 +27,13 @@
 #include <QMutexLocker>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPair>
+#include <QPersistentModelIndex>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
 #include <QSet>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QSpinBox>
 #include <QTableView>
 #include <QTextEdit>
@@ -51,12 +58,30 @@
 
 namespace
 {
+    // Explicit model-data ownership is shared by ordinary item views and
+    // virtual combo models. Query only marker/proxy metadata, never row data.
+    bool preserveModelDataText(const QObject* owner, const QAbstractItemModel* model)
+    {
+        if (owner && owner->property("ks_i18n_preserve_model_data").toBool()) return true;
+        QSet<const QAbstractItemModel*> visited;
+        while (model && !visited.contains(model))
+        {
+            if (model->property("ks_i18n_preserve_model_data").toBool()) return true;
+            visited.insert(model);
+            const auto* proxy = qobject_cast<const QAbstractProxyModel*>(model);
+            model = proxy ? proxy->sourceModel() : nullptr;
+        }
+        return false;
+    }
+
     constexpr auto kLanguagePackSchema = "ksword-language-pack";
     constexpr int kLanguagePackFormatVersion = 1;
     constexpr qint64 kMaximumLanguagePackBytes = 32 * 1024 * 1024;
     constexpr auto kSystemLanguagePreferenceId = "system";
     constexpr auto kEnglishFallbackLanguageId = "en-US";
     constexpr auto kProductFallbackLanguageId = "zh-CN";
+    constexpr int kSourceCacheBytes = 1024 * 1024;
+    constexpr qsizetype kMaximumCachedSourceCharacters = 4096;
     constexpr int kComboKeyRole = Qt::UserRole + 91;
     constexpr int kComboFallbackRole = Qt::UserRole + 92;
 
@@ -75,7 +100,8 @@ namespace
     constexpr auto kTabToolTipKeyProperty = "ks_i18n_tab_tooltip_key";
     constexpr auto kTabToolTipFallbackProperty = "ks_i18n_tab_tooltip_fallback";
 
-    constexpr auto kRuntimeRefreshPendingProperty = "ks_i18n_runtime_refresh_pending";
+    constexpr auto kRuntimeManagedProperty = "ks_i18n_runtime_managed_subtree";
+    constexpr auto kRuntimeDirtyProperty = "ks_i18n_runtime_dirty_subtree";
     constexpr auto kRuntimeWindowTitleSourceProperty = "ks_i18n_runtime_window_title_source";
     constexpr auto kRuntimeWindowTitleAppliedProperty = "ks_i18n_runtime_window_title_applied";
     constexpr auto kRuntimeToolTipSourceProperty = "ks_i18n_runtime_tooltip_source";
@@ -110,6 +136,7 @@ namespace
     constexpr int kRuntimeHeaderAppliedRole = Qt::UserRole + 1520;
     constexpr int kRuntimeModelSourceRole = Qt::UserRole + 1521;
     constexpr int kRuntimeModelAppliedRole = Qt::UserRole + 1522;
+    constexpr qsizetype kMaximumRuntimeModelRoots = 128;
 
     // containsHanCharacters 作用：判断文本是否含汉字（BMP 内的 CJK 统一表意文字及扩展 A）。
     bool containsHanCharacters(const QStringView text)
@@ -300,23 +327,30 @@ namespace
         storageObject->setProperty(appliedProperty, result.appliedText);
     }
 
-    QObject* runtimeTranslationRoot(QObject* object)
+    // Inspect only the ownership path of an event inside an explicit producer.
+    // Independent windows retain their own policy and never inherit a parent's.
+    QObject* runtimeManagedAncestor(QObject* object, QObject** dirtyAncestorOut = nullptr)
     {
-        if (QWidget* widget = qobject_cast<QWidget*>(object))
+        QObject* managedAncestor = nullptr;
+        if (dirtyAncestorOut != nullptr) *dirtyAncestorOut = nullptr;
+        for (QObject* current = object; current != nullptr; current = current->parent())
         {
-            return widget->window() != nullptr ? widget->window() : widget;
-        }
-
-        QObject* currentObject = object;
-        while (currentObject != nullptr)
-        {
-            if (QWidget* parentWidget = qobject_cast<QWidget*>(currentObject))
+            if (current->property("ks_i18n_preserve_data_text").toBool())
             {
-                return parentWidget->window() != nullptr ? parentWidget->window() : parentWidget;
+                if (dirtyAncestorOut != nullptr) *dirtyAncestorOut = nullptr;
+                return current;
             }
-            currentObject = currentObject->parent();
+            const bool managed = current->property(kRuntimeManagedProperty).toBool();
+            const bool dirty = current->property(kRuntimeDirtyProperty).toBool();
+            if (managed) managedAncestor = current;
+            if (dirtyAncestorOut != nullptr && dirty)
+                *dirtyAncestorOut = current;
+            // An outer dirty root cannot reach this event through a clean
+            // managed boundary. Retain only a candidate below that barrier.
+            if (managed && !dirty) break;
+            if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
         }
-        return object;
+        return managedAncestor;
     }
 
     void appendUniqueDirectory(QStringList* directoryList, const QString& directoryPath)
@@ -397,14 +431,24 @@ namespace
         quint32 valueLength = 0;
     };
 
-    // TemplateRef 说明：带占位符的中文源串（如“状态：%1”）的索引；
-    // 匹配时才按源串现拆字面量与占位符，不再为每条常驻一个已编译正则。
+    // Views refer to the immutable, squeezed LoadedPack::text buffer.
+    struct ParsedTemplate
+    {
+        std::vector<QStringView> literals;
+        std::vector<QStringView> placeholders;
+    };
+
+    ParsedTemplate parseTemplate(QStringView pattern);
+
+    // Template syntax is parsed once; captures remain local to each query.
+    // Template order still determines specificity and the first successful match.
     struct TemplateRef
     {
         quint32 entryIndex = 0;    // entryIndex：在 sourceTranslations 中的下标。
         quint32 literalLength = 0; // literalLength：字面量总长，越长越具体，先匹配。
         quint32 prefixLength = 0;  // prefixLength：首个占位符之前的字面量长度，用于快速排除。
         quint32 suffixLength = 0;  // suffixLength：最后一个占位符之后的字面量长度，用于快速排除。
+        ParsedTemplate parsed;
     };
 
     // LoadedPack 说明：
@@ -418,6 +462,8 @@ namespace
         std::vector<StringEntry> contextTranslations;
         std::vector<StringEntry> sourceTranslations;
         std::vector<TemplateRef> sourceTemplates;
+        QHash<ushort, std::vector<quint32>> templatesByPrefix;
+        std::vector<quint32> templatesWithoutPrefix;
         mutable std::once_flag renderedOnce;
         mutable std::vector<quint32> renderedIndex;
 
@@ -940,6 +986,7 @@ namespace
             }
             TemplateRef reference;
             reference.entryIndex = index;
+            reference.parsed = parseTemplate(key);
             reference.literalLength = static_cast<quint32>(key.size() - placeholderChars);
             reference.prefixLength = static_cast<quint32>(firstStart);
             reference.suffixLength = static_cast<quint32>(key.size() - lastEnd);
@@ -952,15 +999,20 @@ namespace
                 return left.literalLength > right.literalLength;
             });
         pack->sourceTemplates.shrink_to_fit();
+        for (quint32 index = 0; index < pack->sourceTemplates.size(); ++index)
+        {
+            const TemplateRef& reference = pack->sourceTemplates[index];
+            if (reference.prefixLength == 0)
+            {
+                pack->templatesWithoutPrefix.push_back(index);
+            }
+            else
+            {
+                const QChar first = pack->keyOf(pack->sourceTranslations[reference.entryIndex]).front();
+                pack->templatesByPrefix[first.unicode()].push_back(index);
+            }
+        }
     }
-
-    // ParsedTemplate 说明：一条源串拆成 n+1 段字面量与 n 个占位符；captures[k] 是第 k 个占位符匹配到的文本。
-    struct ParsedTemplate
-    {
-        std::vector<QStringView> literals;
-        std::vector<QStringView> placeholders;
-        std::vector<QStringView> captures;
-    };
 
     ParsedTemplate parseTemplate(const QStringView pattern)
     {
@@ -977,7 +1029,6 @@ namespace
             cursor = previousEnd;
         }
         parsed.literals.push_back(pattern.sliced(previousEnd));
-        parsed.captures.resize(parsed.placeholders.size());
         return parsed;
     }
 
@@ -986,7 +1037,8 @@ namespace
     // - 末段的 $ 既可匹配文本结尾，也可匹配结尾换行之前，与 PCRE 默认行为一致。
     bool matchTemplateFrom(
         const QStringView text,
-        ParsedTemplate& parsed,
+        const ParsedTemplate& parsed,
+        std::vector<QStringView>& captures,
         const std::size_t index,
         const qsizetype position)
     {
@@ -1000,7 +1052,7 @@ namespace
                 const qsizetype literalStart = endings[choice] - next.size();
                 if (literalStart >= position && text.sliced(literalStart, next.size()) == next)
                 {
-                    parsed.captures[index] = text.sliced(position, literalStart - position);
+                    captures[index] = text.sliced(position, literalStart - position);
                     return true;
                 }
             }
@@ -1012,8 +1064,8 @@ namespace
             {
                 continue;
             }
-            parsed.captures[index] = text.sliced(position, candidate - position);
-            if (matchTemplateFrom(text, parsed, index + 1, candidate + next.size()))
+            captures[index] = text.sliced(position, candidate - position);
+            if (matchTemplateFrom(text, parsed, captures, index + 1, candidate + next.size()))
             {
                 return true;
             }
@@ -1021,13 +1073,16 @@ namespace
         return false;
     }
 
-    bool matchTemplate(const QStringView text, ParsedTemplate& parsed)
+    bool matchTemplate(
+        const QStringView text,
+        const ParsedTemplate& parsed,
+        std::vector<QStringView>& captures)
     {
         if (parsed.placeholders.empty() || !text.startsWith(parsed.literals[0]))
         {
             return false;
         }
-        return matchTemplateFrom(text, parsed, 0, parsed.literals[0].size());
+        return matchTemplateFrom(text, parsed, captures, 0, parsed.literals[0].size());
     }
 
     // parsePackBytes 作用：
@@ -1269,6 +1324,239 @@ namespace
     }
 }
 
+namespace
+{
+    // One source/template resolver serves live queries and frozen worker values.
+    // Pack ownership and captured-value translation are supplied by each caller;
+    // parsing, specificity, fallback and placeholder behavior stay identical.
+    template <typename AcquirePack, typename TranslateCapturedSource>
+    QString resolveSourceTextValue(
+        const QString& languageId,
+        const QString& sourceText,
+        QStringList* visitedLanguageIds,
+        const bool preserveHistoricalChineseSource,
+        const AcquirePack& acquirePack,
+        const TranslateCapturedSource& translateCapturedSource)
+    {
+        if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty() || sourceText.isEmpty())
+        {
+            return sourceText;
+        }
+
+        const QString normalizedLanguageId = languageId.trimmed().toLower();
+        if (visitedLanguageIds->contains(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+        visitedLanguageIds->append(normalizedLanguageId);
+
+        if (preserveHistoricalChineseSource
+            && isHistoricalChineseLanguage(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+
+        const auto pack = acquirePack(normalizedLanguageId);
+        if (!pack.found || !pack.data)
+        {
+            return sourceText;
+        }
+
+        if (const StringEntry* entry = pack.data->find(pack.data->sourceTranslations, sourceText))
+        {
+            return pack.data->valueOf(*entry).toString();
+        }
+
+        if (containsHanCharacters(sourceText))
+        {
+            // Both lists contain the original specificity-order indices. Merge
+            // them rather than iterating one bucket before prefixless templates.
+            const auto bucket = pack.data->templatesByPrefix.constFind(sourceText.front().unicode());
+            const std::vector<quint32> emptyIndices;
+            const std::vector<quint32>& prefixIndices = bucket == pack.data->templatesByPrefix.cend()
+                ? emptyIndices : bucket.value();
+            const std::vector<quint32>& generalIndices = pack.data->templatesWithoutPrefix;
+            std::size_t prefixPosition = 0;
+            std::size_t generalPosition = 0;
+            while (prefixPosition < prefixIndices.size() || generalPosition < generalIndices.size())
+            {
+                const bool takePrefix = generalPosition == generalIndices.size()
+                    || (prefixPosition < prefixIndices.size()
+                        && prefixIndices[prefixPosition] < generalIndices[generalPosition]);
+                const quint32 referenceIndex = takePrefix
+                    ? prefixIndices[prefixPosition++] : generalIndices[generalPosition++];
+                const TemplateRef& reference = pack.data->sourceTemplates[referenceIndex];
+                const StringEntry& entry = pack.data->sourceTranslations[reference.entryIndex];
+                const QStringView patternText = pack.data->keyOf(entry);
+                if (reference.prefixLength > 0
+                    && !sourceText.startsWith(patternText.first(reference.prefixLength)))
+                {
+                    continue;
+                }
+                if (reference.suffixLength > 0
+                    && !sourceText.endsWith(patternText.last(reference.suffixLength)))
+                {
+                    continue;
+                }
+
+                const ParsedTemplate& parsedPattern = reference.parsed;
+                std::vector<QStringView> captures(parsedPattern.placeholders.size());
+                if (!matchTemplate(sourceText, parsedPattern, captures))
+                {
+                    continue;
+                }
+
+                const QStringView translatedPattern = pack.data->valueOf(entry);
+                QString translatedText;
+                qsizetype previousEnd = 0;
+                qsizetype placeholderStart = 0;
+                qsizetype placeholderLength = 0;
+                while (findPlaceholder(translatedPattern, previousEnd, &placeholderStart, &placeholderLength))
+                {
+                    translatedText += translatedPattern.sliced(
+                        previousEnd,
+                        placeholderStart - previousEnd);
+                    const QStringView placeholder = translatedPattern.sliced(
+                        placeholderStart,
+                        placeholderLength);
+                    // 同一占位符在源串里多次出现时取第一次的捕获，与旧实现的登记顺序一致。
+                    const auto placeholderIterator = std::find(
+                        parsedPattern.placeholders.cbegin(),
+                        parsedPattern.placeholders.cend(),
+                        placeholder);
+                    if (placeholderIterator == parsedPattern.placeholders.cend())
+                    {
+                        translatedText.clear();
+                        break;
+                    }
+                    // Placeholder values can themselves be stable UI phrases (for
+                    // example a translated status template receiving "安全模式").
+                    // Resolve each captured value independently so an English outer
+                    // template cannot retain a nested Chinese enum/status string.
+                    const std::size_t captureIndex = static_cast<std::size_t>(
+                        placeholderIterator - parsedPattern.placeholders.cbegin());
+                    translatedText += translateCapturedSource(
+                        captures[captureIndex].toString());
+                    previousEnd = placeholderStart + placeholderLength;
+                }
+                if (!translatedText.isNull())
+                {
+                    translatedText += translatedPattern.sliced(previousEnd);
+                    return translatedText;
+                }
+            }
+        }
+
+        if (!pack.fallbackLanguageId.isEmpty())
+        {
+            return resolveSourceTextValue(
+                pack.fallbackLanguageId,
+                sourceText,
+                visitedLanguageIds,
+                preserveHistoricalChineseSource,
+                acquirePack,
+                translateCapturedSource);
+        }
+        return sourceText;
+    }
+    template <typename AcquirePack>
+    QString sourceForRenderedTextValue(const QString& activeLanguageId,
+        const QString& renderedText, const AcquirePack& acquirePack)
+    {
+        if (renderedText.isEmpty() || containsHanCharacters(renderedText))
+        {
+            return {};
+        }
+
+        // 只沿当前语言的 fallback 链反查：界面上呈现的译文只可能来自当前生效的包，
+        // 扫描未启用的语言既会把它们全部加载进内存，也不对应任何已显示的文本。
+        // 反查索引本身在各包第一次走到这里时才构建。
+        QStringList visitedLanguageIds;
+        QString languageId = activeLanguageId;
+        while (!languageId.trimmed().isEmpty())
+        {
+            const QString normalizedLanguageId = languageId.trimmed().toLower();
+            if (visitedLanguageIds.contains(normalizedLanguageId))
+            {
+                break;
+            }
+            visitedLanguageIds.append(normalizedLanguageId);
+
+            const auto pack = acquirePack(normalizedLanguageId);
+            if (!pack.found)
+            {
+                break;
+            }
+            if (pack.data)
+            {
+                const QStringView source = pack.data->renderedSource(renderedText);
+                if (!source.isEmpty())
+                {
+                    return source.toString();
+                }
+            }
+            languageId = pack.fallbackLanguageId;
+        }
+        return {};
+    }
+
+    template <typename TranslateSource, typename ReverseSource>
+    QString displayTextValue(const QString& value, const TranslateSource& translate,
+        const ReverseSource& reverse)
+    {
+        if (value.isEmpty()) return value;
+        if (containsHanCharacters(value)) return translate(value);
+        const QString canonical = reverse(value);
+        return canonical.isEmpty() ? value : translate(canonical);
+    }
+
+    template<class AcquirePack>
+    QString resolveContextTextValue(const QString& languageId, const QString& contextKey,
+        const QString& sourceText, QStringList* visitedLanguageIds, const AcquirePack& acquire)
+    {
+        if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty())
+        {
+            return sourceText;
+        }
+
+        const QString normalizedLanguageId = languageId.trimmed().toLower();
+        if (visitedLanguageIds->contains(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+        visitedLanguageIds->append(normalizedLanguageId);
+
+        // Keep the historical Chinese fallback authoritative even when a third
+        // language reaches zh-CN through its fallback chain.
+        if (isHistoricalChineseLanguage(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+
+        const auto pack = acquire(normalizedLanguageId);
+        if (!pack.found || !pack.data)
+        {
+            return sourceText;
+        }
+
+        if (const StringEntry* entry = pack.data->find(pack.data->contextTranslations, contextKey))
+        {
+            return pack.data->valueOf(*entry).toString();
+        }
+        if (!pack.fallbackLanguageId.isEmpty())
+        {
+            return resolveContextTextValue(
+                pack.fallbackLanguageId,
+                contextKey,
+                sourceText,
+                visitedLanguageIds, acquire);
+        }
+        return sourceText;
+    }
+
+
+}
+
 // State 说明：
 // - packs 只在启动时登记清单；data 为空表示该语言尚未被使用，不占翻译表内存；
 // - mutex 保护清单与按需加载，查询线程拿到的是 shared_ptr 快照，加载后不再变更。
@@ -1285,6 +1573,28 @@ struct ks::i18n::LanguageManager::State
 
     mutable QMutex mutex;
     std::vector<PackEntry> packs;
+    // Query result caches include exact, template and unchanged/miss results.
+    // Keep normal source-language semantics separate from forced pack lookups.
+    mutable QMutex sourceCacheMutex;
+    QCache<QString, QString> sourceResults{ kSourceCacheBytes };
+    QCache<QString, QString> packedSourceResults{ kSourceCacheBytes };
+    QString sourceLanguageId;
+    quint64 sourceGeneration = 0;
+    // GUI-only model projections survive ordinary repaint passes. Actual model
+    // notifications invalidate them; language generation invalidates by value.
+    struct RuntimeModelState
+    {
+        QList<QPointer<QObject>> owners;
+        quint64 revision = 1;
+        using Stamp = QPair<quint64, quint64>; // language generation, model mutation revision
+        QHash<QPersistentModelIndex, Stamp> itemRoots;
+        QHash<QPersistentModelIndex, Stamp> headerRoots;
+        QHash<QPersistentModelIndex, QHash<int, Stamp>> comboRoots;
+    };
+    QHash<QAbstractItemModel*, RuntimeModelState> runtimeModels;
+    // GUI-thread queue: a pending ancestor covers pending descendants.
+    QList<QPointer<QObject>> pendingRuntimeRoots;
+    bool runtimeDrainPending = false;
 };
 
 struct ks::i18n::LanguageManager::PackRef
@@ -1295,6 +1605,81 @@ struct ks::i18n::LanguageManager::PackRef
     QString loadError;
     std::shared_ptr<const LoadedPack> data;
 };
+
+struct ks::i18n::SourceTextSnapshot::Data
+{
+    struct FrozenPack
+    {
+        bool found = false;
+        QString languageId;
+        QString fallbackLanguageId;
+        std::shared_ptr<const LoadedPack> data;
+    };
+
+    QString languageId;
+    std::vector<FrozenPack> packs;
+
+    FrozenPack acquirePack(const QString& id) const
+    {
+        const auto found = std::find_if(packs.cbegin(), packs.cend(),
+            [&id](const FrozenPack& pack) { return pack.languageId == id; });
+        return found == packs.cend() ? FrozenPack{} : *found;
+    }
+
+    QString sourceForRenderedText(const QString& value) const
+    {
+        return sourceForRenderedTextValue(languageId, value,
+            [this](const QString& id) { return acquirePack(id); });
+    }
+
+    QString translate(const QString& sourceText, const bool preserveHistoricalChineseSource) const
+    {
+        QStringList visitedLanguageIds;
+        return resolveSourceTextValue(
+            languageId, sourceText, &visitedLanguageIds, preserveHistoricalChineseSource,
+            [this](const QString& id) { return acquirePack(id); },
+            // Captures use normal source semantics even for packed queries,
+            // matching LanguageManager::resolveSourceText's nested behavior.
+            [this](const QString& value) { return translate(value, true); });
+    }
+};
+
+ks::i18n::SourceTextSnapshot::SourceTextSnapshot(std::shared_ptr<const Data> data)
+    : m_data(std::move(data))
+{
+}
+
+QString ks::i18n::SourceTextSnapshot::languageId() const
+{
+    return m_data ? m_data->languageId : QString();
+}
+
+QString ks::i18n::SourceTextSnapshot::sourceText(const QString& sourceText) const
+{
+    return m_data ? m_data->translate(sourceText, true) : sourceText;
+}
+
+QString ks::i18n::SourceTextSnapshot::packedSourceText(const QString& sourceText) const
+{
+    return m_data ? m_data->translate(sourceText, false) : sourceText;
+}
+
+QString ks::i18n::SourceTextSnapshot::contextText(const QString& contextKey, const QString& sourceText) const
+{
+    if (!m_data || contextKey.trimmed().isEmpty() || sourceText.isEmpty()
+        || isHistoricalChineseLanguage(m_data->languageId)) return sourceText;
+    QStringList visitedLanguageIds;
+    return resolveContextTextValue(m_data->languageId, contextKey, sourceText, &visitedLanguageIds,
+        [this](const QString& id) { return m_data->acquirePack(id); });
+}
+
+QString ks::i18n::SourceTextSnapshot::displayText(const QString& renderedOrSourceText) const
+{
+    if (!m_data) return renderedOrSourceText;
+    return displayTextValue(renderedOrSourceText,
+        [this](const QString& value) { return m_data->translate(value, true); },
+        [this](const QString& value) { return m_data->sourceForRenderedText(value); });
+}
 
 ks::i18n::LanguageManager::LanguageManager()
     : m_state(std::make_unique<State>())
@@ -1423,7 +1808,14 @@ bool ks::i18n::LanguageManager::setLanguage(
         }
     }
 
-    m_currentLanguageId = pack.languageId;
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        m_currentLanguageId = pack.languageId;
+        m_state->sourceLanguageId = pack.languageId;
+        ++m_state->sourceGeneration;
+        m_state->sourceResults.clear();
+        m_state->packedSourceResults.clear();
+    }
     ensureApplicationEventFilter();
     applyApplicationDirection();
     retranslateAll();
@@ -1558,46 +1950,74 @@ QString ks::i18n::LanguageManager::contextText(
 
 QString ks::i18n::LanguageManager::sourceText(const QString& sourceText) const
 {
-    if (sourceText.isEmpty() || isHistoricalChineseLanguage(m_currentLanguageId))
-    {
-        return sourceText;
-    }
-
-    QStringList visitedLanguageIds;
-    return resolveSourceText(
-        m_currentLanguageId,
-        sourceText,
-        &visitedLanguageIds,
-        true);
+    return cachedSourceText(sourceText, true);
 }
 
 QString ks::i18n::LanguageManager::packedSourceText(const QString& sourceText) const
+{
+    return cachedSourceText(sourceText, false);
+}
+
+QString ks::i18n::LanguageManager::cachedSourceText(
+    const QString& sourceText,
+    const bool preserveHistoricalChineseSource) const
 {
     if (sourceText.isEmpty())
     {
         return sourceText;
     }
 
-    QStringList visitedLanguageIds;
-    return resolveSourceText(
-        m_currentLanguageId,
-        sourceText,
-        &visitedLanguageIds,
-        false);
-}
-
-QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& renderedText) const
-{
-    if (renderedText.isEmpty() || containsHanCharacters(renderedText))
+    QString languageId;
+    quint64 generation = 0;
+    const bool cacheable = sourceText.size() <= kMaximumCachedSourceCharacters;
     {
-        return {};
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        languageId = m_state->sourceLanguageId;
+        generation = m_state->sourceGeneration;
+        if (preserveHistoricalChineseSource && isHistoricalChineseLanguage(languageId))
+        {
+            return sourceText;
+        }
+        QCache<QString, QString>& cache = preserveHistoricalChineseSource
+            ? m_state->sourceResults : m_state->packedSourceResults;
+        if (cacheable)
+        {
+            if (const QString* cached = cache.object(sourceText))
+            {
+                return *cached;
+            }
+        }
     }
 
-    // 只沿当前语言的 fallback 链反查：界面上呈现的译文只可能来自当前生效的包，
-    // 扫描未启用的语言既会把它们全部加载进内存，也不对应任何已显示的文本。
-    // 反查索引本身在各包第一次走到这里时才构建。
     QStringList visitedLanguageIds;
-    QString languageId = m_currentLanguageId;
+    const QString result = resolveSourceText(
+        languageId, sourceText, &visitedLanguageIds, preserveHistoricalChineseSource);
+    const qint64 cacheCost = (static_cast<qint64>(sourceText.size()) + result.size()) * 2 + 128;
+    if (cacheable && cacheCost <= kSourceCacheBytes)
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        if (generation == m_state->sourceGeneration)
+        {
+            QCache<QString, QString>& cache = preserveHistoricalChineseSource
+                ? m_state->sourceResults : m_state->packedSourceResults;
+            // Callers may pass QString::fromRawData or a large-capacity string.
+            // Own exactly the budgeted characters rather than retaining borrowed storage.
+            const QString ownedKey(sourceText.constData(), sourceText.size());
+            cache.insert(ownedKey, new QString(result.constData(), result.size()), static_cast<int>(cacheCost));
+        }
+    }
+    return result;
+}
+
+ks::i18n::SourceTextSnapshot ks::i18n::LanguageManager::sourceTextSnapshot() const
+{
+    auto frozen = std::make_shared<SourceTextSnapshot::Data>();
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        frozen->languageId = m_state->sourceLanguageId;
+    }
+    QStringList visitedLanguageIds;
+    QString languageId = frozen->languageId;
     while (!languageId.trimmed().isEmpty())
     {
         const QString normalizedLanguageId = languageId.trimmed().toLower();
@@ -1606,38 +2026,32 @@ QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& rendered
             break;
         }
         visitedLanguageIds.append(normalizedLanguageId);
-
+        // Load the fallback chain here, before dispatch. No worker query can
+        // perform a lazy pack read or consult the manager's later state.
         const PackRef pack = acquirePack(normalizedLanguageId);
+        frozen->packs.push_back({pack.found, normalizedLanguageId, pack.fallbackLanguageId, pack.data});
+        // Reverse lookup follows registered fallback metadata even through a
+        // failed pack load. Normal source lookup still stops at that failure.
         if (!pack.found)
         {
             break;
         }
-        if (pack.data)
-        {
-            const QStringView source = pack.data->renderedSource(renderedText);
-            if (!source.isEmpty())
-            {
-                return source.toString();
-            }
-        }
         languageId = pack.fallbackLanguageId;
     }
-    return {};
+    return SourceTextSnapshot(std::move(frozen));
+}
+
+QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& renderedText) const
+{
+    return sourceForRenderedTextValue(m_currentLanguageId, renderedText,
+        [this](const QString& id) { return acquirePack(id); });
 }
 
 QString ks::i18n::LanguageManager::displayText(const QString& renderedOrSourceText) const
 {
-    if (renderedOrSourceText.isEmpty())
-    {
-        return renderedOrSourceText;
-    }
-    if (containsHanCharacters(renderedOrSourceText))
-    {
-        return sourceText(renderedOrSourceText);
-    }
-
-    const QString canonicalSource = sourceForRenderedText(renderedOrSourceText);
-    return canonicalSource.isEmpty() ? renderedOrSourceText : sourceText(canonicalSource);
+    return displayTextValue(renderedOrSourceText,
+        [this](const QString& value) { return sourceText(value); },
+        [this](const QString& value) { return sourceForRenderedText(value); });
 }
 
 void ks::i18n::LanguageManager::bindText(
@@ -1651,7 +2065,7 @@ void ks::i18n::LanguageManager::bindText(
     }
     object->setProperty(kTextKeyProperty, key);
     object->setProperty(kTextFallbackProperty, fallbackText);
-    applyBindings(object);
+    applyTextBinding(object);
 }
 
 bool ks::i18n::LanguageManager::moveTextBinding(
@@ -1697,7 +2111,7 @@ void ks::i18n::LanguageManager::bindToolTip(
     }
     widget->setProperty(kToolTipKeyProperty, key);
     widget->setProperty(kToolTipFallbackProperty, fallbackText);
-    applyBindings(widget);
+    widget->setToolTip(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindPlaceholder(
@@ -1711,7 +2125,7 @@ void ks::i18n::LanguageManager::bindPlaceholder(
     }
     lineEdit->setProperty(kPlaceholderKeyProperty, key);
     lineEdit->setProperty(kPlaceholderFallbackProperty, fallbackText);
-    applyBindings(lineEdit);
+    lineEdit->setPlaceholderText(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindSuffix(
@@ -1725,7 +2139,7 @@ void ks::i18n::LanguageManager::bindSuffix(
     }
     spinBox->setProperty(kSuffixKeyProperty, key);
     spinBox->setProperty(kSuffixFallbackProperty, fallbackText);
-    applyBindings(spinBox);
+    spinBox->setSuffix(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindWindowTitle(
@@ -1739,7 +2153,7 @@ void ks::i18n::LanguageManager::bindWindowTitle(
     }
     widget->setProperty(kWindowTitleKeyProperty, key);
     widget->setProperty(kWindowTitleFallbackProperty, fallbackText);
-    applyBindings(widget);
+    widget->setWindowTitle(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindTab(
@@ -1754,7 +2168,11 @@ void ks::i18n::LanguageManager::bindTab(
     }
     page->setProperty(kTabKeyProperty, key);
     page->setProperty(kTabFallbackProperty, fallbackText);
-    applyBindings(tabWidget);
+    const int index = tabWidget->indexOf(page);
+    if (index >= 0)
+    {
+        tabWidget->setTabText(index, text(key, fallbackText));
+    }
 }
 
 void ks::i18n::LanguageManager::bindTabToolTip(
@@ -1769,7 +2187,7 @@ void ks::i18n::LanguageManager::bindTabToolTip(
     }
     page->setProperty(kTabToolTipKeyProperty, key);
     page->setProperty(kTabToolTipFallbackProperty, fallbackText);
-    applyBindings(tabWidget);
+    tabWidget->setTabToolTip(tabWidget->indexOf(page), text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindComboBoxItem(
@@ -1784,7 +2202,24 @@ void ks::i18n::LanguageManager::bindComboBoxItem(
     }
     comboBox->setItemData(itemIndex, key, kComboKeyRole);
     comboBox->setItemData(itemIndex, fallbackText, kComboFallbackRole);
-    applyBindings(comboBox);
+    comboBox->setItemText(itemIndex, text(key, fallbackText));
+}
+
+void ks::i18n::LanguageManager::setRuntimeTranslationManaged(QObject* object, const bool managed)
+{
+    if (object != nullptr && object->property(kRuntimeManagedProperty).toBool() != managed)
+        object->setProperty(kRuntimeManagedProperty, managed);
+}
+
+void ks::i18n::LanguageManager::markRuntimeTranslationDirty(QObject* object)
+{
+    if (object == nullptr || m_applyingRuntimeTranslations) return;
+    if (!object->property(kRuntimeDirtyProperty).toBool()) object->setProperty(kRuntimeDirtyProperty, true);
+    // A hidden explicit subtree has no paint to prepare yet. Its Show event
+    // consumes the dirty bit before the first frame, without touching business
+    // sampling, canonical documents or hidden model contents in the meantime.
+    const auto* widget = qobject_cast<const QWidget*>(object);
+    if (widget == nullptr || widget->isVisible()) scheduleRuntimeTranslation(object);
 }
 
 void ks::i18n::LanguageManager::retranslateAll()
@@ -1951,44 +2386,8 @@ QString ks::i18n::LanguageManager::resolveContextText(
     const QString& sourceText,
     QStringList* visitedLanguageIds) const
 {
-    if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty())
-    {
-        return sourceText;
-    }
-
-    const QString normalizedLanguageId = languageId.trimmed().toLower();
-    if (visitedLanguageIds->contains(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-    visitedLanguageIds->append(normalizedLanguageId);
-
-    // Keep the historical Chinese fallback authoritative even when a third
-    // language reaches zh-CN through its fallback chain.
-    if (isHistoricalChineseLanguage(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-
-    const PackRef pack = acquirePack(normalizedLanguageId);
-    if (!pack.found || !pack.data)
-    {
-        return sourceText;
-    }
-
-    if (const StringEntry* entry = pack.data->find(pack.data->contextTranslations, contextKey))
-    {
-        return pack.data->valueOf(*entry).toString();
-    }
-    if (!pack.fallbackLanguageId.isEmpty())
-    {
-        return resolveContextText(
-            pack.fallbackLanguageId,
-            contextKey,
-            sourceText,
-            visitedLanguageIds);
-    }
-    return sourceText;
+    return resolveContextTextValue(languageId, contextKey, sourceText, visitedLanguageIds,
+        [this](const QString& id) { return acquirePack(id); });
 }
 
 QString ks::i18n::LanguageManager::resolveSourceText(
@@ -1997,108 +2396,10 @@ QString ks::i18n::LanguageManager::resolveSourceText(
     QStringList* visitedLanguageIds,
     const bool preserveHistoricalChineseSource) const
 {
-    if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty() || sourceText.isEmpty())
-    {
-        return sourceText;
-    }
-
-    const QString normalizedLanguageId = languageId.trimmed().toLower();
-    if (visitedLanguageIds->contains(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-    visitedLanguageIds->append(normalizedLanguageId);
-
-    if (preserveHistoricalChineseSource
-        && isHistoricalChineseLanguage(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-
-    const PackRef pack = acquirePack(normalizedLanguageId);
-    if (!pack.found || !pack.data)
-    {
-        return sourceText;
-    }
-
-    if (const StringEntry* entry = pack.data->find(pack.data->sourceTranslations, sourceText))
-    {
-        return pack.data->valueOf(*entry).toString();
-    }
-
-    if (containsHanCharacters(sourceText))
-    {
-        for (const TemplateRef& reference : pack.data->sourceTemplates)
-        {
-            const StringEntry& entry = pack.data->sourceTranslations[reference.entryIndex];
-            const QStringView patternText = pack.data->keyOf(entry);
-            if (reference.prefixLength > 0
-                && !sourceText.startsWith(patternText.first(reference.prefixLength)))
-            {
-                continue;
-            }
-            if (reference.suffixLength > 0
-                && !sourceText.endsWith(patternText.last(reference.suffixLength)))
-            {
-                continue;
-            }
-
-            ParsedTemplate parsedPattern = parseTemplate(patternText);
-            if (!matchTemplate(sourceText, parsedPattern))
-            {
-                continue;
-            }
-
-            const QStringView translatedPattern = pack.data->valueOf(entry);
-            QString translatedText;
-            qsizetype previousEnd = 0;
-            qsizetype placeholderStart = 0;
-            qsizetype placeholderLength = 0;
-            while (findPlaceholder(translatedPattern, previousEnd, &placeholderStart, &placeholderLength))
-            {
-                translatedText += translatedPattern.sliced(
-                    previousEnd,
-                    placeholderStart - previousEnd);
-                const QStringView placeholder = translatedPattern.sliced(
-                    placeholderStart,
-                    placeholderLength);
-                // 同一占位符在源串里多次出现时取第一次的捕获，与旧实现的登记顺序一致。
-                const auto placeholderIterator = std::find(
-                    parsedPattern.placeholders.cbegin(),
-                    parsedPattern.placeholders.cend(),
-                    placeholder);
-                if (placeholderIterator == parsedPattern.placeholders.cend())
-                {
-                    translatedText.clear();
-                    break;
-                }
-                // Placeholder values can themselves be stable UI phrases (for
-                // example a translated status template receiving "安全模式").
-                // Resolve each captured value independently so an English outer
-                // template cannot retain a nested Chinese enum/status string.
-                const std::size_t captureIndex = static_cast<std::size_t>(
-                    placeholderIterator - parsedPattern.placeholders.cbegin());
-                translatedText += this->sourceText(
-                    parsedPattern.captures[captureIndex].toString());
-                previousEnd = placeholderStart + placeholderLength;
-            }
-            if (!translatedText.isNull())
-            {
-                translatedText += translatedPattern.sliced(previousEnd);
-                return translatedText;
-            }
-        }
-    }
-
-    if (!pack.fallbackLanguageId.isEmpty())
-    {
-        return resolveSourceText(
-            pack.fallbackLanguageId,
-            sourceText,
-            visitedLanguageIds,
-            preserveHistoricalChineseSource);
-    }
-    return sourceText;
+    return resolveSourceTextValue(
+        languageId, sourceText, visitedLanguageIds, preserveHistoricalChineseSource,
+        [this](const QString& id) { return acquirePack(id); },
+        [this](const QString& value) { return this->sourceText(value); });
 }
 
 void ks::i18n::LanguageManager::ensureApplicationEventFilter()
@@ -2119,21 +2420,54 @@ void ks::i18n::LanguageManager::ensureApplicationEventFilter()
 
 void ks::i18n::LanguageManager::scheduleRuntimeTranslation(QObject* object)
 {
-    if (object == nullptr || m_applyingRuntimeTranslations
-        || object->property(kRuntimeRefreshPendingProperty).toBool())
+    if (object == nullptr || m_applyingRuntimeTranslations)
     {
         return;
     }
 
-    object->setProperty(kRuntimeRefreshPendingProperty, true);
-    const QPointer<QObject> guardedObject(object);
-    QTimer::singleShot(0, this, [this, guardedObject]() {
-        if (guardedObject.isNull())
+    const auto covers = [](QObject* ancestor, QObject* child) {
+        for (QObject* current = child; current != nullptr; current = current->parent())
+        {
+            // A clean explicit boundary terminates ancestor coverage: its
+            // independently dirtied descendant must keep its own queue entry.
+            if (current->property(kRuntimeManagedProperty).toBool()
+                && !current->property(kRuntimeDirtyProperty).toBool()) return false;
+            if (current == ancestor) return true;
+            if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
+        }
+        return false;
+    };
+    auto& pending = m_state->pendingRuntimeRoots;
+    for (const QPointer<QObject>& queued : pending)
+    {
+        if (!queued.isNull() && covers(queued.data(), object))
         {
             return;
         }
-        guardedObject->setProperty(kRuntimeRefreshPendingProperty, false);
-        applyRuntimeTranslations(guardedObject.data());
+    }
+    pending.erase(std::remove_if(pending.begin(), pending.end(),
+        [object, &covers](const QPointer<QObject>& queued) {
+            return queued.isNull() || covers(object, queued.data());
+        }), pending.end());
+    pending.append(QPointer<QObject>(object));
+    if (m_state->runtimeDrainPending)
+    {
+        return;
+    }
+
+    m_state->runtimeDrainPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        // Detach before applying: callbacks may create new independent work.
+        const QList<QPointer<QObject>> roots = std::move(m_state->pendingRuntimeRoots);
+        m_state->pendingRuntimeRoots.clear();
+        m_state->runtimeDrainPending = false;
+        for (const QPointer<QObject>& root : roots)
+        {
+            if (!root.isNull())
+            {
+                applyRuntimeTranslations(root.data(), true);
+            }
+        }
     });
 }
 
@@ -2145,38 +2479,134 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
         return QObject::eventFilter(watched, event);
     }
 
+    // No repaint/layout notification may schedule a window/subtree traversal.
+    // Widgets without text NOTIFY are checked at their own paint/help boundary.
+    switch (event->type())
+    {
+    case QEvent::ChildAdded:
+    case QEvent::Show:
+    case QEvent::PolishRequest:
+    case QEvent::ActionAdded:
+    case QEvent::ActionChanged:
+    case QEvent::Paint:
+    case QEvent::Enter:
+    case QEvent::ToolTip:
+    case QEvent::ToolTipChange:
+    case QEvent::WhatsThis:
+    case QEvent::QueryWhatsThis:
+    case QEvent::WindowTitleChange:
+    {
+        QObject* dirtyAncestor = nullptr;
+        QObject* managedAncestor = runtimeManagedAncestor(watched, &dirtyAncestor);
+        if (event->type() == QEvent::Show && dirtyAncestor != nullptr
+            && managedAncestor != nullptr)
+        {
+            const QPointer<QObject> guardedWatched(watched);
+            applyRuntimeTranslations(dirtyAncestor, true);
+            return guardedWatched.isNull(); // Consume an event whose receiver was destroyed.
+        }
+        if (managedAncestor != nullptr) return QObject::eventFilter(watched, event);
+        break;
+    }
+    default:
+        return QObject::eventFilter(watched, event);
+    }
+
     switch (event->type())
     {
     case QEvent::ChildAdded:
     {
         QChildEvent* childEvent = static_cast<QChildEvent*>(event);
         QObject* targetObject = childEvent->child() != nullptr ? childEvent->child() : watched;
-        scheduleRuntimeTranslation(runtimeTranslationRoot(targetObject));
+        scheduleRuntimeTranslation(targetObject);
         break;
     }
     case QEvent::Show:
-    case QEvent::PolishRequest:
-    case QEvent::ActionAdded:
-    case QEvent::ActionChanged:
-        scheduleRuntimeTranslation(runtimeTranslationRoot(watched));
-        break;
-    case QEvent::LayoutRequest:
-    case QEvent::UpdateRequest:
     {
-        QObject* targetObject = watched;
-        if (qobject_cast<QHeaderView*>(watched) != nullptr)
+        // Qt sends Show to each newly visible child before the parent's Show.
+        // Prepare each receiver once rather than walk all those children again.
+        // Explicit managed/dirty branches keep the complete path above. Unknown
+        // hidden receivers consume their own deferred bit; their children have
+        // their own Show and paint/help checks. An already queued explicit pass
+        // remains queued and still traverses its full declared subtree.
+        const QPointer<QObject> guardedWatched(watched);
+        if (watched->property(kRuntimeDirtyProperty).toBool())
+            watched->setProperty(kRuntimeDirtyProperty, QVariant());
+        if (!guardedWatched) return true;
+        applyRuntimeTranslations(watched, true, false);
+        if (!guardedWatched) return true;
+        if (auto* widget = qobject_cast<QWidget*>(watched))
         {
-            QObject* parentObject = watched->parent();
-            while (parentObject != nullptr && qobject_cast<QAbstractItemView*>(parentObject) == nullptr)
+            // Actions have no Show event. Prepare the actions actually exposed
+            // by this widget (including externally owned menu actions) before
+            // its first frame instead of relying on a queued ActionAdded pass.
+            QList<QPointer<QAction>> actions;
+            for (QAction* action : widget->actions()) actions.append(action);
+            for (const QPointer<QAction>& action : actions)
             {
-                parentObject = parentObject->parent();
-            }
-            if (parentObject != nullptr)
-            {
-                targetObject = parentObject;
+                if (action && runtimeManagedAncestor(action.data()) == nullptr)
+                    applyRuntimeTranslations(action.data(), true, false);
+                if (!guardedWatched) return true;
             }
         }
-        scheduleRuntimeTranslation(targetObject);
+        return guardedWatched.isNull();
+    }
+    case QEvent::PolishRequest:
+        scheduleRuntimeTranslation(watched);
+        break;
+    case QEvent::ActionAdded:
+    case QEvent::ActionChanged:
+    {
+        const auto* actionEvent = static_cast<QActionEvent*>(event);
+        scheduleRuntimeTranslation(actionEvent->action());
+        break;
+    }
+    case QEvent::Paint:
+    case QEvent::Enter:
+    case QEvent::ToolTip:
+    case QEvent::ToolTipChange:
+    case QEvent::WhatsThis:
+    case QEvent::QueryWhatsThis:
+    case QEvent::WindowTitleChange:
+    {
+        const QPointer<QObject> guardedWatched(watched);
+        // Keep the existing per-object translation rules and model/root stamps,
+        // but never visit children for ordinary drawing, hover or help events.
+        applyRuntimeTranslations(watched, true, false);
+        if (!guardedWatched) return true;
+        auto* widget = qobject_cast<QWidget*>(watched);
+        auto* parentWidget = widget != nullptr ? widget->parentWidget() : nullptr;
+        QWidget* ownerWidget = nullptr;
+        if (auto* area = qobject_cast<QAbstractScrollArea*>(parentWidget);
+            area != nullptr && area->viewport() == widget)
+        {
+            // A viewport paints on behalf of its view/editor. This also notices
+            // a new rootModelIndex without rescanning any sibling view/model.
+            ownerWidget = area;
+        }
+        else if (qobject_cast<QTabBar*>(watched) != nullptr
+            && qobject_cast<QTabWidget*>(parentWidget) != nullptr)
+            ownerWidget = parentWidget;
+        else if (qobject_cast<QLineEdit*>(watched) != nullptr
+            && (qobject_cast<QSpinBox*>(parentWidget) != nullptr
+                || qobject_cast<QDoubleSpinBox*>(parentWidget) != nullptr
+                || qobject_cast<QComboBox*>(parentWidget) != nullptr))
+            ownerWidget = parentWidget;
+        if (ownerWidget != nullptr && runtimeManagedAncestor(ownerWidget) == nullptr)
+        {
+            const QPointer<QWidget> ownerGuard(ownerWidget);
+            applyRuntimeTranslations(ownerWidget, true, false);
+            if (!guardedWatched) return true;
+            // Header viewport -> header -> canonical table/tree, still no
+            // recursive walk and still the same model-data preservation policy.
+            if (ownerGuard && qobject_cast<QHeaderView*>(ownerGuard.data()) != nullptr)
+            {
+                auto* view = qobject_cast<QAbstractItemView*>(ownerGuard->parentWidget());
+                if (view != nullptr && runtimeManagedAncestor(view) == nullptr)
+                    applyRuntimeTranslations(view, true, false);
+            }
+        }
+        if (!guardedWatched) return true;
         break;
     }
     default:
@@ -2185,19 +2615,97 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     return QObject::eventFilter(watched, event);
 }
 
-void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
+void ks::i18n::LanguageManager::observeRuntimeModel(QAbstractItemModel* model, QObject* owner)
+{
+    auto found = m_state->runtimeModels.find(model);
+    if (found == m_state->runtimeModels.end())
+    {
+        found = m_state->runtimeModels.insert(model, State::RuntimeModelState{});
+        const auto invalidate = [this, model]()
+        {
+            auto current = m_state->runtimeModels.find(model);
+            if (current == m_state->runtimeModels.end()) return;
+            ++current->revision;
+            // Count even synchronous writes from source callbacks during our
+            // pass. Never cache a projection that changed while being read.
+            // Keep referenced cache nodes alive until the current pass exits;
+            // their old revision already makes every previous stamp stale.
+            // The historical Chinese baseline keeps its original no-runtime-
+            // queue policy; its revision still changes for later explicit work.
+            if (m_applyingRuntimeTranslations || isHistoricalChineseLanguage(m_currentLanguageId)) return;
+            current->itemRoots.clear();
+            current->headerRoots.clear();
+            current->comboRoots.clear();
+            const auto owners = current->owners;
+            for (const QPointer<QObject>& target : owners)
+            {
+                if (target.isNull() || target->property(kRuntimeDirtyProperty).toBool()) continue;
+                if (runtimeManagedAncestor(target.data()) != nullptr) continue;
+                if (const auto* view = qobject_cast<QAbstractItemView*>(target.data());
+                    view != nullptr && view->model() != model) continue;
+                if (const auto* combo = qobject_cast<QComboBox*>(target.data());
+                    combo != nullptr && combo->model() != model) continue;
+                markRuntimeTranslationDirty(target.data());
+            }
+        };
+        connect(model, &QAbstractItemModel::dataChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::headerDataChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsInserted, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsRemoved, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsMoved, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsInserted, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsRemoved, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsMoved, this, invalidate);
+        connect(model, &QAbstractItemModel::layoutChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::modelReset, this, invalidate);
+        connect(model, &QObject::destroyed, this, [this, model]()
+        {
+            m_state->runtimeModels.remove(model);
+        });
+    }
+    // Root navigation can change without a model notification. Bound retained
+    // projection keys; eviction only makes the next visit translate again.
+    if (found->itemRoots.size() >= kMaximumRuntimeModelRoots
+        || found->headerRoots.size() >= kMaximumRuntimeModelRoots
+        || found->comboRoots.size() >= kMaximumRuntimeModelRoots)
+    {
+        found->itemRoots.clear();
+        found->headerRoots.clear();
+        found->comboRoots.clear();
+    }
+    auto& owners = found->owners;
+    owners.erase(std::remove_if(owners.begin(), owners.end(),
+        [](const QPointer<QObject>& target) { return target.isNull(); }), owners.end());
+    if (!owners.contains(QPointer<QObject>(owner))) owners.append(QPointer<QObject>(owner));
+}
+
+void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const bool visibleOnly,
+    const bool includeDescendants)
 {
     if (object == nullptr || m_applyingRuntimeTranslations)
     {
         return;
     }
 
+    // Localized event roots must still honor an ancestor's canonical data
+    // ownership marker, including a marker assigned after ChildAdded queued it.
+    for (QObject* current = object; current != nullptr; current = current->parent())
+    {
+        if (current->property("ks_i18n_preserve_data_text").toBool()) return;
+        if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
+    }
+    quint64 languageGeneration = 0;
+    {
+        QMutexLocker locker(&m_state->sourceCacheMutex);
+        languageGeneration = m_state->sourceGeneration;
+    }
     QScopedValueRollback<bool> translationGuard(m_applyingRuntimeTranslations, true);
-    std::function<void(QAbstractItemModel*, const QModelIndex&, int&)> translateModelItems;
-    translateModelItems = [this, &translateModelItems](
+    QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedModelRoots;
+    QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedHeaderRoots;
+    const auto translateModelItems = [this](auto&& translateModelItems,
                               QAbstractItemModel* model,
                               const QModelIndex& parentIndex,
-                              int& remainingIndexBudget) {
+                              int& remainingIndexBudget) -> void {
         if (model == nullptr || remainingIndexBudget <= 0)
         {
             return;
@@ -2257,17 +2765,34 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
             const QModelIndex childParent = model->index(row, 0, parentIndex);
             if (childParent.isValid() && model->hasChildren(childParent))
             {
-                translateModelItems(model, childParent, remainingIndexBudget);
+                translateModelItems(translateModelItems, model, childParent, remainingIndexBudget);
             }
         }
     };
 
-    std::function<void(QObject*)> visitObject;
-    visitObject = [this, &translateModelItems, &visitObject](QObject* currentObject) {
+    const auto visitObject = [this, visibleOnly, includeDescendants, languageGeneration,
+        &translateModelItems, &translatedModelRoots, &translatedHeaderRoots]
+        (auto&& visitObject, QObject* currentObject) -> void {
         if (currentObject == nullptr || currentObject->property("ks_i18n_preserve_data_text").toBool())
         {
             return;
         }
+
+        const bool explicitlyDirty = currentObject->property(kRuntimeDirtyProperty).toBool();
+        if (currentObject->property(kRuntimeManagedProperty).toBool() && !explicitlyDirty)
+            return;
+        if (visibleOnly)
+        {
+            if (const auto* widget = qobject_cast<const QWidget*>(currentObject); widget != nullptr && !widget->isVisible())
+            {
+                // Retain one unknown/explicitly dirty boundary, not a walk
+                // through hidden pages or an opt-in producer's clean subtree.
+                currentObject->setProperty(kRuntimeDirtyProperty, true);
+                return;
+            }
+        }
+        if (explicitlyDirty && includeDescendants)
+            currentObject->setProperty(kRuntimeDirtyProperty, QVariant());
 
         if (QAction* action = qobject_cast<QAction*>(currentObject))
         {
@@ -2460,29 +2985,43 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                 kRuntimePlaceholderAppliedProperty,
                 comboBox->placeholderText(),
                 [comboBox](const QString& value) { comboBox->setPlaceholderText(value); });
-            for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
+            QAbstractItemModel* comboModel = comboBox->model();
+            if (!preserveModelDataText(comboBox, comboModel) && comboModel != nullptr)
             {
-                const ManagedTextResult result = resolveManagedText(
-                    *this,
-                    comboBox->itemText(itemIndex),
-                    comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
-                    comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
-                if (result.clearMetadata)
+                observeRuntimeModel(comboModel, comboBox);
+                auto& comboState = m_state->runtimeModels[comboModel];
+                auto& generations = comboState.comboRoots[QPersistentModelIndex(comboBox->rootModelIndex())];
+                if (generations.size() >= kMaximumRuntimeModelRoots) generations.clear();
+                const auto stamp = qMakePair(languageGeneration, comboState.revision);
+                if (generations.value(comboBox->modelColumn()) != stamp)
                 {
-                    comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
-                    comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
-                    continue;
+                    for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
+                    {
+                        const ManagedTextResult result = resolveManagedText(
+                            *this,
+                            comboBox->itemText(itemIndex),
+                            comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
+                            comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
+                        if (result.clearMetadata)
+                        {
+                            comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
+                            comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
+                            continue;
+                        }
+                        if (!result.updateMetadata)
+                        {
+                            continue;
+                        }
+                        if (result.setText)
+                        {
+                            comboBox->setItemText(itemIndex, result.appliedText);
+                        }
+                        comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
+                        comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
+                    }
+                    if (comboState.revision == stamp.second)
+                        generations.insert(comboBox->modelColumn(), stamp);
                 }
-                if (!result.updateMetadata)
-                {
-                    continue;
-                }
-                if (result.setText)
-                {
-                    comboBox->setItemText(itemIndex, result.appliedText);
-                }
-                comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
-                comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
             }
         }
 
@@ -2537,98 +3076,98 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
             }
         }
 
-        if (QTableView* tableView = qobject_cast<QTableView*>(currentObject))
+        QAbstractItemView* itemView = qobject_cast<QTableView*>(currentObject);
+        if (itemView == nullptr)
         {
-            QAbstractItemModel* model = tableView->model();
-            if (model != nullptr)
-            {
-                const int columnCount = model->columnCount(tableView->rootIndex());
-                for (int section = 0; section < columnCount; ++section)
-                {
-                    const QString currentHeader = model->headerData(
-                        section,
-                        Qt::Horizontal,
-                        Qt::DisplayRole).toString();
-                    const ManagedTextResult result = resolveManagedText(
-                        *this,
-                        currentHeader,
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
-                    if (result.clearMetadata)
-                    {
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
-                        continue;
-                    }
-                    if (!result.updateMetadata)
-                    {
-                        continue;
-                    }
-                    if (result.setText
-                        && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
-                    {
-                        continue;
-                    }
-                    model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
-                    model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
-                }
-                int remainingIndexBudget = 50000;
-                if (!tableView->property("ks_i18n_preserve_model_data").toBool())
-                    translateModelItems(model, tableView->rootIndex(), remainingIndexBudget);
-            }
+            itemView = qobject_cast<QTreeView*>(currentObject);
         }
-        else if (QTreeView* treeView = qobject_cast<QTreeView*>(currentObject))
+        if (itemView != nullptr)
         {
-            QAbstractItemModel* model = treeView->model();
+            QAbstractItemModel* model = itemView->model();
+            const QPersistentModelIndex rootIndex(itemView->rootIndex());
             if (model != nullptr)
             {
-                const int columnCount = model->columnCount(treeView->rootIndex());
-                for (int section = 0; section < columnCount; ++section)
+                observeRuntimeModel(model, itemView);
+                auto& modelState = m_state->runtimeModels[model];
+                const auto headerStamp = qMakePair(languageGeneration, modelState.revision);
+                if (!translatedHeaderRoots[model].contains(rootIndex)
+                    && modelState.headerRoots.value(rootIndex) != headerStamp)
                 {
-                    const QString currentHeader = model->headerData(
-                        section,
-                        Qt::Horizontal,
-                        Qt::DisplayRole).toString();
-                    const ManagedTextResult result = resolveManagedText(
-                        *this,
-                        currentHeader,
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
-                        model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
-                    if (result.clearMetadata)
+                    translatedHeaderRoots[model].insert(rootIndex);
+                    const int columnCount = model->columnCount(itemView->rootIndex());
+                    for (int section = 0; section < columnCount; ++section)
                     {
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
-                        model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
-                        continue;
+                        const QString currentHeader = model->headerData(
+                            section,
+                            Qt::Horizontal,
+                            Qt::DisplayRole).toString();
+                        const ManagedTextResult result = resolveManagedText(
+                            *this,
+                            currentHeader,
+                            model->headerData(section, Qt::Horizontal, kRuntimeHeaderSourceRole),
+                            model->headerData(section, Qt::Horizontal, kRuntimeHeaderAppliedRole));
+                        if (result.clearMetadata)
+                        {
+                            model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderSourceRole);
+                            model->setHeaderData(section, Qt::Horizontal, QVariant(), kRuntimeHeaderAppliedRole);
+                            continue;
+                        }
+                        if (!result.updateMetadata)
+                        {
+                            continue;
+                        }
+                        if (result.setText
+                            && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
+                        {
+                            continue;
+                        }
+                        model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
+                        model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
                     }
-                    if (!result.updateMetadata)
-                    {
-                        continue;
-                    }
-                    if (result.setText
-                        && !model->setHeaderData(section, Qt::Horizontal, result.appliedText, Qt::DisplayRole))
-                    {
-                        continue;
-                    }
-                    model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
-                    model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
+                    if (modelState.revision == headerStamp.second)
+                        modelState.headerRoots.insert(rootIndex, headerStamp);
                 }
-                int remainingIndexBudget = 50000;
-                if (!treeView->property("ks_i18n_preserve_model_data").toBool())
-                    translateModelItems(model, treeView->rootIndex(), remainingIndexBudget);
+                bool preserveModelData = preserveModelDataText(itemView, model);
+                if (itemView->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool())
+                {
+                    // Frozen panes are children of their canonical table and
+                    // share its model. Never let a pane bypass its data policy.
+                    const auto* source = qobject_cast<QTableView*>(itemView->parentWidget());
+                    if (source != nullptr && source->model() == model)
+                    {
+                        preserveModelData = preserveModelData
+                            || source->property("ks_i18n_preserve_model_data").toBool();
+                    }
+                }
+                const auto itemStamp = qMakePair(languageGeneration, modelState.revision);
+                if (!preserveModelData && !translatedModelRoots[model].contains(rootIndex)
+                    && modelState.itemRoots.value(rootIndex) != itemStamp)
+                {
+                    translatedModelRoots[model].insert(rootIndex);
+                    int remainingIndexBudget = 50000;
+                    translateModelItems(translateModelItems, model, itemView->rootIndex(), remainingIndexBudget);
+                    if (modelState.revision == itemStamp.second)
+                        modelState.itemRoots.insert(rootIndex, itemStamp);
+                }
             }
         }
 
+        if (!includeDescendants) return;
         const QObjectList childList = currentObject->children();
         for (QObject* childObject : childList)
         {
-            visitObject(childObject);
+            // A separately owned window is prepared through its own Show/root
+            // entry and the top-level language broadcast, never via its owner.
+            const auto* childWidget = qobject_cast<const QWidget*>(childObject);
+            if (childWidget != nullptr && childWidget->isWindow()) continue;
+            visitObject(visitObject, childObject);
         }
     };
 
-    visitObject(object);
+    visitObject(visitObject, object);
 }
 
-void ks::i18n::LanguageManager::applyBindings(QObject* object) const
+void ks::i18n::LanguageManager::applyTextBinding(QObject* object) const
 {
     if (object == nullptr)
     {
@@ -2656,6 +3195,16 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
             action->setText(translatedText);
         }
     }
+}
+
+void ks::i18n::LanguageManager::applyBindings(QObject* object) const
+{
+    if (object == nullptr)
+    {
+        return;
+    }
+
+    applyTextBinding(object);
 
     if (QWidget* widget = qobject_cast<QWidget*>(object))
     {
@@ -2698,12 +3247,15 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
 
     if (QComboBox* comboBox = qobject_cast<QComboBox*>(object))
     {
-        for (int index = 0; index < comboBox->count(); ++index)
+        if (!preserveModelDataText(comboBox, comboBox->model()))
         {
-            const QString itemKey = comboBox->itemData(index, kComboKeyRole).toString();
-            if (!itemKey.isEmpty())
+            for (int index = 0; index < comboBox->count(); ++index)
             {
-                comboBox->setItemText(index, text(itemKey, comboBox->itemData(index, kComboFallbackRole).toString()));
+                const QString itemKey = comboBox->itemData(index, kComboKeyRole).toString();
+                if (!itemKey.isEmpty())
+                {
+                    comboBox->setItemText(index, text(itemKey, comboBox->itemData(index, kComboFallbackRole).toString()));
+                }
             }
         }
     }

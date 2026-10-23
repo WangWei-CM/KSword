@@ -31,8 +31,121 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kThemeCheckPageNavigation[] = {
+    {"table", "", "", "表格", true},
+    {"text", "", "", "文本", false}
+};
+}
+
+namespace {
+enum class ThemeCheckText {Description, Inputs, Placeholder, OptionOne, OptionTwo, OptionThree, SingleLine, Integer, Decimal, Combo, Check, Radio, Disabled, Values, Card, CardNote, Dynamic, Add, Refresh, Capture, HeaderName, HeaderState};
+const char* const kThemeCheckTexts[] = {
+    "本页使用普通 Qt 控件，未逐个设置样式。请检查深浅主题、透明背景、悬停和下拉弹窗。",
+    "默认输入与选择",
+    "输入示例文字",
+    "选项一",
+    "选项二",
+    "选项三",
+    "单行输入",
+    "整数",
+    "小数",
+    "下拉选择",
+    "复选状态",
+    "单选状态",
+    "禁用输入",
+    "默认滑块与进度",
+    "默认分组卡片",
+    "分组标题位于卡片内部，参数分区使用标题与分隔线。",
+    "动态新建控件",
+    "新增控件",
+    "重新检查",
+    "保存检查截图",
+    "名称",
+    "状态"
+};
+// The cold body and the actual controls share target identities as well as text.
+// The three options use their one real combo; both headers use their real table.
+const char* const kThemeCheckTargets[] = {
+    "ks_theme_check_description",
+    "ks_theme_check_inputs",
+    "ks_theme_check_input",
+    "ks_theme_check_combo",
+    "ks_theme_check_combo",
+    "ks_theme_check_combo",
+    "ks_theme_check_single_line_label",
+    "ks_theme_check_integer_label",
+    "ks_theme_check_decimal_label",
+    "ks_theme_check_combo_label",
+    "ks_theme_check_checkbox",
+    "ks_theme_check_radio",
+    "ks_theme_check_disabled_label",
+    "ks_theme_check_values",
+    "ks_theme_check_card",
+    "ks_theme_check_card_note",
+    "ks_theme_check_dynamic",
+    "ks_theme_check_add",
+    "ks_theme_check_refresh",
+    "ks_theme_check_capture",
+    "ks_theme_check_table",
+    "ks_theme_check_table"
+};
+static_assert(sizeof(kThemeCheckTargets) / sizeof(kThemeCheckTargets[0])
+    == sizeof(kThemeCheckTexts) / sizeof(kThemeCheckTexts[0]));
+constexpr char kThemeCheckTextPageTarget[] = "ks_theme_check_text";
+QString ThemeCheckTextValue(const ThemeCheckText key)
+{
+    return ks::i18n::sourceText(QString::fromUtf8(kThemeCheckTexts[static_cast<int>(key)]));
+}
+QString ThemeCheckTargetName(const ThemeCheckText key)
+{
+    return QString::fromLatin1(kThemeCheckTargets[static_cast<int>(key)]);
+}
+}
+
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> ThemeCheckPage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(24);
+        const auto append = [&body](ThemeCheckText key, const QStringList& groups = {}, bool mnemonic = false)
+        {
+            body.append({ThemeCheckTextValue(key), ThemeCheckTargetName(key), groups, mnemonic});
+        };
+        // Match the real QObject traversal: description, parameter canvas,
+        // action footer, then result card and tabs. Empty cold status/capture,
+        // zero table rows and the plain editor document have no original hits.
+        append(ThemeCheckText::Description);
+        append(ThemeCheckText::Inputs);
+        const QStringList inputs{ThemeCheckTextValue(ThemeCheckText::Inputs)};
+        for (const auto key : {ThemeCheckText::Placeholder, ThemeCheckText::OptionOne,
+            ThemeCheckText::OptionTwo, ThemeCheckText::OptionThree, ThemeCheckText::SingleLine,
+            ThemeCheckText::Integer, ThemeCheckText::Decimal, ThemeCheckText::Combo})
+            append(key, inputs);
+        append(ThemeCheckText::Check, inputs, true);
+        append(ThemeCheckText::Radio, inputs, true);
+        append(ThemeCheckText::Disabled, inputs);
+        append(ThemeCheckText::Values);
+        append(ThemeCheckText::Dynamic);
+        append(ThemeCheckText::Add, {ThemeCheckTextValue(ThemeCheckText::Dynamic)}, true);
+        append(ThemeCheckText::Refresh, {}, true);
+        append(ThemeCheckText::Capture, {}, true);
+        append(ThemeCheckText::Card);
+        append(ThemeCheckText::CardNote, {ThemeCheckTextValue(ThemeCheckText::Card)});
+        const QString tableTitle = ks::ui::PageNavigationTabDescriptor(kThemeCheckPageNavigation[0]).title;
+        const QString textTitle = ks::ui::PageNavigationTabDescriptor(kThemeCheckPageNavigation[1]).title;
+        const QStringList tablePath{ks::ui::StripUiSearchMnemonicMarkers(tableTitle)};
+        const QStringList textPath{ks::ui::StripUiSearchMnemonicMarkers(textTitle)};
+        // A tab-title hit targets its real page, whose path already contains
+        // that tab ancestor; no extra navigation page is introduced here.
+        body.append({tableTitle, ThemeCheckTargetName(ThemeCheckText::HeaderName), tablePath, true});
+        body.append({textTitle, QString::fromLatin1(kThemeCheckTextPageTarget), textPath, true});
+        append(ThemeCheckText::HeaderName, tablePath);
+        append(ThemeCheckText::HeaderState, tablePath);
+        return body;
+    }
+
     ThemeCheckPage::ThemeCheckPage(QWidget* parent) : QWidget(parent)
     {
         setObjectName(QStringLiteral("ks_theme_check_page"));
@@ -40,7 +153,8 @@ namespace ks::misc
         auto* root = new QVBoxLayout(this);
         root->setContentsMargins(6, 6, 6, 6);
         root->setSpacing(8);
-        auto* description = new QLabel(QStringLiteral("本页使用普通 Qt 控件，未逐个设置样式。请检查深浅主题、透明背景、悬停和下拉弹窗。"), this);
+        auto* description = new QLabel(ThemeCheckTextValue(ThemeCheckText::Description), this);
+        description->setObjectName(ThemeCheckTargetName(ThemeCheckText::Description));
         description->setWordWrap(true);
         root->addWidget(description);
 
@@ -48,12 +162,13 @@ namespace ks::misc
         auto* workspace = new ks::ui::ParameterWorkspace(this, 480);
         workspace->useWideParameterLayout(60); // 宽屏优先双列参数，不让少量检查结果吞掉页面。
         root->addWidget(workspace, 1);
-        auto* inputs = new QGroupBox(QStringLiteral("默认输入与选择"), workspace);
+        auto* inputs = new QGroupBox(ThemeCheckTextValue(ThemeCheckText::Inputs), workspace);
+        inputs->setObjectName(ThemeCheckTargetName(ThemeCheckText::Inputs));
         auto* form = new QFormLayout(inputs);
         form->setRowWrapPolicy(QFormLayout::WrapLongRows);
         auto* field = new QLineEdit(inputs);
-        field->setObjectName(QStringLiteral("ks_theme_check_input"));
-        field->setPlaceholderText(QStringLiteral("输入示例文字"));
+        field->setObjectName(ThemeCheckTargetName(ThemeCheckText::Placeholder));
+        field->setPlaceholderText(ThemeCheckTextValue(ThemeCheckText::Placeholder));
         auto* integer = new QSpinBox(inputs);
         integer->setRange(0, 10000);
         integer->setValue(42);
@@ -61,26 +176,34 @@ namespace ks::misc
         decimal->setRange(0, 100);
         decimal->setValue(1.25);
         auto* combo = new QComboBox(inputs);
-        combo->setObjectName(QStringLiteral("ks_theme_check_combo"));
-        combo->addItems({QStringLiteral("选项一"), QStringLiteral("选项二"), QStringLiteral("选项三")});
-        form->addRow(QStringLiteral("单行输入"), field);
-        form->addRow(QStringLiteral("整数"), integer);
-        form->addRow(QStringLiteral("小数"), decimal);
-        form->addRow(QStringLiteral("下拉选择"), combo);
+        combo->setObjectName(ThemeCheckTargetName(ThemeCheckText::OptionOne));
+        combo->addItems({ThemeCheckTextValue(ThemeCheckText::OptionOne), ThemeCheckTextValue(ThemeCheckText::OptionTwo), ThemeCheckTextValue(ThemeCheckText::OptionThree)});
+        form->addRow(ThemeCheckTextValue(ThemeCheckText::SingleLine), field);
+        form->addRow(ThemeCheckTextValue(ThemeCheckText::Integer), integer);
+        form->addRow(ThemeCheckTextValue(ThemeCheckText::Decimal), decimal);
+        form->addRow(ThemeCheckTextValue(ThemeCheckText::Combo), combo);
+        form->labelForField(field)->setObjectName(ThemeCheckTargetName(ThemeCheckText::SingleLine));
+        form->labelForField(integer)->setObjectName(ThemeCheckTargetName(ThemeCheckText::Integer));
+        form->labelForField(decimal)->setObjectName(ThemeCheckTargetName(ThemeCheckText::Decimal));
+        form->labelForField(combo)->setObjectName(ThemeCheckTargetName(ThemeCheckText::Combo));
         m_samples << field << integer << decimal << combo;
-        auto* checked = new QCheckBox(QStringLiteral("复选状态"), inputs);
+        auto* checked = new QCheckBox(ThemeCheckTextValue(ThemeCheckText::Check), inputs);
+        checked->setObjectName(ThemeCheckTargetName(ThemeCheckText::Check));
         checked->setChecked(true);
         form->addRow(checked);
-        auto* radio = new QRadioButton(QStringLiteral("单选状态"), inputs);
+        auto* radio = new QRadioButton(ThemeCheckTextValue(ThemeCheckText::Radio), inputs);
+        radio->setObjectName(ThemeCheckTargetName(ThemeCheckText::Radio));
         radio->setChecked(true);
         form->addRow(radio);
         auto* disabled = new QLineEdit(QStringLiteral("禁用状态仍应清晰可辨"), inputs);
         disabled->setEnabled(false);
-        form->addRow(QStringLiteral("禁用输入"), disabled);
+        form->addRow(ThemeCheckTextValue(ThemeCheckText::Disabled), disabled);
+        form->labelForField(disabled)->setObjectName(ThemeCheckTargetName(ThemeCheckText::Disabled));
         workspace->parameters()->addWidget(inputs);
 
         // 原生滑块和进度条不使用专用子类，直接验证全局默认皮肤。
-        auto* values = new QGroupBox(QStringLiteral("默认滑块与进度"), workspace);
+        auto* values = new QGroupBox(ThemeCheckTextValue(ThemeCheckText::Values), workspace);
+        values->setObjectName(ThemeCheckTargetName(ThemeCheckText::Values));
         auto* valueLayout = new QVBoxLayout(values);
         auto* slider = new QSlider(Qt::Horizontal, values);
         slider->setObjectName(QStringLiteral("ks_theme_check_slider"));
@@ -100,43 +223,47 @@ namespace ks::misc
         tabs->setObjectName(QStringLiteral("ks_theme_check_tabs"));
         auto* table = new QTableWidget(0, 2, tabs);
         m_table = table;
-        table->setObjectName(QStringLiteral("ks_theme_check_table"));
-        table->setHorizontalHeaderLabels({QStringLiteral("名称"), QStringLiteral("状态")});
+        table->setObjectName(ThemeCheckTargetName(ThemeCheckText::HeaderName));
+        table->setHorizontalHeaderLabels({ThemeCheckTextValue(ThemeCheckText::HeaderName), ThemeCheckTextValue(ThemeCheckText::HeaderState)});
         table->setEditTriggers(QAbstractItemView::NoEditTriggers); // 接入数据由真实控件状态产生。
         table->setAlternatingRowColors(true);
         table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
         ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::None);
         auto* text = new QPlainTextEdit(tabs);
+        text->setObjectName(QString::fromLatin1(kThemeCheckTextPageTarget));
         text->setPlainText(QStringLiteral("普通多行输入：背景、文字和选区应随主题一致变化。"));
-        tabs->addTab(table, QStringLiteral("表格"));
-        tabs->addTab(text, QStringLiteral("文本"));
+        m_navigationTabs.add(kThemeCheckPageNavigation[0], tabs, table);
+        m_navigationTabs.add(kThemeCheckPageNavigation[1], tabs, text);
         tabs->setMinimumHeight(180);
         // 结果侧独立分组验证标题在卡片内部；参数侧同类QGroupBox自动成为分区标题。
-        auto* card = new QGroupBox(QStringLiteral("默认分组卡片"), workspace);
+        auto* card = new QGroupBox(ThemeCheckTextValue(ThemeCheckText::Card), workspace);
+        card->setObjectName(ThemeCheckTargetName(ThemeCheckText::Card));
         auto* cardLayout = new QVBoxLayout(card);
-        auto* cardNote = new QLabel(QStringLiteral("分组标题位于卡片内部，参数分区使用标题与分隔线。"), card);
+        auto* cardNote = new QLabel(ThemeCheckTextValue(ThemeCheckText::CardNote), card);
+        cardNote->setObjectName(ThemeCheckTargetName(ThemeCheckText::CardNote));
         cardNote->setWordWrap(true);
         cardLayout->addWidget(cardNote);
         workspace->results()->addWidget(card);
         workspace->results()->addWidget(tabs, 1);
 
-        auto* dynamic = new QGroupBox(QStringLiteral("动态新建控件"), workspace);
+        auto* dynamic = new QGroupBox(ThemeCheckTextValue(ThemeCheckText::Dynamic), workspace);
+        dynamic->setObjectName(ThemeCheckTargetName(ThemeCheckText::Dynamic));
         m_dynamicLayout = new QVBoxLayout(dynamic);
-        auto* add = new QPushButton(QStringLiteral("新增控件"), dynamic);
-        add->setObjectName(QStringLiteral("ks_theme_check_add"));
+        auto* add = new QPushButton(ThemeCheckTextValue(ThemeCheckText::Add), dynamic);
+        add->setObjectName(ThemeCheckTargetName(ThemeCheckText::Add));
         connect(add, &QPushButton::clicked, this, &ThemeCheckPage::addDynamicControls);
         m_dynamicLayout->addWidget(add);
         m_samples << add;
         workspace->parameters()->addWidget(dynamic);
         ks::ui::ArrangeParameterColumns(workspace->parameters(), {inputs}, {values, dynamic});
-        auto* check = new QPushButton(QStringLiteral("重新检查"), workspace);
-        check->setObjectName(QStringLiteral("ks_theme_check_refresh"));
+        auto* check = new QPushButton(ThemeCheckTextValue(ThemeCheckText::Refresh), workspace);
+        check->setObjectName(ThemeCheckTargetName(ThemeCheckText::Refresh));
         connect(check, &QPushButton::clicked, this, &ThemeCheckPage::refreshChecks);
         auto* actions = workspace->actions();
         actions->addWidget(check);
         m_samples << check;
-        auto* capture = new QPushButton(QStringLiteral("保存检查截图"), workspace);
-        capture->setObjectName(QStringLiteral("ks_theme_check_capture"));
+        auto* capture = new QPushButton(ThemeCheckTextValue(ThemeCheckText::Capture), workspace);
+        capture->setObjectName(ThemeCheckTargetName(ThemeCheckText::Capture));
         auto* captureStatus = new QLabel(this);
         captureStatus->setObjectName(QStringLiteral("ks_theme_check_capture_status"));
         captureStatus->setWordWrap(true);
@@ -215,4 +342,28 @@ namespace ks::misc
             .arg(ks::i18n::sourceText(installed ? QStringLiteral("已安装") : QStringLiteral("未安装")))
             .arg(bound).arg(live).arg(sized).arg(mode));
     }
+}
+
+ks::ui::PageNavigationCatalog ks::misc::ThemeCheckPage::navigationCatalog(const ThemeCheckPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kThemeCheckPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    schema[0].searchTexts = {ThemeCheckTextValue(ThemeCheckText::HeaderName), ThemeCheckTextValue(ThemeCheckText::HeaderState)};
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ThemeCheckPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kThemeCheckPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ThemeCheckPage>(QStringLiteral("misc.theme_check")); }
+
+QStringList ks::misc::ThemeCheckPage::navigationRootSearchTexts()
+{
+    QStringList texts;
+    // 表头归table子页；其余cold构造实际索引的标签/按钮/分组/下拉/placeholder归共同页根。
+    for (int index = 0; index < static_cast<int>(ThemeCheckText::HeaderName); ++index)
+        texts.append(ThemeCheckTextValue(static_cast<ThemeCheckText>(index)));
+    return texts;
 }

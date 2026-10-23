@@ -868,6 +868,8 @@ namespace ksword::hvm
     //                没有根据。要说的是"这次归因没跑起来"。
     //   Unavailable  没有地址可归。
     HvmWatchAttribution attributeKernelAddress(unsigned long long address);
+    // One immutable loaded-module snapshot for the complete bounded watch batch.
+    QVector<HvmWatchAttribution> attributeKernelAddresses(const QVector<quint64>& addresses);
 
     // HvmProcessAttribution：把命中现场的 CR3 归到一个进程上。
     //

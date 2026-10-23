@@ -42,6 +42,7 @@ namespace ks::file
             ManualFsType& fsTypeOut,
             QString& errorTextOut,
             bool* partialOut = nullptr,
-            QString* sourceDetailOut = nullptr);
+            QString* sourceDetailOut = nullptr,
+            const DirectoryCancellationCallback& canceled = {});
     };
 }

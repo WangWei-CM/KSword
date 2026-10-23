@@ -31,10 +31,12 @@
 #include <QString>
 #include "../UI/StructuredFieldView.h"
 #include <QWidget>
+#include <QPointer>
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QCheckBox;
@@ -44,6 +46,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QShowEvent;
+class QHideEvent;
 class QTableWidget;
 namespace ks::ui
 {
@@ -81,6 +85,9 @@ protected:
     // - 作用：深浅色切换后重新下发语义色样式；
     // - 参数 event：Qt 事件对象。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // ========================================================
@@ -119,6 +126,7 @@ private:
     // - 作用：枚举 \Driver\Disk 设备并（在已填 LBA 时）逐块做一次 ATA DMA 读探测；
     // - 处理：结果写入磁盘表，同时刷新能力标志与会话可用性。
     void probeChannels();
+    void refreshOperationState();
 
     // ScratchDetection：一次候选侦测的完整结果，含可直接展示的证据文本。
     struct ScratchDetection
@@ -140,7 +148,7 @@ private:
     // - 处理：枚举卷 → 找出落在本磁盘上的 → 建文件并落盘 → 取 retrieval pointers
     //   拿 LCN → 用卷起始偏移与簇大小换算成磁盘 LBA。
     // - 返回：成功时 ok 为真且 scratchFilePath 非空；失败时 summaryText 说明原因。
-    ScratchDetection detectScratchByOwnedFile(
+    static ScratchDetection detectScratchByOwnedFile(
         std::uint32_t driveIndex,
         std::uint32_t sectorSize);
 
@@ -151,13 +159,13 @@ private:
     //   寄居处。所以分级交给 shared/evidence 的纯算术，本函数只负责 Win32 读取
     //   与"读回来是不是全零"这一条实测证据；
     // - 返回：侦测结果；失败时 summaryText 说明卡在哪一步。
-    ScratchDetection detectScratchCandidatesForSelectedDisk();
+    static ScratchDetection detectScratchCandidatesForDisk(const ksword::ark::DdmaDiskEntry& entry);
 
     // detectScratchCandidatesByGap：
     // - 作用：退路——当专属暂存文件那条路走不通时，改从分区表的未分配间隙里挑；
     // - 说明：分区表说"未分配"只代表没人登记，不代表那里是空的，所以分级与
     //   内容复核两道证据缺一不可。
-    ScratchDetection detectScratchCandidatesByGap(
+    static ScratchDetection detectScratchCandidatesByGap(
         std::uint32_t driveIndex,
         const ksword::ark::DdmaDiskEntry& entry);
 
@@ -172,7 +180,7 @@ private:
         ks::ui::FieldDocument fields;
         QString bytePreview; // Literal hex/ASCII view of disk bytes, not a property report.
     };
-    ScratchContext buildScratchContext(
+    static ScratchContext buildScratchContext(
         std::uint32_t driveIndex,
         std::uint64_t startLba,
         std::uint32_t sectorSize,
@@ -211,6 +219,12 @@ private:
 
     // writePhysicalFromUi：把十六进制视图里改动过的字节用 DDMA 写回物理内存。
     void writePhysicalFromUi();
+    struct PhysicalWriteState;
+    bool accessWriteContextMatches(const PhysicalWriteState& state) const;
+    void submitPhysicalWrite(std::shared_ptr<PhysicalWriteState> state);
+    void confirmPhysicalWriteForce(std::shared_ptr<PhysicalWriteState> state);
+    bool canPresentOperationPopup() const;
+    void schedulePendingForce();
 
     // compareBackendsFromUi：
     // - 作用：对同一物理地址分别用标准通道与 DDMA 各读一页并逐字节比对；
@@ -232,6 +246,12 @@ private:
 
     ksword::memory_backend::DdmaSession m_session;      // 当前会话配置。
     std::vector<ksword::ark::DdmaDiskEntry> m_diskCache; // 最近一次探测到的磁盘。
+    std::shared_ptr<PhysicalWriteState> m_pendingForceWrite;
+    QPointer<QWidget> m_exposureWindow;
+    bool m_pageExposed = false;
+    bool m_windowExposed = false;
+    bool m_forcePromptScheduled = false;
+    bool m_operationBusy = false;
     bool m_probeCompleted = false;                      // 是否至少成功探测过一次。
     bool m_kernelDebuggerEnabled = false;               // 探测到的内核调试状态。
     std::uint32_t m_transferBytes = 0;                  // R0 自报的一次传输长度。

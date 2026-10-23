@@ -403,13 +403,15 @@ QWidget* ScannerDock::createAttackPathPage(
                     ? QStringLiteral("0x%1").arg(evidence.offset, 0, 16).toUpper()
                     : translated("scanner.attack.offset.decoded", "解码后对象")));
     }
+    for (int row = 0; row < table->rowCount(); ++row)
+        table->item(row, 0)->setData(Qt::UserRole, row);
     table->resizeColumnsToContents();
     layout->addWidget(table, 1);
     return page;
 }
 
 QWidget* ScannerDock::createStructuredTablePage(
-    QTableWidget* table,
+    QTableView* table,
     const int columnCount) const
 {
     // 五列以内无需拆组；返回原表可避免增加无意义的控制条。
@@ -452,6 +454,7 @@ QWidget* ScannerDock::createStructuredTablePage(
         auto* groupButton = new QPushButton(
             QString(QChar(groupLetter)),
             page); // groupButton：切换到当前互补字段组。
+        groupButton->setProperty("scanner_column_group", true);
         groupButton->setMinimumWidth(36);
         groupButton->setToolTip(
             translated(
@@ -478,7 +481,7 @@ QWidget* ScannerDock::createStructuredTablePage(
     const auto applyGroup =
         [table, groups, buttons](const int groupIndex)
         {
-            for (int column = 0; column < table->columnCount(); ++column)
+            for (int column = 0; column < table->model()->columnCount(); ++column)
             {
                 table->setColumnHidden(column, true);
             }
@@ -532,11 +535,11 @@ QWidget* ScannerDock::createStructuredTablePage(
                     KswordTheme::TextDisabledColorHex()));
 
             // columnAction：勾选状态直接反映当前列可见性。
-            for (int column = 0; column < table->columnCount(); ++column)
+            for (int column = 0; column < table->model()->columnCount(); ++column)
             {
                 QAction* columnAction = menu.addAction( // columnAction：控制单列显隐的菜单项。
-                    table->horizontalHeaderItem(column) != nullptr
-                        ? table->horizontalHeaderItem(column)->text()
+                    table->model()->headerData(column, Qt::Horizontal).isValid()
+                        ? table->model()->headerData(column, Qt::Horizontal).toString()
                         : translated("scanner.column.unnamed", "未命名列"));
                 columnAction->setCheckable(true);
                 columnAction->setChecked(!table->isColumnHidden(column));

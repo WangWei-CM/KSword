@@ -17,7 +17,7 @@
 #include <QMessageBox>
 #include <QModelIndex>
 #include <QStringList>
-#include <QTableWidget>
+#include <QTableView>
 #include <QTableWidgetItem>
 
 #ifndef NOMINMAX
@@ -141,7 +141,7 @@ void OtherDock::switchToSelectedDesktop()
     // actionEvent：整条“读取选中行 -> OpenDesktopW -> SwitchDesktop”流程共用一条日志事件。
     kLogEvent actionEvent;
 
-    if (m_desktopTable == nullptr || m_desktopStatusLabel == nullptr || m_desktopTable->currentRow() < 0)
+    if (m_desktopTable == nullptr || m_desktopStatusLabel == nullptr || m_desktopTable->currentIndex().row() < 0)
     {
         warn << actionEvent
             << "[OtherDock] 切换桌面失败：未选中目标桌面。"
@@ -154,10 +154,10 @@ void OtherDock::switchToSelectedDesktop()
     }
 
     // row/windowStationItem/desktopItem：从当前行中取出切换所需的窗口站名与桌面名。
-    const int row = m_desktopTable->currentRow();
-    QTableWidgetItem* windowStationItem = m_desktopTable->item(row, kDesktopColumnWindowStation);
-    QTableWidgetItem* desktopItem = m_desktopTable->item(row, kDesktopColumnDesktopName);
-    if (windowStationItem == nullptr || desktopItem == nullptr)
+    const int row = m_desktopTable->currentIndex().row();
+    const auto windowStationItem = m_desktopTable->model()->index(row, kDesktopColumnWindowStation);
+    const auto desktopItem = m_desktopTable->model()->index(row, kDesktopColumnDesktopName);
+    if (!windowStationItem.isValid() || !desktopItem.isValid())
     {
         err << actionEvent
             << "[OtherDock] 切换桌面失败：目标行缺少窗口站或桌面列。"
@@ -167,8 +167,8 @@ void OtherDock::switchToSelectedDesktop()
     }
 
     // windowStationName/desktopName：来自刷新阶段写入的行元数据。
-    const QString windowStationName = windowStationItem->data(kDesktopRoleWindowStationName).toString().trimmed();
-    const QString desktopName = desktopItem->data(kDesktopRoleDesktopName).toString().trimmed();
+    const QString windowStationName = windowStationItem.data(kDesktopRoleWindowStationName).toString().trimmed();
+    const QString desktopName = desktopItem.data(kDesktopRoleDesktopName).toString().trimmed();
     if (windowStationName.isEmpty() || desktopName.isEmpty())
     {
         err << actionEvent
@@ -306,22 +306,22 @@ void OtherDock::showDesktopContextMenu(const QPoint& localPos)
     m_desktopTable->selectRow(row);
 
     // stationItem/desktopItem/sidItem/sidDetailItem：收集右键菜单后续动作依赖的数据。
-    QTableWidgetItem* stationItem = m_desktopTable->item(row, kDesktopColumnWindowStation);
-    QTableWidgetItem* desktopItem = m_desktopTable->item(row, kDesktopColumnDesktopName);
-    QTableWidgetItem* sidItem = m_desktopTable->item(row, kDesktopColumnSid);
-    QTableWidgetItem* sidDetailItem = m_desktopTable->item(row, kDesktopColumnSidDetail);
-    if (stationItem == nullptr || desktopItem == nullptr)
+    const auto stationItem = m_desktopTable->model()->index(row, kDesktopColumnWindowStation);
+    const auto desktopItem = m_desktopTable->model()->index(row, kDesktopColumnDesktopName);
+    const auto sidItem = m_desktopTable->model()->index(row, kDesktopColumnSid);
+    const auto sidDetailItem = m_desktopTable->model()->index(row, kDesktopColumnSidDetail);
+    if (!stationItem.isValid() || !desktopItem.isValid())
     {
         return;
     }
 
-    const QString windowStationName = stationItem->data(kDesktopRoleWindowStationName).toString().trimmed();
-    const QString desktopName = desktopItem->data(kDesktopRoleDesktopName).toString().trimmed();
-    const QString sidText = sidItem != nullptr
-        ? sidItem->data(kDesktopRoleOwnerSidText).toString().trimmed()
+    const QString windowStationName = stationItem.data(kDesktopRoleWindowStationName).toString().trimmed();
+    const QString desktopName = desktopItem.data(kDesktopRoleDesktopName).toString().trimmed();
+    const QString sidText = sidItem.isValid()
+        ? sidItem.data(kDesktopRoleOwnerSidText).toString().trimmed()
         : QString();
-    const QString sidDetailText = sidDetailItem != nullptr
-        ? sidDetailItem->data(kDesktopRoleOwnerSidDetailText).toString().trimmed()
+    const QString sidDetailText = sidDetailItem.isValid()
+        ? sidDetailItem.data(kDesktopRoleOwnerSidDetailText).toString().trimmed()
         : QString();
     const QString qualifiedDesktopName = QStringLiteral("%1\\%2").arg(windowStationName, desktopName);
 

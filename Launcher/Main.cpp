@@ -185,11 +185,27 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     //     return 0;
     // }
 
+    ScanResult scan;
+    bool scanLoaded = false;
+    // Marker validation and the normal report consume the same accepted value
+    // snapshot. A rejected marker never triggers a second per-file PE/hash scan.
+    const auto ensureScan = [&]() {
+        if (scanLoaded) return true;
+        HWND checkingWindow = nullptr;
+        ShowCheckingWindow(Text(chinese, L"正在核对偏移清单……", L"Checking the offset support list..."), &checkingWindow);
+        const bool observed = RunLauncherValueTask(
+            [manifest, &scan]() { scan = ScanCompatibility(manifest); }, []() {},
+            [&checkingWindow]() { return IsLauncherObserverAlive(checkingWindow, &checkingWindow); });
+        if (IsLauncherObserverAlive(checkingWindow, &checkingWindow)) CloseCheckingWindow(checkingWindow);
+        scanLoaded = true;
+        return observed;
+    };
     bool markerValid = false;
     if (!options.checkOnly && !options.internalUpload && !options.internalMarker) {
         MarkerState marker;
         if (LoadMarker(paths, &marker)) {
-            ScanResult markerScan = ScanCompatibility(manifest);
+            if (!ensureScan()) return 0;
+            const ScanResult& markerScan = scan;
             if (markerScan.kernel.valid && marker.manifestSha256 == manifest.sha256 && marker.kernelKey == KernelIdentityKey(markerScan.kernel)) {
                 if (!options.targetOverride) options.useLight = marker.useLight;
                 markerValid = true;
@@ -213,10 +229,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
-    HWND checkingWindow = nullptr;
-    ShowCheckingWindow(Text(chinese, L"正在核对偏移清单……", L"Checking the offset support list..."), &checkingWindow);
-    ScanResult scan = ScanCompatibility(manifest);
-    CloseCheckingWindow(checkingWindow);
+    if (!ensureScan()) return 0;
 
     if (options.checkOnly) {
         if (scan.missing.empty()) ShowSimpleMessage(Text(chinese, L"核对完成", L"Check completed"), Text(chinese, L"当前系统的已加载内核模块均有完整偏移信息。", L"All loaded kernel modules have complete offset information."), chinese);
@@ -236,8 +249,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         std::wstring bundle;
         CollectionProgress progress;
         ShowCollectionProgress(chinese, &progress);
-        const bool prepared = PrepareUploadBundle(paths, manifest, scan, &bundle, &progress, chinese);
+        // The worker owns values and a progress channel, never GUI handles.
+        CollectionProgress workerProgress;
+        workerProgress.state = progress.state;
+        bool prepared = false;
+        const bool collectionObserved = RunLauncherValueTask(
+            [paths, manifest, scan, chinese, workerProgress, &bundle, &prepared]() mutable {
+                prepared = PrepareUploadBundle(paths, manifest, scan, &bundle, &workerProgress, chinese);
+            }, [&progress]() { PresentCollectionProgress(&progress); },
+            [&progress]() { return IsLauncherObserverAlive(progress.window, &progress); });
         CloseCollectionProgress(&progress);
+        if (!collectionObserved) return 0;
         if (!prepared) {
             ShowSimpleMessage(Text(chinese, L"采集失败", L"Collection failed"),
                 Text(chinese, L"无法准备开发者采集文件夹。", L"The developer collection folder could not be prepared."), chinese);

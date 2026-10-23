@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
@@ -11,9 +12,17 @@
 #include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 #include "HttpsProxyService.h"
+#include "../UI/RetainedCleanupJob.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../theme.h"
 
 #include <QApplication>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QTableView>
+#include <QPointer>
+#include "../UI/TableInteractionSupport.h"
+#include "../Internationalization/LanguageManager.h"
 #include <QFileDialog>
 #include <QSaveFile>
 #include <QTextStream>
@@ -419,9 +428,110 @@ namespace
     }
 }
 
+class NetworkDock::HttpsParsedModel final : public QAbstractTableModel
+{
+public:
+    using Entry = std::shared_ptr<const ks::network::HttpsProxyParsedEntry>;
+    HttpsParsedModel(QObject* owner, QStringList headers) : QAbstractTableModel(owner), m_headers(std::move(headers)) {}
+    int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_rows.size()); }
+    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : HttpsParsedColumnCount; }
+    Entry entryAt(int row) const { return row >= 0 && row < rowCount() ? m_rows[static_cast<std::size_t>(row)] : Entry(); }
+    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+    {
+        if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_headers.size())
+            return ks::i18n::displayText(m_headers[section]);
+        return QAbstractTableModel::headerData(section, orientation, role);
+    }
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+    {
+        const auto value = entryAt(index.row());
+        if (!index.isValid() || !value || (role != Qt::DisplayRole && role != Qt::ToolTipRole)) return {};
+        const auto& e = *value;
+        switch (index.column())
+        {
+        case HttpsParsedColumnTime: return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(e.timestampMs)).toString(QStringLiteral("HH:mm:ss.zzz"));
+        case HttpsParsedColumnSession: return QString::number(e.sessionId);
+        case HttpsParsedColumnClient: return e.clientEndpointText;
+        case HttpsParsedColumnProcess: return e.clientProcessText;
+        case HttpsParsedColumnHost: return QStringLiteral("%1:%2").arg(e.targetHostText).arg(e.targetPort);
+        case HttpsParsedColumnEvent: return e.eventTypeText;
+        case HttpsParsedColumnMethod: return e.methodText;
+        case HttpsParsedColumnPath: return e.pathText;
+        case HttpsParsedColumnStatus: return e.statusCode > 0 ? QString::number(e.statusCode) : QString();
+        case HttpsParsedColumnContentType: return e.contentTypeText;
+        case HttpsParsedColumnTls: return e.tlsVersionText;
+        case HttpsParsedColumnAlpn: return e.alpnText;
+        case HttpsParsedColumnElapsed: return e.elapsedMs > 0 ? QStringLiteral("%1 ms").arg(e.elapsedMs) : QString();
+        case HttpsParsedColumnUpload: return e.uploadBytes > 0 ? QString::number(e.uploadBytes) : QString();
+        case HttpsParsedColumnDownload: return e.downloadBytes > 0 ? QString::number(e.downloadBytes) : QString();
+        case HttpsParsedColumnDetail: return e.detailText;
+        default: return {};
+        }
+    }
+    Qt::ItemFlags flags(const QModelIndex& index) const override
+    { return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags; }
+    bool synchronize(const std::deque<Entry>& canonical)
+    {
+        // Capture only the new tail before Qt signals can reenter the producer.
+        // Normal refresh examines removed/new rows, never all old display cells.
+        std::size_t removed = 0;
+        if (canonical.empty()) removed = m_rows.size();
+        else while (removed < m_rows.size() && m_rows[removed] != canonical.front()) ++removed;
+        const auto kept = m_rows.size() - removed;
+        std::vector<Entry> tail;
+        if (canonical.size() > kept) tail.assign(canonical.begin() + static_cast<std::ptrdiff_t>(kept), canonical.end());
+        const QPointer<HttpsParsedModel> guard(this);
+        if (removed != 0)
+        {
+            beginRemoveRows({}, 0, static_cast<int>(removed) - 1);
+            if (!guard) return false;
+            for (std::size_t i = 0; i < removed; ++i) m_rows.pop_front();
+            endRemoveRows();
+            if (!guard) return false;
+        }
+        if (!tail.empty())
+        {
+            beginInsertRows({}, static_cast<int>(kept), static_cast<int>(kept + tail.size()) - 1);
+            if (!guard) return false;
+            for (auto& entry : tail) m_rows.push_back(std::move(entry));
+            endInsertRows();
+            if (!guard) return false;
+        }
+        return true;
+    }
+private:
+    QStringList m_headers;
+    std::deque<Entry> m_rows;
+};
+
+class NetworkDock::HttpsParsedProxy final : public QSortFilterProxyModel
+{
+public:
+    explicit HttpsParsedProxy(QObject* owner) : QSortFilterProxyModel(owner) { setDynamicSortFilter(false); }
+    void setFilters(QString keyword, QString event)
+    {
+        if (keyword == m_keyword && event == m_event) return;
+        m_keyword = std::move(keyword); m_event = std::move(event);
+        invalidateFilter();
+    }
+protected:
+    bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+    {
+        if (!m_event.isEmpty() && sourceModel()->index(row, HttpsParsedColumnEvent, parent)
+            .data().toString().compare(m_event, Qt::CaseInsensitive) != 0) return false;
+        if (m_keyword.isEmpty()) return true;
+        for (int column = 0; column < HttpsParsedColumnCount; ++column)
+            if (sourceModel()->index(row, column, parent).data().toString().contains(m_keyword, Qt::CaseInsensitive)) return true;
+        return false;
+    }
+private:
+    QString m_keyword, m_event;
+};
+
+
 void NetworkDock::initializeHttpsAnalyzeTab()
 {
-    m_httpsAnalyzePage = new QWidget(this);
+    if (m_httpsAnalyzePage == nullptr) m_httpsAnalyzePage = new QWidget(this);
     m_httpsAnalyzeLayout = new QVBoxLayout(m_httpsAnalyzePage);
     m_httpsAnalyzeLayout->setContentsMargins(6, 6, 6, 6);
     m_httpsAnalyzeLayout->setSpacing(6);
@@ -546,11 +656,9 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     ks::ui::NormalizeToolbarRow(parsedFilterLayout);
     m_httpsAnalyzeLayout->addWidget(httpsToolbar);
 
-    m_httpsParsedTable = new ks::ui::VisibleTableWidget(m_httpsAnalyzePage);
-    // 已有可见 CSV 导出、清空和自动滚动，避免重复的通用操作栏。
+    m_httpsParsedTable = new ks::ui::TableActionTableView(m_httpsAnalyzePage);
     ks::ui::SetTableActionBarMode(m_httpsParsedTable, ks::ui::TableActionBarMode::None);
-    m_httpsParsedTable->setColumnCount(HttpsParsedColumnCount);
-    m_httpsParsedTable->setHorizontalHeaderLabels({
+    m_httpsParsedModel = new HttpsParsedModel(this, {
         QStringLiteral("时间"),
         QStringLiteral("会话"),
         QStringLiteral("客户端"),
@@ -568,6 +676,12 @@ void NetworkDock::initializeHttpsAnalyzeTab()
         QStringLiteral("下行"),
         QStringLiteral("详情")
         });
+    m_httpsParsedProxy = new HttpsParsedProxy(this);
+    m_httpsParsedProxy->setSourceModel(m_httpsParsedModel);
+    m_httpsParsedTable->setModel(m_httpsParsedProxy);
+    m_httpsParsedTable->setProperty("ks_i18n_preserve_model_data", true);
+    m_httpsParsedTable->setSortingEnabled(true);
+    m_httpsParsedProxy->sort(-1);
     m_httpsParsedTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_httpsParsedTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_httpsParsedTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -600,7 +714,7 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsProxyLogOutput->setFixedHeight(150);
     m_httpsAnalyzeLayout->addWidget(m_httpsProxyLogOutput, 0);
 
-    m_sideTabWidget->addTab(m_httpsAnalyzePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("HTTPS解析"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_httpsAnalyzePage, QStringLiteral("https"), QIcon(":/Icon/process_details.svg"));
     updateHttpsProxyStatusLabel(QStringLiteral("状态：HTTPS代理未启动"));
     updateHttpsParsedSummary();
 
@@ -609,9 +723,9 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     connect(m_httpsClearParsedButton, &QPushButton::clicked, this, [this]() { clearHttpsParsedEntries(); });
     connect(m_httpsExportParsedButton, &QPushButton::clicked, this, [this]() { exportVisibleHttpsParsedEntries(); });
 
-    connect(m_httpsParsedTable, &QTableWidget::cellDoubleClicked, this, [this](const int row, const int /*column*/)
+    connect(m_httpsParsedTable, &QTableView::doubleClicked, this, [this](const QModelIndex& index)
         {
-            openHttpsParsedDetailByRow(row);
+            openHttpsParsedDetailByRow(index.row());
         });
     connect(m_httpsParsedTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
         {
@@ -620,14 +734,19 @@ void NetworkDock::initializeHttpsAnalyzeTab()
                 return;
             }
 
-            const QTableWidgetItem* clickedItem = m_httpsParsedTable->itemAt(localPosition);
-            if (clickedItem == nullptr)
+            const QModelIndex clickedIndex = m_httpsParsedTable->indexAt(localPosition);
+            if (!clickedIndex.isValid())
             {
                 return;
             }
 
-            const int rowIndex = clickedItem->row();
-            m_httpsParsedTable->setCurrentCell(rowIndex, clickedItem->column());
+            const int rowIndex = clickedIndex.row();
+            m_httpsParsedTable->setCurrentIndex(clickedIndex);
+            const auto evidence = m_httpsParsedModel->entryAt(m_httpsParsedProxy->mapToSource(clickedIndex).row());
+            if (!evidence) return;
+            QStringList frozenRow;
+            for (int column = 0; column < HttpsParsedColumnCount; ++column)
+                frozenRow.push_back(m_httpsParsedProxy->index(rowIndex, column).data().toString());
 
             QMenu contextMenu(this);
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -639,7 +758,11 @@ void NetworkDock::initializeHttpsAnalyzeTab()
             QAction* selectedAction = contextMenu.exec(m_httpsParsedTable->viewport()->mapToGlobal(localPosition));
             if (selectedAction == detailAction)
             {
-                openHttpsParsedDetailByRow(rowIndex);
+                auto* detail = new HttpsParsedDetailWindow(*evidence, nullptr);
+                detail->setAttribute(Qt::WA_DeleteOnClose, true);
+                detail->show();
+                detail->raise();
+                detail->activateWindow();
             }
             else if (selectedAction == copyRowAction)
             {
@@ -647,22 +770,11 @@ void NetworkDock::initializeHttpsAnalyzeTab()
                 // - 输入：用户右键选中的 HTTPS 解析行；
                 // - 处理：逐列读取单元格文本并用 TSV 格式拼接；
                 // - 输出：写入系统剪贴板，方便粘贴到表格或工单。
-                QStringList rowTextParts;
-                rowTextParts.reserve(HttpsParsedColumnCount);
-                for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
-                {
-                    const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
-                    rowTextParts.append(cellItem != nullptr ? cellItem->text() : QString());
-                }
-                QApplication::clipboard()->setText(rowTextParts.join(QChar('\t')));
+                QApplication::clipboard()->setText(frozenRow.join(QChar('	')));
             }
             else if (selectedAction == copyDetailAction)
             {
-                if (rowIndex >= 0 && rowIndex < static_cast<int>(m_httpsParsedEntryCache.size()))
-                {
-                    const ks::network::HttpsProxyParsedEntry& parsedEntry = m_httpsParsedEntryCache[static_cast<std::size_t>(rowIndex)];
-                    QApplication::clipboard()->setText(QString::fromUtf8(parsedEntry.rawBytes));
-                }
+                QApplication::clipboard()->setText(QString::fromUtf8(evidence->rawBytes));
             }
         });
 }
@@ -935,6 +1047,12 @@ void NetworkDock::applyHttpsSystemProxy()
 
 void NetworkDock::clearHttpsSystemProxy()
 {
+    if (m_httpsRecoveryCleanup && m_httpsRecoveryCleanup->isCleanupRequested()
+        && !m_httpsRecoveryCleanup->isComplete())
+    {
+        m_httpsRecoveryCleanup->requestCleanup(); // Explicit user restore retries the same witness.
+        return;
+    }
     if (!m_httpsSystemProxySnapshotCaptured)
     {
         appendHttpsProxyLogLine(QStringLiteral("未发现由 HTTPS 解析页保存的系统代理快照，不修改当前系统代理。"));
@@ -966,6 +1084,12 @@ bool NetworkDock::captureHttpsSystemProxySnapshot(QString* errorTextOut)
     if (m_httpsSystemProxySnapshotCaptured)
     {
         return true;
+    }
+
+    if (!ensureHttpsProxyRecoveryCleanup())
+    {
+        if (errorTextOut) *errorTextOut = QStringLiteral("存在尚未完成的 HTTPS 代理恢复事务，不能覆盖原始代理快照。");
+        return false;
     }
 
     std::optional<std::uint32_t> previousProxyEnable;
@@ -1012,13 +1136,10 @@ bool NetworkDock::captureHttpsSystemProxySnapshot(QString* errorTextOut)
     return true;
 }
 
-bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
+bool NetworkDock::restoreHttpsSystemProxySnapshotValues(
+    const HttpsSystemProxySnapshot& snapshot, QString* errorTextOut)
 {
-    if (!m_httpsSystemProxySnapshotCaptured)
-    {
-        return true;
-    }
-
+    if (!snapshot.captured) return true;
     QString errorText;
     const auto restoreDword = [&errorText](const wchar_t* valueName, const std::optional<std::uint32_t>& value) -> bool
         {
@@ -1033,11 +1154,11 @@ bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
                 : deleteInternetSetting(valueName, &errorText);
         };
 
-    if (!restoreDword(L"ProxyEnable", m_httpsPreviousProxyEnable)
-        || !restoreDword(L"AutoDetect", m_httpsPreviousAutoDetect)
-        || !restoreString(L"ProxyServer", m_httpsPreviousProxyServer)
-        || !restoreString(L"ProxyOverride", m_httpsPreviousProxyOverride)
-        || !restoreString(L"AutoConfigURL", m_httpsPreviousAutoConfigUrl))
+    if (!restoreDword(L"ProxyEnable", snapshot.proxyEnable)
+        || !restoreDword(L"AutoDetect", snapshot.autoDetect)
+        || !restoreString(L"ProxyServer", snapshot.proxyServer)
+        || !restoreString(L"ProxyOverride", snapshot.proxyOverride)
+        || !restoreString(L"AutoConfigURL", snapshot.autoConfigUrl))
     {
         if (errorTextOut != nullptr)
         {
@@ -1063,6 +1184,91 @@ bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
         return false;
     }
 
+    return true;
+}
+
+bool NetworkDock::ensureHttpsProxyRecoveryCleanup()
+{
+    if (m_httpsRecoveryCleanup && !m_httpsRecoveryCleanup->isComplete())
+        return !m_httpsRecoveryCleanup->isCleanupRequested();
+    const auto state = std::make_shared<HttpsProxyRecoveryState>();
+    const auto dispatcher = m_trafficDispatcher;
+    const auto freeze = [this, state]()
+    {
+        if (m_httpsRecoveryState == state) retireHttpsProxyRecovery();
+    };
+    const auto restored = [this, state]()
+    {
+        if (m_httpsRecoveryState != state) return;
+        m_httpsPreviousProxyEnable.reset();
+        m_httpsPreviousAutoDetect.reset();
+        m_httpsPreviousProxyServer.reset();
+        m_httpsPreviousProxyOverride.reset();
+        m_httpsPreviousAutoConfigUrl.reset();
+        m_httpsSystemProxySnapshotCaptured = false;
+        m_httpsProxyRecoveryRequired = false;
+    };
+    const auto cleanup = ks::ui::RetainedCleanupJob::create(
+        [state, dispatcher, restored]()
+        {
+            QString error;
+            if (!restoreHttpsSystemProxySnapshotValues(state->snapshot, &error))
+            {
+                kLogEvent restoreEvent;
+                warn << restoreEvent << "[NetworkDock] HTTPS 系统代理恢复失败：" << error << eol;
+                return false;
+            }
+            dispatcher->post(restored);
+            return true;
+        }, 0, [state, dispatcher, freeze]()
+        {
+            state->stopRequested.store(true);
+            dispatcher->post(freeze);
+        },
+        [state]() { return state->ready.load(); });
+    if (!cleanup) return false;
+    state->ready.store(false);
+    m_httpsRecoveryState = state;
+    m_httpsRecoveryCleanup = cleanup;
+    if (state->stopRequested.load())
+    {
+        retireHttpsProxyRecovery();
+        return false;
+    }
+    return true;
+}
+
+void NetworkDock::retireHttpsProxyRecovery()
+{
+    const auto state = m_httpsRecoveryState;
+    const auto cleanup = m_httpsRecoveryCleanup;
+    if (!state || !cleanup || state->frozen) return;
+    state->frozen = true;
+    state->snapshot = {m_httpsSystemProxySnapshotCaptured,
+        m_httpsPreviousProxyEnable, m_httpsPreviousAutoDetect,
+        m_httpsPreviousProxyServer, m_httpsPreviousProxyOverride,
+        m_httpsPreviousAutoConfigUrl};
+    if (state->snapshot.captured) m_httpsProxyRecoveryRequired = true;
+    const auto nativeStopped = [state, cleanup]()
+    {
+        state->ready.store(true);
+        cleanup->notifyReadyToAttempt();
+    };
+    // Preserve teardown order: actual session STOP, then original proxy writes,
+    // WinINet refresh, and finally durable recovery-record removal.
+    if (m_httpsProxyService) m_httpsProxyService->stopAsync({}, nativeStopped);
+    else nativeStopped();
+    if (!cleanup->isCleanupRequested()) cleanup->requestCleanup();
+}
+
+bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
+{
+    const HttpsSystemProxySnapshot snapshot{m_httpsSystemProxySnapshotCaptured,
+        m_httpsPreviousProxyEnable, m_httpsPreviousAutoDetect,
+        m_httpsPreviousProxyServer, m_httpsPreviousProxyOverride,
+        m_httpsPreviousAutoConfigUrl};
+    if (!restoreHttpsSystemProxySnapshotValues(snapshot, errorTextOut)) return false;
+
     m_httpsPreviousProxyEnable.reset();
     m_httpsPreviousAutoDetect.reset();
     m_httpsPreviousProxyServer.reset();
@@ -1075,86 +1281,52 @@ bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
 
 void NetworkDock::onHttpsProxyParsedEntryArrived(const ks::network::HttpsProxyParsedEntry& parsedEntry)
 {
-    if (m_httpsParsedTable == nullptr)
+    // Every accepted full event updates the one canonical bounded window, even
+    // when the page/menu is hidden. The existing 50ms UI clock coalesces projection.
+    if (m_httpsParsedEntryCache.size() >= static_cast<std::size_t>(kMaxHttpsParsedEntries))
     {
-        return;
+        adjustHttpsParsedEventCount(m_httpsParsedEntryCache.front()->eventTypeText, -1);
+        m_httpsParsedEntryCache.pop_front();
     }
+    m_httpsParsedEntryCache.push_back(std::make_shared<const ks::network::HttpsProxyParsedEntry>(parsedEntry));
+    adjustHttpsParsedEventCount(parsedEntry.eventTypeText, 1);
+    m_httpsProjectionDirty = true;
+}
 
-    if (m_httpsParsedTable->rowCount() >= kMaxHttpsParsedEntries)
-    {
-        m_httpsParsedTable->removeRow(0);
-        if (!m_httpsParsedEntryCache.empty())
-        {
-            m_httpsParsedEntryCache.erase(m_httpsParsedEntryCache.begin());
-        }
-    }
+void NetworkDock::synchronizeVisibleHttpsProjection()
+{
+    if (!m_httpsProjectionDirty || m_httpsProjectionInProgress || m_httpsAnalyzePage == nullptr
+        || !m_httpsAnalyzePage->isVisible() || m_httpsParsedModel == nullptr || m_httpsParsedProxy == nullptr) return;
+    const QPointer<NetworkDock> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("network-https-projection"),
+        {m_httpsParsedTable}, [guard]() { if (guard) guard->synchronizeVisibleHttpsProjection(); })) return;
+    m_httpsProjectionDirty = false;
+    m_httpsProjectionInProgress = true;
+    if (!m_httpsParsedModel->synchronize(m_httpsParsedEntryCache) || !guard) return;
+    const auto keyword = m_httpsParsedFilterEdit ? m_httpsParsedFilterEdit->text().trimmed() : QString();
+    const auto event = m_httpsParsedEventFilterCombo && m_httpsParsedEventFilterCombo->currentIndex() > 0
+        ? m_httpsParsedEventFilterCombo->currentText() : QString();
+    m_httpsParsedProxy->setFilters(keyword, event);
+    if (!guard) return;
+    m_httpsParsedVisibleCount = m_httpsParsedProxy->rowCount();
+    m_httpsProjectionInProgress = false;
+    updateHttpsParsedSummary();
+    if (!guard) return;
+    if (!m_httpsProjectionDirty && m_httpsAutoScrollCheck && m_httpsAutoScrollCheck->isChecked()
+        && m_httpsParsedVisibleCount > 0) m_httpsParsedTable->scrollToBottom();
+}
 
-    m_httpsParsedEntryCache.push_back(parsedEntry);
-    const int rowIndex = m_httpsParsedTable->rowCount();
-    m_httpsParsedTable->insertRow(rowIndex);
-
-    const QString timeText = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(parsedEntry.timestampMs)).toString(QStringLiteral("HH:mm:ss.zzz"));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnTime, createPacketCell(timeText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnSession, createPacketCell(QString::number(parsedEntry.sessionId)));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnClient, createPacketCell(parsedEntry.clientEndpointText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnProcess, createPacketCell(parsedEntry.clientProcessText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnHost, createPacketCell(QStringLiteral("%1:%2").arg(parsedEntry.targetHostText).arg(parsedEntry.targetPort)));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnEvent, createPacketCell(parsedEntry.eventTypeText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnMethod, createPacketCell(parsedEntry.methodText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnPath, createPacketCell(parsedEntry.pathText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnStatus, createPacketCell(parsedEntry.statusCode > 0 ? QString::number(parsedEntry.statusCode) : QString()));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnContentType, createPacketCell(parsedEntry.contentTypeText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnTls, createPacketCell(parsedEntry.tlsVersionText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnAlpn, createPacketCell(parsedEntry.alpnText));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnElapsed, createPacketCell(parsedEntry.elapsedMs > 0 ? QStringLiteral("%1 ms").arg(parsedEntry.elapsedMs) : QString()));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnUpload, createPacketCell(parsedEntry.uploadBytes > 0 ? QString::number(parsedEntry.uploadBytes) : QString()));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnDownload, createPacketCell(parsedEntry.downloadBytes > 0 ? QString::number(parsedEntry.downloadBytes) : QString()));
-    m_httpsParsedTable->setItem(rowIndex, HttpsParsedColumnDetail, createPacketCell(parsedEntry.detailText));
-    applyHttpsParsedTableFilter();
-    if (m_httpsAutoScrollCheck != nullptr && m_httpsAutoScrollCheck->isChecked() && !m_httpsParsedTable->isRowHidden(rowIndex))
-    {
-        m_httpsParsedTable->scrollToBottom();
-    }
+void NetworkDock::adjustHttpsParsedEventCount(const QString& eventType, const int delta)
+{
+    if (eventType == QStringLiteral("REQUEST")) m_httpsParsedRequestCount += delta;
+    else if (eventType == QStringLiteral("RESPONSE")) m_httpsParsedResponseCount += delta;
+    else if (eventType == QStringLiteral("ERROR")) m_httpsParsedErrorCount += delta;
 }
 
 void NetworkDock::applyHttpsParsedTableFilter()
 {
-    if (m_httpsParsedTable == nullptr)
-    {
-        return;
-    }
-
-    const QString keywordText = m_httpsParsedFilterEdit != nullptr
-        ? m_httpsParsedFilterEdit->text().trimmed()
-        : QString();
-    const QString eventTypeText = m_httpsParsedEventFilterCombo != nullptr
-        ? m_httpsParsedEventFilterCombo->currentText()
-        : QStringLiteral("全部事件");
-    const bool filterByEventType = !eventTypeText.isEmpty() && eventTypeText != QStringLiteral("全部事件");
-
-    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->rowCount(); ++rowIndex)
-    {
-        bool keywordMatched = keywordText.isEmpty();
-        if (!keywordMatched)
-        {
-            for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
-            {
-                const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
-                if (cellItem != nullptr && cellItem->text().contains(keywordText, Qt::CaseInsensitive))
-                {
-                    keywordMatched = true;
-                    break;
-                }
-            }
-        }
-
-        const QTableWidgetItem* eventItem = m_httpsParsedTable->item(rowIndex, HttpsParsedColumnEvent);
-        const bool eventMatched = !filterByEventType
-            || (eventItem != nullptr && eventItem->text().compare(eventTypeText, Qt::CaseInsensitive) == 0);
-        m_httpsParsedTable->setRowHidden(rowIndex, !keywordMatched || !eventMatched);
-    }
-
-    updateHttpsParsedSummary();
+    m_httpsProjectionDirty = true;
+    synchronizeVisibleHttpsProjection();
 }
 
 void NetworkDock::clearHttpsParsedEntries()
@@ -1165,7 +1337,12 @@ void NetworkDock::clearHttpsParsedEntries()
     }
 
     m_httpsParsedEntryCache.clear();
-    m_httpsParsedTable->setRowCount(0);
+    m_httpsParsedVisibleCount = 0;
+    m_httpsParsedRequestCount = 0;
+    m_httpsParsedResponseCount = 0;
+    m_httpsParsedErrorCount = 0;
+    m_httpsProjectionDirty = true;
+    synchronizeVisibleHttpsProjection();
     updateHttpsParsedSummary();
     appendHttpsProxyLogLine(QStringLiteral("HTTPS 解析结果和详情缓存已清空。"));
 }
@@ -1205,25 +1382,19 @@ void NetworkDock::exportVisibleHttpsParsedEntries()
     QStringList headerTextList;
     for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
     {
-        const QTableWidgetItem* headerItem = m_httpsParsedTable->horizontalHeaderItem(columnIndex);
-        headerTextList.append(escapeCsvField(headerItem != nullptr ? headerItem->text() : QString()));
+        headerTextList.append(escapeCsvField(m_httpsParsedTable->model()->headerData(columnIndex, Qt::Horizontal).toString()));
     }
     outputStream << headerTextList.join(',') << Qt::endl;
 
     int exportedRowCount = 0;
-    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->rowCount(); ++rowIndex)
+    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->model()->rowCount(); ++rowIndex)
     {
-        if (m_httpsParsedTable->isRowHidden(rowIndex))
-        {
-            continue;
-        }
 
         QStringList rowTextList;
         rowTextList.reserve(HttpsParsedColumnCount);
         for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
         {
-            const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
-            rowTextList.append(escapeCsvField(cellItem != nullptr ? cellItem->text() : QString()));
+            rowTextList.append(escapeCsvField(m_httpsParsedTable->model()->index(rowIndex, columnIndex).data().toString()));
         }
         outputStream << rowTextList.join(',') << Qt::endl;
         ++exportedRowCount;
@@ -1239,59 +1410,30 @@ void NetworkDock::exportVisibleHttpsParsedEntries()
 
 void NetworkDock::updateHttpsParsedSummary()
 {
-    if (m_httpsParsedSummaryLabel == nullptr || m_httpsParsedTable == nullptr)
+    if (m_httpsParsedSummaryLabel == nullptr || m_httpsParsedTable == nullptr
+        || m_httpsAnalyzePage == nullptr || !m_httpsAnalyzePage->isVisible())
     {
         return;
     }
-
-    int visibleCount = 0;
-    int requestCount = 0;
-    int responseCount = 0;
-    int errorCount = 0;
-    for (int rowIndex = 0; rowIndex < m_httpsParsedTable->rowCount(); ++rowIndex)
-    {
-        if (!m_httpsParsedTable->isRowHidden(rowIndex))
-        {
-            ++visibleCount;
-        }
-
-        const QTableWidgetItem* eventItem = m_httpsParsedTable->item(rowIndex, HttpsParsedColumnEvent);
-        if (eventItem == nullptr)
-        {
-            continue;
-        }
-        const QString eventText = eventItem->text();
-        if (eventText == QStringLiteral("REQUEST"))
-        {
-            ++requestCount;
-        }
-        else if (eventText == QStringLiteral("RESPONSE"))
-        {
-            ++responseCount;
-        }
-        else if (eventText == QStringLiteral("ERROR"))
-        {
-            ++errorCount;
-        }
-    }
-
     m_httpsParsedSummaryLabel->setText(QStringLiteral("显示 %1 / %2，请求 %3，响应 %4，错误 %5")
-        .arg(visibleCount)
-        .arg(m_httpsParsedTable->rowCount())
-        .arg(requestCount)
-        .arg(responseCount)
-        .arg(errorCount));
+        .arg(m_httpsParsedVisibleCount)
+        .arg(static_cast<qulonglong>(m_httpsParsedEntryCache.size()))
+        .arg(m_httpsParsedRequestCount)
+        .arg(m_httpsParsedResponseCount)
+        .arg(m_httpsParsedErrorCount));
 }
 
 void NetworkDock::openHttpsParsedDetailByRow(const int row)
 {
-    if (row < 0 || row >= static_cast<int>(m_httpsParsedEntryCache.size()))
+    const auto evidence = m_httpsParsedModel && m_httpsParsedProxy
+        ? m_httpsParsedModel->entryAt(m_httpsParsedProxy->mapToSource(m_httpsParsedProxy->index(row, 0)).row()) : HttpsParsedModel::Entry();
+    if (!evidence)
     {
         return;
     }
 
     HttpsParsedDetailWindow* detailWindow =
-        new HttpsParsedDetailWindow(m_httpsParsedEntryCache[static_cast<std::size_t>(row)], nullptr);
+        new HttpsParsedDetailWindow(*evidence, nullptr);
     detailWindow->show();
     detailWindow->raise();
     detailWindow->activateWindow();
@@ -1299,6 +1441,11 @@ void NetworkDock::openHttpsParsedDetailByRow(const int row)
 
 void NetworkDock::appendHttpsProxyLogLine(const QString& logLine)
 {
+    // Recovery/status messages must remain visible even before this tab is opened.
+    // Only such an actual message prepares the cold page; ordinary Dock open does not.
+    const QPointer<NetworkDock> owner(this);
+    if (m_httpsProxyLogOutput == nullptr && !ensureNetworkToolPage(m_httpsAnalyzePage)) return;
+    if (!owner) return;
     if (m_httpsProxyLogOutput == nullptr)
     {
         return;

@@ -1935,9 +1935,13 @@ namespace ks::kernel
             result.imagePath = module.filePath;
 
             QString prepareError;
-            const PreparedTrustedImage* prepared =
-                cachedTrustedImage(module, prepareError, options.backend);
-            if (prepared == nullptr)
+            // A whole-module scan visits each module once. Keep only this
+            // module's verified disk/mapped images until its result is complete.
+            // Address comparisons retain their existing per-thread reuse cache.
+            PreparedTrustedImage preparedImage;
+            const PreparedTrustedImage* const prepared = &preparedImage;
+            if (!prepareTrustedImage(
+                    module, false, preparedImage, prepareError, options.backend))
             {
                 result.statusText = prepareError;
                 if (options.onModuleComplete)

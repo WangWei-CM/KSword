@@ -31,6 +31,7 @@
 #include <QList>
 #include <QString>
 #include <cstdint>
+#include "AsyncCleanupRegistry.h"
 
 QT_BEGIN_NAMESPACE
 class QComboBox;
@@ -74,6 +75,14 @@ namespace ks::ui
         bool originalBytesWritten = false;  // 已向恢复记录写回原字节，清理失败可直接重试。
         QList<KernelHookBackupRange> restoreRanges; // 当前页所有已写范围的原字节。
         bool hasUncachedWrites = false;     // 存在没有完整原字节证据的写入。
+        QList<std::uint64_t> atomicCleanupRecordIds; // 原子提交返回的待注销记录，不覆盖分步记录身份。
+        bool atomicOriginalBytesUnverified = false; // 原子提交没有Backup，资源释放不能证明原字节恢复。
+
+        // 返回仍需本向导归集的资源；仅缺少字节证据不永久阻止退出。
+        bool hasPendingCleanup() const
+        {
+            return recordId != 0ULL || payloadPending || !atomicCleanupRecordIds.isEmpty();
+        }
 
         // 第 3 步 Write payload 后锁定：
         QByteArray payload;                 // 要写入的 payload（1..PAGE_SIZE 字节，由用户决定）
@@ -136,9 +145,11 @@ namespace ks::ui
         // UI 工具：
         void appendTrace(const QString& text); // 向 CodeEditorWidget 追加带时间戳的轨迹行
         void setBusy(bool busy);               // 禁用按钮避免并发触发
+        bool beginOperation();                 // 接入既有退出协调，登记后再派发后台工作。
 
         // 共享状态与控件：
         KernelHookPlan m_plan;              // 跨步共享状态
+        std::shared_ptr<AsyncCleanupRegistry::Lease> m_shutdownLease; // 工作和待恢复记录共同持有退出责任。
         bool m_busy = false;                // 是否有后台任务在跑
         int m_currentStep = 0;              // 0~4
         bool m_closeAfterCleanup = false;   // 恢复成功后重试关闭当前向导。

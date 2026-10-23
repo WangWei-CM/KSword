@@ -1,11 +1,18 @@
 #include "MemoryAccessBackend.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../ksword/log/log.h"
+#include "../UI/AsyncCleanupRegistry.h"
 // 切片长度与门禁顺序都取共用纯函数，和 R0 用的是同一份实现，也是单元测试
 // 覆盖的那一份。
 #include "../../../shared/driver/KswordArkDdmaPlan.h"
 
+#include "../../../shared/evidence/SerialTransactionQueue.h"
+
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <utility>
 #include <limits>
 #include <vector>
 
@@ -143,6 +150,39 @@ namespace ksword::memory_backend
                 QStringLiteral("0X"), QStringLiteral("0x"));
         }
 
+        std::mutex& scratchReceiptMutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        std::vector<DdmaScratchFailure>& mutableDdmaScratchFailures()
+        {
+            static std::vector<DdmaScratchFailure> failures;
+            return failures;
+        }
+
+        AccessOutcome recordScratchFailure(const DdmaSession& session,
+            const std::uint64_t physicalAddress, AccessOutcome outcome, const bool write)
+        {
+            if (outcome.scratchDirty)
+            {
+                {
+                    std::lock_guard<std::mutex> receiptLock(scratchReceiptMutex());
+                    mutableDdmaScratchFailures().push_back({session, physicalAddress,
+                        outcome.bytesDone, write, outcome.failureText});
+                }
+                // The existing thread-safe archive exposes this receipt even
+                // when the page was closed or its visual result became stale.
+                warn << "DDMA scratch restore failed: disk=" << session.diskIndex
+                     << " device=" << QString::fromStdWString(session.deviceName)
+                     << " lba=" << session.scratchLba << " physical=" << physicalAddress
+                     << " write=" << write << " bytesDone=" << outcome.bytesDone
+                     << " detail=" << outcome.failureText << eol;
+            }
+            return outcome;
+        }
+
         // ddmaReadOnePage：
         // - 读取一个物理页内的一段（调用方保证不跨页）；
         // - 把 R0 的多段状态压成 AccessOutcome 的少数几个布尔。
@@ -173,13 +213,13 @@ namespace ksword::memory_backend
                     ? QStringLiteral("当前驱动不支持 DDMA，请更新 KswordARK 驱动。")
                     : QStringLiteral("DDMA 读取通信失败：%1")
                           .arg(QString::fromStdString(result.io.message));
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
             }
             if (result.readStatus != KSWORD_ARK_DDMA_READ_STATUS_OK ||
                 result.data.size() != static_cast<std::size_t>(lengthBytes))
             {
                 outcome.failureText = describeDdmaReadFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
             }
 
             outcome.ok = true;
@@ -187,7 +227,7 @@ namespace ksword::memory_backend
             outcome.data = QByteArray(
                 reinterpret_cast<const char*>(result.data.data()),
                 static_cast<qsizetype>(result.data.size()));
-            return outcome;
+            return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
         }
 
         // ddmaWriteOnePage：写入一个物理页内的一段（调用方保证不跨页）。
@@ -224,7 +264,7 @@ namespace ksword::memory_backend
                     ? QStringLiteral("当前驱动不支持 DDMA，请更新 KswordARK 驱动。")
                     : QStringLiteral("DDMA 写入通信失败：%1")
                           .arg(QString::fromStdString(result.io.message));
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
             if (result.writeStatus == KSWORD_ARK_DDMA_WRITE_STATUS_FORCE_REQUIRED)
             {
@@ -232,18 +272,18 @@ namespace ksword::memory_backend
                 // 而不是让用户回去改 DDMA 配置。
                 outcome.forceRequired = true;
                 outcome.failureText = describeDdmaWriteFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
             if (result.writeStatus != KSWORD_ARK_DDMA_WRITE_STATUS_OK ||
                 result.bytesWritten != static_cast<std::uint32_t>(chunk.size()))
             {
                 outcome.failureText = describeDdmaWriteFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
 
             outcome.ok = true;
             outcome.bytesDone = static_cast<std::uint64_t>(chunk.size());
-            return outcome;
+            return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
         }
 
         // mergeChunkOutcome：把逐页结果里的告警位合并进总结果。
@@ -258,18 +298,23 @@ namespace ksword::memory_backend
 
     namespace
     {
-        // 进程级 DDMA 会话。写入只发生在 UI 线程（DDMA 子页），读取也全部在 UI
-        // 线程，唯一的例外是内存搜索的后台 worker——但它在启动前就把会话按值
-        // 复制走了（见 MemoryDock.SearchFlow.cpp），不会读这里的活对象。
+        // The UI owns the legacy reference. Background callers capture a value
+        // while holding sessionStateMutex, never the UI-owned live object.
         DdmaSession& mutableCurrentDdmaSession()
         {
             static DdmaSession session;
             return session;
         }
 
-        std::uint64_t& mutableDdmaSessionGeneration()
+        std::mutex& sessionStateMutex()
         {
-            static std::uint64_t generation = 0ULL;
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        std::atomic<std::uint64_t>& mutableDdmaSessionGeneration()
+        {
+            static std::atomic<std::uint64_t> generation{ 0ULL };
             return generation;
         }
     }
@@ -281,13 +326,59 @@ namespace ksword::memory_backend
 
     void setCurrentDdmaSession(const DdmaSession& session)
     {
+        std::lock_guard<std::mutex> stateLock(sessionStateMutex());
         mutableCurrentDdmaSession() = session;
         ++mutableDdmaSessionGeneration();
     }
 
     std::uint64_t ddmaSessionGeneration()
     {
-        return mutableDdmaSessionGeneration();
+        return mutableDdmaSessionGeneration().load();
+    }
+
+    DdmaSessionSnapshot captureDdmaSession()
+    {
+        std::lock_guard<std::mutex> stateLock(sessionStateMutex());
+        return { mutableCurrentDdmaSession(), mutableDdmaSessionGeneration().load() };
+    }
+
+    std::vector<DdmaScratchFailure> captureDdmaScratchFailures()
+    {
+        std::lock_guard<std::mutex> receiptLock(scratchReceiptMutex());
+        return mutableDdmaScratchFailures();
+    }
+
+    std::recursive_mutex& ddmaTransactionMutex()
+    {
+        static std::recursive_mutex mutex;
+        return mutex;
+    }
+
+    bool submitDdmaTransaction(std::function<void()> transaction)
+    {
+        // Register before queue admission: coordinated exit freezes new work
+        // and waits for every accepted transaction before stopping R0.
+        auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire();
+        if (!cleanupLease) return false;
+        // Construct the gate first so it outlives queue shutdown and draining.
+        auto* const gate = &ddmaTransactionMutex();
+        (void)captureDdmaSession(); // Session state must also outlive queue draining.
+        (void)mutableDdmaScratchFailures();
+        (void)scratchReceiptMutex();
+        static ksword::evidence::SerialTransactionQueue queue(32);
+        return queue.trySubmit([gate, cleanupLease = std::move(cleanupLease),
+            transaction = std::move(transaction)]() mutable {
+            // Move ownership into this invocation. Unlock the gate and destroy
+            // the task's captured resources before returning the cleanup lease,
+            // including when the transaction throws. Retaining a completed
+            // callable cannot keep exit waiting or release its lease twice.
+            auto acceptedCleanup = std::move(cleanupLease);
+            (void)acceptedCleanup;
+            auto work = std::move(transaction);
+            transaction = nullptr;
+            std::lock_guard<std::recursive_mutex> transactionLock(*gate);
+            work();
+        });
     }
 
     std::uint32_t ddmaTransferBytes()
@@ -698,6 +789,11 @@ namespace ksword::memory_backend
         const std::uint64_t lengthBytes,
         const bool requireHvmDirectWindow)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (lengthBytes == 0ULL)
         {
@@ -818,6 +914,11 @@ namespace ksword::memory_backend
         const QByteArray& bytes,
         const bool forceApproved)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (bytes.isEmpty())
         {
@@ -946,6 +1047,11 @@ namespace ksword::memory_backend
         const std::uint64_t lengthBytes,
         const bool requireHvmDirectWindow)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (lengthBytes == 0ULL)
         {
@@ -1105,6 +1211,11 @@ namespace ksword::memory_backend
         const QByteArray& bytes,
         const bool forceApproved)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (bytes.isEmpty())
         {

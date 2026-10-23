@@ -3,10 +3,12 @@
 #include <QByteArray>
 #include <QString>
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 namespace ks::ui
 {
     class HexView;
+    class AsyncOperation;
 }
 class QComboBox;
 class QLabel;
@@ -15,6 +17,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
+class QTimer;
 
 struct RegistryValueDraft
 {
@@ -31,7 +34,11 @@ class RegistryValueEditorWidget final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const RegistryValueEditorWidget* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     explicit RegistryValueEditorWidget(QWidget* parent = nullptr);
+    ~RegistryValueEditorWidget() override;
     void setValue(const QString& keyPath, const QString& name, quint32 type,
         const QByteArray& raw, bool createMode = false);
     bool value(RegistryValueDraft* out, QString* errorOut = nullptr) const;
@@ -45,12 +52,16 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     quint32 currentType() const;
     void loadTypedEditor();
     void loadHexEditor();
     void updateComparison();
     void updateState();
     void editText();
+    void prepareTextDraft();
+    void invalidateDraftPreparation();
     void editNumber(bool hexadecimal);
     void stageBytes(const QByteArray& bytes);
     void changeType();
@@ -85,6 +96,13 @@ private:
     ks::ui::HexView* m_before = nullptr;
     ks::ui::HexView* m_after = nullptr;
 
+    QTimer* m_textPreparationTimer = nullptr;
+    ks::ui::AsyncOperation* m_textOperation = nullptr;
+    ks::ui::AsyncOperation* m_importOperation = nullptr;
+    ks::ui::AsyncOperation* m_exportOperation = nullptr;
+    bool m_textPreparationPending = false;
+    bool m_importPending = false;
+
     QString m_keyPath;
     QString m_originalName;
     quint32 m_originalType = 0;
@@ -99,5 +117,7 @@ private:
     bool m_syncing = false;
     bool m_typedNeedsRefresh = false;
     bool m_hexNeedsRefresh = false;
+    bool m_comparisonNeedsRefresh = true;
+    bool m_comparisonBaselineNeedsRefresh = true;
     quint64 m_revision = 0;
 };

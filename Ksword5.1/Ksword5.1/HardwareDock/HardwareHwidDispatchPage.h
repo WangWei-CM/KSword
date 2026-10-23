@@ -13,7 +13,9 @@
 #include "../ArkDriverClient/ArkDriverTypes.h"
 
 #include <QWidget>
+#include <QElapsedTimer>
 
+namespace ks::ui { class AsyncOperation; }
 class CodeEditorWidget;
 class QCheckBox;
 class QComboBox;
@@ -38,6 +40,7 @@ public:
     // - parent：Qt 父控件；
     // - 处理：初始化 UI、连接按钮并生成初始计划文本。
     explicit HardwareHwidDispatchPage(QWidget* parent = nullptr);
+    ~HardwareHwidDispatchPage() override;
 
 protected:
     // showEvent：
@@ -70,6 +73,9 @@ private:
     // - 无输入参数；
     // - 无返回值，结果写入状态表和日志。
     void refreshStatus();
+    void submitRequest(bool control, KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST request = {});
+    void updateOperationControls();
+    void consumeResponse(const ksword::ark::HwidDispatchResult& result);
 
     // sendControlRequest：
     // - 输入：action 为协议动作，dryRun 表示只验证不修改；
@@ -139,5 +145,11 @@ private:
     QPushButton* m_copyPlanButton = nullptr;  // m_copyPlanButton：复制计划按钮。
     QTableWidget* m_statusTable = nullptr;    // m_statusTable：目标驱动状态表。
     ks::ui::StructuredFieldView* m_planEditor = nullptr; // m_planEditor：只读计划/日志文本。
+    ks::ui::AsyncOperation* m_operation = nullptr;
+    QElapsedTimer m_statusAge;
+    bool m_hasStatus = false;
+    bool m_confirming = false;
+    bool m_requestPending = false;
+    bool m_pendingControl = false;
     bool m_warningShown = false;              // m_warningShown：首次进入弹窗状态。
 };

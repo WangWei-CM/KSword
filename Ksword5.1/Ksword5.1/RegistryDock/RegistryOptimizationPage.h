@@ -9,24 +9,29 @@
 // 3) Apply selected registry/service/explorer actions with explicit confirmation.
 // ============================================================
 
+#include "RegistryWorkbenchAccess.h"
+#include "RegistryExternalActionSession.h"
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QSet>
 #include <QWidget>
 
 #include <cstdint>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QProcess;
 class QSplitter;
 class QTableWidget;
-class QTemporaryDir;
 class QTreeWidget;
 class QTimer;
 class CodeEditorWidget;
+class QShowEvent;
+class QEvent;
+namespace ks::ui { class AsyncOperation; }
 
 // RegistryOptimizationPage:
 // - Input: parent widget plus profiles/registry_optimization_items.json at runtime;
@@ -41,6 +46,10 @@ public:
     // - Return: no explicit return value.
     explicit RegistryOptimizationPage(QWidget* parent = nullptr);
     ~RegistryOptimizationPage() override;
+
+protected:
+    void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // OptimizationState:
@@ -92,6 +101,28 @@ private:
     {
         int itemIndex = -1;
         int scopeIndex = -1;
+        QString targetLabel;
+        bool targetEnabled = false;
+    };
+
+    struct PreparedScopeRow
+    {
+        VisibleRow source;
+        QStringList columns;
+    };
+    struct ScopeProjection
+    {
+        QVector<PreparedScopeRow> rows;
+        quint64 revision = 0;
+    };
+
+    struct ProfileLoadResult
+    {
+        QString path;
+        QString error;
+        bool found = false;
+        bool parsed = false;
+        QVector<OptimizationItem> items;
     };
 
 private:
@@ -109,9 +140,14 @@ private:
     void initializeUi();
     void initializeConnections();
     void loadOptimizationProfile();
+    void presentOptimizationProfile();
     QStringList profileCandidatePaths() const;
     void rebuildGroupTree();
     void rebuildItemTable();
+    void continueItemProjection();
+    void scheduleVisibleRowWidgets();
+    void materializeVisibleRowWidgets();
+    void setTargetForRow(int row, const QString& label, bool enabled);
     void refreshVisibleStates();
     void refreshVisibleRowState(int tableRow);
     void cancelStateRefresh();
@@ -131,18 +167,32 @@ private:
     void cancelStateApply(const QString& reasonText = QString());
     void completePendingAction(bool actionOk, const QString& errorText);
     void setApplyControlsEnabled(bool enabled);
+    struct ExternalActionResult { bool ok = false; bool canceled = false; bool published = false; QString error; };
     bool startExternalAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static ExternalActionResult executeExternalAction(const QJsonObject& actionObject, const QString& appDir,
+        const QString& currentDir, const std::shared_ptr<ks::registry::external::Session::Work>& work);
     static bool actionRequiresExternalProcess(const QJsonObject& actionObject);
-    bool executeAction(
+    struct OrdinaryActionResult
+    {
+        bool ok = false;
+        bool restartExplorer = false;
+        ks::ui::FieldDocument details;
+    };
+    void submitOrdinaryAction(const QJsonObject& action, const RegistryValueState* original = nullptr);
+    void prepareColorAction(const QJsonObject& action);
+    void acceptOrdinaryAction(const OrdinaryActionResult& result, quint64 generation);
+    static bool describeActionResult(const QJsonObject& action, bool ok, const QString& error,
+        ks::ui::FieldDocument* detailLinesOut, bool* restartExplorerOut);
+    static bool executeAction(
         const QJsonObject& actionObject,
         ks::ui::FieldDocument* detailLinesOut,
-        bool* restartExplorerOut);
+        bool* restartExplorerOut, const RegistryValueState* original = nullptr);
 
-    bool executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeRegistryDeleteAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeRegistryMoveAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeServiceStartAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut, const RegistryValueState* capturedOriginal = nullptr);
+    static bool executeRegistryDeleteAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeRegistryMoveAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeServiceStartAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
 
     static bool evaluateConditionText(const QString& conditionText);
 
@@ -160,10 +210,27 @@ private:
     ks::ui::StructuredFieldView* m_detailText = nullptr;    // 选中项目/动作的只读详情，支持语言切换重绘。
     QLabel* m_statusLabel = nullptr;             // Profile load/apply status.
 
+    std::unique_ptr<ks::ui::AsyncOperation> m_profileOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_ordinaryOperation;
+    bool m_ordinaryReceipt = false;
+    bool m_stateApplyCancelRequested = false;
+    QString m_stateApplyCancelReason;
+    bool m_deferredProfileReload = false;
+    bool m_deferredItemRebuild = false;
+    bool m_profileRequested = false;
+    bool m_profilePresentationDirty = false;
     QString m_loadedProfilePath;                 // Actual JSON path selected from candidates.
     QVector<OptimizationItem> m_itemList;        // Parsed top-level optimization items.
     QVector<VisibleRow> m_visibleRows;           // Current table row to model mapping.
     ColumnPreset m_columnPreset = ColumnPreset::A; // 当前列组预设。
+    std::unique_ptr<ks::ui::AsyncOperation> m_scopeOperation;
+    std::shared_ptr<ScopeProjection> m_scopeProjection;
+    QTimer* m_scopeProjectionTimer = nullptr;
+    QTimer* m_rowWidgetTimer = nullptr;
+    QSet<int> m_rowsWithWidgets;
+    quint64 m_scopeProjectionRevision = 0;
+    qsizetype m_nextScopeProjectionRow = 0;
+    bool m_scopeProjectionClearing = false;
     bool m_rebuildingTable = false;              // Guards refresh signals during table rebuild.
     bool m_stateRefreshInProgress = false;       // 可见状态后台刷新是否仍在执行。
     std::uint64_t m_stateRefreshGeneration = 0;  // 忽略过期后台状态结果。
@@ -177,7 +244,6 @@ private:
     ks::ui::FieldDocument m_stateApplyDetailLines;         // 当前动作序列的诊断信息。
     bool m_stateApplyAllOk = true;               // 所有已完成动作是否成功。
     bool m_stateApplyRestartExplorer = false;    // 是否需要提示 Explorer 重启。
-    QProcess* m_stateApplyProcess = nullptr;     // 仅承载当前非阻塞 cmd/tar 子进程。
-    QTemporaryDir* m_stateApplyTemporaryDir = nullptr; // FileCreateByZIP 解压期间保留临时目录。
-    QString m_stateApplyZipDestinationPath;      // FileCreateByZIP 的最终目标路径。
+    std::shared_ptr<ks::registry::external::Session> m_externalSession; // Worker-local process + retained temporary-resource cleanup.
+
 };

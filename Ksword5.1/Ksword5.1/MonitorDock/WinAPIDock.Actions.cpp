@@ -1,11 +1,16 @@
+#include "MonitorCanonicalExport.h"
+#include <QPushButton>
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/DetailDialogChrome.h"
 #include "WinAPIDock.h"
+#include "MonitorEventFilterProjection.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncUiDispatcher.h"
+#include "../UI/AsyncCleanupRegistry.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../theme.h"
 
@@ -18,6 +23,15 @@
 // ============================================================
 
 #include <QApplication>
+#include <QAbstractItemView>
+#include <QImage>
+#include <objbase.h>
+#include <QPersistentModelIndex>
+#include <QPixmap>
+#include <QQueue>
+#include <QRunnable>
+#include <QScrollBar>
+#include <QThreadPool>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -28,7 +42,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
-#include <QFileIconProvider>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLabel>
@@ -44,6 +57,7 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTableWidgetItem>
 #include <QTextStream>
 #include <QStringConverter>
@@ -59,6 +73,9 @@
 #define NOMINMAX
 #endif
 #include <TlHelp32.h>
+#include <Shellapi.h>
+
+#pragma comment(lib, "Shell32.lib")
 #include "../../../shared/ApiMonitorInjection.h"
 
 namespace
@@ -132,22 +149,216 @@ namespace
         return processList;
     }
 
-    // processIconForPath：
-    // - 作用：为进程下拉框解析系统文件图标；
-    // - 处理：优先按 imagePath 获取 shell 图标，失败时回退项目内置进程图标；
-    // - 返回：可直接设置到 QComboBox item 的 QIcon。
-    QIcon processIconForPath(const QString& imagePathText)
+    // Pure value scheduler: at most two Shell requests and one bounded visible demand.
+    // Completed failures also stay cached, so an unreadable path is not retried on every paint.
+    struct ProcessIconDemandState
     {
-        static QFileIconProvider iconProvider;
-        if (!imagePathText.trimmed().isEmpty())
+        static constexpr int MaximumInFlight = 2;
+        static constexpr qsizetype MaximumDemand = 129;
+        static constexpr qsizetype MaximumCached = 512;
+        QStringList demand;
+        QSet<QString> inFlight;
+        QSet<QString> completed;
+        QQueue<QString> completedOrder;
+
+        void replaceDemand(const QStringList& paths)
         {
-            const QIcon fileIcon = iconProvider.icon(QFileInfo(imagePathText));
-            if (!fileIcon.isNull())
+            demand.clear();
+            QSet<QString> seen;
+            for (const QString& path : paths)
             {
-                return fileIcon;
+                if (path.isEmpty() || seen.contains(path)) continue;
+                seen.insert(path);
+                demand.append(path);
+                if (demand.size() == MaximumDemand) break;
             }
         }
-        return QIcon(QStringLiteral(":/Icon/process_main.svg"));
+
+        QString takeNext()
+        {
+            if (inFlight.size() >= MaximumInFlight) return {};
+            for (const QString& path : demand)
+            {
+                if (!inFlight.contains(path) && !completed.contains(path))
+                {
+                    inFlight.insert(path);
+                    return path;
+                }
+            }
+            return {};
+        }
+
+        QString complete(const QString& path)
+        {
+            inFlight.remove(path);
+            if (completed.contains(path)) return {};
+            completed.insert(path);
+            completedOrder.enqueue(path);
+            if (completedOrder.size() <= MaximumCached) return {};
+            const QString evicted = completedOrder.dequeue();
+            completed.remove(evicted);
+            return evicted;
+        }
+    };
+
+    const QIcon& processPlaceholderIcon()
+    {
+        static const QIcon icon(QStringLiteral(":/Icon/process_main.svg"));
+        return icon;
+    }
+
+    QString processIconPathKey(const QString& path)
+    {
+        return QDir::fromNativeSeparators(path.trimmed()).toCaseFolded();
+    }
+
+    QImage extractProcessSelectorIcon(const QString& path)
+    {
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        struct ComScope { HRESULT result; ~ComScope() { if (SUCCEEDED(result)) ::CoUninitialize(); } } com{initialized};
+        if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return {};
+        SHFILEINFOW shellInfo{};
+        struct IconScope { SHFILEINFOW& value; ~IconScope() { if (value.hIcon) ::DestroyIcon(value.hIcon); } } icon{shellInfo};
+        const auto result = ::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(path.utf16()),
+            0, &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_LARGEICON);
+        return result == 0 || !shellInfo.hIcon ? QImage{} : QImage::fromHICON(shellInfo.hIcon);
+    }
+
+    // QObject owns only projection/cache state. Workers own values and a closeable dispatcher;
+    // neither closing this page nor refreshing its candidate model waits for Shell.
+    class ProcessSelectorIconLoader final : public QObject
+    {
+    public:
+        explicit ProcessSelectorIconLoader(QComboBox* combo, QLabel* selectedIcon)
+            : QObject(combo), m_combo(combo), m_selectedIcon(selectedIcon), m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
+        {
+            setObjectName(QStringLiteral("winapi-process-icon-loader"));
+            m_timer.setSingleShot(true);
+            m_timer.setInterval(0);
+            connect(&m_timer, &QTimer::timeout, this, [this]() { refreshDemand(); });
+            combo->installEventFilter(this);
+            combo->view()->installEventFilter(this);
+            combo->view()->viewport()->installEventFilter(this);
+            connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { schedule(); });
+            connect(combo->view()->verticalScrollBar(), &QScrollBar::valueChanged,
+                this, [this]() { schedule(); });
+        }
+
+        ~ProcessSelectorIconLoader() override { m_dispatcher->close(); }
+
+        void schedule() { if (!m_timer.isActive()) m_timer.start(); }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            switch (event->type())
+            {
+            case QEvent::Show:
+            case QEvent::Hide:
+            case QEvent::Resize:
+            case QEvent::Wheel:
+            case QEvent::KeyRelease:
+                schedule();
+                break;
+            default: break;
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        static QThreadPool& extractionPool()
+        {
+            static QThreadPool pool;
+            static const bool configured = []() {
+                pool.setMaxThreadCount(ProcessIconDemandState::MaximumInFlight);
+                pool.setExpiryTimeout(1000);
+                return true;
+            }();
+            (void)configured;
+            return pool;
+        }
+
+        struct Completion { QString key; QImage image; std::atomic_bool done{false}; };
+        void refreshDemand()
+        {
+            for (auto item = m_completions.begin(); item != m_completions.end(); ) {
+                if (!(*item)->done.load(std::memory_order_acquire)) { ++item; continue; }
+                const auto result = std::move(*item); item = m_completions.erase(item);
+                const QString evicted = m_state.complete(result->key);
+                if (!evicted.isEmpty()) m_icons.remove(evicted);
+                m_icons.insert(result->key, result->image.isNull() ? processPlaceholderIcon() : QIcon(QPixmap::fromImage(result->image)));
+            }
+            QStringList paths;
+            QHash<QString, QString> originalPaths;
+            QVector<QPersistentModelIndex> indexes;
+            auto addRow = [this, &paths, &originalPaths, &indexes](const int row) {
+                if (row < 0 || row >= m_combo->count()) return;
+                const QModelIndex index = m_combo->model()->index(row, m_combo->modelColumn(), m_combo->rootModelIndex());
+                const QString path = index.data(Qt::UserRole + 2).toString().trimmed();
+                const QString key = processIconPathKey(path);
+                if (key.isEmpty()) return;
+                indexes.append(QPersistentModelIndex(index));
+                paths.append(key);
+                originalPaths.insert(key, path);
+            };
+            // The selected candidate gets first priority; unopened/hidden candidates do no work.
+            if (m_combo->isVisible()) addRow(m_combo->currentIndex());
+            QAbstractItemView* view = m_combo->view();
+            if (m_combo->isVisible() && view->isVisible())
+            {
+                const QModelIndex first = view->indexAt(QPoint(2, 2));
+                const QModelIndex last = view->indexAt(QPoint(2, std::max(2, view->viewport()->height() - 2)));
+                const int firstRow = first.isValid() ? first.row() : 0;
+                const int lastRow = last.isValid() ? last.row() : firstRow + 127;
+                for (int row = firstRow; row <= lastRow && row < firstRow + 128; ++row) addRow(row);
+            }
+            m_state.replaceDemand(paths);
+            for (const QPersistentModelIndex& index : indexes)
+            {
+                if (!index.isValid()) continue;
+                const QString key = processIconPathKey(index.data(Qt::UserRole + 2).toString());
+                const auto cached = m_icons.constFind(key);
+                if (cached != m_icons.constEnd())
+                {
+                    const QIcon current = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+                    if (current.cacheKey() != cached->cacheKey())
+                        m_combo->model()->setData(index, *cached, Qt::DecorationRole);
+                }
+            }
+            if (m_selectedIcon != nullptr && m_combo->currentIndex() >= 0)
+                m_selectedIcon->setPixmap(m_combo->itemIcon(m_combo->currentIndex()).pixmap(20, 20));
+            for (QString key = m_state.takeNext(); !key.isEmpty(); key = m_state.takeNext())
+            {
+                const auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire();
+                if (!cleanupLease) { m_state.inFlight.remove(key); break; }
+                const QString path = originalPaths.value(key);
+                const auto dispatcher = m_dispatcher;
+                const auto completion = std::make_shared<Completion>(); completion->key = key;
+                m_completions.push_back(completion);
+                extractionPool().start(QRunnable::create([this, dispatcher, path, completion, cleanupLease]() {
+                    (void)cleanupLease; // Accepted native work stays visible to final shutdown.
+                    try { completion->image = extractProcessSelectorIcon(path); } catch (...) {}
+                    completion->done.store(true, std::memory_order_release);
+                    // Physical completion survives a rejected/dropped wake. The
+                    // next existing show/scroll/selection refresh consumes it.
+                    dispatcher->post([this]() { schedule(); });
+                }));
+            }
+        }
+
+        QComboBox* m_combo;
+        QPointer<QLabel> m_selectedIcon;
+        QTimer m_timer;
+        ProcessIconDemandState m_state;
+        std::vector<std::shared_ptr<Completion>> m_completions;
+        QHash<QString, QIcon> m_icons;
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
+    };
+
+    ProcessSelectorIconLoader* processIconLoader(QComboBox* combo, QLabel* selectedIcon)
+    {
+        auto* existing = combo->findChild<QObject*>(QStringLiteral("winapi-process-icon-loader"), Qt::FindDirectChildrenOnly);
+        return existing != nullptr ? static_cast<ProcessSelectorIconLoader*>(existing) : new ProcessSelectorIconLoader(combo, selectedIcon);
     }
 
     // processDisplayName：
@@ -418,9 +629,7 @@ void WinAPIDock::initializeConnections()
         connect(m_clearEventButton, &QPushButton::clicked, this, [this]() {
             if (m_eventTable != nullptr && !m_pipeRunning.load())
             {
-                m_eventTable->clearContents();
-                m_eventTable->setRowCount(0);
-        m_visibleEventCount = 0;
+                pollSessionBackend(); acceptPendingEventRows(); clearCanonicalEvents();
                 applyEventFilter();
                 updateActionState();
                 updateStatusLabel();
@@ -447,6 +656,12 @@ void WinAPIDock::initializeConnections()
         });
         connect(m_eventTable, &QTableWidget::cellDoubleClicked, this, [this](const int row, const int) {
             showEventDetailDialog(row);
+        });
+    }
+    if (m_resultTabs)
+    {
+        connect(m_resultTabs, &QTabWidget::currentChanged, this, [this](int) {
+            QTimer::singleShot(0, this, [this]() { flushPendingRows(); });
         });
     }
     if (m_uiFlushTimer != nullptr)
@@ -534,7 +749,7 @@ void WinAPIDock::populateProcessSelector(const std::vector<ks::process::ProcessR
             const QString processName = QString::fromStdString(
                 record.processName.empty() ? std::string("<Unknown>") : record.processName);
             const QString imagePathText = QString::fromStdString(record.imagePath);
-            const QIcon processIcon = processIconForPath(imagePathText);
+            const QIcon processIcon = processPlaceholderIcon();
             const QString displayText = processDisplayName(record);
             m_processCombo->addItem(processIcon, displayText, QVariant::fromValue(static_cast<quint32>(record.pid)));
 
@@ -571,6 +786,7 @@ void WinAPIDock::populateProcessSelector(const std::vector<ks::process::ProcessR
         m_processStatusLabel->setText(QStringLiteral("● 已刷新 %1 个进程").arg(m_processList.size()));
         ks::ui::ApplyStatusRole(m_processStatusLabel, ks::ui::StatusRole::Success);
     }
+    processIconLoader(m_processCombo, m_processIconLabel)->schedule();
     updateProcessSelectorStatus();
 }
 
@@ -753,73 +969,6 @@ void WinAPIDock::browseAgentDllPath()
     {
         m_agentDllPathEdit->setText(QDir::cleanPath(selectedPath));
     }
-}
-
-bool WinAPIDock::prepareSessionArtifacts(const std::uint32_t pidValue, QString* errorTextOut)
-{
-    if (errorTextOut != nullptr)
-    {
-        errorTextOut->clear();
-    }
-
-    const QString sessionDirectory = QString::fromStdWString(ks::winapi_monitor::buildSessionDirectory());
-    QDir sessionDir;
-    if (!sessionDir.mkpath(sessionDirectory))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法创建会话目录：%1").arg(sessionDirectory);
-        }
-        return false;
-    }
-
-    m_currentSessionPid = pidValue;
-    m_currentPipeName = QString::fromStdWString(ks::winapi_monitor::buildPipeNameForPid(pidValue));
-    m_currentConfigPath = QString::fromStdWString(ks::winapi_monitor::buildConfigPathForPid(pidValue));
-    m_currentStopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pidValue));
-    m_currentSessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    return true;
-}
-
-bool WinAPIDock::hasResidentAgentForProcess(const std::uint32_t pidValue)
-{
-    // hasResidentAgentForProcess：
-    // - 输入：pidValue 为准备启动会话的目标 PID；
-    // - 处理：用 PID 和进程创建时间确认同一实例仍保留此前已注入的常驻 Agent；
-    // - 返回：确认可复用时为 true，身份无法确认或 PID 已复用时清除缓存并返回 false。
-    if (pidValue == 0 || pidValue != m_residentAgentPid || m_residentAgentCreationTime100ns == 0)
-    {
-        return false;
-    }
-
-    std::uint64_t observedCreationTime100ns = 0;
-    if (!ks::process::QueryProcessCreationTimeByPid(pidValue, &observedCreationTime100ns, nullptr)
-        || observedCreationTime100ns != m_residentAgentCreationTime100ns)
-    {
-        m_residentAgentPid = 0;
-        m_residentAgentCreationTime100ns = 0;
-        return false;
-    }
-    return true;
-}
-
-void WinAPIDock::rememberResidentAgentForProcess(const std::uint32_t pidValue)
-{
-    // rememberResidentAgentForProcess：
-    // - 输入：pidValue 为刚刚完成 DLL 注入的目标 PID；
-    // - 处理：记录 PID 和创建时间，后续同一进程实例的 start-stop-start 复用正在等待的 Agent worker；
-    // - 返回：无返回值，无法读取身份时主动放弃缓存，下一会话将保守地重新执行注入。
-    std::uint64_t creationTime100ns = 0;
-    if (!ks::process::QueryProcessCreationTimeByPid(pidValue, &creationTime100ns, nullptr)
-        || creationTime100ns == 0)
-    {
-        m_residentAgentPid = 0;
-        m_residentAgentCreationTime100ns = 0;
-        return;
-    }
-
-    m_residentAgentPid = pidValue;
-    m_residentAgentCreationTime100ns = creationTime100ns;
 }
 
 QString WinAPIDock::fakeSuccessRulesIniText() const
@@ -1097,41 +1246,10 @@ void WinAPIDock::removeSelectedFakeSuccessRule()
     updateActionState();
 }
 
-bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
+QString WinAPIDock::freezeSessionOptions() const
 {
-    if (errorTextOut != nullptr)
-    {
-        errorTextOut->clear();
-    }
-    if (!validateFakeSuccessRules(errorTextOut))
-    {
-        return false;
-    }
-
-    QSaveFile configFile(m_currentConfigPath);
-    if (!configFile.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法写入会话配置：%1").arg(m_currentConfigPath);
-        }
-        return false;
-    }
-
-    QTextStream outputStream(&configFile);
-    outputStream.setEncoding(QStringConverter::Utf16LE);
-    outputStream.setGenerateByteOrderMark(true);
-    outputStream << "[monitor]\n";
-    outputStream << "pipe_name=" << m_currentPipeName << '\n';
-    outputStream << "root_stop_flag_path=" << m_currentStopFlagPath << '\n';
-    outputStream << "stop_flag_path=" << m_currentStopFlagPath << '\n';
-    outputStream << "session_id=" << m_currentSessionId << '\n';
-    const auto endpoint = m_injectionBroker ? m_injectionBroker->endpoint() : ks::winapi_monitor::InjectionEndpoint{};
-    outputStream << "injection_broker_pipe=" << QString::fromStdWString(endpoint.pipeName) << '\n';
-    outputStream << "injection_broker_token=" << QString::fromStdWString(endpoint.token) << '\n';
-    outputStream << "injection_broker_pid=" << endpoint.hostPid << '\n';
-    outputStream << "injection_broker_creation=" << endpoint.hostCreation << '\n';
-    outputStream << "agent_dll_path=" << (m_agentDllPathEdit != nullptr ? QDir::cleanPath(m_agentDllPathEdit->text().trimmed()) : QString()) << '\n';
+    QString options;
+    QTextStream outputStream(&options);
     outputStream << "enable_file=" << ((m_hookFileCheck != nullptr && m_hookFileCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_registry=" << ((m_hookRegistryCheck != nullptr && m_hookRegistryCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_network=" << ((m_hookNetworkCheck != nullptr && m_hookNetworkCheck->isChecked()) ? 1 : 0) << '\n';
@@ -1149,26 +1267,7 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
     outputStream << "fake_success_raw_fallback=" << ((m_fakeRawFallbackCheck != nullptr && m_fakeRawFallbackCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "fake_success_rules=" << fakeSuccessRulesIniText() << '\n';
     outputStream << "detail_limit=" << static_cast<int>(ks::winapi_monitor::kMaxDetailChars - 1) << '\n';
-    outputStream.flush();
-    if (outputStream.status() != QTextStream::Ok || !configFile.commit())
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法原子提交会话配置：%1").arg(m_currentConfigPath);
-        }
-        return false;
-    }
-
-    // 只有完整新配置已经可见后才撤销停止标记，避免常驻 Agent 在半写入 INI 上启动下一会话。
-    if (QFile::exists(m_currentStopFlagPath) && !QFile::remove(m_currentStopFlagPath))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("会话配置已写入，但无法撤销停止标记：%1").arg(m_currentStopFlagPath);
-        }
-        return false;
-    }
-    return true;
+    return options;
 }
 
 void WinAPIDock::appendInternalEvent(const QString& categoryText, const QString& apiText, const QString& detailText)
@@ -1181,8 +1280,15 @@ void WinAPIDock::appendInternalEvent(const QString& categoryText, const QString&
     rowValue.pidTidText = m_currentSessionPid == 0 ? QStringLiteral("-") : QStringLiteral("%1 / -").arg(m_currentSessionPid);
     rowValue.detailText = detailText;
     rowValue.internalEvent = true;
-    appendEventRow(rowValue);
-    applyEventFilter();
+    if (m_sessionBackend) m_sessionBackend->enqueue(std::move(rowValue));
+    else
+    {
+        auto record = std::make_shared<WinAPIEventRecord>();
+        record->searchText = WinAPIEventFields(rowValue).join(QStringLiteral(" | "));
+        record->value = std::move(rowValue);
+        if (m_eventArchive.append(std::move(record))) ++m_evictedRows;
+        m_eventProjectionStale = true;
+    }
     updateActionState();
     updateStatusLabel();
 }
@@ -1236,295 +1342,138 @@ void WinAPIDock::showEventDetailDialog(const int rowValue)
 
 void WinAPIDock::startMonitoring()
 {
-    if (m_pipeRunning.load())
-    {
-        return;
-    }
-
-    std::uint32_t pidValue = 0;
-    if (!currentSelectedPid(&pidValue))
+    if (m_pipeRunning.load() || (m_sessionCleanup && !m_sessionCleanup->isComplete())
+        || (m_sessionOperation && m_sessionOperation->isBusy())) return;
+    std::uint32_t pid = 0;
+    if (!currentSelectedPid(&pid))
     {
         QMessageBox::information(this, QStringLiteral("WinAPI 监控"), QStringLiteral("请先选择目标进程或手动输入 PID。"));
         return;
     }
-
-    if (m_agentDllPathEdit == nullptr)
+    if (!m_agentDllPathEdit) return;
+    QString error;
+    if (!validateFakeSuccessRules(&error))
+    { QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), error); return; }
+    WinAPISessionConfig config;
+    config.pid = pid;
+    config.generation = m_sessionGeneration.load() + 1;
+    config.requestedAgentPath = m_agentDllPathEdit->text().trimmed();
+    config.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    config.options = freezeSessionOptions(); // Last GUI access; workers receive only values.
+    config.residentPid = m_residentAgentPid;
+    config.residentCreation = m_residentAgentCreationTime100ns;
+    config.autoInjectChildren = m_autoInjectChildCheck && m_autoInjectChildCheck->isChecked();
+    auto backend = std::make_shared<WinAPISessionBackend>(std::move(config));
+    auto cleanup = ks::ui::RetainedCleanupJob::create([backend]() { return backend->cleanup(); }, 0,
+        [backend]() { backend->requestStop(); });
+    if (!cleanup || cleanup->isCleanupRequested()) return; // An old shutdown epoch is never reopened.
+    m_sessionBackend = backend; m_sessionCleanup = cleanup;
+    m_currentSessionPid = pid; m_currentSessionId = backend->config.sessionId;
+    m_sessionGeneration.store(backend->config.generation);
+    m_startupReported = false; m_stopReported = false; m_stopping = false; m_reportedCleanupAttempt = 0;
+    clearCanonicalEvents();
     {
-        return;
+        const std::lock_guard<std::mutex> lock(m_pendingMutex);
+        m_pendingRows.clear(); m_pendingDroppedRows = 0; m_agentDroppedRows.clear(); m_evictedRows = 0;
     }
-
-    std::wstring selectedDllPath, platformError;
-    if (!ks::winapi_monitor::resolveAgentPath(pidValue, m_agentDllPathEdit->text().trimmed().toStdWString(),
-            &selectedDllPath, &platformError))
-    {
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-            QStringLiteral("无法选择匹配目标进程位数的 Agent DLL：%1").arg(QString::fromStdWString(platformError)));
-        return;
-    }
-    const QString dllPathText = QDir::cleanPath(QString::fromStdWString(selectedDllPath));
-    m_agentDllPathEdit->setText(dllPathText);
-
-    if (m_pipeThread != nullptr) stopMonitoringInternal(true);
-    DWORD leaseError = 0;
-    if (!m_sessionLease.acquire(pidValue, &leaseError))
-    {
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-            QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。").arg(pidValue).arg(leaseError));
-        return;
-    }
-    QString errorText;
-    if (!prepareSessionArtifacts(pidValue, &errorText))
-    {
-        m_sessionLease.reset();
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), errorText);
-        return;
-    }
-    m_injectionBroker.reset();
-    if (m_autoInjectChildCheck != nullptr && m_autoInjectChildCheck->isChecked())
-    {
-        auto broker = std::make_unique<ks::winapi_monitor::InjectionBroker>();
-        std::wstring brokerError;
-        if (!broker->start(pidValue, selectedDllPath, m_currentSessionId.toStdWString(),
-                m_currentStopFlagPath.toStdWString(), &brokerError))
-        {
-            m_sessionLease.reset();
-            QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-                QStringLiteral("DLL 注入失败：%1").arg(QString::fromStdWString(brokerError)));
-            return;
-        }
-        m_injectionBroker = std::move(broker);
-    }
-    if (!writeSessionConfigFile(&errorText))
-    {
-        m_injectionBroker.reset();
-        m_sessionLease.reset();
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), errorText);
-        return;
-    }
-
-    // 同一进程实例停止后 Agent worker 会驻留等待下一份配置；复用它避免重复 LoadLibraryW 增加模块引用计数。
-    const bool reuseResidentAgent = hasResidentAgentForProcess(pidValue);
-
-    if (m_eventTable != nullptr)
-    {
-        m_eventTable->clearContents();
-        m_eventTable->setRowCount(0);
-        m_visibleEventCount = 0;
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.clear();
-        m_pendingDroppedRows = 0;
-        m_agentDroppedRows.clear();
-        m_evictedRows = 0;
-    }
-
-    m_hookState = HookState::Waiting;
-    m_definitionMismatch = false;
-    ++m_sessionGeneration;
-    resetCoverageView();
-    m_pipeStopFlag.store(false);
-    m_pipeRunning.store(true);
-    m_pipeConnected.store(false);
-    m_pipeReconnectAttempts.store(0);
-    {
-        std::lock_guard<std::mutex> lock(m_childPipeMutex);
-        m_childSessionLeases.clear();
-        m_childSessionPids.clear();
-        m_childPipeHandleValues.clear();
-    }
-
-    if (m_sessionProgressPid == 0)
-    {
-        m_sessionProgressPid = kPro.addReusable(this, "WinAPI", "准备会话");
-    }
+    m_hookState = HookState::Waiting; m_definitionMismatch = false;
+    resetCoverageView(); m_pipeRunning.store(true); m_pipeConnected.store(false);
+    if (!m_sessionProgressPid) m_sessionProgressPid = kPro.addReusable(this, "WinAPI", "准备会话");
     kPro.set(m_sessionProgressPid, "准备命名管道连接", 0, 20.0f);
-
-    startPipeReadThread();
-
-    std::wstring injectionDetail;
-    const bool injectOk = reuseResidentAgent
-        || ks::winapi_monitor::injectAgent(pidValue, selectedDllPath, &injectionDetail);
-    const std::string detailText = QString::fromStdWString(injectionDetail).toUtf8().toStdString();
-    if (!injectOk)
-    {
-        const QString injectErrorText = QString::fromStdString(detailText);
-        // privilegePromptHandled：权限恢复提示已处理时只保留内部日志与会话清理。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("注入 API 监控 DLL"),
-            injectErrorText);
-        appendInternalEvent(QStringLiteral("内部"), QStringLiteral("InjectDllByPath"), QString::fromStdString(detailText));
-        stopMonitoringInternal(false);
-        if (!privilegePromptHandled)
+    updateActionState(); updateStatusLabel();
+    // Accepted startup is never latest-only. The retained backend serializes its
+    // terminal result with STOP, even if delivery or the page disappears.
+    const auto ticket = m_sessionOperation->submitTransaction<std::shared_ptr<WinAPISessionBackend>, bool>(backend,
+        [cleanup](const auto& value)
         {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("WinAPI 监控"),
-                QStringLiteral("DLL 注入失败：%1").arg(injectErrorText));
-        }
-        return;
-    }
-
-    if (!reuseResidentAgent)
-    {
-        rememberResidentAgentForProcess(pidValue);
-    }
-
-    appendInternalEvent(
-        QStringLiteral("内部"),
-        QStringLiteral("会话已启动"),
-        reuseResidentAgent
-            ? QStringLiteral("已原子写入配置并复用常驻 Agent，等待其重新创建命名管道。")
-            : QStringLiteral("已原子写入配置并完成 DLL 注入，等待 Agent 创建命名管道。"));
-
-    kPro.set(
-        m_sessionProgressPid,
-        reuseResidentAgent ? "复用常驻 Agent，等待握手" : "DLL 已注入，等待 Agent 握手",
-        0,
-        45.0f);
-    updateActionState();
-    updateStatusLabel();
+            const bool started = value->start();
+            if (!started && !cleanup->isCleanupRequested()) cleanup->requestCleanup();
+            return started;
+        },
+        [this](const bool&, std::uint64_t) { pollSessionBackend(); return true; },
+        [this](std::exception_ptr)
+        {
+            m_stopping = true;
+            if (m_sessionBackend) m_sessionBackend->requestStop();
+            if (m_sessionCleanup && !m_sessionCleanup->isCleanupRequested()) m_sessionCleanup->requestCleanup();
+            updateActionState(); updateStatusLabel();
+        },
+        [backend, cleanup](ks::ui::AsyncOperationOutcome outcome)
+        {
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied)
+            { backend->requestStop(); if (!cleanup->isCleanupRequested()) cleanup->requestCleanup(); }
+        });
+    if (!ticket) { backend->requestStop(); if (!cleanup->isCleanupRequested()) cleanup->requestCleanup(); m_stopping = true; }
 }
 
-void WinAPIDock::stopMonitoring()
+void WinAPIDock::stopMonitoring() { stopMonitoringInternal(false); }
+
+void WinAPIDock::stopMonitoringInternal(const bool ownerClosing)
 {
-    stopMonitoringInternal(false);
-}
-
-void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
-{
-    if (!m_pipeRunning.load() && (m_pipeThread == nullptr || !m_pipeThread->joinable()))
-    {
-        m_injectionBroker.reset();
-        return;
-    }
-
-    ++m_sessionGeneration;
-    m_pipeStopFlag.store(true);
-    writeChildStopFlags();
-
-    if (!m_currentStopFlagPath.trimmed().isEmpty())
-    {
-        QFile stopFile(m_currentStopFlagPath);
-        if (stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        {
-            stopFile.write("stop");
-            stopFile.close();
-        }
-    }
-
-    m_injectionBroker.reset();
-
-    if (m_pipeThread != nullptr && m_pipeThread->joinable())
-    {
-        // The reader owns a synchronous ReadFile, so cancel it before joining.
-        (void)::CancelSynchronousIo(m_pipeThread->native_handle());
-        m_pipeThread->join();
-    }
-    m_pipeThread.reset();
-
-    const std::uintptr_t pipeHandleValue = m_pipeHandleValue.exchange(0);
-    if (pipeHandleValue != 0)
-    {
-        ::CloseHandle(reinterpret_cast<HANDLE>(pipeHandleValue));
-    }
-    joinChildPipeThreads();
-    closeChildPipeHandles();
-    { std::lock_guard<std::mutex> lock(m_childPipeMutex); m_childSessionLeases.clear(); }
-    m_sessionLease.reset();
-
-    m_pipeRunning.store(false);
-    m_pipeConnected.store(false);
-    markCoverageStale();
-    m_hookState = HookState::Waiting;
-    m_definitionMismatch = false;
-    kPro.set(m_sessionProgressPid, "WinAPI 监控已停止", 0, 100.0f);
-
-    if (!waitForThread)
-    {
-        appendInternalEvent(QStringLiteral("内部"), QStringLiteral("停止监控"), QStringLiteral("已发出停止标记并回收本地管道线程。"));
-    }
-
-    updateActionState();
-    updateStatusLabel();
+    if (!m_sessionBackend || !m_sessionCleanup) return;
+    m_sessionBackend->requestStop(); // No file IO, broker destruction or join on GUI.
+    m_stopping = true;
+    if (!m_sessionCleanup->isCleanupRequested() || !ownerClosing)
+        m_sessionCleanup->requestCleanup(); // Only an explicit Stop/Retry retries a failed attempt.
+    if (!ownerClosing) { updateActionState(); updateStatusLabel(); }
 }
 
 void WinAPIDock::terminateHooksForSelectedProcess()
 {
-    std::uint32_t pidValue = 0;
-    if (!currentSelectedPid(&pidValue))
+    std::uint32_t pid = 0;
+    if (!currentSelectedPid(&pid))
     {
         QMessageBox::information(this, QStringLiteral("终止 Hook"), QStringLiteral("请先选择目标进程或手动输入 PID。"));
         return;
     }
-
-    ks::winapi_monitor::SessionLease temporaryLease;
-    DWORD leaseError = 0;
-    if (m_sessionLease.pid() != pidValue && !temporaryLease.acquire(pidValue, &leaseError))
+    if (m_sessionCleanup && !m_sessionCleanup->isComplete())
     {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"),
-            QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。").arg(pidValue).arg(leaseError));
+        if (m_currentSessionPid == pid) stopMonitoringInternal(false);
         return;
     }
+    if (m_sessionOperation && m_sessionOperation->isBusy()) return;
+    pollSessionBackend(); // Preserve the prior session's final accepted inbox before replacing its owner.
+    WinAPISessionConfig config;
+    config.pid = pid; config.stopOnly = true;
+    config.generation = m_sessionGeneration.load() + 1;
+    auto backend = std::make_shared<WinAPISessionBackend>(std::move(config));
+    auto cleanup = ks::ui::RetainedCleanupJob::create([backend]() { return backend->cleanup(); }, 0,
+        [backend]() { backend->requestStop(); });
+    if (!cleanup) return;
+    m_sessionBackend = backend; m_sessionCleanup = cleanup;
+    m_currentSessionPid = pid; m_sessionGeneration.store(backend->config.generation);
+    m_startupReported = true; m_stopReported = false; m_stopping = true; m_reportedCleanupAttempt = 0;
+    m_pipeRunning.store(true); m_pipeConnected.store(false);
+    cleanup->requestCleanup();
+    updateActionState(); updateStatusLabel();
+}
 
-    const QString sessionDirectory = QString::fromStdWString(ks::winapi_monitor::buildSessionDirectory());
-    QDir sessionDir;
-    if (!sessionDir.mkpath(sessionDirectory))
-    {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法创建会话目录：%1").arg(sessionDirectory));
-        return;
-    }
-
-    const QString stopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pidValue));
-    QFile stopFile(stopFlagPath);
-    if (!stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法写入停止标记：%1").arg(stopFlagPath));
-        return;
-    }
-    stopFile.write("stop");
-    stopFile.close();
-
-    if (m_pipeRunning.load() && m_currentSessionPid == pidValue)
-    {
-        stopMonitoringInternal(false);
-    }
-    else
-    {
-        appendInternalEvent(
-            QStringLiteral("内部"),
-            QStringLiteral("手动终止 Hook"),
-            QStringLiteral("已为 PID=%1 写入停止标记。").arg(pidValue));
-        updateActionState();
-        updateStatusLabel();
-    }
+void WinAPIDock::initializeEventProjection()
+{
+    m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+        [this](int row) {
+            const auto item = m_eventTable->item(row, EventColumnTime100ns);
+            return ks::monitor::EventFilterRow{{item ? item->data(Qt::UserRole).toString() : QString()}, {}, 0};
+        },
+        [this](int visible, int total, bool pending) {
+            m_visibleEventCount = visible;
+            if (m_eventFilterStatusLabel)
+            {
+                m_eventFilterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visible).arg(total));
+                ks::ui::ApplyStatusRole(m_eventFilterStatusLabel, pending ? ks::ui::StatusRole::Warning
+                    : visible > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
+            }
+        });
+    applyEventFilter();
 }
 
 void WinAPIDock::applyEventFilter()
 {
-    if (m_eventTable == nullptr) return;
-    const QString keyword = m_eventFilterEdit != nullptr ? m_eventFilterEdit->text().trimmed() : QString();
-    if (keyword != m_eventFilterKeyword)
-    {
-        m_eventFilterKeyword = keyword;
-        m_visibleEventCount = 0;
-        for (int row = 0; row < m_eventTable->rowCount(); ++row)
-        {
-            const auto* item = m_eventTable->item(row, EventColumnTime100ns);
-            const bool visible = keyword.isEmpty()
-                || (item && item->data(Qt::UserRole).toString().contains(keyword, Qt::CaseInsensitive));
-            m_eventTable->setRowHidden(row, !visible);
-            if (visible) ++m_visibleEventCount;
-        }
-    }
-    if (m_eventFilterStatusLabel != nullptr)
-    {
-        m_eventFilterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2")
-            .arg(m_visibleEventCount).arg(m_eventTable->rowCount()));
-        ks::ui::ApplyStatusRole(m_eventFilterStatusLabel,
-            m_visibleEventCount > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-    }
+    m_eventFilterKeyword = m_eventFilterEdit ? m_eventFilterEdit->text().trimmed() : QString();
+    if (!m_eventFilterProjection || !m_eventTable || !m_eventTable->isVisible()) return;
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_eventFilterKeyword}; spec.fieldIndexes = {0};
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void WinAPIDock::clearEventFilter()
@@ -1536,73 +1485,68 @@ void WinAPIDock::clearEventFilter()
     applyEventFilter();
 }
 
+void WinAPIDock::updateEventExportAction()
+{
+    if (!m_exportButton) return;
+    const bool preparing = m_eventExport && m_eventExport->isPreparing();
+    const bool busy = m_eventExport && m_eventExport->isBusy();
+    m_exportButton->setEnabled(preparing || (!busy && m_eventArchive.size() > 0));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_exportButton->setToolTip(preparing
+        ? language.text(QStringLiteral("monitor.export.preparing_hint"), QStringLiteral("正在准备完整导出；再次点击可取消准备。"))
+        : busy ? language.text(QStringLiteral("monitor.export.in_progress"), QStringLiteral("导出进行中"))
+        : ks::i18n::sourceText(QStringLiteral("导出当前可见事件为 TSV")));
+}
+
 void WinAPIDock::exportVisibleRowsToTsv()
 {
-    if (m_eventTable == nullptr || m_eventTable->rowCount() == 0)
-    {
-        QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前没有可导出的事件。"));
-        return;
-    }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        if (!m_eventTable->isRowHidden(row))
-        {
-            ++visibleCount;
-        }
-    }
-    if (visibleCount == 0)
-    {
-        QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前筛选结果为空。"));
-        return;
-    }
-
+    const QPointer<WinAPIDock> guard(this);
+    if (m_eventExport) m_eventExport->reconcile();
+    if (!guard) return;
+    if (m_eventExport && m_eventExport->isPreparing()) { m_eventExport->cancelPreparation(); return; }
+    if (m_eventExport && m_eventExport->isBusy()) return;
     const QString defaultFileName = QStringLiteral("winapi_events_%1.tsv")
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-    const QString exportPath = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出 WinAPI 事件"),
-        defaultFileName,
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出 WinAPI 事件"), defaultFileName,
         QStringLiteral("TSV 文件 (*.tsv);;文本文件 (*.txt)"));
-    if (exportPath.trimmed().isEmpty())
-    {
-        return;
-    }
-
-    QFile exportFile(exportPath);
-    if (!exportFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    {
-        QMessageBox::warning(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("无法写入文件：%1").arg(exportPath));
-        return;
-    }
-
-    QTextStream outputStream(&exportFile);
-    outputStream << QStringLiteral("# 仅导出当前表格中的可见记录；这不是完整调用轨迹。%1").arg(eventLossSummary()) << '\n';
-    QStringList headerTextList;
-    for (int column = 0; column < EventColumnCount; ++column)
-    {
-        QTableWidgetItem* headerItem = m_eventTable->horizontalHeaderItem(column);
-        headerTextList << (headerItem != nullptr ? headerItem->text() : QString());
-    }
-    outputStream << headerTextList.join('\t') << '\n';
-
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        if (m_eventTable->isRowHidden(row))
-        {
-            continue;
+    if (!guard || path.trimmed().isEmpty() || (m_eventExport && m_eventExport->isBusy())) return;
+    try {
+        const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(freezeVisibleEventRowsForExport());
+        if (!guard) return;
+        if (snapshot->rows.empty()) {
+            QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前没有可导出的事件。")); return;
         }
-
-        QStringList rowTextList;
-        for (int column = 0; column < EventColumnCount; ++column)
-        {
-            QTableWidgetItem* itemPointer = m_eventTable->item(row, column);
-            rowTextList << (itemPointer != nullptr ? itemPointer->text().replace('\t', ' ') : QString());
+        if (!m_eventExport) {
+            m_eventExport = new ks::monitor::MonitorCanonicalExport(this);
+            m_eventExport->setStateChangedCallback([guard]() { if (guard) guard->updateEventExportAction(); });
         }
-        outputStream << rowTextList.join('\t') << '\n';
+        const bool started = m_eventExport->start(snapshot, QStringLiteral("monitor/winapi/session-%1/pid-%2/retained-events").arg(snapshot->sessionGeneration).arg(snapshot->targetPid), path, QStringLiteral("# 仅导出当前表格中的可见记录；这不是完整调用轨迹。%1").arg(snapshot->lossSummary),
+            [guard](const ks::monitor::CanonicalExportOutcome& result) {
+                if (!guard || result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+                auto& language = ks::i18n::LanguageManager::instance();
+                if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                    QMessageBox::information(guard, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前筛选结果为空。")); return;
+                }
+                if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                    QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"), language.text(QStringLiteral("monitor.export.not_accepted"),
+                        QStringLiteral("未开始写入文件，请重试导出。"))); return;
+                }
+                const auto& receipt = result.receipt;
+                if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                    QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                        language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+                }
+                if (!receipt.succeeded()) QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"),
+                    language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
+            });
+        if (!guard) return;
+        if (!started) QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-    exportFile.close();
+    if (guard) updateEventExportAction();
 }
 
 void WinAPIDock::showEventContextMenu(const QPoint& position)

@@ -1,3 +1,6 @@
+#include "NetworkDock.NidsAnalysis.h"
+#include <QItemSelectionModel>
+#include <QTableView>
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "NetworkAuditPage.h"
@@ -6,6 +9,7 @@
 #include "../PluginHost.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/RetainedCleanupJob.h"
 #include "../theme.h"
 
 #include <QCoreApplication>
@@ -138,41 +142,144 @@ namespace
         return packetRecord;
     }
 
-    // disableNetworkTrafficCaptureAsync 作用：
-    // - 把“关闭 R0 逐包数据面”的同步 IOCTL 丢到后台线程执行；
-    //   CreateFileW + DeviceIoControl 没有 OVERLAPPED，内核侧要注销 WFP callout，
-    //   在 UI 线程直接下发会造成可感知卡顿；
-    // - 入参：无（该控制面只有“启用/停用”两个幂等指令，这里固定下发停用）；
-    // - 返回：无，停用失败只写警告日志，不再回投 UI。
-    void disableNetworkTrafficCaptureAsync()
-    {
-        std::thread([]()
+
+}
+
+void NetworkDock::initializeNidsConnections()
+{
+    // NIDS 控制连接：实时检测开关、等级过滤和清空。
+    connect(m_nidsEnableCheck, &QCheckBox::toggled, this, [this](const bool checked)
+        {
+            if (!checked)
             {
-                const ksword::ark::DriverClient driverClient;
-                const ksword::ark::NetworkTrafficCaptureControlResult captureControl =
-                    driverClient.controlNetworkTrafficCapture(false);
-                if (!captureControl.io.ok ||
-                    captureControl.response.status != KSWORD_ARK_NETWORK_STATUS_DISABLED)
-                {
-                    kLogEvent disableEvent;
-                    warn << disableEvent
-                         << "[NetworkDock] R0 逐包数据面停用失败: "
-                         << captureControl.io.message << eol;
-                }
-            }).detach();
-    }
+                if (m_nidsAnalysisSession) m_nidsAnalysisSession->enqueueReset();
+                scheduleNidsAnalysis();
+            }
+            updateNidsStatusLabel();
+        });
+    connect(m_nidsSeverityFilterCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
+        {
+            rebuildNidsAlertTable();
+            updateNidsStatusLabel();
+        });
+    connect(m_nidsClearButton, &QPushButton::clicked, this, [this]()
+        {
+            clearNidsAlerts();
+        });
+    const auto nidsAlertSequenceForRow = [this](const int row, std::uint64_t& sequenceIdOut) -> bool
+        {
+            if (m_nidsAlertTable == nullptr || row < 0 || row >= m_nidsAlertTable->model()->rowCount())
+            {
+                return false;
+            }
+
+            const QVariant sequenceVariant = m_nidsAlertTable->model()->index(
+                row, toNidsAlertColumn(NidsAlertTableColumn::Time)).data(Qt::UserRole);
+            if (!sequenceVariant.isValid())
+            {
+                return false;
+            }
+            sequenceIdOut = static_cast<std::uint64_t>(sequenceVariant.toULongLong());
+            return sequenceIdOut != 0;
+        };
+    connect(m_nidsAlertTable, &QTableView::doubleClicked, this,
+        [this, nidsAlertSequenceForRow](const QModelIndex& index)
+        {
+            std::uint64_t sequenceId = 0;
+            if (nidsAlertSequenceForRow(index.row(), sequenceId))
+            {
+                openPacketDetailWindowBySequenceId(sequenceId);
+            }
+        });
+    // NIDS 告警表右键菜单说明：
+    // - 该菜单此前在这里和 initializeNidsTab() 各注册过一次，两个槽都会 QMenu::exec()；
+    // - Qt 按连接顺序依次调用槽，于是一次右键先弹“复制类”菜单，关掉后又立刻弹出“详情类”菜单，
+    //   表现为连续右键两次看到的菜单内容不一致；
+    // - 现统一由 NetworkDock.Nids.cpp 的 initializeNidsTab() 注册唯一一份合并后的菜单，此处不再注册。
+}
+
+void NetworkDock::initializeHttpsAnalyzeConnections()
+{
+    // HTTPS 解析控制连接。
+    connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            startHttpsProxyService();
+        });
+    connect(m_httpsStopProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            stopHttpsProxyService();
+        });
+    connect(m_httpsTrustCertButton, &QPushButton::clicked, this, [this]()
+        {
+            ensureHttpsRootCertificateTrusted();
+        });
+    connect(m_httpsApplyProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            applyHttpsSystemProxy();
+        });
+    connect(m_httpsClearProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            clearHttpsSystemProxy();
+        });
+}
+
+void NetworkDock::initializeMultiThreadDownloadConnections()
+{
+    // 多线程下载页连接：开始下载、选择目录、URL回车触发。
+    connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+    connect(m_multiDownloadBrowseDirButton, &QPushButton::clicked, this, [this]()
+        {
+            browseMultiThreadDownloadDirectory();
+        });
+    connect(m_multiDownloadUrlEdit, &QLineEdit::returnPressed, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+
+    // 下载捕获设置连接：开关/后缀变化后写入 JSON。
+    connect(m_multiDownloadAutoCaptureClipboardCheck, &QCheckBox::toggled, this, [this](const bool checked)
+        {
+            m_multiDownloadAutoCaptureClipboardEnabled = checked;
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadCaptureSuffixEdit, &QLineEdit::editingFinished, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadSaveCaptureSettingsButton, &QPushButton::clicked, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+
+    // Model/proxy rows may move; the stable task role selects segment identity.
+    connect(m_multiDownloadTaskTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
+        {
+            const auto rows = m_multiDownloadTaskTable->selectionModel()->selectedRows(0);
+            m_multiDownloadSelectedTaskId = rows.isEmpty() ? 0 : rows.front().data(Qt::UserRole + 1).toInt();
+            refreshMultiThreadDownloadUi();
+        });
 }
 
 void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
         {
+            const QPointer<NetworkDock> owner(this);
+            ensureVisibleNetworkToolPage();
+            if (!owner) return;
+            initializeVisibleDiagnosticPage();
+            synchronizeVisiblePacketProjection();
+            synchronizeVisibleNidsProjection();
+            synchronizeVisibleHttpsProjection();
             QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
-            if (currentPage == m_firewallPage && m_firewallPage != nullptr)
+            if (currentPage == m_firewallTabPage && m_firewallPage != nullptr)
             {
                 m_firewallPage->requestInitialRefresh();
             }
-            else if (currentPage == m_networkAuditPage && m_networkAuditPage != nullptr)
+            else if (currentPage == m_networkAuditTabPage && m_networkAuditPage != nullptr)
             {
                 m_networkAuditPage->requestInitialRefresh();
             }
@@ -197,60 +304,6 @@ void NetworkDock::initializeConnections()
             context.targetKind = ks::plugin_host::TargetKind::Network;
             ks::plugin_host::populateTargetMenu(m_networkPluginMenu, this, context);
         });
-
-    // NIDS 控制连接：实时检测开关、等级过滤和清空。
-    connect(m_nidsEnableCheck, &QCheckBox::toggled, this, [this](const bool checked)
-        {
-            if (!checked)
-            {
-                m_nidsEngine.Reset();
-            }
-            updateNidsStatusLabel();
-        });
-    connect(m_nidsSeverityFilterCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
-        {
-            rebuildNidsAlertTable();
-            updateNidsStatusLabel();
-        });
-    connect(m_nidsClearButton, &QPushButton::clicked, this, [this]()
-        {
-            clearNidsAlerts();
-        });
-    const auto nidsAlertSequenceForRow = [this](const int row, std::uint64_t& sequenceIdOut) -> bool
-        {
-            if (m_nidsAlertTable == nullptr || row < 0 || row >= m_nidsAlertTable->rowCount())
-            {
-                return false;
-            }
-
-            QTableWidgetItem* timeItem = m_nidsAlertTable->item(row, toNidsAlertColumn(NidsAlertTableColumn::Time));
-            if (timeItem == nullptr)
-            {
-                return false;
-            }
-
-            const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
-            if (!sequenceVariant.isValid())
-            {
-                return false;
-            }
-            sequenceIdOut = static_cast<std::uint64_t>(sequenceVariant.toULongLong());
-            return sequenceIdOut != 0;
-        };
-    connect(m_nidsAlertTable, &QTableWidget::cellDoubleClicked, this,
-        [this, nidsAlertSequenceForRow](const int row, const int /*column*/)
-        {
-            std::uint64_t sequenceId = 0;
-            if (nidsAlertSequenceForRow(row, sequenceId))
-            {
-                openPacketDetailWindowBySequenceId(sequenceId);
-            }
-        });
-    // NIDS 告警表右键菜单说明：
-    // - 该菜单此前在这里和 initializeNidsTab() 各注册过一次，两个槽都会 QMenu::exec()；
-    // - Qt 按连接顺序依次调用槽，于是一次右键先弹“复制类”菜单，关掉后又立刻弹出“详情类”菜单，
-    //   表现为连续右键两次看到的菜单内容不一致；
-    // - 现统一由 NetworkDock.Nids.cpp 的 initializeNidsTab() 注册唯一一份合并后的菜单，此处不再注册。
 
     // 流量时间轴连接：
     // - ProcessTraceTimelineWidget 内部复用了 ETW 页的框选、拖拽和滚轮缩放工具；
@@ -388,28 +441,6 @@ void NetworkDock::initializeConnections()
             refreshConnectionTables();
         });
     }
-
-    // HTTPS 解析控制连接。
-    connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            startHttpsProxyService();
-        });
-    connect(m_httpsStopProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            stopHttpsProxyService();
-        });
-    connect(m_httpsTrustCertButton, &QPushButton::clicked, this, [this]()
-        {
-            ensureHttpsRootCertificateTrusted();
-        });
-    connect(m_httpsApplyProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            applyHttpsSystemProxy();
-        });
-    connect(m_httpsClearProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            clearHttpsSystemProxy();
-        });
 
     // 连接表 PID 解析辅助：
     // - 从任意连接表（TCP/UDP）指定列提取 PID；
@@ -685,99 +716,6 @@ void NetworkDock::initializeConnections()
             });
     }
 
-    // 请求构造控制连接：执行请求、重置表单、模式切换自动调整默认参数。
-    connect(m_manualExecuteButton, &QPushButton::clicked, this, [this]()
-        {
-            executeManualRequest();
-        });
-    connect(m_manualResetButton, &QPushButton::clicked, this, [this]()
-        {
-            kLogEvent resetClickEvent;
-            info << resetClickEvent << "[NetworkDock] 用户点击请求构造重置按钮。" << eol;
-            resetManualRequestForm();
-        });
-    connect(m_manualApiCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
-        {
-            if (m_manualApiCombo == nullptr)
-            {
-                return;
-            }
-
-            const ks::network::ManualNetworkApiKind apiKind =
-                static_cast<ks::network::ManualNetworkApiKind>(m_manualApiCombo->currentData().toInt());
-
-            // 模式切换时只更新推荐默认参数，不强行覆盖用户已勾选的“手动覆盖”语义。
-            if (m_manualOverrideSocketParameterCheck != nullptr &&
-                m_manualOverrideSocketParameterCheck->isChecked())
-            {
-                kLogEvent switchApiEvent;
-                dbg << switchApiEvent
-                    << "[NetworkDock] 请求构造 API 模式切换（保留手工参数）, api="
-                    << ks::network::ManualNetworkApiKindToString(apiKind)
-                    << eol;
-                return;
-            }
-
-            if (m_manualSocketTypeEdit == nullptr || m_manualProtocolEdit == nullptr)
-            {
-                return;
-            }
-
-            if (apiKind == ks::network::ManualNetworkApiKind::WinSockTcp)
-            {
-                m_manualSocketTypeEdit->setText(QStringLiteral("1")); // SOCK_STREAM
-                m_manualProtocolEdit->setText(QStringLiteral("6"));   // IPPROTO_TCP
-                if (m_manualConnectBeforeSendCheck != nullptr)
-                {
-                    m_manualConnectBeforeSendCheck->setChecked(true);
-                }
-            }
-            else
-            {
-                m_manualSocketTypeEdit->setText(QStringLiteral("2")); // SOCK_DGRAM
-                m_manualProtocolEdit->setText(QStringLiteral("17"));  // IPPROTO_UDP
-            }
-
-            const bool overrideSocketParameters = m_manualOverrideSocketParameterCheck != nullptr
-                && m_manualOverrideSocketParameterCheck->isChecked();
-            kLogEvent switchApiEvent;
-            dbg << switchApiEvent
-                << "[NetworkDock] 请求构造 API 模式切换, api="
-                << ks::network::ManualNetworkApiKindToString(apiKind)
-                << ", overrideSocket="
-                << (overrideSocketParameters ? "true" : "false")
-                << eol;
-        });
-
-    // 多线程下载页连接：开始下载、选择目录、URL回车触发。
-    connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
-        {
-            startMultiThreadDownloadTask();
-        });
-    connect(m_multiDownloadBrowseDirButton, &QPushButton::clicked, this, [this]()
-        {
-            browseMultiThreadDownloadDirectory();
-        });
-    connect(m_multiDownloadUrlEdit, &QLineEdit::returnPressed, this, [this]()
-        {
-            startMultiThreadDownloadTask();
-        });
-
-    // 下载捕获设置连接：开关/后缀变化后写入 JSON。
-    connect(m_multiDownloadAutoCaptureClipboardCheck, &QCheckBox::toggled, this, [this](const bool checked)
-        {
-            m_multiDownloadAutoCaptureClipboardEnabled = checked;
-            saveMultiThreadDownloadCaptureSettings();
-        });
-    connect(m_multiDownloadCaptureSuffixEdit, &QLineEdit::editingFinished, this, [this]()
-        {
-            saveMultiThreadDownloadCaptureSettings();
-        });
-    connect(m_multiDownloadSaveCaptureSettingsButton, &QPushButton::clicked, this, [this]()
-        {
-            saveMultiThreadDownloadCaptureSettings();
-        });
-
     // 剪贴板监听连接：
     // - 仅处理主剪贴板文本变化；
     // - 自动捕获开关关闭时，检测函数会快速返回。
@@ -794,42 +732,11 @@ void NetworkDock::initializeConnections()
             });
     }
 
-    // 多线程下载任务选中变化：切换右侧分段详情与总进度条绑定任务。
-    connect(m_multiDownloadTaskTable, &QTableWidget::itemSelectionChanged, this, [this]()
-        {
-            if (m_multiDownloadTaskTable == nullptr)
-            {
-                return;
-            }
-
-            const QList<QTableWidgetItem*> selectedItemList = m_multiDownloadTaskTable->selectedItems();
-            if (selectedItemList.isEmpty())
-            {
-                m_multiDownloadSelectedTaskId = 0;
-                refreshMultiThreadDownloadUi();
-                return;
-            }
-
-            const int selectedRow = selectedItemList.first()->row();
-            QTableWidgetItem* idItem = m_multiDownloadTaskTable->item(selectedRow, 0);
-            if (idItem == nullptr)
-            {
-                m_multiDownloadSelectedTaskId = 0;
-                refreshMultiThreadDownloadUi();
-                return;
-            }
-
-            bool parseOk = false;
-            const int selectedTaskId = idItem->text().toInt(&parseOk, 10);
-            m_multiDownloadSelectedTaskId = parseOk ? selectedTaskId : 0;
-            refreshMultiThreadDownloadUi();
-        });
-
     // 双击报文行：打开独立详情窗口（非阻塞）。
-    connect(m_packetTable, &QTableWidget::cellDoubleClicked, this,
-        [this](const int row, const int /*column*/)
+    connect(m_packetTable, &QTableView::doubleClicked, this,
+        [this](const QModelIndex& index)
         {
-            openPacketDetailWindowFromTableRow(m_packetTable, row);
+            openPacketDetailWindowBySequenceId(index.siblingAtColumn(0).data(Qt::UserRole).toULongLong());
         });
 
     // 右键菜单：查看详情 / 预填阻断规则 / 复制行 / 批量复制ASCII/HEX / 重放到请求构造 / 跟踪此进程 / 转到进程详细信息。
@@ -898,13 +805,7 @@ void NetworkDock::initializeConnections()
                             continue;
                         }
 
-                        QTableWidgetItem* timeItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Time));
-                        if (timeItem == nullptr)
-                        {
-                            continue;
-                        }
-
-                        const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+                        const QVariant sequenceVariant = m_packetTable->cell(row, toPacketColumn(PacketTableColumn::Time), Qt::UserRole);
                         if (!sequenceVariant.isValid())
                         {
                             continue;
@@ -922,7 +823,7 @@ void NetworkDock::initializeConnections()
             QAction* addBlockRuleAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
                 QStringLiteral("预填阻断规则"));
-            addBlockRuleAction->setEnabled(m_firewallPage != nullptr);
+            addBlockRuleAction->setEnabled(m_firewallTabPage != nullptr);
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
@@ -968,12 +869,10 @@ void NetworkDock::initializeConnections()
                         uploadTarget.errorText = QStringLiteral("当前报文选择为空，无法解析 PID。");
                         return uploadTarget;
                     }
-                    const QTableWidgetItem* pidItem =
-                        (m_packetTable != nullptr && rowIndex >= 0)
-                        ? m_packetTable->item(rowIndex, toPacketColumn(PacketTableColumn::Pid))
-                        : nullptr;
+                    const QString pidText = m_packetTable != nullptr && rowIndex >= 0
+                        ? m_packetTable->cell(rowIndex, toPacketColumn(PacketTableColumn::Pid)).toString() : QString{};
                     std::uint32_t targetPid = 0;
-                    if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                    if (pidText.isEmpty() || !ks::online_scan::tryParsePidFromText(pidText, &targetPid))
                     {
                         uploadTarget.errorText = QStringLiteral("当前报文行没有可解析 PID。");
                         return uploadTarget;
@@ -995,17 +894,16 @@ void NetworkDock::initializeConnections()
             {
                 if (anchorRow >= 0)
                 {
-                    openPacketDetailWindowFromTableRow(m_packetTable, anchorRow);
+                    openPacketDetailWindowBySequenceId(m_packetTable->cell(anchorRow, 0, Qt::UserRole).toULongLong());
                 }
             }
             else if (selectedAction == addBlockRuleAction)
             {
                 const std::vector<std::uint64_t> sequenceList = collectSequenceListByRows(
                     anchorRow >= 0 ? std::vector<int>{ anchorRow } : std::vector<int>{});
-                if (sequenceList.empty() || m_firewallPage == nullptr)
-                {
-                    return;
-                }
+                if (sequenceList.empty()) return;
+                const QPointer<NetworkDock> owner(this);
+                if (!ensureNetworkToolPage(m_firewallTabPage) || !owner || m_firewallPage == nullptr) return;
 
                 const auto packetIt = m_packetBySequence.find(sequenceList.front());
                 if (packetIt == m_packetBySequence.end())
@@ -1013,7 +911,7 @@ void NetworkDock::initializeConnections()
                     return;
                 }
 
-                const ks::network::PacketRecord& packetRecord = packetIt->second;
+                const ks::network::PacketRecord& packetRecord = *packetIt->second;
                 m_firewallPage->addBlockRuleFromEvidence(
                     QString::fromUtf8(packetRecord.remoteAddress.c_str()),
                     QString::number(packetRecord.remotePort),
@@ -1032,8 +930,7 @@ void NetworkDock::initializeConnections()
                 rowTextList.reserve(m_packetTable->columnCount());
                 for (int columnIndex = 0; columnIndex < m_packetTable->columnCount(); ++columnIndex)
                 {
-                    QTableWidgetItem* item = m_packetTable->item(anchorRow, columnIndex);
-                    rowTextList.push_back(item == nullptr ? QString() : item->text());
+                    rowTextList.push_back(m_packetTable->cell(anchorRow, columnIndex).toString());
                 }
                 if (QGuiApplication::clipboard() != nullptr)
                 {
@@ -1076,7 +973,7 @@ void NetworkDock::initializeConnections()
                         continue;
                     }
 
-                    const ks::network::PacketRecord& packetRecord = iterator->second;
+                    const ks::network::PacketRecord& packetRecord = *iterator->second;
                     if (copyHexMode)
                     {
                         // 十六进制模式：始终保留报文头元信息，方便回溯上下文。
@@ -1157,6 +1054,396 @@ void NetworkDock::initializeConnections()
             }
         });
 
+    // 初始化按钮可用状态。
+    updateMonitorButtonState();
+
+    // 初始化新增页首屏数据。
+    refreshMultiThreadDownloadUi();
+}
+
+void NetworkDock::startTrafficMonitor()
+{
+    if (m_trafficService == nullptr)
+    {
+        return;
+    }
+
+    // 正在停止时不允许立刻重启，避免服务线程状态在“停/启”间抖动。
+    if (m_monitorStopInProgress.load())
+    {
+        if (m_monitorStatusLabel != nullptr)
+        {
+            m_monitorStatusLabel->setText(QStringLiteral("状态：停止中，请稍候..."));
+        }
+        return;
+    }
+
+    if (!ensureTrafficCaptureLifetime()) return;
+    const auto lifetime = m_trafficLifetime;
+    const auto reservation = std::make_shared<TrafficCaptureReservation>();
+    if (!lifetime->reserve()) return;
+    reservation->lifetime = lifetime;
+    reservation->job = m_trafficCleanup;
+
+    // 每次启动前清零“后台队列丢包计数”，便于观察本次运行状态。
+    {
+        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+        m_droppedPacketCount = 0;
+    }
+
+    // 先探测版本化 R0 WFP IP packet IOCTL；旧驱动或逐包数据面不可用时立即回退 R3。
+    // 后台探测失败会自动调用 startR3TrafficMonitor，不需要用户二次点击。
+    const std::uint64_t generation = m_monitorGeneration.fetch_add(1) + 1ULL;
+    m_monitorSource = TrafficMonitorSource::Starting;
+    m_monitorRunning = true;
+
+    // 启用 R0 数据面是一次同步 IOCTL（CreateFileW + DeviceIoControl，无 OVERLAPPED），
+    // 内核侧要注册 WFP callout/filter 并初始化 ring buffer，因此整段控制流放到后台线程；
+    // UI 线程只先把按钮状态与“正在探测”提示落地，结果回投后再决定进 R0 还是回退 R3。
+    if (m_monitorStatusLabel != nullptr)
+    {
+        m_monitorStatusLabel->setText(QStringLiteral("状态：正在探测 R0 WFP IPv4/IPv6 逐包数据源..."));
+    }
+    updateMonitorButtonState();
+
+    const auto dispatcher = m_trafficDispatcher;
+    const auto deliver = [this, generation](bool r0CaptureEnabled, const QString& message)
+    {
+        if (m_monitorGeneration.load() != generation
+            || m_monitorSource != TrafficMonitorSource::Starting) return;
+        if (!r0CaptureEnabled)
+        {
+            startR3TrafficMonitor(message);
+            kLogEvent fallbackEvent;
+            warn << fallbackEvent << "[NetworkDock] R0 逐包数据面启用失败，已回退 R3: "
+                << message << eol;
+            return;
+        }
+        m_r0LastEventSequence = 0ULL;
+        m_r0LastDroppedEventCount = 0ULL;
+        refreshR0TrafficSnapshotAsync(generation, true);
+        updateMonitorButtonState();
+    };
+    QThreadPool::globalInstance()->start([lifetime, reservation, dispatcher, deliver]()
+    {
+        // Reserve precedes admission; cleanup cannot race an accepted enable.
+        lifetime->r0Touched.store(true);
+        const ksword::ark::DriverClient driverClient;
+        const auto control = driverClient.controlNetworkTrafficCapture(true);
+        // Failure to open the device means ENABLE was never submitted. Keep
+        // conservative cleanup for an actual IOCTL/protocol failure, but do not
+        // turn a missing driver into an impossible DISABLE cleanup obligation.
+        if (control.io.deviceOpenFailed) lifetime->r0Touched.store(false);
+        const bool enabled = control.io.ok && !control.unsupported
+            && control.response.status == KSWORD_ARK_NETWORK_STATUS_APPLIED
+            && control.response.enabled == 1UL;
+        if (!enabled && !lifetime->stopR0())
+        {
+            reservation->job->requestCleanup();
+            return; // Failed native restore retains the epoch; never start R3 over it.
+        }
+        const QString message = QString::fromStdString(control.io.message);
+        dispatcher->post([deliver, enabled, message]() { deliver(enabled, message); });
+    });
+
+    kLogEvent startEvent;
+    info << startEvent << "[NetworkDock] 用户触发网络监控启动。" << eol;
+}
+
+void NetworkDock::stopTrafficMonitor()
+{
+    if (!m_trafficCleanup || m_monitorStopInProgress.exchange(true)) return;
+    m_monitorGeneration.fetch_add(1);
+    m_monitorSource = TrafficMonitorSource::Stopped;
+    m_monitorRunning = false;
+    if (m_r0TrafficRefreshTimer) m_r0TrafficRefreshTimer->stop();
+    if (m_monitorStatusLabel) m_monitorStatusLabel->setText(QStringLiteral("状态：停止中..."));
+    updateMonitorButtonState();
+    m_trafficCleanup->requestCleanup();
+    kLogEvent stopEvent;
+    info << stopEvent << "[NetworkDock] 用户触发网络监控停止（异步）。" << eol;
+}
+
+void NetworkDock::refreshR0TrafficSnapshotAsync(
+    const std::uint64_t generation,
+    const bool initialProbe)
+{
+    unsigned long requestedRows = 0;
+    {
+        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+        if (m_pendingPacketQueue.size() < kMaxPendingPacketQueueCount)
+            requestedRows = static_cast<unsigned long>(std::min<std::size_t>(
+                kMaxPendingPacketQueueCount - m_pendingPacketQueue.size(),
+                KSWORD_ARK_NETWORK_TRAFFIC_MAX_REQUESTED_ROWS));
+    }
+    // A single R0 query owns at most the currently free queue slots. While it
+    // runs the GUI consumer can only free more slots; R3 is stopped in R0 mode.
+    // With no room, leave the driver cursor untouched and defer this poll.
+    if (requestedRows == 0 || m_r0TrafficRefreshPending.exchange(true))
+    {
+        // 用户可能在上一代 R0 查询尚未返回时停止并立即重启。
+        // 初始探测不能静默丢弃，否则新一代会永久停在 Starting 状态。
+        if (initialProbe)
+        {
+            QTimer::singleShot(120, this, [this, generation]()
+            {
+                if (m_monitorGeneration.load() == generation
+                    && m_monitorSource == TrafficMonitorSource::Starting)
+                {
+                    refreshR0TrafficSnapshotAsync(generation, true);
+                }
+            });
+        }
+        return;
+    }
+
+    const auto lifetime = m_trafficLifetime;
+    const auto reservation = std::make_shared<TrafficCaptureReservation>();
+    if (!lifetime || !lifetime->reserve())
+    {
+        m_r0TrafficRefreshPending.store(false);
+        return;
+    }
+    reservation->lifetime = lifetime;
+    reservation->job = m_trafficCleanup;
+    const std::uint64_t afterSequence = m_r0LastEventSequence;
+    const auto dispatcher = m_trafficDispatcher;
+    const auto deliver = [this, generation, initialProbe](bool r0Usable,
+        const QString& diagnosticText, std::uint64_t nextSequence,
+        std::uint64_t droppedPacketCount, std::vector<ks::network::PacketRecord> packetRecords)
+    {
+        m_r0TrafficRefreshPending.store(false);
+        if (m_monitorGeneration.load() != generation
+            || m_monitorSource == TrafficMonitorSource::Stopped) return;
+        if (!r0Usable)
+        {
+            startR3TrafficMonitor(diagnosticText);
+            return;
+        }
+        if (initialProbe)
+        {
+            m_monitorSource = TrafficMonitorSource::R0;
+            m_monitorRunning = true;
+            if (!m_packetTimelineSessionActive) beginPacketTimelineMonitorSession();
+            if (m_r0TrafficRefreshTimer) m_r0TrafficRefreshTimer->start();
+        }
+        m_r0LastEventSequence = nextSequence;
+        m_r0LastDroppedEventCount = droppedPacketCount;
+        {
+            // Use the same time-budgeted consumer as R3. The previous
+            // direct loop ran the entire R0 query on GUI and bypassed the batch
+            // projection/timeline refresh when the R3 queue was empty. Query
+            // admission reserved enough free slots; no R0 packet is discarded.
+            std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+            for (auto& packetRecord : packetRecords)
+            {
+                packetRecord.sequenceId = m_r0SyntheticSequence++;
+                m_pendingPacketQueue.push_back(std::move(packetRecord));
+            }
+        }
+        if (m_monitorStatusLabel)
+            m_monitorStatusLabel->setText(QStringLiteral("状态：运行中；来源：R0 WFP IPv4/IPv6 逐包捕获（报文前缀最长 %1 字节；%2）")
+                .arg(KSWORD_ARK_NETWORK_TRAFFIC_MAX_CAPTURE_BYTES).arg(diagnosticText));
+        updateMonitorButtonState();
+    };
+    QThreadPool::globalInstance()->start([lifetime, reservation, dispatcher, deliver, afterSequence, requestedRows]() mutable
+    {
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::NetworkTrafficPacketResult packetResult =
+            driverClient.queryNetworkTrafficPackets(
+                afterSequence,
+                requestedRows);
+        const bool r0Usable =
+            packetResult.io.ok &&
+            !packetResult.unsupported &&
+            packetResult.status == KSWORD_ARK_NETWORK_STATUS_APPLIED;
+
+        std::vector<ks::network::PacketRecord> packetRecords;
+        if (r0Usable)
+        {
+            ks::network::detail::ConnectionPidResolver pidResolver;
+            ks::network::detail::ProcessNameResolver processNameResolver;
+            packetRecords.reserve(packetResult.entries.size());
+            for (const KSWORD_ARK_NETWORK_TRAFFIC_PACKET_ROW& packetRow : packetResult.entries)
+            {
+                packetRecords.push_back(buildR0WfpPacketRecord(
+                    packetRow,
+                    pidResolver,
+                    processNameResolver));
+            }
+        }
+
+        const QString diagnosticText = r0Usable
+            ? QStringLiteral("新增=%1/%2，cursor=%3，ring覆盖=%4，cursor缺口=%5")
+                .arg(static_cast<qulonglong>(packetRecords.size()))
+                .arg(packetResult.returnedCount)
+                .arg(static_cast<qulonglong>(packetResult.nextSequence))
+                .arg(static_cast<qulonglong>(packetResult.droppedPacketCount))
+                .arg(static_cast<qulonglong>(packetResult.cursorGapCount))
+            : QStringLiteral("packet=%1；status=%2；lastStatus=0x%3")
+                .arg(QString::fromUtf8(packetResult.io.message.c_str()))
+                .arg(packetResult.status)
+                .arg(static_cast<quint32>(packetResult.lastStatus), 8, 16, QChar('0'));
+
+        if (!r0Usable && !lifetime->stopR0())
+        {
+            reservation->job->requestCleanup();
+            return;
+        }
+        dispatcher->post([deliver = std::move(deliver), r0Usable, diagnosticText,
+            nextSequence = packetResult.nextSequence,
+            droppedPacketCount = packetResult.droppedPacketCount,
+            packetRecords = std::move(packetRecords)]() mutable
+        {
+            deliver(r0Usable, diagnosticText, nextSequence, droppedPacketCount, std::move(packetRecords));
+        });
+    });
+}
+
+void NetworkDock::startR3TrafficMonitor(const QString& fallbackReason)
+{
+    if (m_monitorSource == TrafficMonitorSource::Stopped || m_trafficService == nullptr)
+    {
+        return;
+    }
+    if (m_r0TrafficRefreshTimer != nullptr)
+    {
+        m_r0TrafficRefreshTimer->stop();
+    }
+    m_monitorSource = TrafficMonitorSource::R3;
+
+    const auto lifetime = m_trafficLifetime;
+    const auto reservation = std::make_shared<TrafficCaptureReservation>();
+    if (!lifetime || !lifetime->reserve()) return;
+    reservation->lifetime = lifetime;
+    reservation->job = m_trafficCleanup;
+    const auto dispatcher = m_trafficDispatcher;
+    const auto generation = m_monitorGeneration.load();
+    const auto deliver = [this, generation, fallbackReason](bool running)
+    {
+        if (m_monitorGeneration.load() != generation || m_monitorSource != TrafficMonitorSource::R3) return;
+        m_monitorRunning = running;
+        if (!m_monitorRunning)
+        {
+            m_monitorSource = TrafficMonitorSource::Stopped;
+            if (m_packetTimelineSessionActive)
+            {
+                endPacketTimelineMonitorSession();
+            }
+            if (m_monitorStatusLabel != nullptr)
+            {
+                m_monitorStatusLabel->setText(QStringLiteral("状态：R0 不可用，R3 回退启动失败"));
+            }
+        }
+        else
+        {
+            if (!m_packetTimelineSessionActive)
+            {
+                beginPacketTimelineMonitorSession();
+            }
+            if (m_monitorStatusLabel != nullptr)
+            {
+                m_monitorStatusLabel->setText(
+                    QStringLiteral("状态：运行中；来源：R3 用户态抓包（R0 不可用：%1）")
+                        .arg(fallbackReason));
+            }
+        }
+        updateMonitorButtonState();
+    };
+    QThreadPool::globalInstance()->start([lifetime, reservation, dispatcher, deliver]()
+    {
+        const bool started = lifetime->service->StartCapture();
+        const bool running = started && lifetime->service->IsRunning();
+        dispatcher->post([deliver, running]() { deliver(running); });
+    });
+}
+
+void NetworkDock::updateMonitorButtonState()
+{
+    const bool stopping = m_monitorStopInProgress.load();
+    if (m_startMonitorButton != nullptr)
+    {
+        m_startMonitorButton->setEnabled(!m_monitorRunning && !stopping);
+    }
+    if (m_stopMonitorButton != nullptr)
+    {
+        m_stopMonitorButton->setEnabled(m_monitorRunning && !stopping);
+    }
+}
+
+
+
+
+void NetworkDock::initializeManualRequestConnections()
+{
+    // 请求构造控制连接：执行请求、重置表单、模式切换自动调整默认参数。
+    connect(m_manualExecuteButton, &QPushButton::clicked, this, [this]()
+        {
+            executeManualRequest();
+        });
+    connect(m_manualResetButton, &QPushButton::clicked, this, [this]()
+        {
+            kLogEvent resetClickEvent;
+            info << resetClickEvent << "[NetworkDock] 用户点击请求构造重置按钮。" << eol;
+            resetManualRequestForm();
+        });
+    connect(m_manualApiCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
+        {
+            if (m_manualApiCombo == nullptr)
+            {
+                return;
+            }
+
+            const ks::network::ManualNetworkApiKind apiKind =
+                static_cast<ks::network::ManualNetworkApiKind>(m_manualApiCombo->currentData().toInt());
+
+            // 模式切换时只更新推荐默认参数，不强行覆盖用户已勾选的“手动覆盖”语义。
+            if (m_manualOverrideSocketParameterCheck != nullptr &&
+                m_manualOverrideSocketParameterCheck->isChecked())
+            {
+                kLogEvent switchApiEvent;
+                dbg << switchApiEvent
+                    << "[NetworkDock] 请求构造 API 模式切换（保留手工参数）, api="
+                    << ks::network::ManualNetworkApiKindToString(apiKind)
+                    << eol;
+                return;
+            }
+
+            if (m_manualSocketTypeEdit == nullptr || m_manualProtocolEdit == nullptr)
+            {
+                return;
+            }
+
+            if (apiKind == ks::network::ManualNetworkApiKind::WinSockTcp)
+            {
+                m_manualSocketTypeEdit->setText(QStringLiteral("1")); // SOCK_STREAM
+                m_manualProtocolEdit->setText(QStringLiteral("6"));   // IPPROTO_TCP
+                if (m_manualConnectBeforeSendCheck != nullptr)
+                {
+                    m_manualConnectBeforeSendCheck->setChecked(true);
+                }
+            }
+            else
+            {
+                m_manualSocketTypeEdit->setText(QStringLiteral("2")); // SOCK_DGRAM
+                m_manualProtocolEdit->setText(QStringLiteral("17"));  // IPPROTO_UDP
+            }
+
+            const bool overrideSocketParameters = m_manualOverrideSocketParameterCheck != nullptr
+                && m_manualOverrideSocketParameterCheck->isChecked();
+            kLogEvent switchApiEvent;
+            dbg << switchApiEvent
+                << "[NetworkDock] 请求构造 API 模式切换, api="
+                << ks::network::ManualNetworkApiKindToString(apiKind)
+                << ", overrideSocket="
+                << (overrideSocketParameters ? "true" : "false")
+                << eol;
+        });
+
+}
+
+void NetworkDock::initializeArpCacheConnections()
+{
     // ARP 缓存页控制连接。
     connect(m_refreshArpButton, &QPushButton::clicked, this, [this]()
         {
@@ -1175,6 +1462,10 @@ void NetworkDock::initializeConnections()
             flushArpCache();
         });
 
+}
+
+void NetworkDock::initializeDnsCacheConnections()
+{
     // DNS 缓存页控制连接。
     connect(m_refreshDnsButton, &QPushButton::clicked, this, [this]()
         {
@@ -1209,6 +1500,10 @@ void NetworkDock::initializeConnections()
             }
         });
 
+}
+
+void NetworkDock::initializeAliveHostScanConnections()
+{
     // 存活主机扫描页连接。
     connect(m_startAliveScanButton, &QPushButton::clicked, this, [this]()
         {
@@ -1219,496 +1514,4 @@ void NetworkDock::initializeConnections()
             stopAliveHostScan();
         });
 
-    // 初始化按钮可用状态。
-    updateMonitorButtonState();
-
-    // 初始化新增页首屏数据。
-    refreshMultiThreadDownloadUi();
-    refreshArpCacheTable();
-    refreshDnsCacheTable();
 }
-
-void NetworkDock::startTrafficMonitor()
-{
-    if (m_trafficService == nullptr)
-    {
-        return;
-    }
-
-    // 正在停止时不允许立刻重启，避免服务线程状态在“停/启”间抖动。
-    if (m_monitorStopInProgress.load())
-    {
-        if (m_monitorStatusLabel != nullptr)
-        {
-            m_monitorStatusLabel->setText(QStringLiteral("状态：停止中，请稍候..."));
-        }
-        return;
-    }
-
-    // 若上次停止线程对象仍残留（通常已结束），这里做一次回收，避免线程句柄泄漏。
-    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
-    {
-        m_monitorStopThread->join();
-    }
-    m_monitorStopThread.reset();
-
-    // 每次启动前清零“后台队列丢包计数”，便于观察本次运行状态。
-    {
-        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
-        m_droppedPacketCount = 0;
-    }
-
-    // 先探测版本化 R0 WFP IP packet IOCTL；旧驱动或逐包数据面不可用时立即回退 R3。
-    // 后台探测失败会自动调用 startR3TrafficMonitor，不需要用户二次点击。
-    const std::uint64_t generation = m_monitorGeneration.fetch_add(1) + 1ULL;
-    m_monitorSource = TrafficMonitorSource::Starting;
-    m_monitorRunning = true;
-
-    // 启用 R0 数据面是一次同步 IOCTL（CreateFileW + DeviceIoControl，无 OVERLAPPED），
-    // 内核侧要注册 WFP callout/filter 并初始化 ring buffer，因此整段控制流放到后台线程；
-    // UI 线程只先把按钮状态与“正在探测”提示落地，结果回投后再决定进 R0 还是回退 R3。
-    if (m_monitorStatusLabel != nullptr)
-    {
-        m_monitorStatusLabel->setText(QStringLiteral("状态：正在探测 R0 WFP IPv4/IPv6 逐包数据源..."));
-    }
-    updateMonitorButtonState();
-
-    const QPointer<NetworkDock> guardedSelf(this);
-    std::thread([guardedSelf, generation]()
-        {
-            const ksword::ark::DriverClient driverClient;
-            const ksword::ark::NetworkTrafficCaptureControlResult captureControl =
-                driverClient.controlNetworkTrafficCapture(true);
-            const bool r0CaptureEnabled =
-                captureControl.io.ok &&
-                !captureControl.unsupported &&
-                captureControl.response.status == KSWORD_ARK_NETWORK_STATUS_APPLIED &&
-                captureControl.response.enabled == 1UL;
-            if (!r0CaptureEnabled)
-            {
-                // 控制响应损坏或启用后业务拒绝时也做一次幂等停用，避免未知半成功状态。
-                // 该停用与启用在同一后台线程内串行完成，不会再占用 UI 线程。
-                (void)driverClient.controlNetworkTrafficCapture(false);
-            }
-
-            const QString captureMessageText = QString::fromStdString(captureControl.io.message);
-            const std::string captureMessageLogText = captureControl.io.message;
-            QCoreApplication* const appInstance = QCoreApplication::instance();
-            if (appInstance == nullptr)
-            {
-                return;
-            }
-            QMetaObject::invokeMethod(
-                appInstance,
-                [guardedSelf, generation, r0CaptureEnabled, captureMessageText, captureMessageLogText]()
-                {
-                    if (guardedSelf == nullptr)
-                    {
-                        return;
-                    }
-
-                    // 用户可能在探测返回前就点了停止或重新开始，此时本轮结果整体作废；
-                    // 若本轮确实把数据面打开了，还要再补一次异步幂等停用。
-                    if (guardedSelf->m_monitorGeneration.load() != generation ||
-                        guardedSelf->m_monitorSource != TrafficMonitorSource::Starting)
-                    {
-                        if (r0CaptureEnabled)
-                        {
-                            disableNetworkTrafficCaptureAsync();
-                        }
-                        return;
-                    }
-
-                    if (!r0CaptureEnabled)
-                    {
-                        guardedSelf->startR3TrafficMonitor(captureMessageText);
-                        kLogEvent fallbackEvent;
-                        warn << fallbackEvent
-                             << "[NetworkDock] R0 逐包数据面启用失败，已回退 R3: "
-                             << captureMessageLogText << eol;
-                        return;
-                    }
-
-                    // 新捕获会话由 R0 清空 ring 并从 sequence=1 重新计数，R3 cursor 必须同步归零。
-                    guardedSelf->m_r0LastEventSequence = 0ULL;
-                    guardedSelf->m_r0LastDroppedEventCount = 0ULL;
-                    guardedSelf->refreshR0TrafficSnapshotAsync(generation, true);
-                    guardedSelf->updateMonitorButtonState();
-                },
-                Qt::QueuedConnection);
-        }).detach();
-
-    kLogEvent startEvent;
-    info << startEvent << "[NetworkDock] 用户触发网络监控启动。" << eol;
-}
-
-void NetworkDock::stopTrafficMonitor()
-{
-    if (m_trafficService == nullptr)
-    {
-        return;
-    }
-
-    // 线程正在停机时直接返回，避免重复点击导致多个 stop 线程并发。
-    if (m_monitorStopInProgress.exchange(true))
-    {
-        return;
-    }
-
-    const TrafficMonitorSource sourceBeforeStop = m_monitorSource;
-    m_monitorGeneration.fetch_add(1);
-    m_monitorSource = TrafficMonitorSource::Stopped;
-    if (m_r0TrafficRefreshTimer != nullptr)
-    {
-        m_r0TrafficRefreshTimer->stop();
-    }
-
-    // 停用 R0 数据面同样是一次同步 IOCTL，放到后台线程执行，界面按“停用成功”乐观推进；
-    // m_monitorStopInProgress 保持置位直到停用回投，这样用户无法在停用尚未落地时抢先重启，
-    // 避免“启用/停用”两条后台控制流互相插队把数据面留在错误状态。
-    const bool r0DisableDispatched =
-        sourceBeforeStop == TrafficMonitorSource::R0 ||
-        sourceBeforeStop == TrafficMonitorSource::Starting;
-    if (r0DisableDispatched)
-    {
-        const QPointer<NetworkDock> guardedSelf(this);
-        const std::uint64_t stopGeneration = m_monitorGeneration.load();
-        std::thread([guardedSelf, stopGeneration]()
-            {
-                const ksword::ark::DriverClient driverClient;
-                const ksword::ark::NetworkTrafficCaptureControlResult captureControl =
-                    driverClient.controlNetworkTrafficCapture(false);
-                const bool r0StopConfirmed =
-                    captureControl.io.ok &&
-                    !captureControl.unsupported &&
-                    captureControl.response.status == KSWORD_ARK_NETWORK_STATUS_DISABLED &&
-                    captureControl.response.enabled == 0UL;
-                if (!r0StopConfirmed)
-                {
-                    kLogEvent stopFailureEvent;
-                    warn << stopFailureEvent
-                         << "[NetworkDock] R0 逐包数据面停用失败: "
-                         << captureControl.io.message << eol;
-                }
-
-                const QString r0StopFailure = r0StopConfirmed
-                    ? QString()
-                    : QString::fromStdString(captureControl.io.message);
-                QCoreApplication* const appInstance = QCoreApplication::instance();
-                if (appInstance == nullptr)
-                {
-                    return;
-                }
-                QMetaObject::invokeMethod(
-                    appInstance,
-                    [guardedSelf, stopGeneration, r0StopFailure]()
-                    {
-                        if (guardedSelf == nullptr)
-                        {
-                            return;
-                        }
-
-                        // 停用已经落地，释放“停止中”闸门，按钮恢复可点。
-                        guardedSelf->m_monitorStopInProgress.store(false);
-                        guardedSelf->updateMonitorButtonState();
-                        if (r0StopFailure.isEmpty() ||
-                            guardedSelf->m_monitorStatusLabel == nullptr)
-                        {
-                            return;
-                        }
-
-                        // 停用失败提示只对“仍停在本轮停止结果上”的界面有效，
-                        // 用户已经重新开始抓包时不覆盖新的运行状态文本。
-                        if (guardedSelf->m_monitorGeneration.load() != stopGeneration ||
-                            guardedSelf->m_monitorSource != TrafficMonitorSource::Stopped)
-                        {
-                            return;
-                        }
-                        guardedSelf->m_monitorStatusLabel->setText(
-                            QStringLiteral("状态：界面已停止，但 R0 数据面停用失败：%1")
-                                .arg(r0StopFailure));
-                    },
-                    Qt::QueuedConnection);
-            }).detach();
-    }
-
-    // UI 立即切换到“停止中”，给用户及时反馈，避免误判“按钮没反应”。
-    m_monitorRunning = false;
-    if (m_monitorStatusLabel != nullptr)
-    {
-        m_monitorStatusLabel->setText(QStringLiteral("状态：停止中..."));
-    }
-    updateMonitorButtonState();
-
-    // R0/探测模式没有 R3 抓包线程需要 join，可在 UI 线程立即完成停止。
-    if (sourceBeforeStop != TrafficMonitorSource::R3 || !m_trafficService->IsRunning())
-    {
-        // 已经派发异步停用时，停止闸门由停用回投负责释放，这里不能提前放开。
-        if (!r0DisableDispatched)
-        {
-            m_monitorStopInProgress.store(false);
-        }
-        if (m_packetTimelineSessionActive)
-        {
-            endPacketTimelineMonitorSession();
-        }
-        if (m_monitorStatusLabel != nullptr)
-        {
-            m_monitorStatusLabel->setText(QStringLiteral("状态：已停止（来源：无）"));
-        }
-        updateMonitorButtonState();
-        return;
-    }
-
-    // 先回收上一次 stop 线程对象，确保本轮只保留一个 stop worker。
-    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
-    {
-        m_monitorStopThread->join();
-    }
-    m_monitorStopThread.reset();
-
-    // 把 StopCapture 放到后台线程，避免主线程 join 导致界面卡顿。
-    QPointer<NetworkDock> guardThis(this);
-    ks::network::TrafficMonitorService* trafficServicePtr = m_trafficService.get();
-    m_monitorStopThread = std::make_unique<std::thread>([guardThis, trafficServicePtr]() {
-        if (trafficServicePtr != nullptr)
-        {
-            trafficServicePtr->StopCapture();
-        }
-
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            // stop 线程退出后再 join，保证不会在 UI 线程长时间阻塞。
-            if (guardThis->m_monitorStopThread != nullptr && guardThis->m_monitorStopThread->joinable())
-            {
-                guardThis->m_monitorStopThread->join();
-            }
-            guardThis->m_monitorStopThread.reset();
-            guardThis->m_monitorStopInProgress.store(false);
-            guardThis->m_monitorRunning = false;
-            guardThis->m_monitorSource = TrafficMonitorSource::Stopped;
-            guardThis->endPacketTimelineMonitorSession();
-            if (guardThis->m_monitorStatusLabel != nullptr)
-            {
-                guardThis->m_monitorStatusLabel->setText(QStringLiteral("状态：已停止"));
-            }
-            guardThis->updateMonitorButtonState();
-
-            kLogEvent stopFinishedEvent;
-            info << stopFinishedEvent << "[NetworkDock] 后台停止流程完成，抓包线程已退出。" << eol;
-        }, Qt::QueuedConnection);
-    });
-
-    kLogEvent stopEvent;
-    info << stopEvent << "[NetworkDock] 用户触发网络监控停止（异步）。" << eol;
-}
-
-void NetworkDock::refreshR0TrafficSnapshotAsync(
-    const std::uint64_t generation,
-    const bool initialProbe)
-{
-    if (m_r0TrafficRefreshPending.exchange(true))
-    {
-        // 用户可能在上一代 R0 查询尚未返回时停止并立即重启。
-        // 初始探测不能静默丢弃，否则新一代会永久停在 Starting 状态。
-        if (initialProbe)
-        {
-            QTimer::singleShot(120, this, [this, generation]()
-            {
-                if (m_monitorGeneration.load() == generation
-                    && m_monitorSource == TrafficMonitorSource::Starting)
-                {
-                    refreshR0TrafficSnapshotAsync(generation, true);
-                }
-            });
-        }
-        return;
-    }
-
-    const std::uint64_t afterSequence = m_r0LastEventSequence;
-    QPointer<NetworkDock> safeThis(this);
-    std::thread([safeThis, generation, initialProbe, afterSequence]()
-    {
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::NetworkTrafficPacketResult packetResult =
-            driverClient.queryNetworkTrafficPackets(
-                afterSequence,
-                KSWORD_ARK_NETWORK_TRAFFIC_MAX_REQUESTED_ROWS);
-        const bool r0Usable =
-            packetResult.io.ok &&
-            !packetResult.unsupported &&
-            packetResult.status == KSWORD_ARK_NETWORK_STATUS_APPLIED;
-
-        std::vector<ks::network::PacketRecord> packetRecords;
-        if (r0Usable)
-        {
-            ks::network::detail::ConnectionPidResolver pidResolver;
-            ks::network::detail::ProcessNameResolver processNameResolver;
-            packetRecords.reserve(packetResult.entries.size());
-            for (const KSWORD_ARK_NETWORK_TRAFFIC_PACKET_ROW& packetRow : packetResult.entries)
-            {
-                packetRecords.push_back(buildR0WfpPacketRecord(
-                    packetRow,
-                    pidResolver,
-                    processNameResolver));
-            }
-        }
-
-        const QString diagnosticText = r0Usable
-            ? QStringLiteral("新增=%1/%2，cursor=%3，ring覆盖=%4，cursor缺口=%5")
-                .arg(static_cast<qulonglong>(packetRecords.size()))
-                .arg(packetResult.returnedCount)
-                .arg(static_cast<qulonglong>(packetResult.nextSequence))
-                .arg(static_cast<qulonglong>(packetResult.droppedPacketCount))
-                .arg(static_cast<qulonglong>(packetResult.cursorGapCount))
-            : QStringLiteral("packet=%1；status=%2；lastStatus=0x%3")
-                .arg(QString::fromUtf8(packetResult.io.message.c_str()))
-                .arg(packetResult.status)
-                .arg(static_cast<quint32>(packetResult.lastStatus), 8, 16, QChar('0'));
-
-        if (safeThis.isNull())
-        {
-            (void)driverClient.controlNetworkTrafficCapture(false);
-            return;
-        }
-        QMetaObject::invokeMethod(
-            safeThis.data(),
-            [safeThis,
-                generation,
-                initialProbe,
-                r0Usable,
-                diagnosticText,
-                nextSequence = packetResult.nextSequence,
-                droppedPacketCount = packetResult.droppedPacketCount,
-                packetRecords = std::move(packetRecords)]() mutable
-            {
-                if (safeThis.isNull())
-                {
-                    return;
-                }
-                safeThis->m_r0TrafficRefreshPending.store(false);
-                if (safeThis->m_monitorGeneration.load() != generation
-                    || safeThis->m_monitorSource == TrafficMonitorSource::Stopped)
-                {
-                    if (safeThis->m_monitorSource == TrafficMonitorSource::Stopped)
-                    {
-                        // 纯兜底停用，没有后续步骤依赖它的完成顺序，直接丢后台执行，
-                        // 避免在 UI 线程的回投 lambda 里再下发一次同步 IOCTL。
-                        disableNetworkTrafficCaptureAsync();
-                    }
-                    return;
-                }
-
-                if (!r0Usable)
-                {
-                    const ksword::ark::DriverClient driverClient;
-                    const auto captureControl =
-                        driverClient.controlNetworkTrafficCapture(false);
-                    if (!captureControl.io.ok ||
-                        captureControl.response.status != KSWORD_ARK_NETWORK_STATUS_DISABLED)
-                    {
-                        kLogEvent disableEvent;
-                        warn << disableEvent
-                             << "[NetworkDock] R0 查询失败后的数据面停用失败: "
-                             << captureControl.io.message << eol;
-                    }
-                    safeThis->startR3TrafficMonitor(diagnosticText);
-                    return;
-                }
-
-                if (initialProbe)
-                {
-                    safeThis->m_monitorSource = TrafficMonitorSource::R0;
-                    safeThis->m_monitorRunning = true;
-                    if (!safeThis->m_packetTimelineSessionActive)
-                    {
-                        safeThis->beginPacketTimelineMonitorSession();
-                    }
-                    if (safeThis->m_r0TrafficRefreshTimer != nullptr)
-                    {
-                        safeThis->m_r0TrafficRefreshTimer->start();
-                    }
-                }
-
-                safeThis->m_r0LastEventSequence = nextSequence;
-                safeThis->m_r0LastDroppedEventCount = droppedPacketCount;
-                for (ks::network::PacketRecord& packetRecord : packetRecords)
-                {
-                    packetRecord.sequenceId = safeThis->m_r0SyntheticSequence++;
-                    safeThis->onPacketCaptured(packetRecord);
-                }
-
-                if (safeThis->m_monitorStatusLabel != nullptr)
-                {
-                    safeThis->m_monitorStatusLabel->setText(
-                        QStringLiteral("状态：运行中；来源：R0 WFP IPv4/IPv6 逐包捕获（报文前缀最长 %1 字节；%2）")
-                            .arg(KSWORD_ARK_NETWORK_TRAFFIC_MAX_CAPTURE_BYTES)
-                            .arg(diagnosticText));
-                }
-                safeThis->updateMonitorButtonState();
-            },
-            Qt::QueuedConnection);
-    }).detach();
-}
-
-void NetworkDock::startR3TrafficMonitor(const QString& fallbackReason)
-{
-    if (m_monitorSource == TrafficMonitorSource::Stopped || m_trafficService == nullptr)
-    {
-        return;
-    }
-    if (m_r0TrafficRefreshTimer != nullptr)
-    {
-        m_r0TrafficRefreshTimer->stop();
-    }
-    m_monitorSource = TrafficMonitorSource::R3;
-
-    const bool startIssued = m_trafficService->StartCapture();
-    m_monitorRunning = startIssued && m_trafficService->IsRunning();
-    if (!m_monitorRunning)
-    {
-        m_monitorSource = TrafficMonitorSource::Stopped;
-        if (m_packetTimelineSessionActive)
-        {
-            endPacketTimelineMonitorSession();
-        }
-        if (m_monitorStatusLabel != nullptr)
-        {
-            m_monitorStatusLabel->setText(QStringLiteral("状态：R0 不可用，R3 回退启动失败"));
-        }
-    }
-    else
-    {
-        if (!m_packetTimelineSessionActive)
-        {
-            beginPacketTimelineMonitorSession();
-        }
-        if (m_monitorStatusLabel != nullptr)
-        {
-            m_monitorStatusLabel->setText(
-                QStringLiteral("状态：运行中；来源：R3 用户态抓包（R0 不可用：%1）")
-                    .arg(fallbackReason));
-        }
-    }
-    updateMonitorButtonState();
-}
-
-void NetworkDock::updateMonitorButtonState()
-{
-    const bool stopping = m_monitorStopInProgress.load();
-    if (m_startMonitorButton != nullptr)
-    {
-        m_startMonitorButton->setEnabled(!m_monitorRunning && !stopping);
-    }
-    if (m_stopMonitorButton != nullptr)
-    {
-        m_stopMonitorButton->setEnabled(m_monitorRunning && !stopping);
-    }
-}
-
-
-

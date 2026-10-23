@@ -1,7 +1,7 @@
 #include "ProcessDetailWindow.InternalCommon.h"
 #include "../UI/DetailDialogChrome.h"
 #include "../UI/StructuredFieldView.h"
-#include "../UI/VisibleTableWidget.h"
+#include "../UI/ImmutableValueTable.h"
 
 #include "../ksword/process/dll_hijack_detector.h"
 
@@ -11,10 +11,18 @@ using namespace process_detail_window_internal;
 
 namespace
 {
+    thread_local const ks::i18n::SourceTextSnapshot* reportTranslator = nullptr;
+    struct ReportLanguageScope
+    {
+        const ks::i18n::SourceTextSnapshot* previous;
+        explicit ReportLanguageScope(const ks::i18n::SourceTextSnapshot& translator)
+            : previous(reportTranslator) { reportTranslator = &translator; }
+        ~ReportLanguageScope() { reportTranslator = previous; }
+    };
     QString dllHijackText(const char* const key, const QString& sourceText)
     {
         static_cast<void>(key);
-        return ks::i18n::sourceText(sourceText);
+        return reportTranslator ? reportTranslator->sourceText(sourceText) : ks::i18n::sourceText(sourceText);
     }
 
     int riskRank(const ks::process::DllHijackRisk risk)
@@ -291,12 +299,34 @@ namespace
         return document;
     }
 
+    struct DllReportValues
+    {
+        ks::process::DllHijackScanResult result;
+        QVector<ks::ui::FieldDocument> details;
+        QString reportText;
+        int high = 0, suspicious = 0, informational = 0, safe = 0;
+    };
+    std::shared_ptr<DllReportValues> makeDllReportValues()
+    {
+        return {new DllReportValues, [](DllReportValues* value) noexcept
+        {
+            try
+            {
+                auto retired = std::unique_ptr<DllReportValues>(value);
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                QThreadPool::globalInstance()->start(task.get()); (void)task.release();
+            }
+            catch (...) { /* RAII owns enqueue failure. */ }
+        }};
+    }
+
     void showDllHijackResultDialog(
         QWidget* const parent,
-        const ks::process::DllHijackScanResult& result,
+        const std::shared_ptr<const DllReportValues>& prepared,
         const QString& processName,
         const std::uint32_t pid)
     {
+        const auto& result = prepared->result;
         QDialog dialog(parent);
         dialog.setWindowTitle(dllHijackText(
             "process.detail.dll_hijack.dialog.title",
@@ -308,21 +338,10 @@ namespace
         layout->setContentsMargins(10, 10, 10, 10);
         layout->setSpacing(8);
 
-        int highCount = 0;
-        int suspiciousCount = 0;
-        int informationalCount = 0;
-        int safeCount = 0;
-        for (const ks::process::DllHijackFinding& finding : result.findings)
-        {
-            switch (finding.risk)
-            {
-            case ks::process::DllHijackRisk::High: ++highCount; break;
-            case ks::process::DllHijackRisk::Suspicious: ++suspiciousCount; break;
-            case ks::process::DllHijackRisk::Informational: ++informationalCount; break;
-            case ks::process::DllHijackRisk::Safe: ++safeCount; break;
-            }
-        }
-
+        const int highCount = prepared->high;
+        const int suspiciousCount = prepared->suspicious;
+        const int informationalCount = prepared->informational;
+        const int safeCount = prepared->safe;
         QString summaryText;
         const QString failure = scanFailureText(result);
         if (!failure.isEmpty())
@@ -381,10 +400,9 @@ namespace
             .arg(KswordTheme::TextSecondaryHex()));
         layout->addWidget(boundaryLabel);
 
-        QTableWidget* const table = new QTableWidget(&dialog);
+
         // 一次扫描报告仅需复制与导出，无实时冻结/快照链路。
-        ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-        const QStringList headers{
+        const QVector<ks::ui::ImmutableTableHeader> headers{
             dllHijackText("process.detail.dll_hijack.header.risk", QStringLiteral("风险")),
             dllHijackText("process.detail.dll_hijack.header.presence", QStringLiteral("加载状态")),
             dllHijackText("process.detail.dll_hijack.header.dll", QStringLiteral("DLL")),
@@ -395,18 +413,27 @@ namespace
             dllHijackText("process.detail.dll_hijack.header.local_path", QStringLiteral("程序目录路径")),
             dllHijackText("process.detail.dll_hijack.header.system_path", QStringLiteral("系统基线路径"))
         };
-        table->setColumnCount(headers.size());
-        table->setHorizontalHeaderLabels(headers);
-        table->setRowCount(result.findings.size());
+        auto* const table = new ks::ui::ImmutableValueTable(&dialog, headers);
+        ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
         table->setSelectionMode(QAbstractItemView::SingleSelection);
         table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         table->setAlternatingRowColors(true);
         table->setSortingEnabled(false);
 
-        for (int row = 0; row < result.findings.size(); ++row)
+        const QColor safeColor = riskColor(ks::process::DllHijackRisk::Safe);
+        const QColor infoColor = riskColor(ks::process::DllHijackRisk::Informational);
+        const QColor suspiciousColor = riskColor(ks::process::DllHijackRisk::Suspicious);
+        const QColor highColor = riskColor(ks::process::DllHijackRisk::High);
+        table->setSourceFactory([prepared, safeColor, infoColor, suspiciousColor, highColor](const ks::i18n::SourceTextSnapshot& translator)
         {
-            const ks::process::DllHijackFinding& finding = result.findings.at(row);
+            const ReportLanguageScope language(translator);
+            const auto& result = prepared->result;
+            QVector<ks::ui::ImmutableTableRow> rows;
+            rows.reserve(result.findings.size());
+            for (int row = 0; row < result.findings.size(); ++row)
+            {
+                const auto& finding = result.findings.at(row);
             const QString hashState = !finding.hashComparable
                 ? dllHijackText(
                     "process.detail.dll_hijack.hash.unavailable",
@@ -429,19 +456,23 @@ namespace
                 finding.localFile.path,
                 finding.systemFile.path
             };
-            const QString detail = findingDocument(finding).toPlainText(true);
-            for (int column = 0; column < cells.size(); ++column)
-            {
-                QTableWidgetItem* const item = new QTableWidgetItem(cells.at(column));
-                item->setToolTip(detail.left(8000));
-                item->setForeground(QBrush(riskColor(finding.risk)));
-                if (column == 0)
-                {
-                    item->setData(Qt::UserRole, riskRank(finding.risk));
-                }
-                table->setItem(row, column, item);
+
+                ks::ui::ImmutableTableRow value;
+                value.key = finding.localFile.path + QLatin1Char(':') + QString::number(row);
+                value.cells = cells;
+                value.rolesInAllColumns = true;
+                const QColor color = finding.risk == ks::process::DllHijackRisk::High ? highColor :
+                    finding.risk == ks::process::DllHijackRisk::Suspicious ? suspiciousColor :
+                    finding.risk == ks::process::DllHijackRisk::Informational ? infoColor : safeColor;
+                value.roles.insert(Qt::ForegroundRole, QBrush(color));
+                value.roles.insert(Qt::UserRole + 1, row);
+                value.columnRoles[0].insert(Qt::UserRole, riskRank(finding.risk));
+                const QString detail = prepared->details.at(row).toPlainText([&translator](const QString& text) { return translator.sourceText(text); });
+                value.roles.insert(Qt::ToolTipRole, detail.left(8000));
+                rows.push_back(std::move(value));
             }
-        }
+            return ks::ui::MakeImmutableTableSource(std::move(rows));
+        });
         table->horizontalHeader()->setStretchLastSection(false);
         table->setColumnWidth(0, 80);
         table->setColumnWidth(1, 115);
@@ -458,7 +489,7 @@ namespace
         detailPane->setMaximumHeight(180);
         if (!result.findings.isEmpty())
         {
-            detailPane->setDocument(findingDocument(result.findings.first()));
+            detailPane->setDocument(prepared->details.first());
         }
         else
         {
@@ -470,17 +501,14 @@ namespace
         }
         layout->addWidget(detailPane);
 
-        QObject::connect(
-            table,
-            &QTableWidget::currentCellChanged,
-            &dialog,
-            [detailPane, result](const int currentRow, int, int, int)
-            {
-                if (currentRow >= 0 && currentRow < result.findings.size())
-                {
-                    detailPane->setDocument(findingDocument(result.findings.at(currentRow)));
-                }
-            });
+        table->currentRowChanged = [detailPane, table, prepared]
+        {
+            bool valid = false;
+            const int sourceRow = table->currentCell(0, Qt::UserRole + 1).toInt(&valid);
+            if (valid && sourceRow >= 0 && sourceRow < prepared->details.size())
+                detailPane->setDocument(prepared->details.at(sourceRow));
+        };
+        table->sourceReady = [table] { if (table->rowCount() > 0) table->selectRow(0); };
 
         QHBoxLayout* const buttonLayout = new QHBoxLayout();
         buttonLayout->addStretch(1);
@@ -511,10 +539,9 @@ namespace
         buttonLayout->addWidget(closeButton);
         layout->addLayout(buttonLayout);
 
-        const ks::ui::FieldDocument reportDocument = buildScanDocument(result, processName, pid);
-        QObject::connect(copyButton, &QPushButton::clicked, &dialog, [reportDocument]()
+        QObject::connect(copyButton, &QPushButton::clicked, &dialog, [prepared]()
         {
-            QApplication::clipboard()->setText(reportDocument.toPlainText(true));
+            QApplication::clipboard()->setText(prepared->reportText);
         });
         QObject::connect(
             openDirectoryButton,
@@ -570,6 +597,7 @@ void ProcessDetailWindow::requestAsyncDllHijackScan()
         << creationTime100ns
         << eol;
 
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     QPointer<ProcessDetailWindow> guard(this);
     QRunnable* const task = QRunnable::create([
         guard,
@@ -577,13 +605,29 @@ void ProcessDetailWindow::requestAsyncDllHijackScan()
         pid,
         creationTime100ns,
         fallbackImagePath,
-        processName]()
+        processName, translator]()
     {
-        const ks::process::DllHijackScanResult result =
-            ks::process::ScanProcessDllHijacking(
+        auto prepared = makeDllReportValues();
+        prepared->result = ks::process::ScanProcessDllHijacking(
                 pid,
                 creationTime100ns,
                 fallbackImagePath);
+        const auto& result = prepared->result;
+        const ReportLanguageScope language(translator);
+        prepared->details.reserve(result.findings.size());
+        for (const auto& finding : result.findings)
+        {
+            prepared->details.push_back(findingDocument(finding));
+            switch (finding.risk)
+            {
+            case ks::process::DllHijackRisk::High: ++prepared->high; break;
+            case ks::process::DllHijackRisk::Suspicious: ++prepared->suspicious; break;
+            case ks::process::DllHijackRisk::Informational: ++prepared->informational; break;
+            case ks::process::DllHijackRisk::Safe: ++prepared->safe; break;
+            }
+        }
+        prepared->reportText = buildScanDocument(result, processName, pid).toPlainText(
+            [&translator](const QString& text) { return translator.sourceText(text); });
         if (guard == nullptr)
         {
             return;
@@ -591,10 +635,12 @@ void ProcessDetailWindow::requestAsyncDllHijackScan()
 
         QMetaObject::invokeMethod(
             qApp,
-            [guard, localTicket, pid, processName, result]()
+            [guard, localTicket, pid, creationTime100ns, processName, prepared]()
             {
+                const auto& result = prepared->result;
                 if (guard == nullptr ||
-                    localTicket != guard->m_dllHijackScanTicket)
+                    localTicket != guard->m_dllHijackScanTicket || pid != guard->m_baseRecord.pid ||
+                    creationTime100ns != guard->m_baseRecord.creationTime100ns)
                 {
                     return;
                 }
@@ -605,20 +651,8 @@ void ProcessDetailWindow::requestAsyncDllHijackScan()
                     guard->m_dllHijackScanButton->setEnabled(true);
                 }
 
-                int highCount = 0;
-                int suspiciousCount = 0;
-                for (const ks::process::DllHijackFinding& finding : result.findings)
-                {
-                    if (finding.risk == ks::process::DllHijackRisk::High)
-                    {
-                        ++highCount;
-                    }
-                    else if (finding.risk == ks::process::DllHijackRisk::Suspicious)
-                    {
-                        ++suspiciousCount;
-                    }
-                }
-
+                const int highCount = prepared->high;
+                const int suspiciousCount = prepared->suspicious;
                 if (result.status == ks::process::DllHijackScanStatus::Complete)
                 {
                     guard->updateModuleStatusLabel(
@@ -660,7 +694,7 @@ void ProcessDetailWindow::requestAsyncDllHijackScan()
 
                 showDllHijackResultDialog(
                     guard,
-                    result,
+                    prepared,
                     processName,
                     pid);
             },

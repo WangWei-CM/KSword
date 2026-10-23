@@ -10,9 +10,12 @@
 
 #include "../Framework.h"
 #include "../UI/ThemeColorRemap.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <QStringList>
+#include <QHash>
+#include <QSet>
 #include <QPointer>
 #include <QPoint>
 #include <QPalette>
@@ -22,10 +25,17 @@
 #include <QVector>
 #include <QWidget>
 
+#include <array>
+#include "../../../shared/ui/MetricHistory.h"
+#include <deque>
+
 #include <atomic>   // std::atomic_bool：异步探测任务互斥。
 #include <cstdint>  // std::uint64_t：保存采样累计值与时间戳。
+#include <memory>
 #include <utility>
 #include <vector>   // std::vector：保存每核图表与采样数据。
+
+namespace KswordTheme { enum class PerformanceRole; }
 
 class DiskMonitorPage;
 class MemoryCompositionHistoryWidget;
@@ -44,6 +54,8 @@ class QGridLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineSeries;
+class QListWidgetItem;
+class QPushButton;
 class QListWidget;
 class QResizeEvent;
 class QScrollArea;
@@ -53,9 +65,12 @@ class QStackedWidget;
 class QTabWidget;
 class QTableWidget;
 class QTimer;
+class QThread;
 class QValueAxis;
 class QVBoxLayout;
 class QWidget;
+
+namespace ks::ui { class AsyncUiDispatcher; }
 
 class HardwareDock final : public QWidget
 {
@@ -79,6 +94,9 @@ public:
 
     // 同一个采样器只升级范围；欢迎页重新绑定不会撤销已打开的硬件详情采样。
     void startPerformanceSampling(SamplingScope scope = SamplingScope::HardwareDetails);
+
+    static ks::ui::PageNavigationCatalog navigationCatalog(const HardwareDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 signals:
     // performanceSnapshotChanged 作用：发布与性能监控页相同的聚合采样结果。
@@ -278,8 +296,23 @@ private:
     // - 作用：保存一个磁盘卡片、详情页和历史缩略图状态；
     // - 调用方式：ensureDiskUtilizationDevice 在发现新 PDH 实例时创建；
     // - 返回行为：结构体由 HardwareDock 持有，Qt 对象仍走父子树释放。
+    struct DeviceSeriesArchive
+    {
+        bool active = true;
+        bool available = false;
+        bool explicitlyViewed = false;
+        std::uint64_t lastProjectedHistoryId = 0;
+        QPointer<QPushButton> offlineButton;
+        int navRow = -1;
+        int lastSampleId = 0;
+        qint64 lastSampleTimeMs = 0;
+        QHash<QString, std::shared_ptr<ks::ui::MetricHistory>> histories;
+    };
+
     struct DiskUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        DiskRateSample lastSample;
         QString instanceNameText;                 // instanceNameText：PDH PhysicalDisk 实例名。
         QString displayNameText;                  // displayNameText：左侧卡片标题。
         QWidget* pageWidget = nullptr;            // pageWidget：右侧详情页。
@@ -306,6 +339,8 @@ private:
     // - 返回行为：结构体不返回数据，刷新函数读取字段更新 UI。
     struct NetworkUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        NetworkRateSample lastSample;
         std::uint64_t interfaceKey = 0;           // interfaceKey：网络接口 LUID 打包键。
         QString displayNameText;                 // displayNameText：网卡展示名。
         std::uint64_t linkBitsPerSecond = 0;      // linkBitsPerSecond：链路速率 bit/s。
@@ -339,6 +374,8 @@ private:
     // - 返回行为：字段由 updateGpuUtilizationDevice 读取并刷新。
     struct GpuUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        GpuUsageSample lastSample;
         std::uint64_t adapterKey = 0;             // adapterKey：DXGI LUID 打包键。
         bool adapterKeyAssigned = false;          // adapterKeyAssigned：adapterKey 是否已经绑定真实设备。
         int adapterIndex = 0;                     // adapterIndex：DXGI 枚举序号。
@@ -415,6 +452,9 @@ private:
     void scheduleUtilizationThemeRefresh();
     void refreshUtilizationThemeColors();
     void refreshUtilizationChartThemeColors(const QPalette* floatingPalette = nullptr);
+    void prepareNewUtilizationChartTheme(QChartView* view,
+        KswordTheme::PerformanceRole primaryRole, KswordTheme::PerformanceRole secondaryRole);
+    void prepareNewUtilizationEngineChartTheme(QChartView* view, const QString& engineKey);
     void applyInitialUtilizationSplitterSize();
     void syncUtilizationSidebarCardWidths();
     void syncUtilizationSidebarSelection(int selectedRowIndex);
@@ -455,23 +495,129 @@ private:
     void createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer);
     void createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer);
 
+    struct HardwarePageDefinition
+    {
+        ks::ui::PageNavigationTabDefinition navigation;
+        const char* tooltipKey;
+        const char* tooltip;
+        void (HardwareDock::*initialize)();
+    };
+    static const std::vector<HardwarePageDefinition>& hardwarePageDefinitions();
+    QString utilizationNavigationId(const UtilizationNavEntry& entry) const;
+    static QString diskUtilizationDisplayName(const DiskRateSample& sample, int ordinal);
+    static QString networkUtilizationDisplayName(const NetworkRateSample& sample, int ordinal);
+    static QString gpuUtilizationDisplayName(int ordinal);
+    ks::ui::PageNavigationTabCatalog m_hardwareNavigationTabs;
+    struct LazyHardwarePage
+    {
+        QWidget* host = nullptr;
+        QWidget* content = nullptr;
+        void (HardwareDock::*initialize)() = nullptr;
+        QString title;
+        QString titleKey;
+        QString tip;
+        QString tipKey;
+    };
+    void registerLazyHardwarePage(const HardwarePageDefinition& definition);
+    int addHardwarePageTab(QWidget* content, const QString& title);
+    QWidget* currentHardwarePage() const;
+    void ensureCurrentHardwarePageInitialized();
+    void restoreUtilizationHistory();
+    std::vector<LazyHardwarePage> m_lazyHardwarePages;
+    QWidget* m_buildingHardwareHost = nullptr;
+    bool m_hardwarePageInitializing = false;
+    bool m_utilizationDetailsInitialized = false;
+    bool m_restoringUtilizationHistory = false;
+    std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreHistory;
+    std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreBaselineHistory;
+    PerformanceNavCard* makeUtilizationSidebarCard(QListWidgetItem* item,
+        const QString& title, const QColor& accent);
+    PerformanceNavCard* restoreDeviceNavigation(DeviceSeriesArchive& archive, QWidget* page,
+        const QString& title, const QColor& accent, UtilizationDeviceKind kind, int deviceIndex);
+    void archiveDeviceNavigation(DeviceSeriesArchive& archive, const QString& title,
+        UtilizationDeviceKind kind, int deviceIndex);
+    void retireInactiveDeviceViews();
+    void retireDiskDeviceView(int index);
+    void retireNetworkDeviceView(int index);
+    void retireGpuDeviceView(int index);
+    void materializeArchivedDeviceNavigation();
+    void openArchivedDevice(const UtilizationNavEntry& entry);
+    void projectArchivedDevice(const UtilizationNavEntry& entry);
+    void refreshArchivedNavigationTexts();
+    static QString archivedDeviceTitle(const QString& title);
+    void restoreArchivedNavSamples(const DeviceSeriesArchive& archive, PerformanceNavCard* card,
+        const QString& primaryRole, const QString& secondaryRole, double* upperBound);
+    QSet<int> m_presentedDiskDevices;
+    QSet<int> m_presentedNetworkDevices;
+    QSet<int> m_presentedGpuDevices;
+    bool m_openingArchivedDevice = false;
+    bool m_projectingDeviceArchive = false;
+    QVector<QPointer<QWidget>> m_virtualNetworkLaidOutTiles;
+    static void appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
+        double value, bool valid, int sampleId, qint64 sampleTimeMs, int capacity);
+    static void appendDeviceGap(DeviceSeriesArchive& archive, int sampleId, qint64 sampleTimeMs);
+    void attachDeviceHistory(DeviceSeriesArchive& archive, const QString& role,
+        QLineSeries* line, QLineSeries* baseline);
+    void recordDeviceSamples(const std::vector<DiskRateSample>& disks,
+        const std::vector<NetworkRateSample>& networks, const std::vector<GpuUsageSample>& gpus);
+    bool m_recordingDeviceHistory = false;
+    QHash<QString, int> m_diskDeviceIndex;
+    QHash<quint64, int> m_networkDeviceIndex;
+    QHash<quint64, int> m_gpuDeviceIndex;
+    QSet<int> m_activeDiskDevices;
+    QSet<int> m_activeNetworkDevices;
+    QSet<int> m_activeGpuDevices;
     // ===================== 采样与刷新 =====================
     void initializePerformanceCounters();
     void refreshAllViews();
-    bool samplePerCoreUsage(
-        std::vector<double>* coreUsageOut,
-        double* totalUsageOut);
-    bool sampleCpuEffectiveSpeed(double* speedGhzOut) const;
-    bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut);
-    bool sampleMemoryUsage(double* memoryUsagePercentOut);
-    bool sampleDiskRates(std::vector<DiskRateSample>* sampleListOut);
-    bool sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut);
-    bool sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut);
-    bool sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut);
+    // One completed collection; no GUI object or PDH handle crosses this boundary.
+    struct PerformanceSample
+    {
+        qint64 sampleTimeMs = 0;
+        std::vector<double> coreUsage;
+        std::vector<bool> coreValid;
+        double totalCpuUsage = 0.0;
+        bool cpuValid = false;
+        double cpuSpeedGhz = 0.0;
+        std::vector<CpuPowerSnapshot> powerInfo;
+        double memoryUsagePercent = 0.0;
+        bool memoryValid = false;
+        std::uint64_t totalPhysicalBytes = 0;
+        std::uint64_t availablePhysicalBytes = 0;
+        std::uint64_t installedMemoryKb = 0;
+        SystemPerformanceSnapshot systemPerformance;
+        bool systemPerformanceValid = false;
+        std::vector<DiskRateSample> diskSamples;
+        bool diskValid = false;
+        std::vector<NetworkRateSample> networkSamples;
+        bool networkValid = false;
+        QString primaryNetworkAdapterName;
+        std::uint64_t primaryNetworkLinkBitsPerSecond = 0;
+    };
+    struct SamplingState;
+    struct SamplingReceipt;
+    void reconcilePerformanceSample();
+    void applyPerformanceSample(const PerformanceSample& sample);
+    SamplingState* m_samplingState = nullptr; // Owned and destroyed by the dedicated sampling thread.
+    QThread* m_samplingThread = nullptr;
+    bool m_samplingInFlight = false; // GUI-owned gate; reconciled against physical completion.
+    std::shared_ptr<SamplingReceipt> m_samplingReceipt;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_samplingDispatcher;
+    PerformanceSample m_lastPerformanceSample;
+    struct PresentationSample
+    {
+        PerformanceSample sample;
+        std::vector<GpuUsageSample> gpuSamples;
+        bool gpuValid = false;
+        int sampleId = 0;
+    };
+    std::deque<PresentationSample> m_presentationHistory;
+    std::vector<GpuUsageSample> m_lastGpuSamples;
+    bool m_lastGpuValid = false;
+
     bool sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut);
     bool sampleGpuUsage(double* gpuUsagePercentOut);
     bool sampleGpuMemoryInfoByDxgi();
-    bool sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const;
     void updateOverviewText(double cpuUsagePercent, double memoryUsagePercent);
     void updateUtilizationView(
         const std::vector<double>& coreUsageList,
@@ -660,6 +806,8 @@ private:
     std::vector<FloatingWidgetStyleState> m_utilizationFloatingWidgetStyles;
     std::vector<FloatingLayoutStyleState> m_utilizationFloatingLayoutStyles;
     double m_utilizationFloatingAppliedContentScale = 1.0;
+    quint64 m_utilizationMirrorStructureRevision = 0;
+    quint64 m_utilizationMirrorThemeRevision = 0;
     bool m_utilizationThemeRefreshScheduled = false; // 合并 palette 事件，禁止同步 repolish 重入。
     QSize m_utilizationFloatingBaseSize;
     int m_utilizationFloatingScalePercent = 100;
@@ -810,6 +958,8 @@ private:
     int m_sampleCounter = 60;                 // m_sampleCounter：采样序号（从历史长度起步避免首段无图）。
     QString m_cachedSensorText;               // m_cachedSensorText：CPU 温度/电压缓存。
     QString m_lastSensorLogSignatureText;     // m_lastSensorLogSignatureText：最近一次传感器日志去重签名。
+    std::array<quint64, 7> m_staticDataRevisions{{1, 1, 1, 1, 1, 1, 1}};
+    std::array<quint64, 7> m_staticPresentedRevisions{};
     ks::ui::FieldDocument m_cachedOverviewFields;       // 概览字段快照。
     ks::ui::FieldDocument m_cachedGpuFields;            // 显卡字段快照。
     ks::ui::FieldDocument m_cachedMemoryFields;         // 内存字段快照。
@@ -898,13 +1048,6 @@ private:
     std::vector<GpuUtilizationDevice> m_gpuUtilDevices; // m_gpuUtilDevices：GPU利用率多设备页。
 
     // PDH 性能计数器句柄（用 void* 规避头文件引入 Windows 细节）。
-    void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。
-    std::vector<void*> m_coreCounterHandles;  // m_coreCounterHandles：每核利用率计数器句柄。
-    void* m_cpuPerformanceCounterHandle = nullptr; // m_cpuPerformanceCounterHandle：CPU 总体性能百分比计数器。
-    void* m_cpuFrequencyCounterHandle = nullptr; // m_cpuFrequencyCounterHandle：CPU 基准频率计数器。
-    void* m_diskPerfQueryHandle = nullptr;    // m_diskPerfQueryHandle：磁盘速率查询句柄。
-    void* m_diskReadCounterHandle = nullptr;  // m_diskReadCounterHandle：磁盘读速率计数器句柄。
-    void* m_diskWriteCounterHandle = nullptr; // m_diskWriteCounterHandle：磁盘写速率计数器句柄。
     void* m_gpuPerfQueryHandle = nullptr;     // m_gpuPerfQueryHandle：GPU 利用率查询句柄。
     void* m_gpuCounterHandle = nullptr;       // m_gpuCounterHandle：GPU 引擎利用率计数器句柄。
     void* m_gpuDedicatedMemoryCounterHandle = nullptr; // m_gpuDedicatedMemoryCounterHandle：系统专用显存占用计数器句柄。

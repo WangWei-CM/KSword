@@ -7,6 +7,7 @@
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -242,6 +243,7 @@ void KernelTextIntegrityTab::initializeUi()
     m_moduleTable->horizontalHeader()->setStretchLastSection(true);
 
     m_rangeTable = new ks::ui::VisibleTableWidget(splitter);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_rangeTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 所选模块的差异区间是扫描下钻结果，保留复制导出并收拢重复快照。
     ks::ui::SetTableActionBarMode(m_rangeTable, ks::ui::TableActionBarMode::Compact);
     m_rangeTable->setColumnCount(RangeColumnCount);
@@ -287,6 +289,12 @@ void KernelTextIntegrityTab::startScan()
     m_hvciEvidenceUsable = false;
     m_hvciEnforcing = false;
     m_results.clear();
+    m_rangeExclusions.clear();
+    m_unexplainedRangeCount = 0U;
+    m_knownRangeCount = 0U;
+    m_unparsedModuleCount = 0U;
+    m_untrustedModuleCount = 0U;
+    m_incompleteModuleCount = 0U;
     m_moduleTable->setRowCount(0);
     m_rangeTable->setRowCount(0);
     m_scanButton->setEnabled(false);
@@ -395,6 +403,11 @@ void KernelTextIntegrityTab::appendModuleResult(
     const KernelTextIntegrityResult& result)
 {
     m_results.push_back(result);
+    m_unexplainedRangeCount += result.unexplainedRangeCount;
+    m_knownRangeCount += result.knownRangeCount;
+    m_incompleteModuleCount += result.complete ? 0U : 1U;
+    m_unparsedModuleCount += result.unparsedDynamicRelocations ? 1U : 0U;
+    m_untrustedModuleCount += (result.available && !result.diskTrustVerified) ? 1U : 0U;
 
     const int row = m_moduleTable->rowCount();
     m_moduleTable->insertRow(row);
@@ -446,8 +459,8 @@ void KernelTextIntegrityTab::appendModuleResult(
         ModuleColumnStatus,
         readOnlyItem(ks::i18n::sourceText(result.statusText)));
 
-    // 扫描过程中持续刷新差异表与总体结论，避免长时间没有任何反馈。
-    rebuildRangeTable();
+    // Append only this module; accepted ranges and selection stay stable.
+    appendRangeRows(result);
     updateVerdict();
     m_statusLabel->setText(
         kernelText(
@@ -475,76 +488,67 @@ void KernelTextIntegrityTab::finishScan(const bool cancelled)
                 "kernel.text_integrity.status.done",
                 QStringLiteral("状态：完成，共比对 %1 个模块"))
                 .arg(m_results.size()));
-    rebuildRangeTable();
+    m_rangeTable->resizeColumnsToContents();
     updateVerdict();
 }
 
 void KernelTextIntegrityTab::rebuildRangeTable()
 {
+    // Filtering changes visibility only; full canonical ranges remain in place.
     const bool unexplainedOnly = m_unexplainedOnlyCheck->isChecked();
-    m_rangeTable->setRowCount(0);
-    for (const KernelTextIntegrityResult& result : m_results)
+    m_rangeExclusions.clear();
+    for (int row = 0; row < m_rangeTable->rowCount(); ++row)
     {
-        for (const KernelTextDiffRange& range : result.ranges)
-        {
-            if (unexplainedOnly
-                && range.origin != KernelTextDiffRange::Origin::Unexplained)
-            {
-                continue;
-            }
-            const int row = m_rangeTable->rowCount();
-            m_rangeTable->insertRow(row);
-            m_rangeTable->setItem(
-                row, RangeColumnModule, readOnlyItem(result.moduleName));
-            m_rangeTable->setItem(
-                row, RangeColumnSection, readOnlyItem(range.sectionName));
-            m_rangeTable->setItem(
-                row, RangeColumnRva, readOnlyItem(hex32(range.rva)));
-            m_rangeTable->setItem(
-                row, RangeColumnAddress, readOnlyItem(hex64(range.kernelAddress)));
-            m_rangeTable->setItem(
-                row, RangeColumnLength, readOnlyItem(QString::number(range.length)));
-
-            auto* originItem = readOnlyItem(originText(range.origin));
-            originItem->setForeground(
-                range.origin == KernelTextDiffRange::Origin::Unexplained
-                    ? KswordTheme::ErrorColor()
-                    : KswordTheme::WarningColor());
-            m_rangeTable->setItem(row, RangeColumnOrigin, originItem);
-
-            m_rangeTable->setItem(
-                row, RangeColumnClean, readOnlyItem(byteText(range.cleanBytes)));
-            m_rangeTable->setItem(
-                row, RangeColumnObserved, readOnlyItem(byteText(range.observedBytes)));
-        }
+        const auto* origin = m_rangeTable->item(row, RangeColumnOrigin);
+        if (unexplainedOnly && origin != nullptr && !origin->data(Qt::UserRole).toBool())
+            m_rangeExclusions.insert(m_rangeTable->model()->index(row, 0));
     }
-    m_rangeTable->resizeColumnsToContents();
+    ks::ui::ApplyTableRowFilter(m_rangeTable, m_rangeExclusions);
+}
+
+void KernelTextIntegrityTab::appendRangeRows(const KernelTextIntegrityResult& result)
+{
+    const bool unexplainedOnly = m_unexplainedOnlyCheck->isChecked();
+    for (const KernelTextDiffRange& range : result.ranges)
+    {
+        const int row = m_rangeTable->rowCount();
+        m_rangeTable->insertRow(row);
+        m_rangeTable->setItem(
+            row, RangeColumnModule, readOnlyItem(result.moduleName));
+        m_rangeTable->setItem(
+            row, RangeColumnSection, readOnlyItem(range.sectionName));
+        m_rangeTable->setItem(
+            row, RangeColumnRva, readOnlyItem(hex32(range.rva)));
+        m_rangeTable->setItem(
+            row, RangeColumnAddress, readOnlyItem(hex64(range.kernelAddress)));
+        m_rangeTable->setItem(
+            row, RangeColumnLength, readOnlyItem(QString::number(range.length)));
+
+        auto* originItem = readOnlyItem(originText(range.origin));
+        originItem->setData(Qt::UserRole, range.origin == KernelTextDiffRange::Origin::Unexplained);
+        originItem->setForeground(
+            range.origin == KernelTextDiffRange::Origin::Unexplained
+                ? KswordTheme::ErrorColor()
+                : KswordTheme::WarningColor());
+        m_rangeTable->setItem(row, RangeColumnOrigin, originItem);
+
+        m_rangeTable->setItem(
+            row, RangeColumnClean, readOnlyItem(byteText(range.cleanBytes)));
+        m_rangeTable->setItem(
+            row, RangeColumnObserved, readOnlyItem(byteText(range.observedBytes)));
+        if (unexplainedOnly && range.origin != KernelTextDiffRange::Origin::Unexplained)
+            m_rangeExclusions.insert(m_rangeTable->model()->index(row, 0));
+    }
+    ks::ui::ApplyTableRowFilter(m_rangeTable, m_rangeExclusions);
 }
 
 void KernelTextIntegrityTab::updateVerdict()
 {
-    std::uint32_t unexplained = 0U;
-    std::uint32_t known = 0U;
-    std::uint32_t unparsedModules = 0U;
-    std::uint32_t untrustedModules = 0U;
-    std::uint32_t incompleteModules = 0U;
-    for (const KernelTextIntegrityResult& result : m_results)
-    {
-        unexplained += result.unexplainedRangeCount;
-        known += result.knownRangeCount;
-        if (!result.complete)
-        {
-            ++incompleteModules;
-        }
-        if (result.unparsedDynamicRelocations)
-        {
-            unparsedModules += 1U;
-        }
-        if (result.available && !result.diskTrustVerified)
-        {
-            untrustedModules += 1U;
-        }
-    }
+    const std::uint32_t unexplained = m_unexplainedRangeCount;
+    const std::uint32_t known = m_knownRangeCount;
+    const std::uint32_t unparsedModules = m_unparsedModuleCount;
+    const std::uint32_t untrustedModules = m_untrustedModuleCount;
+    const std::uint32_t incompleteModules = m_incompleteModuleCount;
 
     QString verdict;
     QString color;

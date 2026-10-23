@@ -1392,7 +1392,8 @@ void KernelDock::refreshDriverStatusAsync()
             guardThis->m_refreshDriverStatusButton->setEnabled(true);
             guardThis->m_driverStatusSummary = std::move(summary);
             guardThis->m_driverCapabilityRows = std::move(rows);
-            populateSummaryTable(guardThis->m_driverStatusSummaryTable, guardThis->m_driverStatusSummary, guardThis->m_driverCapabilityRows.size());
+            // rebuildDriverCapabilityTable presents the same summary with the final
+            // filtered count; do not build and immediately discard it once here too.
             guardThis->rebuildDriverCapabilityTable(guardThis->m_driverStatusFilterEdit->text().trimmed());
 
             if (!success)
@@ -1448,16 +1449,22 @@ void KernelDock::rebuildDriverCapabilityTable(const QString& filterKeyword)
 {
     if (m_driverCapabilityTable == nullptr) { return; }
 
-    m_driverCapabilityTable->setSortingEnabled(false);
-    m_driverCapabilityTable->setRowCount(0);
-
+    std::vector<std::size_t> visibleSources;
+    visibleSources.reserve(m_driverCapabilityRows.size());
     for (std::size_t sourceIndex = 0U; sourceIndex < m_driverCapabilityRows.size(); ++sourceIndex)
     {
+        if (shouldShowCapability(m_driverCapabilityRows[sourceIndex], filterKeyword))
+            visibleSources.push_back(sourceIndex);
+    }
+    m_driverCapabilityTable->setSortingEnabled(false);
+    m_driverCapabilityTable->setRowCount(0);
+    // One insertion range, rather than notifying view/header/filter observers
+    // separately for every capability during first-display result delivery.
+    m_driverCapabilityTable->setRowCount(static_cast<int>(visibleSources.size()));
+    int row = 0;
+    for (const std::size_t sourceIndex : visibleSources)
+    {
         const KernelDriverCapabilityEntry& entry = m_driverCapabilityRows[sourceIndex];
-        if (!shouldShowCapability(entry, filterKeyword)) { continue; }
-
-        const int row = m_driverCapabilityTable->rowCount();
-        m_driverCapabilityTable->insertRow(row);
         auto* featureItem = new QTableWidgetItem(safeText(entry.featureNameText));
         auto* stateItem = new QTableWidgetItem(stateText(entry.state, entry.stateNameText));
         auto* policyItem = new QTableWidgetItem(formatHex32(entry.requiredPolicyFlags));
@@ -1481,6 +1488,7 @@ void KernelDock::rebuildDriverCapabilityTable(const QString& filterKeyword)
         setReadonlyItem(m_driverCapabilityTable, row, DriverCapabilityColumn::PresentDyn, presentItem);
         setReadonlyItem(m_driverCapabilityTable, row, DriverCapabilityColumn::Dependency, dependencyItem);
         setReadonlyItem(m_driverCapabilityTable, row, DriverCapabilityColumn::Reason, reasonItem);
+        ++row;
     }
 
     m_driverCapabilityTable->setSortingEnabled(true);

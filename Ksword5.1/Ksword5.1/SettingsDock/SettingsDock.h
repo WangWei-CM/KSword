@@ -3,6 +3,7 @@
 #include "AppearanceSettings.h"
 
 #include <QWidget>
+#include <memory>
 
 class QButtonGroup;
 class QCheckBox;
@@ -117,6 +118,7 @@ private:
     void applyMcpSettingsToUi(const ks::settings::AppearanceSettings& settings);
     void collectMcpSettingsFromUi(ks::settings::AppearanceSettings& settings) const;
     void refreshMcpServiceState(); // 根据最近的真实状态刷新文案和启停按钮。
+    void requestMcpPathValidation(bool forceRefresh = false);
     void refreshMcpClientConfiguration(); // 仅更新当前 PID 的配置预览，不运行脚本。
     void refreshMcpInstallPrompt(); // 读取随程序嵌入的规范提示词，语言切换时刷新原文。
 
@@ -292,6 +294,8 @@ private:
     QWidget* m_onlineScanTab = nullptr;
 
     // MCP 页保持原控件身份；运行状态与待应用偏好分开保存。
+    struct McpPathValidationState;
+    std::shared_ptr<McpPathValidationState> m_mcpPathValidation;
     QWidget* m_mcpTab = nullptr; // 设置窗口中的 MCP 分类页。
     QCheckBox* m_mcpAutoStartCheckBox = nullptr; // 待保存的自动启动偏好。
     QLineEdit* m_mcpPythonCommandEdit = nullptr; // 客户端 Python 命令或可执行文件路径。
@@ -364,6 +368,10 @@ private:
 
     // m_backgroundOpacityValueLabel 作用：显示透明度百分比文本。
     QLabel* m_backgroundOpacityValueLabel = nullptr;
+
+    // 共享主题控件底色单独调节，保留文字、图标与窗口背景图的原有不透明度。
+    QSlider* m_controlBackgroundOpacitySlider = nullptr;
+    QLabel* m_controlBackgroundOpacityValueLabel = nullptr;
 
     // m_backgroundTransparencyCheckBox 作用：让背景图自身的透明区域透出窗口后方。
     QCheckBox* m_backgroundTransparencyCheckBox = nullptr;
@@ -459,6 +467,9 @@ private:
     QCheckBox* m_privilegeDdmaCheckBox = nullptr;
     // m_hvmDisplayNameCombo 作用：选择硬件虚拟化按钮上显示 HVM / R-1。
     QComboBox* m_hvmDisplayNameCombo = nullptr;
+
+    // m_uiAnimationsCheckBox 作用：应用内界面动画总开关；关闭后平滑滚动一并失效。
+    QCheckBox* m_uiAnimationsCheckBox = nullptr;
 
     // m_smoothScrollingCheckBox 作用：设置全局滚动区域是否启用滚轮缓动。
     QCheckBox* m_smoothScrollingCheckBox = nullptr;

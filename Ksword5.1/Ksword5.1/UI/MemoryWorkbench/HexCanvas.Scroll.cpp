@@ -315,6 +315,17 @@ namespace ks::ui
             return;
         }
 
+        const QPointer<HexCanvas> alive(this);
+        const auto revision = m_viewport.SourceRevision();
+        auto* const provider = m_provider;
+        // A fresh geometry-only viewport uses the exact resident-window planner,
+        // without copying cached bytes or mistaking this call's missing pages for interest.
+        const ksword::memwb::HexViewport interestViewport(m_viewport.FirstAddress(),
+            m_viewport.LastAddress(), m_viewport.BytesPerRow(), m_viewport.MaxCachedPages());
+        provider->UpdateViewportInterest(
+            interestViewport.PlanFetch(m_firstRow, paintRowCount(), kPrefetchPages), revision);
+        if (!alive || revision != sourceRevision() || provider != m_provider) return;
+
         // plan：还需要读取的页范围；accepted：成功登记在途的范围，只有它们才交给提供者。
         const std::vector<HexFetchRange> plan =
             m_viewport.PlanFetch(m_firstRow, paintRowCount(), kPrefetchPages);
@@ -346,7 +357,7 @@ namespace ks::ui
         if (enabled) requestVisiblePages();
     }
 
-    void HexCanvas::requestAddressRange(std::uint64_t first, std::uint64_t last)
+    void HexCanvas::requestAddressRange(std::uint64_t first, std::uint64_t last, RangeReadPurpose purpose)
     {
         if (!m_hasSpace || !m_provider || first > last) return;
         first = std::max(first, m_viewport.FirstAddress());
@@ -357,11 +368,26 @@ namespace ks::ui
         const auto firstRow = m_viewport.RowOfAddress(first);
         const auto lastRow = m_viewport.RowOfAddress(last);
         if (!firstRow || !lastRow) return;
+        const QPointer<HexCanvas> alive(this);
+        const auto revision = sourceRevision();
+        auto* const provider = m_provider;
+        const ksword::memwb::HexViewport explicitViewport(m_viewport.FirstAddress(),
+            m_viewport.LastAddress(), m_viewport.BytesPerRow(), m_viewport.MaxCachedPages());
+        const auto intent = explicitViewport.PlanFetch(*firstRow, *lastRow - *firstRow + 1, kPrefetchPages);
+        // Preserve the complete explicit intent BEFORE PlanFetch removes cached and
+        // in-flight pages. A fully pending range still has protected ownership.
+        if (purpose == RangeReadPurpose::Browse) provider->UpdateViewportInterest(intent, revision);
+        else provider->ProtectPages(intent, revision);
+        if (!alive || revision != sourceRevision() || provider != m_provider) return;
         const auto plan = m_viewport.PlanFetch(*firstRow, *lastRow - *firstRow + 1, kPrefetchPages);
         std::vector<HexFetchRange> accepted;
         for (const auto& range : plan)
             if (m_viewport.MarkInFlight(range) == PageResult::Accepted) accepted.push_back(range);
-        if (!accepted.empty()) m_provider->RequestPages(accepted, m_viewport.SourceRevision());
+        if (!accepted.empty())
+        {
+            if (purpose == RangeReadPurpose::Browse) m_provider->RequestPages(accepted, revision);
+            else m_provider->RequestExplicitPages(accepted, revision);
+        }
     }
 
     // 返回当前绘制区间；首尾行均按真实地址空间去掉补空位。

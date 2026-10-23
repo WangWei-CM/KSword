@@ -61,6 +61,17 @@ namespace ks::process
         std::unordered_map<std::uint64_t, CpuCoreUsageSeries> threadUsageByIdentity;
     };
 
+    struct ProcessCpuCoreEtwHealth
+    {
+        bool isRunning = false;
+        bool cleanupPending = false;
+        bool stopErrorKnown = false;
+        std::uint32_t stopError = 0;
+        bool errorCodeKnown = false;
+        std::uint32_t errorCode = 0;
+        std::string errorText;
+    };
+
     // BuildCpuThreadIdentity：PID/TID 组合键，避免不同进程的线程 ID 混淆。
     std::uint64_t BuildCpuThreadIdentity(std::uint32_t processId, std::uint32_t threadId);
 
@@ -79,6 +90,9 @@ namespace ks::process
 
         bool Start();
         void Stop();
+        // False retains the exact owned session/consumer identity for explicit retry.
+        bool StopChecked();
+        ProcessCpuCoreEtwHealth SnapshotHealth() const;
         bool IsRunning() const;
         std::string LastErrorText() const;
         CpuCoreUsageSnapshot SnapshotAndReset();
@@ -92,7 +106,9 @@ namespace ks::process
         static void WINAPI eventRecordCallback(PEVENT_RECORD eventRecord);
         static ULONG WINAPI bufferCallback(PEVENT_TRACE_LOGFILEW logFile);
 
-        void consumeTrace(PROCESSTRACE_HANDLE consumerHandle, std::wstring sessionName);
+        void consumeTrace(PROCESSTRACE_HANDLE consumerHandle, TRACEHANDLE sessionHandle, std::wstring sessionName);
+        bool stopLocked();
+        bool closeOwnedConsumer();
         void recordEvent(const EVENT_RECORD& eventRecord);
         void recordThreadLifecycleEvent(const EVENT_RECORD& eventRecord, std::uint8_t opcode);
         void recordContextSwitchEvent(const EVENT_RECORD& eventRecord);
@@ -102,16 +118,20 @@ namespace ks::process
             std::uint64_t deltaTicks);
         std::uint32_t resolveThreadOwnerLocked(std::uint32_t threadId);
         void resetProcessorBaselinesLocked();
-        void setLastErrorText(std::string errorText);
+        void setLastErrorText(std::string errorText, ULONG errorCode = ERROR_SUCCESS, bool codeKnown = false);
 
     private:
         mutable std::mutex m_lifecycleMutex;
         std::thread m_consumerThread;
         TRACEHANDLE m_sessionHandle = 0;
-        PROCESSTRACE_HANDLE m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
+        std::atomic<PROCESSTRACE_HANDLE> m_consumerHandle{ INVALID_PROCESSTRACE_HANDLE };
         std::wstring m_sessionName;
 
         std::atomic_bool m_running{ false };
+        std::atomic_bool m_sessionReleased{ true };
+        std::atomic_bool m_consumerFinished{ true };
+        std::atomic_bool m_cleanupPending{ false };
+        std::atomic<ULONG> m_stopError{ ERROR_SUCCESS };
         std::atomic_bool m_stopRequested{ false };
         std::atomic<std::uint64_t> m_bufferEventsLost{ 0 };
         std::atomic<std::uint64_t> m_sessionEventsLost{ 0 };
@@ -132,5 +152,7 @@ namespace ks::process
 
         mutable std::mutex m_errorMutex;
         std::string m_lastErrorText;
+        ULONG m_lastErrorCode = ERROR_SUCCESS;
+        bool m_lastErrorCodeKnown = false;
     };
 } // namespace ks::process

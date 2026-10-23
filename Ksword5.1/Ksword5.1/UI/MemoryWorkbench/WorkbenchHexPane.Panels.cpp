@@ -164,6 +164,23 @@ namespace ks::ui
             }
             return view;
         });
+        findBar_->setRangeSourceGetter([this](std::uint64_t first, std::uint64_t last) {
+            HexFindBar::SourceView view;
+            if (!overlay_.HasBaseline() || !overlay_.BaselineSize() || first > last) return view;
+            const auto base = overlay_.BaseAddress();
+            const auto size = overlay_.BaselineSize();
+            const auto baselineLast = size - 1 > UINT64_MAX - base ? UINT64_MAX : base + size - 1;
+            first = std::max(first, base); last = std::min(last, baselineLast);
+            if (first > last) return view;
+            const auto materialized = overlay_.Materialize(first, last - first + 1);
+            if (!materialized.ok) return view;
+            view.base = first;
+            view.data = QByteArray(reinterpret_cast<const char*>(materialized.bytes.data()),
+                static_cast<qsizetype>(materialized.bytes.size()));
+            view.validMask = QByteArray(reinterpret_cast<const char*>(materialized.validMask.data()),
+                static_cast<qsizetype>(materialized.validMask.size()));
+            return view;
+        });
         findBar_->setSelectionGetter([this](std::uint64_t* firstOut, std::uint64_t* lastOut) {
             const std::optional<HexCanvas::AddressRange> range = canvas_->selectedRange();
             if (!range.has_value())

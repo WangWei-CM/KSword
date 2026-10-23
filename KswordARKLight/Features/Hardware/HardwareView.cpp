@@ -248,7 +248,7 @@ bool HasVisibleChildren(const HardwareViewState& state, const HardwareDeviceNode
 
 // InsertTreeNode inserts one device node. When includeDescendants is false the
 // item exposes its child affordance but defers child materialization until the
-// user expands it; filtered trees request a complete visible branch instead.
+// user expands it. The complete filtered ancestor closure stays in the model.
 HTREEITEM InsertTreeNode(HardwareViewState* state, int index, HTREEITEM parent, const bool includeDescendants) {
     const HardwareDeviceNode* node = state ? state->model.deviceAt(index) : nullptr;
     if (!node || !IsVisibleDevice(*state, index)) {
@@ -374,8 +374,8 @@ void SelectFirstRoot(HardwareViewState* state) {
 }
 
 // PopulateTree rebuilds the tree control from the immutable filtered snapshot.
-// Empty searches create roots only, while a non-empty local search exposes the
-// compact matching branch so both cases stay responsive with large inventories.
+// Both query modes materialize only expanded branches. A non-empty search opens
+// roots while descendants remain available through the existing lazy expansion.
 void PopulateTree(HardwareViewState* state) {
     if (!state || !state->tree) {
         return;
@@ -384,7 +384,7 @@ void PopulateTree(HardwareViewState* state) {
     ::SendMessageW(state->tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(state->tree);
     for (const int rootIndex : state->model.rootIndices()) {
-        HTREEITEM root = InsertTreeNode(state, rootIndex, TVI_ROOT, filtered);
+        HTREEITEM root = InsertTreeNode(state, rootIndex, TVI_ROOT, false);
         if (root && filtered) {
             TreeView_Expand(state->tree, root, TVE_EXPAND);
         }
@@ -512,7 +512,7 @@ void ApplyHardwareFilter(HardwareViewState& state, HardwareFilterResult result) 
 void RequestHardwareFilter(HardwareViewState& state, std::wstring query, std::wstring selectedInstanceId) {
     state.filterQuery = std::move(query);
     state.filterUseRegex = Ksword::Ui::GetFilterBarRegexEnabled(state.filterBar);
-    const std::vector<HardwareDeviceNode> devices = state.model.devices();
+    const auto devices = state.model.deviceSnapshot();
     const std::uint64_t generation = state.displayGeneration;
     const bool useRegex = state.filterUseRegex;
     if (!state.filterTask) {
@@ -525,7 +525,7 @@ void RequestHardwareFilter(HardwareViewState& state, std::wstring query, std::ws
             result.query = std::move(query);
             result.useRegex = useRegex;
             result.selectedInstanceId = std::move(selectedInstanceId);
-            result.visibleIndexes.assign(devices.size(), result.query.empty());
+            result.visibleIndexes.assign(devices->size(), result.query.empty());
             // Compiled once for the whole pass; a malformed pattern falls back
             // to substring matching, matching the list-view filter's behavior.
             std::wregex compiled;
@@ -539,14 +539,14 @@ void RequestHardwareFilter(HardwareViewState& state, std::wstring query, std::ws
                 }
             }
             if (!result.query.empty()) {
-                for (const HardwareDeviceNode& node : devices) {
+                for (const HardwareDeviceNode& node : *devices) {
                     if (!MatchesDevice(node, result.query, regexReady ? &compiled : nullptr)) {
                         continue;
                     }
                     int current = node.index;
                     while (current >= 0 && static_cast<std::size_t>(current) < result.visibleIndexes.size() && !result.visibleIndexes[static_cast<std::size_t>(current)]) {
                         result.visibleIndexes[static_cast<std::size_t>(current)] = true;
-                        current = devices[static_cast<std::size_t>(current)].parentIndex;
+                        current = (*devices)[static_cast<std::size_t>(current)].parentIndex;
                     }
                 }
             }

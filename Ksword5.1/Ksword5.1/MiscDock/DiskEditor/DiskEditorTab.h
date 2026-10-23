@@ -16,6 +16,7 @@
 
 #include <QByteArray>
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
 
 #include <cstdint>
 #include <vector>
@@ -32,15 +33,23 @@ class QSpinBox;
 class QSplitter;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
 class QVBoxLayout;
 namespace ks::ui
 {
     class HexView;
+    template<typename RowT> class FlatTableModel;
+    class AsyncOperation;
 }
 
 namespace ks::misc
 {
     class DiskMapWidget;
+    struct DiskSearchDisplayRow
+    {
+        std::size_t ordinal = 0;
+        DiskSearchResult hit;
+    };
 
     // DiskEditorTab 说明：
     // - 输入：用户选择的物理磁盘、偏移和读取长度；
@@ -49,6 +58,9 @@ namespace ks::misc
     class DiskEditorTab final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const DiskEditorTab* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造函数：
         // - parent 为 Qt 父控件；
         // - 初始化 UI 后异步枚举磁盘。
@@ -57,9 +69,11 @@ namespace ks::misc
         // 析构函数：
         // - 后台回投使用 QPointer；
         // - 无需手动等待线程。
-        ~DiskEditorTab() override = default;
+        ~DiskEditorTab() override;
 
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         // initializeUi：
         // - 创建顶部工具栏、分区视图、扇区编辑区和日志区；
         // - 无输入参数，无返回值。
@@ -280,6 +294,7 @@ namespace ks::misc
         // - busy 为 true 时表示正在读/写/刷新；
         // - 无返回值。
         void setControlsEnabledForBusy(bool busy);
+        void finishWriteTransactionUi();
 
     private:
         QVBoxLayout* m_rootLayout = nullptr;        // m_rootLayout：页面根布局。
@@ -305,7 +320,8 @@ namespace ks::misc
         QTableWidget* m_structureTable = nullptr;    // m_structureTable：MBR/GPT/启动扇区解析表。
         QTableWidget* m_volumeTable = nullptr;       // m_volumeTable：卷与盘符映射表。
         QTableWidget* m_healthTable = nullptr;       // m_healthTable：设备能力/健康表。
-        QTableWidget* m_searchResultTable = nullptr; // m_searchResultTable：扇区搜索结果表。
+        QTableView* m_searchResultTable = nullptr;
+        ks::ui::FlatTableModel<DiskSearchDisplayRow>* m_searchResultModel = nullptr; // m_searchResultTable：扇区搜索结果表。
         QPushButton* m_analyzeButton = nullptr;      // m_analyzeButton：刷新结构解析按钮。
         QPushButton* m_toolUseSelectionButton = nullptr; // m_toolUseSelectionButton：使用当前读取范围按钮。
         QPushButton* m_toolUsePartitionButton = nullptr; // m_toolUsePartitionButton：使用当前分区范围按钮。
@@ -337,6 +353,8 @@ namespace ks::misc
         std::uint64_t m_readGeneration = 0;         // m_readGeneration：只有所属异步读可以结束 busy 状态。
         std::uint64_t m_loadedBaseOffset = 0;       // m_loadedBaseOffset：HEX 缓冲对应磁盘偏移。
         int m_selectedPartitionIndex = -1;          // m_selectedPartitionIndex：当前分区索引。
+        ks::ui::AsyncOperation* m_writeOperation = nullptr;
+        bool m_writeTransactionPending = false;
         bool m_busy = false;                        // m_busy：后台任务互斥标志。
         bool m_dirty = false;                       // m_dirty：当前 HEX 缓冲是否已修改。
     };

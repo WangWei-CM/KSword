@@ -14,6 +14,7 @@ class QChartView;
 class QChart;
 class QGridLayout;
 class QHBoxLayout;
+class QHideEvent;
 class QLabel;
 class QLineSeries;
 class QListWidget;
@@ -23,6 +24,7 @@ class QShowEvent;
 class QStackedWidget;
 class QTimer;
 class QValueAxis;
+class QVariantAnimation;
 
 class HudPerformancePanel final : public QWidget
 {
@@ -37,6 +39,7 @@ public:
 protected:
     void resizeEvent(QResizeEvent* resizeEventPointer) override;
     void showEvent(QShowEvent* showEventPointer) override;
+    void hideEvent(QHideEvent* hideEventPointer) override;
 
 private:
     struct CoreChartEntry
@@ -125,10 +128,13 @@ private:
     void initializeCoreCharts();
     void syncSidebarSelection(int selectedRowIndex);
     void adjustChartHeights();
+    void refreshCorePresentation(double progress, bool refreshLabels);
 
     void initializePerformanceCounters();
     void refreshAllViews();
     void requestLiveRefresh();
+    void refreshVisiblePresentation(bool snapToLatest = false);
+    void projectGeneralSeries(QLineSeries* lineSeries, QValueAxis* axisX, QValueAxis* axisY);
     LiveSampleResult collectLiveSampleResult();
     void applyLiveSampleResult(const LiveSampleResult& liveSampleResult);
     bool samplePerCoreUsage(std::vector<double>* coreUsageOut, double* totalUsageOut);
@@ -158,17 +164,7 @@ private:
         double networkRxBytesPerSec,
         double networkTxBytesPerSec,
         double gpuUsagePercent);
-    void updateTaskManagerDetailLabels(
-        const std::vector<double>& coreUsageList,
-        const std::vector<CpuPowerSnapshot>& powerInfoList,
-        double memoryUsagePercent,
-        double diskReadBytesPerSec,
-        double diskWriteBytesPerSec,
-        double networkRxBytesPerSec,
-        double networkTxBytesPerSec,
-        double gpuUsagePercent,
-        const SystemPerformanceSnapshot* systemPerfSnapshotPointer,
-        bool systemPerfOk);
+    void updateTaskManagerDetailLabels(const LiveSampleResult& sample);
     void appendCoreSeriesPoint(CoreChartEntry& chartEntry, double usagePercent);
     void appendGeneralSeriesPoint(
         QLineSeries* lineSeries,
@@ -189,8 +185,11 @@ private:
     QListWidget* m_sidebarList = nullptr;
     QStackedWidget* m_detailStack = nullptr;
     QTimer* m_refreshTimer = nullptr;
+    QVariantAnimation* m_coreSampleAnimation = nullptr;
     QFutureWatcher<LiveSampleResult>* m_liveSampleWatcher = nullptr;
     QMutex m_liveSampleMutex;
+    LiveSampleResult m_latestLiveSample;
+    bool m_hasLiveSample = false;
     bool m_liveSampleInProgress = false;
 
     PerformanceNavCard* m_cpuNavCard = nullptr;

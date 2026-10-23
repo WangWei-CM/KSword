@@ -60,6 +60,7 @@ namespace ks::settings
     // customMainBackgroundColor：用户自定义的主背景色（#RRGGBB）；空值表示跟随当前深浅主题。
     // backgroundImagePath：背景图路径（可相对可绝对）；
     // backgroundOpacityPercent：背景图透明度（0~100）；
+    // controlBackgroundOpacityPercent：主题控件背景不透明度（0~100），不影响文字和图标。
     // backgroundTransparencyEnabled：是否让背景图片自身的 alpha 透明区域透出窗口后方；
     // backgroundTranslucencyMaterial：透明背景效果
     // （auto=有图直透无图磨砂，acrylic=始终亚克力磨砂，desktop=始终直透桌面；
@@ -81,6 +82,8 @@ namespace ks::settings
     // startupWindowScaleFactor：主窗口启动缩放因子（1.0=100%，重启后生效）；
     // startupScaleRecommendPromptDisabled：小屏推荐缩放提示是否不再弹出。
     // unlockerShellContextMenuEnabled：是否启用“系统右键-文件解锁器”菜单（下次启动生效）。
+    // uiAnimationsEnabled：应用内界面动画总开关（滚动缓动、页签切换、菜单弹出、浮动滚动条淡出等）；
+    //   默认启用；关闭后上述过渡立即到位，且覆盖 smoothScrollingEnabled。
     // smoothScrollingEnabled：是否对全局滚动区域启用滚轮缓动；
     // sliderWheelAdjustEnabled：是否允许滚轮调整滑块、下拉框和数值输入框，以及切换标签页；沿用旧配置键，默认关闭。
     // fontFamily：应用界面字体族；空值表示沿用系统默认字体。
@@ -105,6 +108,7 @@ namespace ks::settings
         QString uiLanguage = QStringLiteral("system");
         QString backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         int backgroundOpacityPercent = 35;
+        int controlBackgroundOpacityPercent = 75;
         bool backgroundTransparencyEnabled = false;
         int utilizationFloatingScalePercent = 100;
         int utilizationFloatingBackgroundOpacityPercent = 100;
@@ -133,6 +137,7 @@ namespace ks::settings
         double startupWindowScaleFactor = 1.0;
         bool startupScaleRecommendPromptDisabled = false;
         bool unlockerShellContextMenuEnabled = false;
+        bool uiAnimationsEnabled = true;
         bool smoothScrollingEnabled = true;
         bool sliderWheelAdjustEnabled = false;
         DetailDisplayScheme detailDisplayScheme = DetailDisplayScheme::BottomCollapsed;

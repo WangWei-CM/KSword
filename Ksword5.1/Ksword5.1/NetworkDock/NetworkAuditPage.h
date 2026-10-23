@@ -16,11 +16,17 @@
 #include <QWidget>
 #include <QJsonValue>
 #include <QSet>
+#include <QStringList>
+#include <string>
 
+#include <cstdint>
 #include <atomic> // std::atomic_bool：防止并发刷新重入。
 #include <functional> // std::function：把原连接管理页的进程动作回调给 NetworkDock。
 #include <memory> // std::unique_ptr：异步快照对象托管。
 #include <vector> // std::vector：批量快照行缓存。
+
+namespace ks::ui { class AsyncOperation; }
+namespace ks::i18n { class SourceTextSnapshot; }
 
 class QImage;
 class QLabel;
@@ -28,8 +34,11 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QSplitter;
+class QShowEvent;
+class QEvent;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
 class QTableWidgetItem;
 class QTimer;
 class QVBoxLayout;
@@ -63,6 +72,9 @@ public:
     // - 无返回值。
     void requestInitialRefresh();
 
+    // 详情页先挂载、后传入 PID；首次查询须等目标范围确定。
+    void deferInitialRefreshUntilProcessScope();
+
     // focusProcessIds 作用：
     // - 合并原连接管理页的“按进程跳转”能力；
     // - 传入空集合表示清除过滤，并切换到 TCP/UDP Cross-View；
@@ -92,7 +104,24 @@ public:
     // - handler 为空时 UDP 菜单不显示该写操作。
     void setUdpEndpointBlockRuleHandler(UdpEndpointBlockRuleHandler handler);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
+
 private:
+    // One value row, not a second model/framework. The complete source snapshots
+    // and TCP control records remain in the immutable displayed source snapshot.
+    struct CrossViewValueRow
+    {
+        std::string identity;
+        QStringList fields;
+        QStringList searchFields;
+        quint32 processId = 0;
+        qulonglong sourceIndex = 0;
+    };
+    void configureCrossViewValueTable(QTableView* table, const QStringList& headers, bool tcp);
+    using CrossViewValue = std::shared_ptr<const CrossViewValueRow>;
+
     // CrossViewRow：TCP/UDP 交叉视图的一行聚合结果。
     struct CrossViewRow
     {
@@ -279,11 +308,39 @@ private:
         QString detailText;
     };
 
+    // Immutable preparation belongs to the exact canonical source and language epoch.
+    struct CrossViewPresentation
+    {
+        std::shared_ptr<const AuditSnapshot> source;
+        std::uint64_t sourceGeneration = 0;
+        std::uint64_t languageGeneration = 0;
+        QSet<quint32> processIds;
+        QString r0TcpStatusText;
+        QString r0UdpStatusText;
+        std::vector<CrossViewValue> tcpRows;
+        std::vector<CrossViewValue> udpRows;
+        std::vector<CrossViewValue> summaryRows;
+    };
+    void requestCrossViewPreparation();
+    static std::shared_ptr<const CrossViewPresentation> prepareCrossViewValues(
+        const std::shared_ptr<const AuditSnapshot>& source,
+        const ks::i18n::SourceTextSnapshot& language,
+        std::uint64_t sourceGeneration, std::uint64_t languageGeneration,
+        const QString& r0TcpStatusText, const QString& r0UdpStatusText,
+        const QSet<quint32>& processIds,
+        const std::function<bool()>& isCanceled);
+    const std::vector<TcpEndpointRow>& tcpEndpointCache() const;
+
     // initializeUi 作用：
     // - 构建顶部控制栏和四个审计分区；
     // - 输入：无；
     // - 返回：无。
     void initializeUi();
+    void initializeCrossViewConnections();
+    void updateProcessFilterLabel();
+    bool ensureCurrentAuditPage();
+    void addLazyAuditTableTab(QTabWidget* tabs, QTableView* NetworkAuditPage::* member,
+        const QStringList& headers, const QString& id, bool fullToolbar);
 
     // initializeConnections 作用：
     // - 连接刷新按钮和表格交互；
@@ -304,16 +361,24 @@ private:
     void refreshCrossViewAsync();
 
     // applySnapshot 作用：
-    // - 将后台采集完成的全部快照写回各个表格；
+    // - 保存完整规范快照，只投影当前可见分支；
     // - 输入 snapshot：后台线程采集结果；
     // - 返回：无。
-    void applySnapshot(const AuditSnapshot& snapshot);
+    void applySnapshot(std::shared_ptr<AuditSnapshot> snapshot,
+        std::shared_ptr<const CrossViewPresentation> prepared);
+
+    // R3 高频刷新合并最近 R0；非连接分区保留最近一次完整审计结果。
+    void applyCrossViewSnapshot(std::shared_ptr<AuditSnapshot> snapshot,
+        std::shared_ptr<const CrossViewPresentation> prepared);
+
+    // Show/切页/回投共用入口；菜单屏障后只消费当前分支的最新 dirty 快照。
+    void presentVisibleSnapshot();
 
     // refreshCrossViewTable 作用：
-    // - 重建 TCP/UDP 明细表和进程维度交叉视图表格；
-    // - 输入 snapshot：来自后台的完整网络快照；
+    // - 提交后台准备好的完整 TCP/UDP/汇总值，不在 GUI 聚合或构造搜索文本；
+    // - 输入 prepared：与规范源及语言代次一致的不可变准备结果；
     // - 返回：无。
-    void refreshCrossViewTable(const AuditSnapshot& snapshot);
+    void refreshCrossViewTable(std::shared_ptr<const CrossViewPresentation> prepared);
 
     // terminateSelectedTcpConnection 作用：
     // - 终止 Cross-View 中选中的 R3 IPv4 TCP 活动连接；
@@ -325,7 +390,7 @@ private:
     // - 为 TCP/UDP 表提供复制、刷新、进程跟踪、进程详情、扫描、终止和清除 PID 筛选；
     // - 菜单显式应用主题样式；
     // - 返回：无。
-    void showCrossViewContextMenu(QTableWidget* tableWidget, const QPoint& localPosition);
+    void showCrossViewContextMenu(QTableView* tableWidget, const QPoint& localPosition);
 
     // resolveProcessIcon 作用：
     // - 只读取 PID 图标缓存，绝不在建表主链路里做 OpenProcess / Shell 图标提取；
@@ -363,19 +428,19 @@ private:
     // - 重建 AFD 相关句柄表格；
     // - 输入 snapshot：来自后台的 AFD 句柄结果；
     // - 返回：无。
-    void refreshAfdTable(const std::vector<AfdHandleRow>& snapshot);
+    void refreshAfdTable(const std::shared_ptr<AuditSnapshot>& snapshot);
 
     // refreshWfpTables 作用：
     // - 重建 WFP provider / sublayer / callout / filter 四张只读表；
     // - 输入 snapshot：来自后台的 WFP 目录结果；
     // - 返回：无。
-    void refreshWfpTables(const AuditSnapshot& snapshot);
+    void refreshWfpTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable);
 
     // refreshNdisTables 作用：
     // - 重建 NDIS miniport / binding / protocol 表；
     // - 输入 snapshot：来自后台的 NDIS 结果；
     // - 返回：无。
-    void refreshNdisTables(const AuditSnapshot& snapshot);
+    void refreshNdisTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable);
 
     // refreshNsiSummaryTable 作用：
     // - 重建 NSI 与 R0 网络审计摘要表；
@@ -437,43 +502,61 @@ private:
     QSplitter* m_crossViewSplitter = nullptr;
     QSplitter* m_crossViewTopSplitter = nullptr;
     QHBoxLayout* m_crossControlLayout = nullptr;
+    QTimer* m_crossSearchTimer = nullptr;
+    bool m_crossFilterDirty = false;
+    bool m_initialProcessScopePending = false;
     QLineEdit* m_crossSearchEdit = nullptr;        // m_crossSearchEdit：Cross-View 三张表的实时文本筛选。
     QPushButton* m_crossAutoRefreshButton = nullptr;
     QPushButton* m_crossTerminateButton = nullptr;
     QPushButton* m_clearProcessFilterButton = nullptr;
     QLabel* m_crossFilterLabel = nullptr;
-    QTableWidget* m_tcpTable = nullptr;
-    QTableWidget* m_udpTable = nullptr;
-    QTableWidget* m_crossSummaryTable = nullptr;
+    QTableView* m_tcpTable = nullptr;
+    QTableView* m_udpTable = nullptr;
+    QTableView* m_crossSummaryTable = nullptr;
 
     // AFD view.
     QWidget* m_afdPage = nullptr;
-    QTableWidget* m_afdTable = nullptr;
+    QTableView* m_afdTable = nullptr;
 
     // WFP view.
     QWidget* m_wfpPage = nullptr;
     QTabWidget* m_wfpTabWidget = nullptr;
-    QTableWidget* m_wfpProviderTable = nullptr;
-    QTableWidget* m_wfpSubLayerTable = nullptr;
-    QTableWidget* m_wfpCalloutTable = nullptr;
-    QTableWidget* m_wfpFilterTable = nullptr;
+    QTableView* m_wfpProviderTable = nullptr;
+    QTableView* m_wfpSubLayerTable = nullptr;
+    QTableView* m_wfpCalloutTable = nullptr;
+    QTableView* m_wfpFilterTable = nullptr;
 
     // NDIS view.
     QWidget* m_ndisPage = nullptr;
     QTabWidget* m_ndisTabWidget = nullptr;
-    QTableWidget* m_ndisAdapterTable = nullptr;
-    QTableWidget* m_ndisBindingTable = nullptr;
-    QTableWidget* m_ndisProtocolTable = nullptr;
-    QTableWidget* m_ndisUnknownTable = nullptr;
+    QTableView* m_ndisAdapterTable = nullptr;
+    QTableView* m_ndisBindingTable = nullptr;
+    QTableView* m_ndisProtocolTable = nullptr;
+    QTableView* m_ndisUnknownTable = nullptr;
 
     // NSI summary.
     QWidget* m_nsiPage = nullptr;
     QTableWidget* m_nsiSummaryTable = nullptr;
 
+    std::shared_ptr<AuditSnapshot> m_latestAuditSnapshot; // 最新完整规范数据；采集不受页面隐藏影响。
+    QHash<QWidget*, std::function<void()>> m_auditPageFactories;
+    bool m_constructingAuditPage = false;
+    QSet<QTableView*> m_dirtyAuditTables; // 未投影表只保留规范数据，不构造隐藏 item。
+    bool m_projectionRequestedWhileBusy = false;
+    bool m_projectionInProgress = false; // 防止投影期间同步 Show/currentChanged 重入。
     QTimer* m_crossAutoRefreshTimer = nullptr; // 原连接管理页自动刷新能力。
     QSet<quint32> m_processFilterSet; // 进程页带入的独立 PID 筛选。
-    std::vector<TcpEndpointRow> m_tcpEndpointCache; // UI 行通过 UserRole 回查终止参数。
-    std::vector<UdpEndpointRow> m_udpEndpointCache; // 最近一次 UDP 快照，保留 R0 行使用。
+    ks::ui::AsyncOperation* m_crossPreparation = nullptr;
+    ks::ui::AsyncOperation* m_crossFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_crossDiffOperation = nullptr;
+    std::shared_ptr<const CrossViewPresentation> m_crossDiffRequestedSource;
+    std::shared_ptr<const AuditSnapshot> m_crossPrepareRequestedSource;
+    std::uint64_t m_crossSourceGeneration = 0;
+    std::uint64_t m_crossLanguageGeneration = 0;
+    std::uint64_t m_crossPrepareRequestedLanguage = 0;
+    QSet<quint32> m_crossPrepareRequestedProcessIds;
+    std::shared_ptr<const CrossViewPresentation> m_preparedCrossView;
+    std::shared_ptr<const CrossViewPresentation> m_displayedCrossView; // TCP索引与已显示完整源同代。
     QString m_r0TcpStatusText; // 最近一次完整 R0 TCP 查询的协议状态，不把零行误报为成功。
     QString m_r0UdpStatusText; // 最近一次完整 R0 UDP 查询的协议状态。
     QHash<quint32, QIcon> m_processIconCache; // PID -> 真实进程图标缓存。

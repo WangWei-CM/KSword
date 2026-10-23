@@ -11,6 +11,8 @@
 
 #include "MinidumpDock.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/PerfTrace.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
 
@@ -30,6 +32,8 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QSaveFile>
+#include <QPointer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -42,6 +46,7 @@
 #include <QPushButton>
 #include <QStyle>
 #include <QTabWidget>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTextBrowser>
 #include <QThreadPool>
@@ -55,14 +60,102 @@
 // MinidumpAsyncState 作用：把 worker 的回投目标放在共享互斥状态中。
 // 析构前先清空 owner；worker 只有在同一把锁保护下才能提交 queued 调用，
 // 从而消除应用退出阶段的接收者竞态。
+struct MinidumpExportRequest
+{
+    std::shared_ptr<const ks::minidump::DumpParseResult> result;
+    QString savePath;
+    std::shared_ptr<const ks::ui::FieldDocument> document;
+    std::function<QString(const QString&)> translate;
+};
+
+struct MinidumpExportResult
+{
+    QString savePath;
+    QString errorText;
+    bool ok = false;
+};
+
 struct MinidumpAsyncState
 {
     std::mutex mutex;               // mutex：保护 owner 的读写。
     MinidumpDock* owner = nullptr;  // owner：结果回投的目标控件；析构后为空。
+    ks::minidump::DumpCancellationToken cancellation; // One explicit parse request.
 };
 
 namespace
 {
+    enum class InitialBodyText
+    {
+        PathLabel, PathPlaceholder, Browse, SystemDirectory, Parse, Export,
+        SymbolLabel, SymbolPlaceholder, Idle
+    };
+    struct InitialBodyEntry
+    {
+        const char* targetObjectName;
+        const char* key;
+        const char* fallback;
+        bool mnemonic;
+    };
+    // The UI and cold search consume the same text/target definitions. No
+    // result-page content is searchable before a real dump has been parsed.
+    constexpr InitialBodyEntry kInitialBody[] = {
+        {"ksword_minidump_path_label", "minidump.path.label", "转储文件", false},
+        {"ksword_minidump_path_input", "minidump.path.placeholder",
+            "选择要解析的转储文件（应用崩溃 .dmp / 蓝屏 Minidump / MEMORY.DMP）", false},
+        {"ksword_minidump_browse", "minidump.action.browse", "浏览…", true},
+        {"ksword_minidump_system_directory", "minidump.action.system_dir", "系统转储", true},
+        {"ksword_minidump_parse", "minidump.action.parse", "解析", true},
+        {"ksword_minidump_export", "minidump.action.export", "导出报告", true},
+        {"ksword_minidump_symbol_label", "minidump.symbol.label", "符号路径", false},
+        {"ksword_minidump_symbol_input", "minidump.symbol.placeholder",
+            "留空则搜索转储所在目录与本机符号缓存；分号分隔可加自己的构建输出目录", false},
+        {"ksword_minidump_status", "minidump.status.idle",
+            "选择一个转储文件开始解析：支持应用崩溃 MDMP 与系统蓝屏 DMP。", false}
+    };
+    const InitialBodyEntry& initialBodyEntry(const InitialBodyText id)
+    {
+        return kInitialBody[static_cast<int>(id)];
+    }
+    QString initialBodyText(const InitialBodyText id)
+    {
+        const auto& entry = initialBodyEntry(id);
+        return ks::i18n::text(QString::fromLatin1(entry.key), QString::fromUtf8(entry.fallback));
+    }
+    QString initialBodyObjectName(const InitialBodyText id)
+    {
+        return QString::fromLatin1(initialBodyEntry(id).targetObjectName);
+    }
+    // All encoding and file work is worker-owned. The writer adapter also permits
+    // pure-value short-write/failure tests without touching a real filesystem.
+    template<class Writer>
+    bool writeExportBytes(Writer& file, const QByteArray& bytes, QString& errorText)
+    {
+        if (!file.open(QIODevice::WriteOnly))
+        {
+            errorText = file.errorString();
+            return false;
+        }
+        qint64 offset = 0;
+        while (offset < bytes.size())
+        {
+            const qint64 written = file.write(bytes.constData() + offset, bytes.size() - offset);
+            if (written <= 0 || written > bytes.size() - offset)
+            {
+                errorText = file.errorString();
+                file.cancelWriting();
+                return false;
+            }
+            offset += written;
+        }
+        if (!file.commit())
+        {
+            errorText = file.errorString();
+            return false;
+        }
+        return true;
+    }
+
+
     // dumpInputStyle / dumpButtonStyle 作用：
     // - 给本页的输入框与按钮套上与其它 Dock 一致的主题外观；
     // - 颜色一律取自 KswordTheme 的动态 token（展开为 palette(...) 字面量），
@@ -109,6 +202,18 @@ namespace
     }
 }
 
+QVector<ks::ui::PageSearchBodyText> MinidumpDock::coldSearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    body.reserve(static_cast<qsizetype>(sizeof(kInitialBody) / sizeof(kInitialBody[0])));
+    for (const auto& entry : kInitialBody)
+    {
+        body.append({ks::i18n::text(QString::fromLatin1(entry.key), QString::fromUtf8(entry.fallback)),
+            QString::fromLatin1(entry.targetObjectName), {}, entry.mnemonic});
+    }
+    return body;
+}
+
 MinidumpDock::MinidumpDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -117,18 +222,23 @@ MinidumpDock::MinidumpDock(QWidget* parent)
     m_asyncState->owner = this;
     buildUi();
     retranslateUi();
-    setStatus(
-        "minidump.status.idle",
-        "选择一个转储文件开始解析：支持应用崩溃 MDMP 与系统蓝屏 DMP。");
+    const auto& idle = initialBodyEntry(InitialBodyText::Idle);
+    setStatus(idle.key, idle.fallback);
     // 转储页头与结果共用整页外框，结果Tab本身不制造外圆，原8px留白保持一致。
     ks::ui::StyleWorkspaceContentFrame(this, 8);
 }
 
 MinidumpDock::~MinidumpDock()
 {
+    if (m_reportBuildOperation != nullptr) m_reportBuildOperation->close();
+    if (m_exportOperation != nullptr) m_exportOperation->close();
     // 加锁清空 owner：此后 worker 即使完成也不会再向本控件投递结果。
     std::lock_guard<std::mutex> lock(m_asyncState->mutex);
     m_asyncState->owner = nullptr;
+    if (m_asyncState->cancellation)
+    {
+        m_asyncState->cancellation->store(true, std::memory_order_relaxed);
+    }
 }
 
 void MinidumpDock::changeEvent(QEvent* event)
@@ -155,12 +265,18 @@ void MinidumpDock::buildUi()
     auto* pathLayout = new QHBoxLayout();
     pathLayout->setSpacing(6);
     m_pathLabel = new QLabel(this);
+    m_pathLabel->setObjectName(initialBodyObjectName(InitialBodyText::PathLabel));
     m_pathEdit = new QLineEdit(this);
+    m_pathEdit->setObjectName(initialBodyObjectName(InitialBodyText::PathPlaceholder));
     m_pathEdit->setClearButtonEnabled(true);
     m_browseButton = new QPushButton(this);
+    m_browseButton->setObjectName(initialBodyObjectName(InitialBodyText::Browse));
     m_systemDirButton = new QPushButton(this);
+    m_systemDirButton->setObjectName(initialBodyObjectName(InitialBodyText::SystemDirectory));
     m_parseButton = new QPushButton(this);
+    m_parseButton->setObjectName(initialBodyObjectName(InitialBodyText::Parse));
     m_exportButton = new QPushButton(this);
+    m_exportButton->setObjectName(initialBodyObjectName(InitialBodyText::Export));
     // 图标：含义简单的按钮用标准图标表达，文字配合悬停释义。
     m_browseButton->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
     m_systemDirButton->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
@@ -194,7 +310,9 @@ void MinidumpDock::buildUi()
     symbolLayout->setContentsMargins(0, 0, 0, 0);
     symbolLayout->setSpacing(6);
     m_symbolPathLabel = new QLabel(this);
+    m_symbolPathLabel->setObjectName(initialBodyObjectName(InitialBodyText::SymbolLabel));
     m_symbolPathEdit = new QLineEdit(this);
+    m_symbolPathEdit->setObjectName(initialBodyObjectName(InitialBodyText::SymbolPlaceholder));
     m_symbolPathEdit->setClearButtonEnabled(true);
     m_symbolPathEdit->setStyleSheet(inputStyle);
     // 文件路径和符号路径采用普通参数输入，不套搜索语义或改变加载时机。
@@ -216,6 +334,7 @@ void MinidumpDock::buildUi()
 
     // m_statusLabel：允许复制诊断状态，长路径自动换行。
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(initialBodyObjectName(InitialBodyText::Idle));
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     sourceLayout->addWidget(m_statusLabel);
@@ -272,6 +391,8 @@ void MinidumpDock::buildUi()
     ks::ui::StylePageTabs(m_rawMemoryTabs);
     m_memoryView = new DumpMemoryView(m_resultTabs);
     m_reportEditor = new ks::ui::StructuredFieldView(m_resultTabs);
+    m_reportEditor->setValueModelProjection();
+    m_reportEditor->setHiddenProjectionDeferred();
 
 
     // 预创建的页全部以 m_resultTabs 为父，但此刻一个都还没 addTab。
@@ -301,6 +422,11 @@ void MinidumpDock::buildUi()
         }
     }
 
+    connect(m_resultTabs, &QTabWidget::currentChanged, this,
+        [this](int) { renderCurrentResultPage(); });
+    connect(m_rawMemoryTabs, &QTabWidget::currentChanged, this,
+        [this](int) { renderCurrentRawMemoryPage(); });
+
     // 所有动作统一进入成员函数的校验流程。
     connect(m_browseButton, &QPushButton::clicked, this, [this]() { chooseFile(); });
     connect(m_systemDirButton, &QPushButton::clicked, this, [this]()
@@ -323,41 +449,40 @@ QString MinidumpDock::translated(const char* key, const char* fallback) const
 
 void MinidumpDock::retranslateUi()
 {
-    m_pathLabel->setText(translated("minidump.path.label", "转储文件"));
-    m_pathEdit->setPlaceholderText(translated(
-        "minidump.path.placeholder",
-        "选择要解析的转储文件（应用崩溃 .dmp / 蓝屏 Minidump / MEMORY.DMP）"));
-    m_symbolPathLabel->setText(translated("minidump.symbol.label", "符号路径"));
-    m_symbolPathEdit->setPlaceholderText(translated(
-        "minidump.symbol.placeholder",
-        "留空则搜索转储所在目录与本机符号缓存；分号分隔可加自己的构建输出目录"));
+    m_pathLabel->setText(initialBodyText(InitialBodyText::PathLabel));
+    m_pathEdit->setPlaceholderText(initialBodyText(InitialBodyText::PathPlaceholder));
+    m_symbolPathLabel->setText(initialBodyText(InitialBodyText::SymbolLabel));
+    m_symbolPathEdit->setPlaceholderText(initialBodyText(InitialBodyText::SymbolPlaceholder));
     m_symbolPathEdit->setToolTip(translated(
         "minidump.symbol.tooltip",
         "只搜索本地目录，不联网下载符号。"
         "映像与转储记录不一致时会明确判为不匹配，并拒绝给出会误导人的行号。"));
-    m_browseButton->setText(translated("minidump.action.browse", "浏览…"));
+    m_browseButton->setText(initialBodyText(InitialBodyText::Browse));
     m_browseButton->setToolTip(translated(
         "minidump.action.browse.tooltip",
         "选择一个转储文件进行只读解析"));
-    m_systemDirButton->setText(translated("minidump.action.system_dir", "系统转储"));
+    m_systemDirButton->setText(initialBodyText(InitialBodyText::SystemDirectory));
     m_systemDirButton->setToolTip(translated(
         "minidump.action.system_dir.tooltip",
         "定位到系统蓝屏转储目录（C:\\Windows\\Minidump）"));
-    m_parseButton->setText(translated("minidump.action.parse", "解析"));
+    m_parseButton->setText(initialBodyText(InitialBodyText::Parse));
     m_parseButton->setToolTip(translated(
         "minidump.action.parse.tooltip",
         "在后台解析转储结构，不会修改目标文件"));
-    m_exportButton->setText(translated("minidump.action.export", "导出报告"));
+    m_exportButton->setText(initialBodyText(InitialBodyText::Export));
     m_exportButton->setToolTip(translated(
         "minidump.action.export.tooltip",
         "把当前解析结果的全文报告保存为文本文件"));
     refreshStatus();
 
-    // 已有结果时按新语言重建所有页签文本。
-    if (m_lastResult)
-    {
-        renderResult(*m_lastResult);
-    }
+    // 表格按语言失效后仅投影当前页；规范字段视图自行重译，不重读内存。
+    retranslateResultPages();
+}
+
+void MinidumpDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    renderCurrentResultPage();
 }
 
 void MinidumpDock::chooseFile()
@@ -424,10 +549,19 @@ void MinidumpDock::beginParse()
     // generation：只有最新一代结果可以回写，避免旧解析覆盖新目标。
     const std::uint64_t generation = ++m_parseGeneration;
     const std::shared_ptr<MinidumpAsyncState> asyncState = m_asyncState;
+    const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    {
+        std::lock_guard<std::mutex> lock(asyncState->mutex);
+        if (asyncState->cancellation)
+        {
+            asyncState->cancellation->store(true, std::memory_order_relaxed);
+        }
+        asyncState->cancellation = cancellation;
+    }
     // symbolPath：在 UI 线程取值后按值带进 worker，worker 内不得触碰控件。
     const QString symbolPath = m_symbolPathEdit->text().trimmed();
     QThreadPool::globalInstance()->start(
-        [asyncState, generation, path, symbolPath]()
+        [asyncState, generation, path, symbolPath, cancellation]()
         {
             // result：worker 中完成的解析产物；自包含，与文件映射无关联。
             // 解析的输入是不可信文件，畸形样本可能让某个列表申请超大内存。
@@ -436,22 +570,37 @@ void MinidumpDock::beginParse()
             std::shared_ptr<ks::minidump::DumpParseResult> result;
             try
             {
+                const ks::minidump::ScopedDumpCancellation cancellationScope(cancellation);
+                ks::minidump::CheckDumpCancellation();
                 result = std::make_shared<ks::minidump::DumpParseResult>(
-                    ks::minidump::ParseDumpFile(path));
+                    ks::minidump::ParseDumpFile(path, cancellation));
+                ks::minidump::CheckDumpCancellation();
                 // 符号化放在解析之后、回主线程之前：DbgHelp 加载 PDB 可能耗时到
                 // 秒级，绝不能放在 UI 线程上。失败不影响已有结论，因此不改 success。
                 if (result->success)
                 {
-                    ks::minidump::ApplySymbols(symbolPath, *result);
+                    ks::minidump::ApplySymbols(symbolPath, *result, cancellation);
+                    ks::minidump::CheckDumpCancellation();
                     // 池标记归属同样可能读大量磁盘（要在模块映像里搜标记字节），
                     // 一并留在 worker 里做。
-                    ks::minidump::ApplyPoolTagAttribution(*result);
+                    ks::minidump::ApplyPoolTagAttribution(*result, cancellation);
+                    ks::minidump::CheckDumpCancellation();
                     // 崩溃时间线：单看一个转储答不出"这次是蓝屏还是没转储的硬挂死"，
                     // 也答不出"崩溃当时跑的是哪一次构建的驱动"。筛选器名过滤成
                     // Ksword，是因为本项目最需要对账的就是自己那个驱动的映像时间戳。
+                    QString historyError;
                     result->crashHistory = ks::minidump::CollectCrashHistory(
-                        30, QStringLiteral("Ksword"), nullptr);
+                        30, QStringLiteral("Ksword"), &historyError, cancellation);
+                    ks::minidump::CheckDumpCancellation();
+                    if (!historyError.isEmpty())
+                    {
+                        result->diagnostics.append(historyError);
+                    }
                 }
+            }
+            catch (const ks::minidump::DumpWorkCancelled&)
+            {
+                return; // Unwind the mapping/session/handles; no partial UI result.
             }
             catch (const std::exception& error)
             {
@@ -470,13 +619,13 @@ void MinidumpDock::beginParse()
             }
             std::lock_guard<std::mutex> lock(asyncState->mutex);
             MinidumpDock* receiver = asyncState->owner;
-            if (receiver == nullptr)
+            if (receiver == nullptr || cancellation->load(std::memory_order_relaxed))
             {
                 return;
             }
             QMetaObject::invokeMethod(
                 receiver,
-                [asyncState, generation, result = std::move(result)]()
+                [asyncState, generation, cancellation, result = std::move(result)]()
                 {
                     // owner 复核：queued 回调真正执行时控件可能已析构。
                     MinidumpDock* owner = nullptr;
@@ -484,7 +633,8 @@ void MinidumpDock::beginParse()
                         std::lock_guard<std::mutex> stateLock(asyncState->mutex);
                         owner = asyncState->owner;
                     }
-                    if (owner != nullptr)
+                    if (owner != nullptr &&
+                        !cancellation->load(std::memory_order_relaxed))
                     {
                         owner->finishParse(generation, result);
                     }
@@ -502,10 +652,13 @@ void MinidumpDock::finishParse(
         return;
     }
 
+    // 采集：解析完成回到 UI 线程后的整体收尾（含结果渲染）耗时。
+    ks::ui::PerfScope finishParsePerf("perf_dump_finish_parse", QString());
     setBusy(false);
     m_lastResult = std::move(result);
     renderResult(*m_lastResult);
-    m_exportButton->setEnabled(m_lastResult->success);
+    m_exportButton->setEnabled(m_lastResult->success &&
+        (m_exportOperation == nullptr || !m_exportOperation->isBusy()));
 
     {
         // 解析结束日志：记录结果类别与成败，方便回溯。
@@ -653,43 +806,170 @@ void MinidumpDock::promptKswordRelatedCrash(const ks::minidump::DumpParseResult&
     }
 }
 
-void MinidumpDock::exportReport()
+void MinidumpDock::requestReportDocument()
 {
-    if (!m_lastResult || !m_lastResult->success)
+    if (!m_lastResult) return;
+    const std::shared_ptr<const ks::minidump::DumpParseResult> snapshot = m_lastResult;
+    if (m_cachedReportSource == snapshot && m_cachedReportDocument)
     {
+        m_reportEditor->setDocument(*m_cachedReportDocument);
+        m_reportEditor->setEnabled(true);
         return;
     }
-    // suggestedName：默认与转储同名的 .txt 报告文件。
-    const QFileInfo dumpInfo(m_lastResult->filePath);
+    if (m_reportBuildOperation == nullptr)
+    {
+        m_reportBuildOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_reportBuildOperation->setStateChangedCallback([this]()
+            {
+                if (m_reportBuildOperation->isBusy() ||
+                    (m_cachedReportSource == m_lastResult && m_cachedReportDocument)) return;
+                // A dropped GUI delivery must not leave the report disabled indefinitely.
+                m_projectedResultPages.remove(m_reportEditor);
+                m_reportEditor->setEnabled(true);
+                if (m_resultTabs->currentWidget() == m_reportEditor &&
+                    m_statusKey == QStringLiteral("minidump.status.projecting"))
+                    setStatus("minidump.status.report_failed", "报告视图生成失败：%1；重新打开报告页可重试。",
+                        {QString::number(ERROR_OPERATION_ABORTED)});
+            });
+    }
+    m_reportEditor->setDocument({});
+    m_reportEditor->setEnabled(false);
+    if (m_statusKey != QStringLiteral("minidump.status.projecting") &&
+        m_statusKey != QStringLiteral("minidump.status.report_failed"))
+    {
+        m_projectionPreviousStatusKey = m_statusKey;
+        m_projectionPreviousStatusFallback = m_statusFallback;
+        m_projectionPreviousStatusArguments = m_statusArguments;
+    }
+    setStatus("minidump.status.projecting", "正在更新结果视图：%1 / %2", {QStringLiteral("0"), QStringLiteral("1")});
+    using Source = std::shared_ptr<const ks::minidump::DumpParseResult>;
+    using Document = std::shared_ptr<const ks::ui::FieldDocument>;
+    m_reportBuildOperation->submit<Source, Document>(snapshot,
+        [](const Source& source, const ks::ui::AsyncOperationToken& token)
+        {
+            if (token.isCanceled()) return Document{};
+            return Document(new ks::ui::FieldDocument(buildReportText(*source)),
+                [](const ks::ui::FieldDocument* document)
+                {
+                    // A superseded large value document is never recursively freed on GUI.
+                    auto* release = QRunnable::create([document]() { delete document; });
+                    release->setAutoDelete(true);
+                    QThreadPool::globalInstance()->start(release, -1);
+                });
+        },
+        [this, snapshot](const Document& document, std::uint64_t)
+        {
+            if (m_lastResult != snapshot || !document) return true;
+            m_cachedReportSource = snapshot;
+            m_cachedReportDocument = document;
+            const QPointer<MinidumpDock> guardThis(this);
+            m_reportEditor->setDocument(*document);
+            if (guardThis == nullptr) return true;
+            m_reportEditor->setEnabled(true);
+            if (m_resultTabs->currentWidget() == m_reportEditor) restoreResultProjectionStatus();
+            return true;
+        },
+        [this, snapshot](std::exception_ptr failure)
+        {
+            if (m_lastResult != snapshot) return;
+            m_projectedResultPages.remove(m_reportEditor);
+            m_reportEditor->setEnabled(true);
+            if (m_resultTabs->currentWidget() != m_reportEditor) return;
+            QString detail = QString::number(ERROR_UNHANDLED_EXCEPTION);
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            setStatus("minidump.status.report_failed", "报告视图生成失败：%1；重新打开报告页可重试。", {detail});
+        });
+}
+
+MinidumpExportResult MinidumpDock::exportReportSnapshot(const MinidumpExportRequest& request)
+{
+    MinidumpExportResult result;
+    result.savePath = request.savePath;
+    const QByteArray bytes = request.document
+        ? request.document->toPlainText(request.translate).toUtf8()
+        : buildReportText(*request.result).toPlainText(request.translate).toUtf8();
+    QSaveFile file(request.savePath);
+    result.ok = writeExportBytes(file, bytes, result.errorText);
+    return result;
+}
+
+void MinidumpDock::exportReport()
+{
+    if (!m_lastResult || !m_lastResult->success ||
+        (m_exportOperation != nullptr && m_exportOperation->isBusy())) return;
+    // Bind the accepted export to the originally chosen result, even across a modal dialog.
+    const auto snapshot = m_lastResult;
+    const QFileInfo dumpInfo(snapshot->filePath);
     const QString suggestedName = dumpInfo.completeBaseName() + QStringLiteral("_report.txt");
-    const QString savePath = QFileDialog::getSaveFileName(
-        this,
+    const QPointer<MinidumpDock> guardThis(this);
+    const QString savePath = QFileDialog::getSaveFileName(this,
         translated("minidump.dialog.export_report", "导出解析报告"),
         QDir::toNativeSeparators(dumpInfo.absolutePath() + QStringLiteral("/") + suggestedName),
         translated("minidump.dialog.report_filter", "文本文件 (*.txt);;所有文件 (*.*)"));
-    if (savePath.isEmpty())
+    if (guardThis == nullptr || savePath.isEmpty()) return;
+    if (m_exportOperation == nullptr)
     {
-        return;
+        m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_exportOperation->setStateChangedCallback([this]()
+            {
+                m_exportButton->setEnabled(!m_parseBusy && m_lastResult && m_lastResult->success &&
+                    !m_exportOperation->isBusy());
+            });
     }
-    QFile reportFile(savePath);
-    if (!reportFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    MinidumpExportRequest request;
+    request.result = snapshot;
+    if (m_cachedReportSource == snapshot) request.document = m_cachedReportDocument;
+    request.savePath = savePath;
+    request.translate = [translator](const QString& source) { return translator.sourceText(source); };
+    const auto ticket = m_exportOperation->submitTransaction<MinidumpExportRequest, MinidumpExportResult>(
+        std::move(request),
+        [](const MinidumpExportRequest& value) { return exportReportSnapshot(value); },
+        [this, snapshot](const MinidumpExportResult& result, std::uint64_t)
+        {
+            if (!result.ok)
+            {
+                QMessageBox::warning(this,
+                    translated("minidump.dialog.export_failed.title", "导出失败"),
+                    translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
+                        .arg(QDir::toNativeSeparators(result.savePath) + QLatin1Char('\n') + result.errorText));
+            }
+            else if (!m_parseBusy && m_lastResult == snapshot)
+            {
+                setStatus("minidump.status.exported", "报告已导出：%1",
+                    {QDir::toNativeSeparators(result.savePath)});
+            }
+            else
+            {
+                // Do not replace the state of a newer parse with an older export completion.
+                QMessageBox::information(this,
+                    translated("minidump.action.export", "导出报告"),
+                    translated("minidump.status.exported", "报告已导出：%1")
+                        .arg(QDir::toNativeSeparators(result.savePath)));
+            }
+            return true;
+        },
+        [this, savePath](std::exception_ptr failure)
+        {
+            QString detail = QString::number(ERROR_UNHANDLED_EXCEPTION);
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            QMessageBox::warning(this,
+                translated("minidump.dialog.export_failed.title", "导出失败"),
+                translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
+                    .arg(QDir::toNativeSeparators(savePath) + QLatin1Char('\n') + detail));
+        });
+    if (ticket == 0)
     {
-        QMessageBox::warning(
-            this,
+        QMessageBox::warning(this,
             translated("minidump.dialog.export_failed.title", "导出失败"),
             translated("minidump.dialog.export_failed.body", "无法写入目标文件：%1")
-                .arg(reportFile.errorString()));
-        return;
+                .arg(QDir::toNativeSeparators(savePath) + QLatin1Char('\n') +
+                    QString::number(ERROR_OPERATION_ABORTED)));
     }
-    // 报告按当前界面语言渲染后写出 UTF-8 文本。
-    const QString localizedReport =
-        buildReportText(*m_lastResult).toPlainText(true);
-    reportFile.write(localizedReport.toUtf8());
-    reportFile.close();
-    setStatus(
-        "minidump.status.exported",
-        "报告已导出：%1",
-        QStringList{ QDir::toNativeSeparators(savePath) });
 }
 
 void MinidumpDock::setStatus(
@@ -726,5 +1006,6 @@ void MinidumpDock::setBusy(const bool busy)
     m_parseButton->setEnabled(!busy);
     m_browseButton->setEnabled(!busy);
     m_systemDirButton->setEnabled(!busy);
-    m_exportButton->setEnabled(!busy && m_lastResult && m_lastResult->success);
+    m_exportButton->setEnabled(!busy && m_lastResult && m_lastResult->success &&
+        (m_exportOperation == nullptr || !m_exportOperation->isBusy()));
 }

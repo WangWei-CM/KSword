@@ -33,6 +33,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
@@ -45,6 +46,9 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <utility>
+#include <QThreadPool>
+#include <QTabWidget>
 #include <set>
 
 namespace
@@ -101,50 +105,134 @@ void HandleDock::applyLocalHandleFilters()
     applyLocalHandleFilters(true);
 }
 
-void HandleDock::applyLocalHandleFilters(const bool rebuildTable)
+HandleDock::HandleFilterResult HandleDock::prepareHandleFilter(
+    const HandleFilterRequest& request, const ks::ui::AsyncOperationToken& token)
 {
-    m_ruleMatchStates.clear();
-    m_totalRuleMatchCount = 0;
-
-    const QVector<ks::handle::HandleFilterRule> activeRuleList = m_temporaryFilterActive
-        ? QVector<ks::handle::HandleFilterRule>{ m_temporaryFilterRule }
-        : m_filterDocument.rules;
-    m_ruleMatchStates.reserve(static_cast<std::size_t>(activeRuleList.size()));
-    for (const ks::handle::HandleFilterRule& rule : activeRuleList)
+    HandleFilterResult result;
+    result.rows = request.rows;
+    result.revision = request.revision;
+    result.rebuild = request.rebuild;
+    if (!request.typeNames.empty())
     {
+        // Any detach/remapping of the complete snapshot happens on the worker.
+        for (HandleRow& row : result.rows)
+        {
+            if (token.isCanceled()) return result;
+            const auto found = request.typeNames.find(row.typeIndex);
+            if (found != request.typeNames.end() && !found->second.empty())
+                row.typeName = QString::fromStdString(found->second);
+        }
+    }
+    std::set<QString> typeNames;
+    for (const HandleRow& row : std::as_const(result.rows))
+        if (!row.typeName.trimmed().isEmpty()) typeNames.insert(row.typeName);
+    result.availableTypes.assign(typeNames.begin(), typeNames.end());
+    result.states.reserve(static_cast<std::size_t>(request.rules.size()));
+    for (const auto& rule : request.rules)
+    {
+        if (token.isCanceled()) return result;
         HandleRuleMatchState state;
         state.ruleId = rule.id;
         state.ruleName = rule.name;
         state.enabled = rule.enabled;
         if (rule.enabled)
         {
-            state.rowIndices.reserve(std::min<std::size_t>(m_allRows.size(), 4096));
-            for (std::size_t sourceRowIndex = 0;
-                sourceRowIndex < m_allRows.size();
-                ++sourceRowIndex)
+            for (qsizetype index = 0; index < result.rows.size(); ++index)
             {
-                if (handleRowMatchesRule(m_allRows[sourceRowIndex], rule))
-                {
-                    state.rowIndices.push_back(sourceRowIndex);
-                }
+                if ((index & 255) == 0 && token.isCanceled()) return result;
+                if (handleRowMatchesRule(result.rows.at(index), rule))
+                    state.rowIndices.push_back(static_cast<std::size_t>(index));
             }
-            m_totalRuleMatchCount += state.rowIndices.size();
+            result.totalMatches += static_cast<std::size_t>(state.rowIndices.size());
         }
-        m_ruleMatchStates.push_back(std::move(state));
+        result.states.push_back(std::move(state));
     }
+    return result;
+}
 
-    if (!rebuildTable)
+void HandleDock::applyLocalHandleFilters(const bool rebuildTable)
+{
+    if (!m_handleFilterOperation)
     {
-        return;
+        m_handleFilterOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_handleFilterOperation->setStateChangedCallback([this]() {
+            if (m_handleFilterPreparationPending && !m_handleFilterOperation->isInFlight())
+                updateHandleStatusLabel(ks::i18n::sourceText(QStringLiteral("● 句柄筛选失败，请重试应用规则或刷新。")), false);
+        });
     }
+    const quint64 revision = ++m_handleFilterRevision;
+    m_handleFilterPreparationPending = true;
+    m_tableWidget->setEnabled(false);
+    if (m_exportResultsButton) m_exportResultsButton->setEnabled(false);
+    updateHandleStatusLabel(ks::i18n::sourceText(QStringLiteral("● 正在准备句柄筛选结果...")), true);
+    HandleFilterRequest request;
+    request.rows = m_allRows; // Shared values; no full GUI copy or mutable detach.
+    request.rules = m_temporaryFilterActive
+        ? QVector<ks::handle::HandleFilterRule>{m_temporaryFilterRule} : m_filterDocument.rules;
+    request.typeNames = m_typeNameMapByIndexFromObjectTab;
+    request.revision = revision;
+    request.rebuild = rebuildTable;
+    m_handleFilterOperation->submit<HandleFilterRequest, HandleFilterResult>(std::move(request),
+        [](const HandleFilterRequest& input, const ks::ui::AsyncOperationToken& token) {
+            return prepareHandleFilter(input, token);
+        }, [this](const HandleFilterResult& result, std::uint64_t ticket) {
+            return applyHandleFilterResult(result, ticket);
+        }, [this, revision](std::exception_ptr) {
+            if (revision == m_handleFilterRevision)
+                updateHandleStatusLabel(ks::i18n::sourceText(QStringLiteral("● 句柄筛选失败，请重试应用规则或刷新。")), false);
+        });
+}
 
-    rebuildHandleTable();
+bool HandleDock::applyHandleFilterResult(const HandleFilterResult& result, const std::uint64_t ticket)
+{
+    if (result.revision != m_handleFilterRevision) return true;
+    const QPointer<HandleDock> guarded(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+        QStringLiteral("handle-rule-prepared-result"), {m_tableWidget},
+        [guarded, snapshot = std::make_shared<HandleFilterResult>(result), ticket]() {
+            if (!guarded || !guarded->m_handleFilterOperation->isCurrent(ticket)) return;
+            if (guarded->applyHandleFilterResult(*snapshot, ticket) && guarded)
+                guarded->m_handleFilterOperation->completeDeferred(ticket);
+        })) return false;
+    auto retiredRows = std::move(m_allRows);
+    auto retiredStates = std::move(m_ruleMatchStates);
+    m_allRows = result.rows;
+    m_ruleMatchStates = result.states; // O(rule count); each complete match vector stays shared.
+    m_availableHandleTypeList = result.availableTypes;
+    m_totalRuleMatchCount = result.totalMatches;
+    QThreadPool::globalInstance()->start([rows = std::move(retiredRows), states = std::move(retiredStates)]() {});
+    m_handleFilterProjectionDirty = true;
+    if (result.rebuild && isVisible() && m_tabWidget->currentWidget() == m_handleListPage)
+    {
+        rebuildHandleTable();
+        if (!guarded) return true;
+        m_handleFilterProjectionDirty = false;
+    }
+    m_handleFilterPreparationPending = false;
+    m_tableWidget->setEnabled(!m_handleFilterProjectionDirty);
+    if (m_exportResultsButton)
+        m_exportResultsButton->setEnabled(!m_handleFilterProjectionDirty
+            && (!m_exportOperation || !m_exportOperation->isInFlight()));
     updateHandleSummaryStatus();
+    return true;
+}
+
+void HandleDock::ensureHandleFilterProjection()
+{
+    if (m_handleFilterPreparationPending || m_handleRenderDeferredUntilTypeMap || !m_handleFilterProjectionDirty
+        || !isVisible() || m_tabWidget->currentWidget() != m_handleListPage) return;
+    const QPointer<HandleDock> guarded(this);
+    rebuildHandleTable();
+    if (!guarded) return;
+    m_handleFilterProjectionDirty = false;
+    m_tableWidget->setEnabled(true);
+    if (m_exportResultsButton)
+        m_exportResultsButton->setEnabled(!m_exportOperation || !m_exportOperation->isInFlight());
 }
 
 bool HandleDock::handleRowMatchesRule(
     const HandleRow& row,
-    const ks::handle::HandleFilterRule& rule) const
+    const ks::handle::HandleFilterRule& rule)
 {
     if (!rule.processIds.isEmpty() && !rule.processIds.contains(row.processId))
     {
@@ -328,21 +416,34 @@ void HandleDock::appendNextRuleResultBatch(const QString& ruleId)
 
     const std::size_t batchEnd = std::min(
         state->loadedCount + kHandleRulePageSize,
-        state->rowIndices.size());
+        static_cast<std::size_t>(state->rowIndices.size()));
     QVector<qulonglong> sourceRowIndices;
     QVector<QTreeWidgetItem*> newItems;
     sourceRowIndices.reserve(static_cast<qsizetype>(batchEnd - state->loadedCount));
     newItems.reserve(static_cast<qsizetype>(batchEnd - state->loadedCount));
     for (std::size_t matchIndex = state->loadedCount; matchIndex < batchEnd; ++matchIndex)
     {
-        const std::size_t sourceRowIndex = state->rowIndices[matchIndex];
+        const std::size_t sourceRowIndex = state->rowIndices.at(matchIndex);
         QTreeWidgetItem* item = createHandleTreeRow(sourceRowIndex);
         if (item == nullptr)
         {
             continue;
         }
         item->setData(0, ks::handle::HandleTreeRuleIdRole, ruleId);
-        summaryItem->addChild(item);
+        if (m_handleSortColumn >= 0 && m_handleSortColumn < static_cast<int>(HandleTableColumn::Count))
+        {
+            int first = 0;
+            int last = summaryItem->childCount();
+            while (first < last)
+            {
+                const int middle = first + (last - first) / 2;
+                if (handleTreeRowLessThan(item, summaryItem->child(middle), m_handleSortColumn, m_handleSortOrder))
+                    last = middle;
+                else first = middle + 1;
+            }
+            summaryItem->insertChild(first, item);
+        }
+        else summaryItem->addChild(item);
         sourceRowIndices.push_back(static_cast<qulonglong>(sourceRowIndex));
         newItems.push_back(item);
     }
@@ -360,8 +461,51 @@ void HandleDock::appendNextRuleResultBatch(const QString& ruleId)
                 .arg(state->rowIndices.size()));
         loadMoreItem->setForeground(0, KswordTheme::PrimaryBlueColor);
     }
-    sortLoadedRuleRows(m_handleSortColumn, m_handleSortOrder);
     scheduleProcessIconResolution(sourceRowIndices, newItems);
+}
+
+bool HandleDock::handleTreeRowLessThan(QTreeWidgetItem* left, QTreeWidgetItem* right,
+    const int column, const Qt::SortOrder order) const
+{
+    const std::size_t leftIndex = static_cast<std::size_t>(
+        left->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
+    const std::size_t rightIndex = static_cast<std::size_t>(
+        right->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
+    if (leftIndex >= m_allRows.size() || rightIndex >= m_allRows.size())
+    {
+        return false;
+    }
+    const HandleRow& leftRow = m_allRows.at(leftIndex);
+    const HandleRow& rightRow = m_allRows.at(rightIndex);
+    int comparison = 0;
+    switch (static_cast<HandleTableColumn>(column))
+    {
+    case HandleTableColumn::ProcessId:
+        comparison = leftRow.processId < rightRow.processId ? -1 : leftRow.processId > rightRow.processId ? 1 : 0;
+        break;
+    case HandleTableColumn::HandleValue:
+        comparison = leftRow.handleValue < rightRow.handleValue ? -1 : leftRow.handleValue > rightRow.handleValue ? 1 : 0;
+        break;
+    case HandleTableColumn::TypeIndex:
+        comparison = leftRow.typeIndex < rightRow.typeIndex ? -1 : leftRow.typeIndex > rightRow.typeIndex ? 1 : 0;
+        break;
+    case HandleTableColumn::ObjectAddress:
+        comparison = leftRow.objectAddress < rightRow.objectAddress ? -1 : leftRow.objectAddress > rightRow.objectAddress ? 1 : 0;
+        break;
+    case HandleTableColumn::GrantedAccess:
+        comparison = leftRow.grantedAccess < rightRow.grantedAccess ? -1 : leftRow.grantedAccess > rightRow.grantedAccess ? 1 : 0;
+        break;
+    case HandleTableColumn::HandleCount:
+        comparison = leftRow.handleCount < rightRow.handleCount ? -1 : leftRow.handleCount > rightRow.handleCount ? 1 : 0;
+        break;
+    case HandleTableColumn::PointerCount:
+        comparison = leftRow.pointerCount < rightRow.pointerCount ? -1 : leftRow.pointerCount > rightRow.pointerCount ? 1 : 0;
+        break;
+    default:
+        comparison = QString::localeAwareCompare(left->text(column), right->text(column));
+        break;
+    }
+    return order == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
 }
 
 void HandleDock::sortLoadedRuleRows(const int column, const Qt::SortOrder order)
@@ -393,47 +537,7 @@ void HandleDock::sortLoadedRuleRows(const int column, const Qt::SortOrder order)
             }
         }
         const auto compareItems = [this, column, order](QTreeWidgetItem* left, QTreeWidgetItem* right)
-        {
-            const std::size_t leftIndex = static_cast<std::size_t>(
-                left->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
-            const std::size_t rightIndex = static_cast<std::size_t>(
-                right->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
-            if (leftIndex >= m_allRows.size() || rightIndex >= m_allRows.size())
-            {
-                return false;
-            }
-            const HandleRow& leftRow = m_allRows[leftIndex];
-            const HandleRow& rightRow = m_allRows[rightIndex];
-            int comparison = 0;
-            switch (static_cast<HandleTableColumn>(column))
-            {
-            case HandleTableColumn::ProcessId:
-                comparison = leftRow.processId < rightRow.processId ? -1 : leftRow.processId > rightRow.processId ? 1 : 0;
-                break;
-            case HandleTableColumn::HandleValue:
-                comparison = leftRow.handleValue < rightRow.handleValue ? -1 : leftRow.handleValue > rightRow.handleValue ? 1 : 0;
-                break;
-            case HandleTableColumn::TypeIndex:
-                comparison = leftRow.typeIndex < rightRow.typeIndex ? -1 : leftRow.typeIndex > rightRow.typeIndex ? 1 : 0;
-                break;
-            case HandleTableColumn::ObjectAddress:
-                comparison = leftRow.objectAddress < rightRow.objectAddress ? -1 : leftRow.objectAddress > rightRow.objectAddress ? 1 : 0;
-                break;
-            case HandleTableColumn::GrantedAccess:
-                comparison = leftRow.grantedAccess < rightRow.grantedAccess ? -1 : leftRow.grantedAccess > rightRow.grantedAccess ? 1 : 0;
-                break;
-            case HandleTableColumn::HandleCount:
-                comparison = leftRow.handleCount < rightRow.handleCount ? -1 : leftRow.handleCount > rightRow.handleCount ? 1 : 0;
-                break;
-            case HandleTableColumn::PointerCount:
-                comparison = leftRow.pointerCount < rightRow.pointerCount ? -1 : leftRow.pointerCount > rightRow.pointerCount ? 1 : 0;
-                break;
-            default:
-                comparison = QString::localeAwareCompare(left->text(column), right->text(column));
-                break;
-            }
-            return order == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
-        };
+        { return handleTreeRowLessThan(left, right, column, order); };
         std::stable_sort(handleItems.begin(), handleItems.end(), compareItems);
         summaryItem->addChildren(handleItems);
         summaryItem->addChildren(trailingItems);
@@ -953,6 +1057,10 @@ void HandleDock::showRuleManagerDialog(const QString& initiallySelectedRuleId)
     saveFilterConfiguration();
     if (m_snapshotScopedToTemporarySinglePid)
     {
+        ++m_handleFilterRevision;
+        if (m_handleFilterOperation) m_handleFilterOperation->cancel();
+        m_handleFilterPreparationPending = true;
+        m_tableWidget->setEnabled(false);
         requestAsyncRefresh(true);
     }
     else
@@ -1110,39 +1218,60 @@ void HandleDock::exportFilterConfiguration() const
         ks::i18n::sourceText(QStringLiteral("筛选配置已导出。")));
 }
 
-void HandleDock::exportRuleResults(const QString& ruleId) const
+void HandleDock::settleExportReceipt(const QString& message, const bool success)
 {
-    const QString filePath = QFileDialog::getSaveFileName(
-        const_cast<HandleDock*>(this),
-        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-        ks::i18n::sourceText(QStringLiteral("句柄筛选结果.tsv")),
-        ks::i18n::sourceText(QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*)")));
-    if (filePath.isEmpty())
-    {
-        return;
-    }
+    m_exportPendingReceipt = false;
+    m_exportReceiptPath.clear();
+    if (m_exportResultsButton) m_exportResultsButton->setEnabled(!m_handleFilterPreparationPending && !m_handleFilterProjectionDirty && !m_exportOperation->isInFlight());
+    const QString title = ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果"));
+    if (success) QMessageBox::information(this, title, message);
+    else QMessageBox::warning(this, title, message);
+}
 
-    QSaveFile targetFile(filePath);
-    if (!targetFile.open(QIODevice::WriteOnly))
+void HandleDock::reconcileExportReceipt()
+{
+    if (m_exportResultsButton) m_exportResultsButton->setEnabled(!m_handleFilterPreparationPending && !m_handleFilterProjectionDirty && !m_exportOperation->isInFlight());
+    if (m_exportPendingReceipt && !m_exportOperation->isInFlight())
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。"))
+            + QLatin1Char('\n') + m_exportReceiptPath);
+}
+
+void HandleDock::exportRuleResults(const QString& ruleId)
+{
+    if (!m_exportOperation)
     {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
+        m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
+    }
+    const QPointer<HandleDock> guarded(this);
+    reconcileExportReceipt();
+    if (!guarded || m_handleFilterPreparationPending || m_handleFilterProjectionDirty || m_exportOperation->isInFlight()) return;
+    const QString filePath = QFileDialog::getSaveFileName(this,
+        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")), ks::i18n::sourceText(QStringLiteral("句柄筛选结果.tsv")),
+        ks::i18n::sourceText(QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*)")));
+    if (!guarded || filePath.isEmpty() || m_handleFilterPreparationPending || m_handleFilterProjectionDirty) return;
+    reconcileExportReceipt();
+    if (!guarded) return;
+    if (m_exportOperation->isInFlight())
+    {
+        QMessageBox::warning(this, ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
+            ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
         return;
     }
-    if (targetFile.write("\xEF\xBB\xBF", 3) != 3)
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
-        targetFile.cancelWriting();
-        return;
-    }
-    const QStringList headerList{
+    struct Group { QString name; QVector<std::size_t> indices; };
+    struct Request {
+        QString path; QStringList headers;
+        QVector<HandleRow> rows;
+        std::vector<Group> groups;
+        ks::i18n::SourceTextSnapshot language;
+    } request;
+    request.path = filePath;
+    request.rows = m_allRows; // Complete implicitly shared value snapshot, no GUI row copy.
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    for (const auto& state : m_ruleMatchStates)
+        if (state.enabled && (ruleId.isEmpty() || state.ruleId == ruleId))
+            request.groups.push_back({state.ruleName, state.rowIndices});
+    request.headers = {
         ks::i18n::sourceText(QStringLiteral("规则名")),
         ks::i18n::sourceText(QStringLiteral("PID")),
         ks::i18n::sourceText(QStringLiteral("进程名")),
@@ -1158,80 +1287,65 @@ void HandleDock::exportRuleResults(const QString& ruleId) const
         ks::i18n::sourceText(QStringLiteral("解码状态")),
         ks::i18n::sourceText(QStringLiteral("差异"))
     };
-    const QByteArray headerBytes = (headerList.join('\t') + '\n').toUtf8();
-    if (targetFile.write(headerBytes) != headerBytes.size())
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                .arg(targetFile.errorString()));
-        targetFile.cancelWriting();
-        return;
-    }
-
-    std::size_t exportedRowCount = 0;
-    for (const HandleRuleMatchState& state : m_ruleMatchStates)
-    {
-        if (!state.enabled || (!ruleId.isEmpty() && state.ruleId != ruleId))
-        {
-            continue;
-        }
-        for (const std::size_t sourceRowIndex : state.rowIndices)
-        {
-            if (sourceRowIndex >= m_allRows.size())
+    struct Result { bool committed = false; bool commitAttempted = false; QString error; std::size_t count = 0; };
+    m_exportPendingReceipt = true;
+    m_exportReceiptPath = filePath;
+    const auto ticket = m_exportOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            QSaveFile targetFile(input.path);
+            if (!targetFile.open(QIODevice::WriteOnly)) { result.error = targetFile.errorString(); return result; }
+            if (targetFile.write("\xEF\xBB\xBF", 3) != 3) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+            const QByteArray headerBytes = (input.headers.join('\t') + '\n').toUtf8();
+            if (targetFile.write(headerBytes) != headerBytes.size()) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+            for (const auto& group : input.groups)
             {
-                continue;
+                for (const auto sourceRowIndex : group.indices)
+                {
+                    if (sourceRowIndex >= input.rows.size()) continue;
+                    const HandleRow& row = input.rows[sourceRowIndex];
+                    QStringList fieldList{
+                        group.name,
+                        QString::number(row.processId),
+                        row.processName,
+                        formatHex(row.handleValue, 0),
+                        input.language.displayText(formatTypeIndexDisplayText(row.typeIndex, row.typeName)),
+                        input.language.displayText(formatObjectNameDisplayText(row)),
+                        formatHex(row.objectAddress, 0),
+                        formatHex(row.grantedAccess, 8),
+                        input.language.displayText(formatHandleAttributes(row.attributes)),
+                        input.language.displayText(formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable)),
+                        input.language.displayText(formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable)),
+                        input.language.displayText(formatHandleSourceText(row.sourceMode)),
+                        input.language.displayText(formatHandleDecodeStatusText(row.decodeStatus)),
+                        input.language.displayText(formatHandleDiffStatusText(row.diffStatus))
+                    };
+                    for (QString& field : fieldList)
+                    {
+                        field = sanitizeTsvField(field);
+                    }
+                    const QByteArray lineBytes = (fieldList.join('\t') + '\n').toUtf8();
+                    if (targetFile.write(lineBytes) != lineBytes.size()) { result.error = targetFile.errorString(); targetFile.cancelWriting(); return result; }
+                    ++result.count;
+                }
             }
-            const HandleRow& row = m_allRows[sourceRowIndex];
-            QStringList fieldList{
-                state.ruleName,
-                QString::number(row.processId),
-                row.processName,
-                formatHex(row.handleValue, 0),
-                ks::i18n::displayText(formatTypeIndexDisplayText(row.typeIndex, row.typeName)),
-                ks::i18n::displayText(formatObjectNameDisplayText(row)),
-                formatHex(row.objectAddress, 0),
-                formatHex(row.grantedAccess, 8),
-                ks::i18n::displayText(formatHandleAttributes(row.attributes)),
-                ks::i18n::displayText(formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable)),
-                ks::i18n::displayText(formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable)),
-                ks::i18n::displayText(formatHandleSourceText(row.sourceMode)),
-                ks::i18n::displayText(formatHandleDecodeStatusText(row.decodeStatus)),
-                ks::i18n::displayText(formatHandleDiffStatusText(row.diffStatus))
-            };
-            for (QString& field : fieldList)
-            {
-                field = sanitizeTsvField(field);
-            }
-            const QByteArray lineBytes = (fieldList.join('\t') + '\n').toUtf8();
-            if (targetFile.write(lineBytes) != lineBytes.size())
-            {
-                QMessageBox::warning(
-                    const_cast<HandleDock*>(this),
-                    ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-                    ks::i18n::sourceText(QStringLiteral("结果文件写入失败：%1"))
-                        .arg(targetFile.errorString()));
-                targetFile.cancelWriting();
-                return;
-            }
-            ++exportedRowCount;
-        }
-    }
-    if (!targetFile.commit())
-    {
-        QMessageBox::warning(
-            const_cast<HandleDock*>(this),
-            ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-            ks::i18n::sourceText(QStringLiteral("结果文件提交失败：%1"))
-                .arg(targetFile.errorString()));
-        return;
-    }
-    QMessageBox::information(
-        const_cast<HandleDock*>(this),
-        ks::i18n::sourceText(QStringLiteral("导出句柄筛选结果")),
-        ks::i18n::sourceText(QStringLiteral("已导出 %1 条命中结果。"))
-            .arg(exportedRowCount));
+            result.commitAttempted = true;
+            result.committed = targetFile.commit();
+            if (!result.committed) result.error = targetFile.errorString();
+            return result;
+        },
+        [this](const Result& result, std::uint64_t) {
+            if (result.committed)
+                settleExportReceipt(ks::i18n::sourceText(QStringLiteral("已导出 %1 条命中结果。")).arg(result.count), true);
+            else
+                settleExportReceipt(ks::i18n::sourceText(result.commitAttempted ? QStringLiteral("结果文件提交失败：%1") : QStringLiteral("结果文件写入失败：%1")).arg(result.error));
+            return true;
+        },
+        [this, filePath](std::exception_ptr) {
+            settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。")) + QLatin1Char('\n') + filePath);
+        });
+    if (!ticket && guarded && m_exportPendingReceipt)
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
 }
 
 void HandleDock::returnToSavedFilters()
@@ -1263,59 +1377,13 @@ void HandleDock::updateTypeFilterItems(const std::vector<QString>& availableType
 
 void HandleDock::refreshTypeFilterItemsFromAllRows()
 {
-    std::set<QString> typeNameSet;
-    for (const HandleRow& row : m_allRows)
-    {
-        if (!row.typeName.trimmed().isEmpty())
-        {
-            typeNameSet.insert(row.typeName);
-        }
-    }
-
-    std::vector<QString> availableTypeList;
-    availableTypeList.reserve(typeNameSet.size());
-    for (const QString& typeNameText : typeNameSet)
-    {
-        availableTypeList.push_back(typeNameText);
-    }
-    updateTypeFilterItems(availableTypeList);
+    applyLocalHandleFilters(!m_handleRenderDeferredUntilTypeMap);
 }
 
 void HandleDock::syncHandleTypeNamesFromObjectTypeMap()
 {
-    if (m_allRows.empty() || m_typeNameMapByIndexFromObjectTab.empty())
-    {
-        if (m_handleRenderDeferredUntilTypeMap && !m_allRows.empty())
-        {
-            // 对象类型快照可能失败或返回空映射。此时不能永久压住句柄列表，
-            // 兜底使用枚举阶段已有类型文本渲染一次，保证用户仍能看到刷新结果。
-            m_handleRenderDeferredUntilTypeMap = false;
-            refreshTypeFilterItemsFromAllRows();
-            applyLocalHandleFilters(true);
-        }
-        return;
-    }
-
-    // 对象类型映射已到达：把当前缓存行转换为最终类型名，然后只触发一次句柄表渲染。
-    for (HandleRow& row : m_allRows)
-    {
-        const auto foundIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
-        if (foundIt != m_typeNameMapByIndexFromObjectTab.end() && !foundIt->second.empty())
-        {
-            row.typeName = QString::fromStdString(foundIt->second);
-        }
-    }
-    refreshTypeFilterItemsFromAllRows();
     m_handleRenderDeferredUntilTypeMap = false;
-    applyLocalHandleFilters();
-
-    kLogEvent syncTypeNameEvent;
-    info << syncTypeNameEvent
-        << "[HandleDock] syncHandleTypeNamesFromObjectTypeMap: syncedRows="
-        << m_allRows.size()
-        << ", mappedTypes="
-        << m_typeNameMapByIndexFromObjectTab.size()
-        << eol;
+    applyLocalHandleFilters(true);
 }
 
 void HandleDock::updateHandleStatusLabel(const QString& statusText, const bool refreshing)
@@ -1449,11 +1517,12 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
                 ? QStringLiteral("停用规则")
                 : QStringLiteral("启用规则"));
         exportRuleAction = menu.addAction(QStringLiteral("导出该规则结果"));
+        exportRuleAction->setEnabled(!m_exportOperation || !m_exportOperation->isInFlight());
     }
     else if (itemKind == ks::handle::HandleTreeItemKind::HandleRow)
     {
         menu.addSeparator();
-        HandleRow* selectedRow = selectedHandleRow();
+        const HandleRow* selectedRow = selectedHandleRow();
         if (selectedRow != nullptr)
         {
             closeTarget = *selectedRow;
@@ -1581,7 +1650,7 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == openProcessAction)
     {
-        HandleRow* selectedRow = selectedHandleRow();
+        const HandleRow* selectedRow = selectedHandleRow();
         if (selectedRow != nullptr)
         {
             ks::ui::OpenProcessDetailByPid(selectedRow->processId);
@@ -1590,7 +1659,7 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == gotoTypeAction)
     {
-        HandleRow* row = selectedHandleRow();
+        const HandleRow* row = selectedHandleRow();
         if (row != nullptr)
         {
             focusObjectTypeByIndex(row->typeIndex);

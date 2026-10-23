@@ -9,9 +9,16 @@
 // ============================================================
 
 #include <QString>
+#include <QStringList>
+#include <QList>
+#include <QPair>
 #include <QStringConverter>
 #include <QPointer>
 #include <QWidget>
+#include <functional>
+#include <memory>
+
+struct CodeEditorReadOnlyViewState;
 
 class QComboBox;
 class QLabel;
@@ -22,6 +29,7 @@ class QVBoxLayout;
 class QHBoxLayout;
 class QWidget;
 
+namespace ks::ui { class AsyncOperation; class BudgetedPlainTextTransfer; }
 class CodeTextEdit;
 class QMenu;
 class QAction;
@@ -101,6 +109,12 @@ public:
     void setWordWrapEnabled(bool enabled);
     bool wordWrapEnabled() const;
 
+    // Value-only reading state for bounded inline editor reuse. The caller owns
+    // the canonical text snapshot and installs it before restoring this state.
+    // Editable sessions are rejected; this port never transfers documents/undo.
+    std::shared_ptr<const CodeEditorReadOnlyViewState> captureReadOnlyViewState() const;
+    bool restoreReadOnlyViewState(const std::shared_ptr<const CodeEditorReadOnlyViewState>& state);
+
     // currentEncodingDisplayText：
     // - 返回当前文件编码展示文本（如 "UTF-8 BOM"）；
     // - 若当前内容不是来自文件加载，则返回 "未知"。
@@ -111,6 +125,9 @@ public:
     // - 不依赖 UI 按钮，适合业务代码直接调用。
     // 返回：true=成功，false=失败。
     bool openLocalFile(const QString& filePath);
+    // First-load variant for an empty editor: value-only file read/decode, then
+    // shared GUI-budgeted complete document transfer. Editing waits for completion.
+    bool openInitialLocalFileAsync(const QString& filePath, std::function<void(bool)> completed);
 
     // openLocalFileWithEncoding：
     // - 通过程序接口按指定编码打开本地文本文件；
@@ -142,10 +159,19 @@ private:
     // initializeUi：
     // - 创建工具栏、查找替换面板、跳转面板、编辑区与状态栏。
     void initializeUi();
+    void populateMoreMenu();
 
     // initializeConnections：
     // - 连接按钮、快捷键与编辑器状态回调。
     void initializeConnections();
+
+    // Explicit UI producers retain source templates and raw argument identity;
+    // language changes refresh labels without rebuilding the source document.
+    void bindUiToolTip(QWidget* widget, const QString& source);
+    void refreshUiText();
+    void setOperationStatus(const QString& sourceTemplate, const QStringList& arguments = {},
+        quint32 translatedArgumentMask = 0, const QString& semanticKey = QString());
+    void refreshOperationStatus();
 
     // applyThemeStyle：
     // - 统一应用工具按钮/输入框样式。
@@ -320,6 +346,16 @@ private:
     // m_editor：核心代码编辑器（行号 + 括号高亮）。
     CodeTextEdit* m_editor = nullptr;
     QToolButton* m_moreButton = nullptr;
+    QMenu* m_syntaxMenu = nullptr;
+    QList<QPair<QPointer<QAction>, QPointer<QToolButton>>> m_toolActions;
+    QList<QPointer<QAction>> m_syntaxActions;
+    QLabel* m_gotoLabel = nullptr;
+    QList<QPair<QPointer<QWidget>, QString>> m_uiToolTips;
+    QString m_placeholderSource;
+    QString m_statusSourceTemplate;
+    QStringList m_statusArguments;
+    quint32 m_statusTranslatedArgumentMask = 0;
+    QString m_statusSemanticKey;
     QToolButton* m_matchCaseButton = nullptr;
     QToolButton* m_wholeWordButton = nullptr;
     QWidget* m_replaceRow = nullptr;
@@ -374,4 +410,7 @@ private:
     // m_themeRefreshPending：合并排队的样式更新，避免setStyleSheet引发palette事件递归。
     bool m_themeRefreshPending = false;
     bool m_contentNotificationPending = false;
+    ks::ui::AsyncOperation* m_initialFileRead = nullptr;
+    ks::ui::BudgetedPlainTextTransfer* m_initialFileTransfer = nullptr;
+    quint64 m_readOnlyViewRestoreGeneration = 0;
 };

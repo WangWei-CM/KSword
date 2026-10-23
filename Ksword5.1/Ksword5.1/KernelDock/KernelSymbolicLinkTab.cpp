@@ -4,6 +4,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 
 // ============================================================
@@ -31,8 +33,10 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QStringList>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include <QTableView>
+#include <QSortFilterProxyModel>
+#include <QTimer>
+#include <QScrollBar>
 #include <QThreadPool>
 #include <QVBoxLayout>
 
@@ -58,6 +62,41 @@ namespace
             .arg(KswordTheme::PrimaryBlueHex);
     }
 }
+
+class KernelSymbolicLinkTab::LinkFilter final : public QSortFilterProxyModel
+{
+public:
+    explicit LinkFilter(Model* source, QObject* parent) : QSortFilterProxyModel(parent), m_source(source)
+    {
+        // QTableWidgetItem text ordering is a case-sensitive locale comparison.
+        // Preserve its one-shot policy instead of re-sorting on each source edit.
+        setDynamicSortFilter(false);
+        setSortRole(Qt::DisplayRole);
+        setSortCaseSensitivity(Qt::CaseSensitive);
+        setSortLocaleAware(true);
+        setSourceModel(source);
+    }
+    void setKeywords(const QString& keyword, const QString& target)
+    {
+        if (m_keyword == keyword && m_target == target) return;
+        m_keyword = keyword;
+        m_target = target;
+        invalidateFilter();
+    }
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex&) const override
+    {
+        const auto* row = m_source->rowAt(sourceRow);
+        return row != nullptr
+            && (m_keyword.isEmpty() || row->mergedText.contains(m_keyword, Qt::CaseInsensitive)
+                || row->targetMergedText.contains(m_keyword, Qt::CaseInsensitive))
+            && (m_target.isEmpty() || row->targetMergedText.contains(m_target, Qt::CaseInsensitive));
+    }
+private:
+    Model* m_source = nullptr;
+    QString m_keyword;
+    QString m_target;
+};
 
 KernelSymbolicLinkTab::KernelSymbolicLinkTab(QWidget* parent)
     : QWidget(parent)
@@ -108,18 +147,30 @@ void KernelSymbolicLinkTab::initializeUi()
     ks::ui::NormalizeToolbarRow(toolLayout);
     rootLayout->addLayout(toolLayout);
 
-    m_table = new ks::ui::VisibleTableWidget(this);
+    m_table = new ks::ui::TableActionTableView(this);
     // 目标路径检索主要用于定位与复制，收拢完整快照栏。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
-    m_table->setColumnCount(static_cast<int>(Column::Count));
-    m_table->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("sourceDirectory"),
-        QStringLiteral("linkName"),
-        QStringLiteral("fullPath"),
-        QStringLiteral("targetPath"),
-        QStringLiteral("dosCandidate"),
-        QStringLiteral("statusText")
-    });
+    m_model = new Model({
+        {QStringLiteral("sourceDirectory")}, {QStringLiteral("linkName")},
+        {QStringLiteral("fullPath")}, {QStringLiteral("targetPath")},
+        {QStringLiteral("dosCandidate")}, {QStringLiteral("statusText")}},
+        [](const TableRow& row, const int column, const int role) -> QVariant {
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+            switch (static_cast<Column>(column))
+            {
+            case Column::SourceDirectory: return row.entry.sourceDirectory;
+            case Column::LinkName: return row.entry.linkName;
+            case Column::FullPath: return row.entry.fullPath;
+            case Column::TargetPath: return row.entry.targetPath;
+            case Column::DosCandidate: return row.entry.dosCandidate;
+            case Column::StatusText: return row.entry.statusText;
+            default: return {};
+            }
+        }, m_table);
+    m_proxy = new LinkFilter(m_model, m_table);
+    m_table->setModel(m_proxy);
+    ks::ui::InstallTableHeaderClickSorting(m_table);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -142,13 +193,13 @@ void KernelSymbolicLinkTab::initializeConnections()
     connect(m_copyTargetButton, &QPushButton::clicked, this, [this]() {
         copyCurrentTarget();
     });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() {
-        applyFilters();
-    });
-    connect(m_targetFilterEdit, &QLineEdit::textChanged, this, [this]() {
-        applyFilters();
-    });
-    connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilters(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
+    connect(m_targetFilterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
+    connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showContextMenu(position);
     });
 }
@@ -208,99 +259,74 @@ void KernelSymbolicLinkTab::applySnapshotResult(
 
     if (!ok)
     {
-        m_allRows.clear();
-        m_visibleRows.clear();
-        rebuildTable();
+        m_model->clearRows();
+        m_unfilteredSelection = QModelIndex();
+        m_filterActive = false;
         m_statusLabel->setText(kernelText("kernel.symbolic_link.status.failed", QStringLiteral("状态：失败 | %1")).arg(errorText));
         return;
     }
 
-    m_allRows = std::move(rows);
+    std::vector<TableRow> tableRows;
+    tableRows.reserve(rows.size());
+    for (auto& row : rows)
+    {
+        TableRow value;
+        value.mergedText = QStringList{row.sourceDirectory, row.linkName, row.fullPath, row.statusText}.join(QStringLiteral(" | "));
+        value.targetMergedText = QStringList{row.targetPath, row.dosCandidate}.join(QStringLiteral(" | "));
+        value.entry = std::move(row);
+        tableRows.push_back(std::move(value));
+    }
+    m_filterTimer->stop();
+    m_unfilteredSelection = QModelIndex();
+    m_filterActive = false;
+    m_model->setRows(std::move(tableRows));
     applyFilters();
 }
 
 void KernelSymbolicLinkTab::applyFilters()
 {
-    const QString keywordText = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
-    const QString targetKeywordText = m_targetFilterEdit != nullptr ? m_targetFilterEdit->text().trimmed() : QString();
-    m_visibleRows.clear();
-    m_visibleRows.reserve(m_allRows.size());
-
-    for (const KernelSymbolicLinkEntry& row : m_allRows)
+    const QPointer<KernelSymbolicLinkTab> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-symbolic-link-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilters(); })) return;
+    const QString keyword = m_filterEdit->text().trimmed();
+    const QString target = m_targetFilterEdit->text().trimmed();
+    const bool active = !keyword.isEmpty() || !target.isEmpty();
+    if (active && !m_filterActive)
     {
-        const QString mergedText = QStringList{
-            row.sourceDirectory,
-            row.linkName,
-            row.fullPath,
-            row.statusText
-        }.join(QStringLiteral(" | "));
-        const QString targetMergedText = QStringList{
-            row.targetPath,
-            row.dosCandidate
-        }.join(QStringLiteral(" | "));
-
-        const bool keywordMatched = keywordText.isEmpty()
-            || mergedText.contains(keywordText, Qt::CaseInsensitive)
-            || targetMergedText.contains(keywordText, Qt::CaseInsensitive);
-        const bool targetMatched = targetKeywordText.isEmpty()
-            || targetMergedText.contains(targetKeywordText, Qt::CaseInsensitive);
-        if (keywordMatched && targetMatched)
-        {
-            m_visibleRows.push_back(row);
-        }
+        m_unfilteredSelection = m_proxy->mapToSource(m_table->currentIndex());
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
     }
-
-    rebuildTable();
-    m_statusLabel->setText(
-        kernelText("kernel.symbolic_link.status.summary", QStringLiteral("状态：显示 %1 / %2"))
-        .arg(m_visibleRows.size())
-        .arg(m_allRows.size()));
+    m_proxy->setKeywords(keyword, target);
+    if (!active && m_filterActive)
+    {
+        if (m_unfilteredSelection.isValid()) m_table->setCurrentIndex(m_proxy->mapFromSource(m_unfilteredSelection));
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QModelIndex();
+    }
+    m_filterActive = active;
+    m_statusLabel->setText(kernelText("kernel.symbolic_link.status.summary", QStringLiteral("状态：显示 %1 / %2"))
+        .arg(m_proxy->rowCount()).arg(m_model->rowCount()));
 }
 
-void KernelSymbolicLinkTab::rebuildTable()
+const KernelSymbolicLinkEntry* KernelSymbolicLinkTab::entryAtVisibleRow(const int row) const
 {
-    m_table->setSortingEnabled(false);
-    m_table->clearContents();
-    m_table->setRowCount(static_cast<int>(m_visibleRows.size()));
-
-    for (int rowIndex = 0; rowIndex < static_cast<int>(m_visibleRows.size()); ++rowIndex)
-    {
-        const KernelSymbolicLinkEntry& row = m_visibleRows[static_cast<std::size_t>(rowIndex)];
-        m_table->setItem(rowIndex, static_cast<int>(Column::SourceDirectory), createReadOnlyItem(row.sourceDirectory));
-        m_table->setItem(rowIndex, static_cast<int>(Column::LinkName), createReadOnlyItem(row.linkName));
-        m_table->setItem(rowIndex, static_cast<int>(Column::FullPath), createReadOnlyItem(row.fullPath));
-        m_table->setItem(rowIndex, static_cast<int>(Column::TargetPath), createReadOnlyItem(row.targetPath));
-        m_table->setItem(rowIndex, static_cast<int>(Column::DosCandidate), createReadOnlyItem(row.dosCandidate));
-        m_table->setItem(rowIndex, static_cast<int>(Column::StatusText), createReadOnlyItem(row.statusText));
-    }
+    const QModelIndex source = m_proxy->mapToSource(m_proxy->index(row, 0));
+    const auto* value = source.isValid() ? m_model->rowAt(source.row()) : nullptr;
+    return value != nullptr ? &value->entry : nullptr;
 }
 
 void KernelSymbolicLinkTab::copyCurrentTarget() const
 {
-    if (m_table == nullptr || m_table->currentRow() < 0)
-    {
-        return;
-    }
-    const int rowIndex = m_table->currentRow();
-    if (rowIndex >= static_cast<int>(m_visibleRows.size()))
-    {
-        return;
-    }
-    QApplication::clipboard()->setText(m_visibleRows[static_cast<std::size_t>(rowIndex)].targetPath);
+    const auto* entry = entryAtVisibleRow(m_table->currentIndex().row());
+    if (entry != nullptr) QApplication::clipboard()->setText(entry->targetPath);
 }
 
 void KernelSymbolicLinkTab::copyCurrentRow() const
 {
-    if (m_table == nullptr || m_table->currentRow() < 0)
-    {
-        return;
-    }
-    const int rowIndex = m_table->currentRow();
-    if (rowIndex >= static_cast<int>(m_visibleRows.size()))
-    {
-        return;
-    }
-    QApplication::clipboard()->setText(rowToTsv(m_visibleRows[static_cast<std::size_t>(rowIndex)]));
+    const auto* entry = entryAtVisibleRow(m_table->currentIndex().row());
+    if (entry != nullptr) QApplication::clipboard()->setText(rowToTsv(*entry));
 }
 
 void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
@@ -310,7 +336,7 @@ void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
     {
         return;
     }
-    m_table->setCurrentCell(index.row(), index.column());
+    m_table->setCurrentIndex(index);
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -330,17 +356,13 @@ void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
         return;
     }
 
-    const int rowIndex = index.row();
-    if (rowIndex < 0 || rowIndex >= static_cast<int>(m_visibleRows.size()))
-    {
-        return;
-    }
-    const KernelSymbolicLinkEntry& row = m_visibleRows[static_cast<std::size_t>(rowIndex)];
+    const auto* entry = entryAtVisibleRow(index.row());
+    if (entry == nullptr) return;
+    const KernelSymbolicLinkEntry& row = *entry;
 
     if (selectedAction == copyCellAction)
     {
-        QTableWidgetItem* item = m_table->item(index.row(), index.column());
-        QApplication::clipboard()->setText(item != nullptr ? item->text() : QString());
+        QApplication::clipboard()->setText(index.data().toString());
     }
     else if (selectedAction == copyTargetAction)
     {
@@ -360,13 +382,6 @@ void KernelSymbolicLinkTab::showContextMenu(const QPoint& position)
     }
 }
 
-QTableWidgetItem* KernelSymbolicLinkTab::createReadOnlyItem(const QString& text)
-{
-    auto* item = new QTableWidgetItem(text);
-    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-    item->setToolTip(text);
-    return item;
-}
 
 QString KernelSymbolicLinkTab::rowToTsv(const KernelSymbolicLinkEntry& row)
 {

@@ -102,54 +102,105 @@ namespace
 // - 聚焦“执行动作 + 结果反馈 + 辅助格式化/查找”逻辑。
 // ============================================================
 
+void ProcessDetailWindow::submitDetailAction(const QString& title, const kLogEvent& actionEvent,
+    std::function<DetailActionResult()> action, const bool refreshModules,
+    std::function<void(const DetailActionResult&)> completed)
+{
+    if (!m_detailActionOperation)
+    {
+        m_detailActionOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_detailActionOperation->setStateChangedCallback([this]
+        {
+            const bool busy = m_detailActionOperation->isBusy();
+            const QPointer<ProcessDetailWindow> alive(this);
+            const QList<QPointer<QPushButton>> buttons{m_executeTerminateActionButton, m_injectDllButton, m_injectShellcodeButton};
+            for (const auto& button : buttons)
+            {
+                if (button) button->setEnabled(!busy);
+                if (!alive) return;
+            }
+            if (m_refreshHotkeyButton) m_refreshHotkeyButton->setEnabled(!busy && !m_hotkeyRefreshing && !m_keyboardRefreshing);
+            if (!alive) return;
+            if (m_refreshKeyboardButton) m_refreshKeyboardButton->setEnabled(!busy && !m_hotkeyRefreshing && !m_keyboardRefreshing);
+            if (!alive) return;
+            const bool canEdit = !busy && !m_hotkeyRefreshing && !m_keyboardRefreshing && m_hotkeyTable &&
+                m_hotkeyTable->isEnabled() && !m_hotkeyTable->isPreparing() && m_hotkeyTable->currentRow() >= 0;
+            if (m_editHotkeyButton) m_editHotkeyButton->setEnabled(canEdit);
+            if (!alive) return;
+            if (m_deleteHotkeyButton) m_deleteHotkeyButton->setEnabled(canEdit);
+        });
+    }
+    if (m_detailActionOperation->isBusy()) return;
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const auto titleValue = title.toStdString();
+    const auto exceptionText = ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString();
+    m_detailActionOperation->submitTransaction<std::function<DetailActionResult()>, DetailActionResult>(std::move(action),
+        [actionEvent, titleValue, pid, exceptionText](const std::function<DetailActionResult()>& work)
+        {
+            DetailActionResult result;
+            try { result = work(); }
+            catch (const std::exception& error) { result.detail = error.what(); }
+            catch (...) { result.detail = exceptionText; }
+            // Accepted effects keep their complete receipt even if the window closes.
+            (result.ok ? info : err) << actionEvent << "[ProcessDetailWindow] action completed, pid=" << pid
+                << ", action=" << titleValue << ", ok=" << result.ok << ", detail=" << result.detail << eol;
+            return result;
+        },
+        [this, title, actionEvent, pid, creationTime, refreshModules, completed = std::move(completed)](const DetailActionResult& result, std::uint64_t)
+        {
+            if (pid != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns) return true;
+            const QPointer<ProcessDetailWindow> alive(this);
+            showActionResultMessage(title, result.ok, result.detail, actionEvent);
+            if (alive && completed) completed(result);
+            if (alive && refreshModules && result.ok) requestAsyncModuleRefresh(true);
+            return true;
+        },
+        [this, title, actionEvent, exceptionText](std::exception_ptr)
+        { showActionResultMessage(title, false, exceptionText, actionEvent); },
+        [actionEvent, titleValue](ks::ui::AsyncOperationOutcome outcome)
+        { info << actionEvent << "[ProcessDetailWindow] action cleanup, action=" << titleValue << ", outcome=" << static_cast<int>(outcome) << eol; });
+}
+
 void ProcessDetailWindow::executeSingleTerminateMethodAction(const std::size_t methodIndex)
 {
     const auto& methods = ks::process::TerminateMethodTable();
-    if (methodIndex >= methods.size())
+    if (methodIndex >= methods.size()) return;
+    const auto targetPid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const QString title = QString::fromUtf8(methods[methodIndex].methodName);
+    const kLogEvent actionEvent;
+    submitDetailAction(title, actionEvent, [targetPid, creationTime, methodIndex]
     {
-        return;
-    }
-
-    const auto& method = methods[methodIndex];
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    kLogEvent actionEvent;
-    std::string detailText;
-    const bool actionOk = invokeProcessActionForIdentity(
-        targetPid,
-        m_baseRecord.creationTime100ns,
-        [targetPid, methodIndex](std::string* detailOut)
-        {
-            return ks::process::TerminateMethodTable()[methodIndex].invokeMethod(targetPid, detailOut);
-        },
-        &detailText);
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] 逐方法结束进程, pid=" << targetPid
-        << ", method=" << method.methodName
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText << eol;
-    showActionResultMessage(QString::fromUtf8(method.methodName), actionOk, detailText, actionEvent);
+        DetailActionResult result;
+        result.ok = invokeProcessActionForIdentity(targetPid, creationTime,
+            [targetPid, methodIndex](std::string* detail)
+            { return ks::process::TerminateMethodTable()[methodIndex].invokeMethod(targetPid, detail); }, &result.detail);
+        return result;
+    });
 }
 
 void ProcessDetailWindow::executeR0SuspendSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (!m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (cacheIndex >= m_threadInspectPublishedRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -203,24 +254,25 @@ void ProcessDetailWindow::executeR0SuspendSelectedThreadAction()
 
 void ProcessDetailWindow::executeR0ResumeSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (!m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (cacheIndex >= m_threadInspectPublishedRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -259,24 +311,25 @@ void ProcessDetailWindow::executeDriverThreadAction(
     const unsigned long action,
     const unsigned long terminateMethod)
 {
-    if (m_threadInspectTable == nullptr)
+    if (!m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (cacheIndex >= m_threadInspectPublishedRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint64_t startAddress = selectedThread.startAddress != 0ULL
         ? selectedThread.startAddress
         : selectedThread.win32StartAddress;
@@ -410,24 +463,25 @@ void ProcessDetailWindow::executeExperimentalFirmwareRebootAction()
 
 void ProcessDetailWindow::executeR0TerminateSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (!m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (cacheIndex >= m_threadInspectPublishedRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -991,144 +1045,68 @@ void ProcessDetailWindow::updateActionAffinityCoreButtons()
 void ProcessDetailWindow::executeInjectDllAction()
 {
     const QString dllPath = m_dllPathLineEdit->text().trimmed();
-    const bool useR0Injection =
-        m_injectionModeCombo != nullptr &&
-        m_injectionModeCombo->currentData().toInt() == 1;
+    const bool useR0Injection = m_injectionModeCombo != nullptr && m_injectionModeCombo->currentData().toInt() == 1;
     if (dllPath.isEmpty())
     {
-        kLogEvent injectDllEmptyPathEvent;
-        warn << injectDllEmptyPathEvent
-            << "[ProcessDetailWindow] executeInjectDllAction: DLL 路径为空。"
-            << eol;
         QMessageBox::warning(this, "DLL 注入", "请先选择 DLL 文件。");
         return;
     }
-
-    // DLL 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDetailWindow] executeInjectDllAction: pid="
-        << m_baseRecord.pid
-        << ", mode="
-        << (useR0Injection ? "R0" : "R3")
-        << ", dllPath="
-        << dllPath.toStdString()
-        << eol;
-
-    std::string detailText;
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    bool actionOk = false;
-    if (useR0Injection)
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const kLogEvent actionEvent;
+    submitDetailAction(useR0Injection ? QStringLiteral("DLL 注入(R0)") : QStringLiteral("DLL 注入"), actionEvent,
+        [pid, creationTime, useR0Injection, dllPath]
     {
-        ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessInjectResult injectResult =
-            driverClient.injectProcessDll(
-                static_cast<std::uint32_t>(m_baseRecord.pid),
-                dllPath.toStdWString());
-        detailText = injectResult.io.message;
-        actionOk =
-            injectResult.io.ok &&
-            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
-    }
-    else
-    {
-        const std::string dllPathUtf8 = dllPath.toStdString();
-        actionOk = invokeProcessActionForIdentity(
-            targetPid,
-            m_baseRecord.creationTime100ns,
-            [targetPid, dllPathUtf8](std::string* detailTextOut)
-            {
-                return ks::process::InjectDllByPath(targetPid, dllPathUtf8, detailTextOut);
-            },
-            &detailText);
-    }
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeInjectDllAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage(useR0Injection ? QStringLiteral("DLL 注入(R0)") : QStringLiteral("DLL 注入"), actionOk, detailText, actionEvent);
-    if (actionOk)
-    {
-        requestAsyncModuleRefresh(true);
-    }
+        DetailActionResult result;
+        if (useR0Injection)
+        {
+            const auto injected = ksword::ark::DriverClient().injectProcessDll(pid, dllPath.toStdWString());
+            result.detail = injected.io.message;
+            result.ok = injected.io.ok && injected.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+        }
+        else
+        {
+            result.ok = invokeProcessActionForIdentity(pid, creationTime,
+                [pid, dllPath](std::string* detail) { return ks::process::InjectDllByPath(pid, dllPath.toStdString(), detail); }, &result.detail);
+        }
+        return result;
+    }, true);
 }
 
 void ProcessDetailWindow::executeInjectShellcodeAction()
 {
     const QString shellcodePath = m_shellcodePathLineEdit->text().trimmed();
-    const bool useR0Injection =
-        m_injectionModeCombo != nullptr &&
-        m_injectionModeCombo->currentData().toInt() == 1;
+    const bool useR0Injection = m_injectionModeCombo != nullptr && m_injectionModeCombo->currentData().toInt() == 1;
     if (shellcodePath.isEmpty())
     {
-        kLogEvent injectShellcodeEmptyPathEvent;
-        warn << injectShellcodeEmptyPathEvent
-            << "[ProcessDetailWindow] executeInjectShellcodeAction: shellcode 路径为空。"
-            << eol;
         QMessageBox::warning(this, "Shellcode 注入", "请先选择 shellcode 文件。");
         return;
     }
-
-    // Shellcode 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDetailWindow] executeInjectShellcodeAction: pid="
-        << m_baseRecord.pid
-        << ", mode="
-        << (useR0Injection ? "R0" : "R3")
-        << ", filePath="
-        << shellcodePath.toStdString()
-        << eol;
-
-    std::vector<std::uint8_t> shellcodeBuffer;
-    std::string readErrorText;
-    if (!readBinaryFile(shellcodePath, shellcodeBuffer, readErrorText, actionEvent))
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const kLogEvent actionEvent;
+    submitDetailAction(useR0Injection ? QStringLiteral("Shellcode 注入(R0)") : QStringLiteral("Shellcode 注入"), actionEvent,
+        [pid, creationTime, useR0Injection, shellcodePath, actionEvent]
     {
-        err << actionEvent
-            << "[ProcessDetailWindow] executeInjectShellcodeAction: 读取文件失败, error="
-            << readErrorText
-            << eol;
-        showActionResultMessage("Shellcode 注入", false, readErrorText, actionEvent);
-        return;
-    }
-
-    std::string detailText;
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    bool actionOk = false;
-    if (useR0Injection)
-    {
-        ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessInjectResult injectResult =
-            driverClient.injectProcessShellcode(
-                static_cast<std::uint32_t>(m_baseRecord.pid),
-                shellcodeBuffer);
-        detailText = injectResult.io.message;
-        actionOk =
-            injectResult.io.ok &&
-            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
-    }
-    else
-    {
-        actionOk = invokeProcessActionForIdentity(
-            targetPid,
-            m_baseRecord.creationTime100ns,
-            [targetPid, &shellcodeBuffer](std::string* detailTextOut)
+        DetailActionResult result;
+        const auto execute = [pid, useR0Injection, shellcodePath, actionEvent](std::string* detail)
+        {
+            std::vector<std::uint8_t> bytes;
+            if (!readBinaryFile(shellcodePath, bytes, *detail, actionEvent,
+                useR0Injection ? KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES : 0U)) return false;
+            if (useR0Injection)
             {
-                return ks::process::InjectShellcodeBuffer(targetPid, shellcodeBuffer, detailTextOut);
-            },
-            &detailText);
-    }
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeInjectShellcodeAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", shellcodeSize="
-        << shellcodeBuffer.size()
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage(useR0Injection ? QStringLiteral("Shellcode 注入(R0)") : QStringLiteral("Shellcode 注入"), actionOk, detailText, actionEvent);
+                const auto injected = ksword::ark::DriverClient().injectProcessShellcode(pid, bytes);
+                *detail = injected.io.message;
+                return injected.io.ok && injected.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+            }
+            return ks::process::InjectShellcodeBuffer(pid, bytes, detail);
+        };
+        // R3 identity is held across both payload reading and the entire remote wait.
+        result.ok = useR0Injection ? execute(&result.detail)
+            : invokeProcessActionForIdentity(pid, creationTime, execute, &result.detail);
+        return result;
+    });
 }
 
 QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, const int iconPixelSize)
@@ -1199,51 +1177,52 @@ QString ProcessDetailWindow::formatHexText(const std::uint64_t value) const
     return QString::fromStdString(stream.str());
 }
 
-bool ProcessDetailWindow::readBinaryFile(
-    const QString& filePath,
-    std::vector<std::uint8_t>& bufferOut,
-    std::string& errorTextOut,
-    const kLogEvent& actionEvent) const
+bool ProcessDetailWindow::readBinaryFile(const QString& filePath,
+    std::vector<std::uint8_t>& bufferOut, std::string& errorTextOut,
+    const kLogEvent& actionEvent, const std::size_t maxBytes)
 {
-    // 文件读取入口日志：沿用调用方的 actionEvent，确保动作链路 GUID 连续。
-    info << actionEvent
-        << "[ProcessDetailWindow] readBinaryFile: filePath="
-        << filePath.toStdString()
-        << eol;
-
     bufferOut.clear();
     errorTextOut.clear();
-
     QFile fileObject(filePath);
     if (!fileObject.open(QIODevice::ReadOnly))
     {
         errorTextOut = "Open file failed: " + fileObject.errorString().toStdString();
-        err << actionEvent
-            << "[ProcessDetailWindow] readBinaryFile: 打开失败, error="
-            << errorTextOut
-            << eol;
         return false;
     }
-
-    const QByteArray rawBytes = fileObject.readAll();
-    if (rawBytes.isEmpty())
+    const qint64 size = fileObject.size();
+    if (maxBytes != 0U && size > static_cast<qint64>(maxBytes))
+    {
+        errorTextOut = "shellcode payload is larger than R0 inject payload limit";
+        return false;
+    }
+    if (size > 0) bufferOut.reserve(static_cast<std::size_t>(size));
+    while (!fileObject.atEnd())
+    {
+        const QByteArray chunk = fileObject.read(64 * 1024);
+        if (chunk.isEmpty())
+        {
+            if (fileObject.error() != QFileDevice::NoError)
+            {
+                errorTextOut = fileObject.errorString().toStdString();
+                return false;
+            }
+            break;
+        }
+        const auto count = static_cast<std::size_t>(chunk.size());
+        if (maxBytes != 0U && (count > maxBytes || bufferOut.size() > maxBytes - count))
+        {
+            errorTextOut = "shellcode payload is larger than R0 inject payload limit";
+            return false;
+        }
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(chunk.constData());
+        bufferOut.insert(bufferOut.end(), begin, begin + count);
+    }
+    if (bufferOut.empty())
     {
         errorTextOut = "File is empty.";
-        warn << actionEvent
-            << "[ProcessDetailWindow] readBinaryFile: 文件为空。"
-            << eol;
         return false;
     }
-
-    bufferOut.resize(static_cast<std::size_t>(rawBytes.size()));
-    std::copy(
-        reinterpret_cast<const std::uint8_t*>(rawBytes.constData()),
-        reinterpret_cast<const std::uint8_t*>(rawBytes.constData()) + rawBytes.size(),
-        bufferOut.begin());
-    info << actionEvent
-        << "[ProcessDetailWindow] readBinaryFile: 读取成功, size="
-        << bufferOut.size()
-        << eol;
+    info << actionEvent << "[ProcessDetailWindow] readBinaryFile: size=" << bufferOut.size() << eol;
     return true;
 }
 
@@ -1272,54 +1251,23 @@ void ProcessDetailWindow::showActionResultMessage(
         << eol;
 }
 
-ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()
+const ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()
 {
-    QTreeWidgetItem* currentItem = m_moduleTable->currentItem();
-    if (currentItem == nullptr)
-    {
-        kLogEvent selectedModuleNullEvent;
-        warn << selectedModuleNullEvent
-            << "[ProcessDetailWindow] selectedModuleRecord: 当前无选中行。"
-            << eol;
-        return nullptr;
-    }
-
-    const std::string pathText = currentItem->data(
-        toModuleColumnIndex(ModuleColumn::Path),
-        Qt::UserRole).toString().toStdString();
-    const std::uint64_t baseAddress = currentItem->data(
-        toModuleColumnIndex(ModuleColumn::Path),
-        Qt::UserRole + 1).toULongLong();
-
-    auto foundIt = std::find_if(
-        m_moduleRecords.begin(),
-        m_moduleRecords.end(),
-        [baseAddress, &pathText](const ks::process::ProcessModuleRecord& moduleRecord)
-        {
-            return moduleRecord.moduleBaseAddress == baseAddress && moduleRecord.modulePath == pathText;
-        });
-    if (foundIt == m_moduleRecords.end())
-    {
-        kLogEvent selectedModuleNotFoundEvent;
-        warn << selectedModuleNotFoundEvent
-            << "[ProcessDetailWindow] selectedModuleRecord: 缓存中未找到对应模块记录。"
-            << eol;
-        return nullptr;
-    }
-    kLogEvent selectedModuleFoundEvent;
-    dbg << selectedModuleFoundEvent
-        << "[ProcessDetailWindow] selectedModuleRecord: 命中模块记录, path="
-        << foundIt->modulePath
-        << eol;
-    return &(*foundIt);
+    if (m_moduleTable == nullptr || m_moduleTable->currentRow() < 0 || !m_moduleRecords) return nullptr;
+    const auto path = m_moduleTable->currentCell(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole).toString().toStdString();
+    const auto base = m_moduleTable->currentCell(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole + 1).toULongLong();
+    const auto found = std::find_if(m_moduleRecords->cbegin(), m_moduleRecords->cend(),
+        [&](const ModuleRowValue& value) { return value.record.moduleBaseAddress == base && value.record.modulePath == path; });
+    return found == m_moduleRecords->cend() ? nullptr : &found->record;
 }
 
 void ProcessDetailWindow::openSelectedThreadStackWindow()
 {
+    if (!m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
     // 调用栈窗口入口：
     // - 当前表格行可能经过排序，因此优先读取 ThreadID 单元格保存的缓存索引；
     // - 缓存索引失效时按 TID 兜底查找，避免排序/刷新边界导致无法打开。
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         return;
     }
@@ -1331,35 +1279,35 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
         return;
     }
 
-    QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+    const QModelIndex threadIdItem = m_threadInspectTable->model()->index(
         currentRow,
         toThreadColumnIndex(ThreadRowColumn::ThreadId));
-    if (threadIdItem == nullptr)
+    if (!threadIdItem.isValid())
     {
         updateThreadInspectStatusLabel(QStringLiteral("● 当前线程行缺少 ThreadID。"), false);
         return;
     }
 
     const std::size_t cacheIndex =
-        static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
+        static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong());
     const ThreadInspectItem* selectedThread = nullptr;
-    if (cacheIndex < m_threadInspectRows.size())
+    if (cacheIndex < m_threadInspectPublishedRows->size())
     {
-        selectedThread = &m_threadInspectRows[cacheIndex];
+        selectedThread = &(*m_threadInspectPublishedRows)[cacheIndex];
     }
 
     const std::uint32_t selectedTid =
-        static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+        static_cast<std::uint32_t>(threadIdItem.data(Qt::UserRole + 1).toUInt());
     if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
     {
         const auto foundIt = std::find_if(
-            m_threadInspectRows.begin(),
-            m_threadInspectRows.end(),
+            m_threadInspectPublishedRows->begin(),
+            m_threadInspectPublishedRows->end(),
             [selectedTid](const ThreadInspectItem& rowItem)
             {
                 return rowItem.threadId == selectedTid;
             });
-        if (foundIt != m_threadInspectRows.end())
+        if (foundIt != m_threadInspectPublishedRows->end())
         {
             selectedThread = &(*foundIt);
         }
@@ -1374,6 +1322,8 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
     ThreadStackTarget target{};
     target.processId = selectedThread->processId != 0 ? selectedThread->processId : m_baseRecord.pid;
     target.threadId = selectedThread->threadId;
+    target.threadCreationTime100ns = selectedThread->createTime100ns;
+    target.processCreationTime100ns = m_baseRecord.creationTime100ns;
     target.processName = QString::fromStdString(
         m_baseRecord.processName.empty() ? std::string("Unknown") : m_baseRecord.processName);
     target.processPath = QString::fromStdString(m_baseRecord.imagePath);
@@ -1413,7 +1363,7 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
     {
         errorTextOut->clear();
     }
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectPublishedRows)
     {
         if (errorTextOut != nullptr)
         {
@@ -1432,10 +1382,10 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         return QString();
     }
 
-    const QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+    const QModelIndex threadIdItem = m_threadInspectTable->model()->index(
         currentRow,
         toThreadColumnIndex(ThreadRowColumn::ThreadId));
-    if (threadIdItem == nullptr)
+    if (!threadIdItem.isValid())
     {
         if (errorTextOut != nullptr)
         {
@@ -1444,23 +1394,23 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         return QString();
     }
 
-    const std::size_t cacheIndex = static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
-    const std::uint32_t selectedTid = static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+    const std::size_t cacheIndex = static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong());
+    const std::uint32_t selectedTid = static_cast<std::uint32_t>(threadIdItem.data(Qt::UserRole + 1).toUInt());
     const ThreadInspectItem* selectedThread = nullptr;
-    if (cacheIndex < m_threadInspectRows.size())
+    if (cacheIndex < m_threadInspectPublishedRows->size())
     {
-        selectedThread = &m_threadInspectRows[cacheIndex];
+        selectedThread = &(*m_threadInspectPublishedRows)[cacheIndex];
     }
     if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
     {
         const auto foundIt = std::find_if(
-            m_threadInspectRows.begin(),
-            m_threadInspectRows.end(),
+            m_threadInspectPublishedRows->begin(),
+            m_threadInspectPublishedRows->end(),
             [selectedTid](const ThreadInspectItem& rowItem)
             {
                 return rowItem.threadId == selectedTid;
             });
-        if (foundIt != m_threadInspectRows.end())
+        if (foundIt != m_threadInspectPublishedRows->end())
         {
             selectedThread = &(*foundIt);
         }
@@ -1473,7 +1423,7 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         }
         return QString();
     }
-    if (m_moduleRecords.empty())
+    if ((!m_moduleRecords || m_moduleRecords->empty()))
     {
         if (errorTextOut != nullptr)
         {
@@ -1494,8 +1444,9 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
             continue;
         }
 
-        for (const ks::process::ProcessModuleRecord& moduleRecord : m_moduleRecords)
+        for (const ModuleRowValue& moduleValue : *m_moduleRecords)
         {
+            const auto& moduleRecord = moduleValue.record;
             if (moduleRecord.moduleBaseAddress == 0 || moduleRecord.moduleSizeBytes == 0)
             {
                 continue;

@@ -11,22 +11,34 @@
 #include "../../Framework.h"
 
 #include <QVector>
+#include <QJsonObject>
+#include "ContextMenuRegistrySnapshot.h"
+#include "ContextMenuTemporaryOverride.h"
+#include <functional>
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
 
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <cstdint>
+#include <optional>
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <Windows.h>
 
+namespace ks::ui { class AsyncOperation; class RetainedCleanupJob; }
+class QShowEvent;
 class QLabel;
 class QLineEdit;
 class QPoint;
 class QPushButton;
 class QTableWidget;
+class QTableWidgetItem;
 class QTabWidget;
+class QTimer;
 class QVBoxLayout;
 #include "../../UI/StructuredFieldView.h"
 
@@ -39,12 +51,17 @@ namespace ks::misc
     class ContextMenuCleanerTab final : public QWidget
     {
     public:
+        // Complete hidden initial body; registry data remains a first-show read.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+        static ks::ui::PageNavigationCatalog navigationCatalog(const ContextMenuCleanerTab* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造函数：
         // - 参数 parent：Qt 父控件，可为空；
-        // - 处理逻辑：创建七类子 Tab，并立即执行一次注册表枚举；
+        // - 处理逻辑：创建七类子 Tab，真实首显时执行当前分类的首次枚举；
         // - 返回值：无。
         explicit ContextMenuCleanerTab(QWidget* parent = nullptr);
-        ~ContextMenuCleanerTab() override = default;
+        ~ContextMenuCleanerTab() override;
 
     private:
         // MenuArea：标识当前操作的右键菜单分区。
@@ -79,6 +96,11 @@ namespace ks::misc
             QString itemName;                     // itemName：注册表子键名。
             QString displayName;                  // displayName：菜单显示名，缺失时回退子键名。
             QString commandOrHandler;             // commandOrHandler：命令、脚本路径、CLSID 或 COM Server。
+            QString clsidFriendlyName;
+            QString clsidServerPath;
+            QString detailText;
+            QString registryPathText;
+            QString searchText;
             QString clsidText;                    // clsidText：COM 右键处理器 CLSID。
             ks::ui::FieldDocument details;                   // detailText：状态标记、Icon、AppliesTo 等补充信息。
             QString statusText;                   // statusText：启用/禁用/扩展菜单等状态。
@@ -98,11 +120,23 @@ namespace ks::misc
             QPushButton* deleteButton = nullptr;  // deleteButton：删除选中项按钮。
             QPushButton* restoreButton = nullptr; // restoreButton：恢复 URL 绑定页上一次删除前的注册表备份。
             QPushButton* copyButton = nullptr;    // copyButton：复制选中注册表路径按钮。
+            QTimer* filterTimer = nullptr;           // Coalesce rapid typing without rebuilding source rows.
+            QVector<QString> searchTexts;             // Immutable full-field search projection for this snapshot.
             QLineEdit* filterEdit = nullptr;      // filterEdit：当前分类关键词筛选框。
             QTableWidget* table = nullptr;        // table：右键菜单项列表。
             ks::ui::StructuredFieldView* detailEditor = nullptr; // detailEditor：本分类的只读详情编辑器，交由详情布局系统托管。
             QLabel* statusLabel = nullptr;        // statusLabel：当前分类统计与提示。
+            QVector<QTableWidgetItem*> entryAnchors; // GUI-only stable row items; invalidated before each budget rebuild.
             QVector<ContextMenuEntry> entries;    // entries：当前分类最近一次完整枚举结果。
+            ks::ui::AsyncOperation* queryOperation = nullptr;
+            QTimer* presentationTimer = nullptr;
+            std::optional<QVector<ContextMenuEntry>> pendingSnapshot;
+            std::uint64_t refreshGeneration = 0;
+            std::uint64_t pendingSnapshotGeneration = 0;
+            bool queryPending = false;
+            bool refreshDeferred = false;
+            int nextPresentationRow = 0;
+            bool tableBuilding = false;
             bool hasLoaded = false;               // hasLoaded：该分类是否至少完成过一次按需枚举。
         };
 
@@ -112,6 +146,7 @@ namespace ks::misc
         // - 处理：创建整体布局、说明文本、七类子页；
         // - 返回：无。
         void initializeUi();
+        void showEvent(QShowEvent* event) override;
 
         // createAreaPage：
         // - 输入 area：需要创建的右键菜单分区；
@@ -124,12 +159,17 @@ namespace ks::misc
         // - 处理：重新枚举该分区注册表项并重建表格；
         // - 返回：无。
         void refreshArea(MenuArea area);
+        static QVector<ContextMenuEntry> enumerateAreaSnapshot(MenuArea area);
+        void applyAreaSnapshot(MenuArea area, std::uint64_t generation, QVector<ContextMenuEntry> entries);
+        void processAreaPresentation(MenuArea area);
+        void flushDeferredAreaRefreshes();
 
         // rebuildAreaTable：
         // - 输入 area：目标分区；
         // - 处理：按当前筛选文本把缓存 entries 渲染到表格；
         // - 返回：无。
         void rebuildAreaTable(MenuArea area);
+        void applyAreaFilter(MenuArea area);
 
         // showAreaContextMenu：
         // - 输入 area：目标分区；localPosition：表格视口内右键坐标；
@@ -156,10 +196,44 @@ namespace ks::misc
         static bool isProtectedUrlBindingEntry(const ContextMenuEntry& entry);
 
         // createUrlBindingBackup：
-        // - 输入 entryIndexes：即将删除的 URL 绑定条目下标；
+        // - 输入 entries：确认前冻结的 URL 绑定条目值；
         // - 处理：把完整注册表树复制到当前用户 KSword 备份区并原子切换“最近备份”；
         // - 返回：全部备份成功返回 true，否则返回 false 并写错误文本。
-        bool createUrlBindingBackup(const QVector<int>& entryIndexes, QString* errorTextOut) const;
+        static bool createUrlBindingBackup(const QVector<ContextMenuEntry>& entries, QString* errorTextOut);
+        struct LatencyMeasurementResult;
+        enum class ShellTransactionStage { NotAccepted, Completed, BackupFailed, Unknown };
+        struct ShellTransactionResult
+        {
+            bool ok = false;
+            ShellTransactionStage stage = ShellTransactionStage::Unknown;
+            QString error;
+            QString path;
+            QStringList failures;
+            int count = 0;
+            QJsonObject payload;
+            std::shared_ptr<LatencyMeasurementResult> latency;
+            QString failureText() const
+            {
+                if (stage == ShellTransactionStage::NotAccepted)
+                    return QStringLiteral("事务未被接受，未执行注册表修改。");
+                if (stage == ShellTransactionStage::Unknown)
+                    return QStringLiteral("后台事务未返回可确认的完成状态；可能已部分执行。请刷新后核对实际注册表：%1").arg(error);
+                return error;
+            }
+        };
+        struct ShellTransactionReceipt
+        {
+            std::mutex mutex;
+            std::optional<ShellTransactionResult> result;
+        };
+        static ShellTransactionResult restoreUrlBindingBackupValue();
+        bool beginShellAction();
+        void endShellAction();
+        bool shellBusy() const;
+        void suspendShellQueries();
+        void settleShellTransaction();
+        void submitShellTransaction(std::function<ShellTransactionResult()> worker,
+            std::function<void(const ShellTransactionResult&)> completed);
 
         // restoreLastUrlBindingBackup：
         // - 输入：无；
@@ -186,7 +260,7 @@ namespace ks::misc
         // - 处理：**只用枚举阶段已采集的字段**拼装详情文本，
         //   其中 CLSID 友好名与服务器路径复用 Internal.h 里既有的 HKCR 查询 helper；
         // - 返回：可直接给只读编辑器显示的多行文本。
-        ks::ui::FieldDocument buildEntryDetailDocument(const ContextMenuEntry& entry) const;
+        static ks::ui::FieldDocument buildEntryDetailDocument(const ContextMenuEntry& entry);
 
         // applyAreaDetailPlaceholder：
         // - 输入 area：目标分区；
@@ -205,13 +279,17 @@ namespace ks::misc
         // - 处理：返回备份目录（优先 exe 同级 ContextMenuBackups；不可写时回落
         //   %LOCALAPPDATA%\Ksword\ContextMenuBackups）；
         // - 返回：目录绝对路径（可能尚未创建）。
-        QString contextMenuBackupDirectory() const;
+        static QString contextMenuBackupDirectory();
 
         // exportContextMenuBackupToFile：
         // - 输入 filePathOut/errorTextOut：可为空；
         // - 处理：把本页覆盖的全部菜单注册表位置递归导出为 JSON（含根键与 32/64 视图）；
         // - 返回：成功返回 true 并写回文件路径；失败返回 false 并写回原因。
-        bool exportContextMenuBackupToFile(QString* filePathOut, QString* errorTextOut) const;
+        static bool exportContextMenuBackupToFile(QString* filePathOut, QString* errorTextOut,
+            QJsonObject* snapshotOut = nullptr, const QString& suffix = QString(),
+            const QVector<shell_transaction::Key>& extraScopes = {}, bool mergeOnly = false);
+        static ShellTransactionResult prepareContextMenuRestore(const QString& path);
+        static ShellTransactionResult applyContextMenuRestore(const QJsonObject& plan);
 
         // backupContextMenuToFile：
         // - 输入 showSuccessMessage：true 时弹窗提示路径（按钮触发），false 只写日志（自动备份）；
@@ -243,6 +321,20 @@ namespace ks::misc
             // 只禁用其中一处，另一处仍会加载并照样慢，差值就会被算成 0 —— 必须整组一起禁用。
             QStringList aliasPaths;
         };
+
+        struct LatencyMeasurementResult
+        {
+            bool cancelled = false;
+            double baselineMs = 0;
+            QVector<double> contributions;
+            QVector<int> measuredEntries;
+            ks::ui::FieldDocument report;
+        };
+        static ShellTransactionResult runLatencyMeasurement(MenuArea area,
+            const QVector<LatencyProbeItem>& items, int truncatedCount, int entryCount,
+            unsigned long explorerPid, std::shared_ptr<shell_transaction::LatencySession> session,
+            std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup);
+        void pollLatencyProgress();
 
         // currentArea：
         // - 输入：无；
@@ -277,7 +369,7 @@ namespace ks::misc
         // - 处理：写耗时列（超过门限标红）、把报告写进详情编辑器、刷新状态栏；
         // - 返回：无。
         void applyLatencyResults(MenuArea area, double baselineMs, const QVector<double>& perEntryMs,
-                                 const ks::ui::FieldDocument& report);
+                                 const ks::ui::FieldDocument& report, const QVector<int>& measuredEntries);
 
         // applySingleLatencyResult：
         // - 输入 area：目标分类；entryIndex：entries 下标；valueMs：该条的贡献（0 表示很短）；
@@ -308,25 +400,25 @@ namespace ks::misc
         // - 输入 area：目标分区；
         // - 处理：按分区分派到右键菜单、关联或命名空间枚举器；
         // - 返回：该分区当前可见的注册表项快照。
-        QVector<ContextMenuEntry> enumerateEntriesForArea(MenuArea area) const;
+        static QVector<ContextMenuEntry> enumerateEntriesForArea(MenuArea area);
 
         // enumerateUrlBindingEntries：
         // - 输入：无；
         // - 处理：枚举 URL Protocol 注册和当前用户 UrlAssociations\UserChoice；
         // - 返回：URL 绑定页的注册表项目快照。
-        QVector<ContextMenuEntry> enumerateUrlBindingEntries() const;
+        static QVector<ContextMenuEntry> enumerateUrlBindingEntries();
 
         // enumerateOpenWithEntries：
         // - 输入：无；
         // - 处理：枚举 Explorer 历史打开方式与 Classes 下候选处理器；
         // - 返回：打开方式页的注册表值或子树快照。
-        QVector<ContextMenuEntry> enumerateOpenWithEntries() const;
+        static QVector<ContextMenuEntry> enumerateOpenWithEntries();
 
         // enumerateExplorerHomeEntries：
         // - 输入：无；
         // - 处理：枚举 Explorer Desktop/MyComputer/HomeFolder 中的第三方命名空间；
         // - 返回：资源管理器主页第三方程序项目快照。
-        QVector<ContextMenuEntry> enumerateExplorerHomeEntries() const;
+        static QVector<ContextMenuEntry> enumerateExplorerHomeEntries();
 
         // selectedEntryIndexes：
         // - 输入 area：目标分区；
@@ -354,6 +446,16 @@ namespace ks::misc
         static QString areaIconPath(MenuArea area);
 
     private:
+        // Shared by immutable registry query workers; transaction follow-up uses the same gate.
+        std::shared_ptr<std::mutex> m_registrySerial;
+        ks::ui::AsyncOperation* m_shellOperation = nullptr;
+        bool m_shellPromptActive = false;
+        bool m_shellPending = false;
+        std::shared_ptr<ShellTransactionReceipt> m_shellReceipt;
+        std::function<void(const ShellTransactionResult&)> m_shellCompletion;
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+        bool m_initialRefreshDeferred = true;
+
         QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：本页根布局。
         QTabWidget* m_areaTabWidget = nullptr; // m_areaTabWidget：七类 Shell 关联子 Tab 容器。
 
@@ -368,6 +470,11 @@ namespace ks::misc
         // ===================== 耗时测量运行状态 =====================
         std::atomic<bool> m_latencyRunning{ false };            // m_latencyRunning：是否有测量任务在跑。
         std::atomic<bool> m_latencyCancelRequested{ false };    // m_latencyCancelRequested：停止标志。
+        std::shared_ptr<shell_transaction::LatencySession> m_latencySession;
+        std::shared_ptr<ks::ui::RetainedCleanupJob> m_latencyCleanup;
+        QTimer* m_latencyPulseTimer = nullptr;
+        MenuArea m_latencyArea = MenuArea::Desktop;
+        std::uint64_t m_latencySnapshotGeneration = 0;
         int m_latencyProgressPid = 0;                           // m_latencyProgressPid：kProgress 任务 PID。
         AreaWidgets m_ieWidgets;               // m_ieWidgets：IE 右键菜单子页控件组。
         AreaWidgets m_desktopWidgets;          // m_desktopWidgets：桌面右键菜单子页控件组。

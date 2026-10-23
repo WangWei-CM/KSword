@@ -16,12 +16,17 @@
 #include <QList>
 #include <QObject>
 #include <QPointer>
+#include <QVector>
+#include <QPersistentModelIndex>
 #include <QString>
 #include <QStringList>
 #include <QUrl>
 
 #include <array>
 #include <functional>
+#include <memory>
+
+namespace ks::ui { class AsyncOperation; }
 
 class QDialog;
 class QGroupBox;
@@ -142,7 +147,32 @@ public:
     // 返回：无。
     static void scanFileAndAutoDelete(const QString& filePath, QWidget* dialogParent = nullptr);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
+    void prepareVisibleRawData(VtApiKind apiKind);
+    void projectVisibleResponses(VtApiKind apiKind);
+    void refreshDeferredReport(VtApiKind apiKind);
+    void resetProfileFilterIndex();
+    void requestProfileFilter(const QString& text);
+    void continueProfileFilterProjection(quint64 revision);
+    struct ProfileFilterField { QString text; int parent = -1; };
+    struct ProfileFilterResult {
+        QVector<bool> visible;
+        QVector<int> changed, expand;
+        quint64 revision = 0;
+    };
+    std::unique_ptr<ks::ui::AsyncOperation> m_profileFilterOperation;
+    QVector<ProfileFilterField> m_profileFilterFields;
+    QVector<QPersistentModelIndex> m_profileFilterIndexes;
+    QVector<bool> m_profileFilterVisible;
+    std::shared_ptr<ProfileFilterResult> m_profileFilterProjection;
+    qsizetype m_profileFilterApplyOffset = 0, m_profileFilterExpandOffset = 0;
+    quint64 m_profileFilterRevision = 0;
+    QString m_profileFilterPendingText;
+    bool m_profileFilterPending = false;
+
     // requestLargeUploadUrl 作用：
     // - 当样本超过 32MB 时请求 VirusTotal 一次性大文件上传 URL；
     // - 成功后继续调用 uploadFileToUrl。
@@ -450,12 +480,15 @@ private:
     // 返回：无。
     void updateResultSummary(const QString& summaryText);
 
-    // buildRawExportJson 作用：
+    // buildRawExportObject 作用：
     // - 把实时窗口累计的原始响应、错误文本和上传上下文打包为 UTF-8 JSON；
     // - responses 字段保留每次 upload_url/upload/analysis/error 的原始内容；
     // - raw_text 字段保留窗口中显示的原始文本，便于人工排查时逐字对照。
-    // 返回：可直接写入 .json 文件的 UTF-8 文档字节。
-    QByteArray buildRawExportJson() const;
+    // 返回：GUI 冻结的完整值快照，序列化和原子写入由独立事务执行。
+    QJsonObject buildRawExportObject() const;
+    void exportAllRawResponses(QDialog* dialog);
+    void reconcileRawExportReceipt();
+    void settleRawExportReceipt(const QString& errorText);
 
     // finalizeAutoDeleteIfNeeded 作用：
     // - 扫描成功或失败后统一处理 scanFileAndAutoDelete 创建的临时对象生命周期；
@@ -573,6 +606,12 @@ private:
         QPointer<CodeEditorWidget> rawEditor;
     };
 
+    std::unique_ptr<ks::ui::AsyncOperation> m_rawExportOperation;
+    bool m_rawExportPendingReceipt = false;
+    QPointer<QWidget> m_rawExportReceiptParent;
+    QString m_rawExportReceiptPath;
+    QPointer<QPushButton> m_exportAllButton;
+
     QNetworkAccessManager* m_networkManager = nullptr; // 网络请求管理器，负责所有 VirusTotal HTTP 调用。
     QPointer<QWidget> m_dialogParent;                  // 弹窗父控件，避免父控件提前销毁后悬空。
     QPointer<QDialog> m_resultDialog;                  // 实时结果窗口，上传响应到达后立即显示。
@@ -586,7 +625,14 @@ private:
     QPointer<CodeEditorWidget> m_resultEditor;         // 实时结果原始数据编辑器，展示全部响应和错误文本。
     std::array<ApiPaneUi, kApiPaneCount> m_apiPanes;    // 多 API 一级 Tab 对应的 UI 控件。
     std::array<VtApiState, kApiPaneCount> m_apiStates{}; // 多 API 状态，默认均为 NotStarted。
-    std::array<QString, kApiPaneCount> m_apiRawText;    // 每个 API Tab 的原始文本。
+    std::array<std::unique_ptr<ks::ui::AsyncOperation>, kApiPaneCount> m_rawPreparationOperations;
+    std::array<qsizetype, kApiPaneCount> m_rawProjectedSections{};
+    std::array<qsizetype, kApiPaneCount> m_responseProjectedSections{};
+    std::array<bool, kApiPaneCount> m_rawPreparationActive{};
+    std::array<bool, kApiPaneCount> m_responseProjectionScheduled{};
+    std::array<bool, kApiPaneCount> m_reportProjectionDirty{};
+    QJsonObject m_latestAnalysisObject;
+    quint64 m_rawProjectionEpoch = 1;
     std::array<QJsonArray, kApiPaneCount> m_apiRawSections; // 每个 API Tab 的结构化原始响应。
     QString m_filePath;                                // 当前待上传的本地文件路径。
     QString m_sourceText;                              // 当前上传来源说明，用于结果窗口摘要和导出上下文。

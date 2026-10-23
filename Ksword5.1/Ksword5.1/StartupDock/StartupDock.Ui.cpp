@@ -1,8 +1,11 @@
 #include "StartupDock.Internal.h"
 
 #include <QElapsedTimer>
+#include <QThreadPool>
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
@@ -12,6 +15,19 @@
 #include <QColor>
 #include <QPair>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kStartupDockNavigation[] = {
+    {"startup.tab.overview", "", "startup.tab.overview", "总览", true},
+    {"startup.tab.logon", "", "startup.tab.logon", "登录", false},
+    {"startup.tab.services", "", "startup.tab.services", "服务", false},
+    {"startup.tab.drivers", "", "startup.tab.drivers", "驱动", false},
+    {"startup.tab.tasks", "", "startup.tab.tasks", "计划任务", false},
+    {"startup.tab.image_hijack", "", "startup.tab.image_hijack", "映像劫持", false},
+    {"startup.tab.registry", "", "startup.tab.registry", "高级注册表", false},
+    {"startup.tab.wmi", "", "startup.tab.wmi", "WMI", false},
+    {"startup.tab.hidden", "", "startup.tab.hidden", "隐藏项", false}
+};
+}
 using namespace startup_dock_detail;
 
 namespace startup_dock_detail
@@ -174,6 +190,14 @@ void StartupDock::initializeUi()
         this,
         &StartupDock::continueIncrementalTableRebuild);
 
+    m_filterRefreshTimer = new QTimer(this);
+    m_filterRefreshTimer->setSingleShot(true);
+    m_filterRefreshTimer->setInterval(120);
+    connect(m_filterRefreshTimer, &QTimer::timeout, this, &StartupDock::applyFilterAndRefresh);
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        ensureCurrentCategoryProjection();
+    });
+
     m_rootLayout->addWidget(m_toolbarWidget, 0);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
     // 工具条和分类Tab共同组成整页，外角放在页根并沿用原四边4px。
@@ -290,61 +314,15 @@ void StartupDock::initializeTabs()
     m_wmiPage = createSingleTablePage(&m_wmiTable, m_sideTabWidget);
     m_hiddenPage = createSingleTablePage(&m_hiddenTable, m_sideTabWidget);
 
-    m_sideTabWidget->addTab(
-        m_allPage,
-        QIcon(":/Icon/process_list.svg"),
-        startupText("startup.tab.overview", QStringLiteral("总览")));
-    m_sideTabWidget->addTab(
-        m_logonPage,
-        QIcon(":/Icon/process_main.svg"),
-        startupText("startup.tab.logon", QStringLiteral("登录")));
-    m_sideTabWidget->addTab(
-        m_servicesPage,
-        QIcon(":/Icon/process_start.svg"),
-        startupText("startup.tab.services", QStringLiteral("服务")));
-    m_sideTabWidget->addTab(
-        m_driversPage,
-        QIcon(":/Icon/process_details.svg"),
-        startupText("startup.tab.drivers", QStringLiteral("驱动")));
-    m_sideTabWidget->addTab(
-        m_tasksPage,
-        QIcon(":/Icon/process_refresh.svg"),
-        startupText("startup.tab.tasks", QStringLiteral("计划任务")));
-    m_sideTabWidget->addTab(
-        m_imageHijackPage,
-        QIcon(":/Icon/startup_image_hijack.svg"),
-        startupText("startup.tab.image_hijack", QStringLiteral("映像劫持")));
-    m_sideTabWidget->addTab(
-        m_registryPage,
-        QIcon(":/Icon/file_find.svg"),
-        startupText("startup.tab.registry", QStringLiteral("高级注册表")));
-    m_sideTabWidget->addTab(
-        m_wmiPage,
-        QIcon(":/Icon/process_tree.svg"),
-        startupText("startup.tab.wmi", QStringLiteral("WMI")));
-    m_sideTabWidget->addTab(
-        m_hiddenPage,
-        QIcon(":/Icon/startup_hidden.svg"),
-        startupText("startup.tab.hidden", QStringLiteral("隐藏项")));
-    const QList<QPair<QWidget*, QPair<QString, QString>>> tabTranslations{
-        {m_allPage, {QStringLiteral("startup.tab.overview"), QStringLiteral("总览")}},
-        {m_logonPage, {QStringLiteral("startup.tab.logon"), QStringLiteral("登录")}},
-        {m_servicesPage, {QStringLiteral("startup.tab.services"), QStringLiteral("服务")}},
-        {m_driversPage, {QStringLiteral("startup.tab.drivers"), QStringLiteral("驱动")}},
-        {m_tasksPage, {QStringLiteral("startup.tab.tasks"), QStringLiteral("计划任务")}},
-        {m_imageHijackPage, {QStringLiteral("startup.tab.image_hijack"), QStringLiteral("映像劫持")}},
-        {m_registryPage, {QStringLiteral("startup.tab.registry"), QStringLiteral("高级注册表")}},
-        {m_wmiPage, {QStringLiteral("startup.tab.wmi"), QStringLiteral("WMI")}},
-        {m_hiddenPage, {QStringLiteral("startup.tab.hidden"), QStringLiteral("隐藏项")}}
-    };
-    for (const auto& tabTranslation : tabTranslations)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_sideTabWidget,
-            tabTranslation.first,
-            tabTranslation.second.first,
-            tabTranslation.second.second);
-    }
+    m_navigationTabs.add(kStartupDockNavigation[0], m_sideTabWidget, m_allPage, QIcon(":/Icon/process_list.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[1], m_sideTabWidget, m_logonPage, QIcon(":/Icon/process_main.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[2], m_sideTabWidget, m_servicesPage, QIcon(":/Icon/process_start.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[3], m_sideTabWidget, m_driversPage, QIcon(":/Icon/process_details.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[4], m_sideTabWidget, m_tasksPage, QIcon(":/Icon/process_refresh.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[5], m_sideTabWidget, m_imageHijackPage, QIcon(":/Icon/startup_image_hijack.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[6], m_sideTabWidget, m_registryPage, QIcon(":/Icon/file_find.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[7], m_sideTabWidget, m_wmiPage, QIcon(":/Icon/process_tree.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[8], m_sideTabWidget, m_hiddenPage, QIcon(":/Icon/startup_hidden.svg"));
 }
 
 void StartupDock::applyTranslatedHeaders()
@@ -373,28 +351,74 @@ void StartupDock::applyTranslatedHeaders()
     }
 }
 
-void StartupDock::rebuildAllTables(const bool processesRefreshStage)
+void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool invalidateProjection, const int appendFrom)
 {
     if (m_tableRebuildTimer == nullptr || m_destroying.load())
     {
         return;
     }
 
-    // 结果对象只能在 UI 线程创建，但不能再用一个长循环独占事件循环。
-    // 每次过滤、语言切换或新快照到达都会重建工作队列；零间隔单次定时器
-    // 让主窗口在两个短时间片之间继续处理绘制、拖动和 Dock 切换。
+    const auto categoryIndex = static_cast<std::size_t>(currentCategory());
+    QTableWidget* const visibleTable = currentCategoryTable();
+    const bool appendCurrentTable = processesRefreshStage && appendFrom >= 0
+        && !m_projectionInvalidationPending && !m_filterRefreshPending && !m_tableRebuildInProgress
+        && currentCategory() != StartupCategory::Registry && visibleTable
+        && m_renderedProjectionRevision[categoryIndex] == m_projectionRevision
+        && m_renderedCanonicalCounts[categoryIndex] == static_cast<std::size_t>(appendFrom)
+        && visibleTable->rowCount() == m_renderedRowCounts[categoryIndex];
+    const bool appendRegistry = processesRefreshStage && appendFrom >= 0
+        && !m_projectionInvalidationPending && !m_filterRefreshPending && !m_tableRebuildInProgress
+        && currentCategory() == StartupCategory::Registry && m_registryTree
+        && m_renderedProjectionRevision[categoryIndex] == m_projectionRevision
+        && m_renderedCanonicalCounts[categoryIndex] == static_cast<std::size_t>(appendFrom)
+        && m_registryTree->topLevelItemCount() == m_renderedRegistryGroupCount
+        && m_registryProjectionGroups.size() == m_renderedRegistryGroupCount;
+    m_projectionInvalidationPending = m_projectionInvalidationPending || invalidateProjection;
+    m_tableRebuildProcessesRefreshStage = m_tableRebuildProcessesRefreshStage || processesRefreshStage;
+    const QList<QAbstractItemView*> startupViews = {
+        m_allTable, m_logonTable, m_servicesTable, m_driversTable, m_tasksTable,
+        m_imageHijackTable, m_wmiTable, m_hiddenTable, m_registryTree
+    };
+    const QPointer<StartupDock> guarded(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+        QStringLiteral("startup-current-projection-rebuild"), startupViews,
+        [guarded, processesRefreshStage, invalidateProjection, appendFrom]() {
+            if (guarded) guarded->rebuildAllTables(processesRefreshStage, invalidateProjection, appendFrom);
+        })) return;
+
+    m_filterRefreshTimer->stop();
+    if (m_projectionInvalidationPending)
+    {
+        m_projectionInvalidationPending = false;
+        ++m_projectionRevision;
+        m_filterRefreshPending = false;
+    }
+    m_projectionBuildActive = false;
+    m_projectionBuildCategory = currentCategory();
+    m_projectionBuildRevision = m_projectionRevision;
+    // Retain hidden projections as disabled, stale views of the canonical snapshot.
+    // They are rebuilt only when selected; no hidden row/tree allocation here.
+    for (QAbstractItemView* view : startupViews) if (view) view->setEnabled(false);
+
     m_tableRebuildTimer->stop();
     m_tableRebuildProcessesRefreshStage =
         m_tableRebuildProcessesRefreshStage || processesRefreshStage;
     m_tableRebuildInProgress = true;
-    m_tableRebuildTargets.clear();
-    m_registryRebuildTargets.clear();
+    retireProjectionIndices();
     m_tableRebuildTargetIndex = 0;
     m_registryRebuildTargetIndex = 0;
     m_tableRebuildCompletedUnits = 0;
     m_tableRebuildTotalUnits = 0;
     m_lastTableRebuildProgressPercent = -1;
     m_rebuildRegistryFirst = currentCategory() == StartupCategory::Registry;
+    m_appendRegistryProjection = appendRegistry;
+    if (m_rebuildRegistryFirst && !appendRegistry)
+    {
+        auto oldGroups = std::move(m_registryProjectionGroups);
+        auto oldOrder = std::move(m_registryProjectionGroupOrder);
+        m_registryProjectionNextOrder = 0;
+        QThreadPool::globalInstance()->start([groups = std::move(oldGroups), order = std::move(oldOrder)]() {});
+    }
 
     if (m_exportButton != nullptr)
     {
@@ -404,6 +428,13 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
     {
         m_copyButton->setEnabled(false);
     }
+
+    if (!isVisible() || m_renderedProjectionRevision[static_cast<std::size_t>(currentCategory())] == m_projectionRevision)
+    {
+        finishIncrementalTableRebuild();
+        return;
+    }
+    m_projectionBuildActive = true;
 
     const std::array<std::pair<StartupCategory, QTableWidget*>, 8> allTableTargets{
         std::pair{ StartupCategory::All, m_allTable },
@@ -416,144 +447,183 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
         std::pair{ StartupCategory::Hidden, m_hiddenTable }
     };
     const StartupCategory visibleCategory = currentCategory();
-    const auto appendTableTarget = [this](
-        const StartupCategory category,
-        QTableWidget* const tableWidget)
-    {
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-        const auto duplicateIt = std::find_if(
-            m_tableRebuildTargets.cbegin(),
-            m_tableRebuildTargets.cend(),
-            [tableWidget](const TableRebuildTarget& target)
-            {
-                return target.tableWidget == tableWidget;
-            });
-        if (duplicateIt != m_tableRebuildTargets.cend())
-        {
-            return;
-        }
-
-        TableRebuildTarget target;
-        target.category = category;
-        target.tableWidget = tableWidget;
-        target.visibleEntryIndexList.reserve(m_entryList.size());
-        for (int entryIndex = 0; entryIndex < static_cast<int>(m_entryList.size()); ++entryIndex)
-        {
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-            if (category != StartupCategory::All && entry.category != category)
-            {
-                continue;
-            }
-            if (entryMatchesCurrentFilter(entry))
-            {
-                target.visibleEntryIndexList.push_back(entryIndex);
-            }
-        }
-
-        tableWidget->setEnabled(false);
-        tableWidget->setRowCount(0);
-        tableWidget->setRowCount(static_cast<int>(target.visibleEntryIndexList.size()));
-        m_tableRebuildTotalUnits += target.visibleEntryIndexList.size();
-        m_tableRebuildTargets.push_back(std::move(target));
-    };
-
-    // 先填充用户当前看见的分类；剩余分类继续在后续时间片中完成。
     for (const auto& [category, tableWidget] : allTableTargets)
     {
-        if (category == visibleCategory)
+        if (category == visibleCategory && tableWidget)
         {
-            appendTableTarget(category, tableWidget);
+            TableRebuildTarget target;
+            target.category = category;
+            target.tableWidget = tableWidget;
+            target.baseRow = appendCurrentTable ? tableWidget->rowCount() : 0;
+            m_tableRebuildTargets.push_back(std::move(target));
             break;
         }
     }
-    for (const auto& [category, tableWidget] : allTableTargets)
+    m_projectionPreparation = std::make_shared<ProjectionPreparation>();
+    m_projectionPreparation->hideEmptyPaths = m_hideEmptyPathCheck && m_hideEmptyPathCheck->isChecked();
+    if (appendCurrentTable || appendRegistry)
     {
-        appendTableTarget(category, tableWidget);
-    }
-
-    if (m_registryTree != nullptr)
-    {
-        m_registryTree->setEnabled(false);
-        m_registryTree->clear();
-
-        QStringList knownLocationList = buildKnownStartupRegistryLocationList();
-        const bool hideEmptyPath = (m_hideEmptyPathCheck != nullptr) && m_hideEmptyPathCheck->isChecked();
-        QHash<QString, std::vector<int>> totalEntryIndexMap;
-        QHash<QString, std::vector<int>> visibleEntryIndexMap;
-        for (int entryIndex = 0; entryIndex < static_cast<int>(m_entryList.size()); ++entryIndex)
-        {
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-            if (!isRegistryBackedStartupEntry(entry))
-            {
-                continue;
-            }
-            const QString groupLocationText = entry.locationGroupText.trimmed().isEmpty()
-                ? entry.locationText
-                : entry.locationGroupText;
-            totalEntryIndexMap[groupLocationText].push_back(entryIndex);
-            if (!knownLocationList.contains(groupLocationText))
-            {
-                knownLocationList.push_back(groupLocationText);
-            }
-            if (entryMatchesCurrentFilter(entry))
-            {
-                visibleEntryIndexMap[groupLocationText].push_back(entryIndex);
-            }
-        }
-
-        m_registryRebuildTargets.reserve(static_cast<std::size_t>(knownLocationList.size()));
-        for (const QString& groupLocationText : knownLocationList)
-        {
-            RegistryGroupRebuildTarget target;
-            target.locationText = groupLocationText;
-            target.totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
-            target.visibleEntryIndexList = visibleEntryIndexMap.value(groupLocationText);
-            if (hideEmptyPath && target.totalEntryIndexList.empty())
-            {
-                continue;
-            }
-            m_tableRebuildTotalUnits += 1U + target.visibleEntryIndexList.size();
-            m_registryRebuildTargets.push_back(std::move(target));
-        }
+        // Previous rows/identities stay in place; scan/format only this stage's tail.
+        m_projectionPreparation->phase = ProjectionPreparation::Phase::Scan;
+        m_projectionPreparation->nextEntry = static_cast<std::size_t>(appendFrom);
     }
 
     if (m_statusLabel != nullptr)
     {
         if (m_tableRebuildProcessesRefreshStage)
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.applying_stage_results",
                     QStringLiteral("状态：正在添加第 %1/%2 阶段结果，本阶段 %3 条..."))
                     .arg(m_activeRefreshStageIndex + 1U)
                     .arg(m_activeRefreshStageCount)
-                    .arg(m_activeRefreshStageEntryCount));
+                    .arg(m_activeRefreshStageEntryCount)));
         }
         else if (m_refreshInProgress.load())
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.refreshing",
-                    QStringLiteral("状态：后台正在枚举启动项...")));
+                    QStringLiteral("状态：后台正在枚举启动项..."))));
         }
         else
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.rebuilding_view",
-                    QStringLiteral("状态：正在分批更新当前启动项视图...")));
+                    QStringLiteral("状态：正在分批更新当前启动项视图..."))));
         }
     }
 
-    if (m_tableRebuildTotalUnits == 0U)
-    {
-        finishIncrementalTableRebuild();
-        return;
-    }
     m_tableRebuildTimer->start(0);
+}
+
+void StartupDock::retireProjectionIndices()
+{
+    if (m_tableRebuildTargets.empty() && m_registryRebuildTargets.empty() && !m_projectionPreparation) return;
+    // Only value index buffers move to the pool. Nonowning view/item pointers are never accessed there.
+    auto preparation = std::move(m_projectionPreparation);
+    auto tables = std::make_shared<std::vector<TableRebuildTarget>>(std::move(m_tableRebuildTargets));
+    auto registry = std::make_shared<std::deque<RegistryGroupRebuildTarget>>(std::move(m_registryRebuildTargets));
+    QThreadPool::globalInstance()->start([preparation = std::move(preparation), tables, registry]() {});
+}
+
+bool StartupDock::continueProjectionPreparation()
+{
+    if (!m_projectionPreparation) return false;
+    ProjectionPreparation& preparation = *m_projectionPreparation;
+    while (true)
+    {
+        switch (preparation.phase)
+        {
+        case ProjectionPreparation::Phase::Clear:
+            if (m_projectionBuildCategory == StartupCategory::Registry)
+            {
+                if (m_registryTree && m_registryTree->topLevelItemCount() > 0)
+                {
+                    const int last = m_registryTree->topLevelItemCount() - 1;
+                    QTreeWidgetItem* group = m_registryTree->topLevelItem(last);
+                    if (group->childCount() > 0) delete group->takeChild(group->childCount() - 1);
+                    else delete m_registryTree->takeTopLevelItem(last);
+                    return true;
+                }
+                // This project resource catalog is fixed; variable entry/group work stays sliced below.
+                preparation.catalog = buildKnownStartupRegistryLocationList();
+                preparation.phase = ProjectionPreparation::Phase::Catalog;
+            }
+            else
+            {
+                if (!m_tableRebuildTargets.empty())
+                {
+                    QTableWidget* table = m_tableRebuildTargets.front().tableWidget;
+                    if (table && table->rowCount() > 0)
+                    {
+                        table->setRowCount(table->rowCount() - 1);
+                        return true;
+                    }
+                }
+                preparation.phase = ProjectionPreparation::Phase::Scan;
+            }
+            break;
+        case ProjectionPreparation::Phase::Catalog:
+            if (preparation.nextCatalog < preparation.catalog.size())
+            {
+                const QString location = preparation.catalog[preparation.nextCatalog++];
+                if (!preparation.knownLocations.contains(location))
+                {
+                    preparation.knownLocations.insert(location);
+                    preparation.locations.push_back(location);
+                    m_registryProjectionGroupOrder.insert(location, m_registryProjectionNextOrder++);
+                }
+                return true;
+            }
+            preparation.phase = ProjectionPreparation::Phase::Scan;
+            break;
+        case ProjectionPreparation::Phase::Scan:
+            if (preparation.nextEntry < m_entryList.size())
+            {
+                const int entryIndex = static_cast<int>(preparation.nextEntry++);
+                const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
+                if (m_projectionBuildCategory == StartupCategory::Registry)
+                {
+                    if (isRegistryBackedStartupEntry(entry))
+                    {
+                        const QString location = entry.locationGroupText.trimmed().isEmpty()
+                            ? entry.locationText : entry.locationGroupText;
+                        preparation.total[location].push_back(entryIndex);
+                        if (!m_registryProjectionGroupOrder.contains(location))
+                            m_registryProjectionGroupOrder.insert(location, m_registryProjectionNextOrder++);
+                        if (!preparation.knownLocations.contains(location))
+                        {
+                            preparation.knownLocations.insert(location);
+                            preparation.locations.push_back(location);
+                        }
+                        if (entryMatchesCurrentFilter(entry)) preparation.visible[location].push_back(entryIndex);
+                    }
+                }
+                else if (!m_tableRebuildTargets.empty()
+                    && (m_projectionBuildCategory == StartupCategory::All || entry.category == m_projectionBuildCategory)
+                    && entryMatchesCurrentFilter(entry))
+                {
+                    m_tableRebuildTargets.front().visibleEntryIndexList.push_back(entryIndex);
+                    ++m_tableRebuildTotalUnits;
+                }
+                return true;
+            }
+            preparation.phase = m_projectionBuildCategory == StartupCategory::Registry
+                ? ProjectionPreparation::Phase::Groups : ProjectionPreparation::Phase::Ready;
+            break;
+        case ProjectionPreparation::Phase::Groups:
+            if (preparation.nextGroup < preparation.locations.size())
+            {
+                RegistryGroupRebuildTarget target;
+                target.locationText = preparation.locations[preparation.nextGroup++];
+                auto total = preparation.total.find(target.locationText);
+                if (total != preparation.total.end())
+                {
+                    target.totalEntryIndexList = std::move(total.value());
+                    preparation.total.erase(total);
+                }
+                auto visible = preparation.visible.find(target.locationText);
+                if (visible != preparation.visible.end())
+                {
+                    target.visibleEntryIndexList = std::move(visible.value());
+                    preparation.visible.erase(visible);
+                }
+                if (!preparation.hideEmptyPaths || !target.totalEntryIndexList.empty())
+                {
+                    m_tableRebuildTotalUnits += 1U + target.visibleEntryIndexList.size();
+                    m_registryRebuildTargets.push_back(std::move(target));
+                }
+                return true;
+            }
+            preparation.phase = ProjectionPreparation::Phase::Ready;
+            break;
+        case ProjectionPreparation::Phase::Ready:
+            return false;
+        }
+    }
 }
 
 void StartupDock::continueIncrementalTableRebuild()
@@ -589,10 +659,11 @@ void StartupDock::continueIncrementalTableRebuild()
                 && entryIndex >= 0
                 && entryIndex < static_cast<int>(m_entryList.size()))
             {
+                target.tableWidget->setRowCount(target.baseRow + static_cast<int>(target.nextRowIndex) + 1);
                 appendEntryRow(
                     target.tableWidget,
-                    static_cast<int>(target.nextRowIndex),
-                    m_entryList[static_cast<std::size_t>(entryIndex)],
+                    target.baseRow + static_cast<int>(target.nextRowIndex),
+                    m_entryList.at(static_cast<std::size_t>(entryIndex)),
                     entryIndex);
             }
             ++target.nextRowIndex;
@@ -638,7 +709,7 @@ void StartupDock::continueIncrementalTableRebuild()
             {
                 appendRegistryTreeLeaf(
                     target.groupItem,
-                    m_entryList[static_cast<std::size_t>(entryIndex)],
+                    m_entryList.at(static_cast<std::size_t>(entryIndex)),
                     entryIndex);
             }
             ++target.nextEntryIndex;
@@ -659,8 +730,8 @@ void StartupDock::continueIncrementalTableRebuild()
     while (sliceUnitCount < maximumUnitsPerSlice
         && (sliceUnitCount == 0U || sliceTimer.elapsed() < sliceBudgetMilliseconds))
     {
-        bool processedUnit = false;
-        if (m_rebuildRegistryFirst)
+        bool processedUnit = continueProjectionPreparation();
+        if (!processedUnit && m_rebuildRegistryFirst)
         {
             processedUnit = processOneRegistryUnit();
             if (!processedUnit)
@@ -683,7 +754,9 @@ void StartupDock::continueIncrementalTableRebuild()
         ++sliceUnitCount;
     }
 
-    if (m_tableRebuildProcessesRefreshStage
+    const bool preparationCompleted = !m_projectionPreparation
+        || m_projectionPreparation->phase == ProjectionPreparation::Phase::Ready;
+    if (preparationCompleted && m_tableRebuildProcessesRefreshStage
         && m_backendEnumerationCompleted
         && m_progressPid != 0
         && m_activeRefreshStageCount != 0U)
@@ -717,7 +790,7 @@ void StartupDock::continueIncrementalTableRebuild()
 
     const bool tablesCompleted = m_tableRebuildTargetIndex >= m_tableRebuildTargets.size();
     const bool registryCompleted = m_registryRebuildTargetIndex >= m_registryRebuildTargets.size();
-    if (tablesCompleted && registryCompleted)
+    if (preparationCompleted && tablesCompleted && registryCompleted)
     {
         finishIncrementalTableRebuild();
         return;
@@ -729,40 +802,37 @@ void StartupDock::finishIncrementalTableRebuild()
 {
     const bool processesRefreshStage = m_tableRebuildProcessesRefreshStage;
     m_tableRebuildInProgress = false;
-    m_tableRebuildProcessesRefreshStage = false;
-    m_rebuildRegistryFirst = false;
-    m_tableRebuildTargets.clear();
-    m_registryRebuildTargets.clear();
-
-    const std::array<QTableWidget*, 8> tableList{
-        m_allTable,
-        m_logonTable,
-        m_servicesTable,
-        m_driversTable,
-        m_tasksTable,
-        m_imageHijackTable,
-        m_wmiTable,
-        m_hiddenTable
-    };
-    for (QTableWidget* tableWidget : tableList)
+    if (m_projectionBuildActive && m_projectionBuildRevision == m_projectionRevision)
     {
-        if (tableWidget != nullptr)
+        const auto index = static_cast<std::size_t>(m_projectionBuildCategory);
+        m_renderedProjectionRevision[index] = m_projectionRevision;
+        m_renderedCanonicalCounts[index] = m_entryList.size();
+        if (m_projectionBuildCategory == StartupCategory::Registry)
+            m_renderedRegistryGroupCount = m_registryTree ? m_registryTree->topLevelItemCount() : 0;
+        else
         {
-            tableWidget->setEnabled(true);
+            for (const auto& target : m_tableRebuildTargets)
+                if (target.category == m_projectionBuildCategory && target.tableWidget)
+                    m_renderedRowCounts[index] = target.tableWidget->rowCount();
         }
     }
-    if (m_registryTree != nullptr)
-    {
-        m_registryTree->setEnabled(true);
-    }
-    if (m_exportButton != nullptr)
-    {
-        m_exportButton->setEnabled(true);
-    }
-    if (m_copyButton != nullptr)
-    {
-        m_copyButton->setEnabled(true);
-    }
+    m_projectionBuildActive = false;
+    m_tableRebuildProcessesRefreshStage = false;
+    m_rebuildRegistryFirst = false;
+    retireProjectionIndices();
+
+    const std::array<std::pair<StartupCategory, QTableWidget*>, 8> tableList{
+        std::pair{StartupCategory::All, m_allTable}, std::pair{StartupCategory::Logon, m_logonTable},
+        std::pair{StartupCategory::Services, m_servicesTable}, std::pair{StartupCategory::Drivers, m_driversTable},
+        std::pair{StartupCategory::Tasks, m_tasksTable}, std::pair{StartupCategory::ImageHijack, m_imageHijackTable},
+        std::pair{StartupCategory::Wmi, m_wmiTable}, std::pair{StartupCategory::Hidden, m_hiddenTable}
+    };
+    for (const auto& [category, tableWidget] : tableList)
+        if (tableWidget) tableWidget->setEnabled(isCategoryProjectionReady(category));
+    if (m_registryTree) m_registryTree->setEnabled(isCategoryProjectionReady(StartupCategory::Registry));
+    const bool ready = isCategoryProjectionReady(currentCategory());
+    if (m_exportButton) m_exportButton->setEnabled(ready && !m_exportOperation->isInFlight());
+    if (m_copyButton) m_copyButton->setEnabled(ready);
 
     if (processesRefreshStage)
     {
@@ -771,13 +841,13 @@ void StartupDock::finishIncrementalTableRebuild()
             m_activeRefreshStageIndex + 1U);
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.stage_results_applied",
                     QStringLiteral("状态：已添加 %1/%2 阶段，共 %3 条"))
                     .arg(m_appliedRefreshStageCount)
                     .arg(m_activeRefreshStageCount)
-                    .arg(m_entryList.size()));
+                    .arg(m_entryList.size())));
         }
         QTimer::singleShot(0, this, [this]()
             {
@@ -795,10 +865,7 @@ void StartupDock::finishIncrementalTableRebuild()
     }
     if (!m_refreshInProgress.load() && m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(
-            startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
-                .arg(m_entryList.size())
-                .arg(categoryToText(currentCategory())));
+        m_statusLabel->setText(refreshSummaryText());
     }
 }
 
@@ -817,6 +884,7 @@ void StartupDock::appendEntryRow(
     nameItem->setData(Qt::UserRole, entryIndex);
     nameItem->setIcon(resolveEntryIcon(entry));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Name), nameItem);
+    trackEntryIcon(entry, tableWidget->model()->index(rowIndex, toStartupColumn(StartupColumn::Name)));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Publisher), createReadOnlyItem(entry.publisherText));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::ImagePath), createReadOnlyItem(entry.imagePathText));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Command), createReadOnlyItem(entry.commandText));
@@ -880,6 +948,7 @@ void StartupDock::appendRegistryTreeLeaf(
     entryItem->setText(toStartupColumn(StartupColumn::Type), ks::i18n::sourceText(entry.sourceTypeText));
     entryItem->setText(toStartupColumn(StartupColumn::Detail), startupLocalizedDetailText(entry.detailText));
     entryItem->setIcon(toStartupColumn(StartupColumn::Name), resolveEntryIcon(entry));
+    trackEntryIcon(entry, m_registryTree->indexFromItem(entryItem, toStartupColumn(StartupColumn::Name)));
 
     // shouldHighlightUntrusted 用途：树节点模式下沿用表格相同的不受信任着色规则。
     const bool shouldHighlightUntrusted = isUntrustedStartupEntry(entry);
@@ -906,7 +975,7 @@ bool StartupDock::isRegistryBackedStartupEntry(const StartupEntry& entry) const
 
 int StartupDock::findEntryIndexByRegistryTreeItem(const QTreeWidgetItem* treeItem) const
 {
-    if (treeItem == nullptr)
+    if (treeItem == nullptr || !isCategoryProjectionReady(StartupCategory::Registry))
     {
         return -1;
     }
@@ -928,7 +997,28 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
     }
     target->initialized = true;
 
-    QTreeWidgetItem* groupItem = new QTreeWidgetItem(m_registryTree);
+    const auto previous = m_registryProjectionGroups.value(target->locationText);
+    const bool reused = m_appendRegistryProjection && previous.item;
+    QTreeWidgetItem* groupItem = reused ? previous.item : new QTreeWidgetItem();
+    if (!reused)
+    {
+        // Preserve fixed catalog/first-discovered order, including a newly nonempty known path.
+        const qsizetype order = m_registryProjectionGroupOrder.value(target->locationText);
+        int first = 0, last = m_registryTree->topLevelItemCount();
+        while (first < last)
+        {
+            const int middle = first + (last - first) / 2;
+            const QString existing = m_registryTree->topLevelItem(middle)->data(0, kStartupTreeLocationRole).toString();
+            if (m_registryProjectionGroupOrder.value(existing) < order) first = middle + 1;
+            else last = middle;
+        }
+        m_registryTree->insertTopLevelItem(first, groupItem);
+    }
+    else if (previous.visible == 0)
+        qDeleteAll(groupItem->takeChildren()); // At most the existing single no-match placeholder.
+    const std::size_t totalCount = (reused ? previous.total : 0U) + target->totalEntryIndexList.size();
+    const std::size_t visibleCount = (reused ? previous.visible : 0U) + target->visibleEntryIndexList.size();
+    m_registryProjectionGroups.insert(target->locationText, {groupItem, totalCount, visibleCount});
     target->groupItem = groupItem;
     groupItem->setData(0, kStartupEntryIndexRole, -1);
     groupItem->setData(0, kStartupTreeNodeKindRole, static_cast<int>(StartupTreeNodeKind::Group));
@@ -936,27 +1026,27 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
     groupItem->setFirstColumnSpanned(true);
     groupItem->setIcon(toStartupColumn(StartupColumn::Name), createBlueIcon(":/Icon/file_find.svg"));
 
-    if (!target->visibleEntryIndexList.empty())
+    if (visibleCount != 0U)
     {
         groupItem->setText(
             toStartupColumn(StartupColumn::Name),
             startupText("startup.registry.group.match_summary", QStringLiteral("%1    匹配 %2 项 / 总计 %3 项"))
                 .arg(target->locationText)
-                .arg(target->visibleEntryIndexList.size())
-                .arg(target->totalEntryIndexList.size()));
+                .arg(visibleCount)
+                .arg(totalCount));
     }
     else
     {
         groupItem->setText(
             toStartupColumn(StartupColumn::Name),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText("startup.registry.group.no_entries", QStringLiteral("%1    无条目"))
                     .arg(target->locationText)
                 : startupText(
                     "startup.registry.group.no_filter_matches",
                     QStringLiteral("%1    当前过滤下无匹配项（总计 %2 项）"))
                     .arg(target->locationText)
-                    .arg(target->totalEntryIndexList.size()));
+                    .arg(totalCount));
 
         QTreeWidgetItem* placeholderItem = new QTreeWidgetItem(groupItem);
         placeholderItem->setData(0, kStartupEntryIndexRole, -1);
@@ -964,12 +1054,12 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
         placeholderItem->setData(0, kStartupTreeLocationRole, target->locationText);
         placeholderItem->setText(
             toStartupColumn(StartupColumn::Name),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText("startup.registry.placeholder.no_entries", QStringLiteral("(无条目)"))
                 : startupText("startup.registry.placeholder.no_matches", QStringLiteral("(无匹配项)")));
         placeholderItem->setText(
             toStartupColumn(StartupColumn::Detail),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText(
                     "startup.registry.placeholder.not_found",
                     QStringLiteral("该位置当前未发现启动项"))
@@ -978,5 +1068,19 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
                     QStringLiteral("存在条目，但被当前过滤条件隐藏")));
     }
 
-    groupItem->setExpanded(true);
+    if (!reused) groupItem->setExpanded(true);
 }
+
+ks::ui::PageNavigationCatalog StartupDock::navigationCatalog(const StartupDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kStartupDockNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* StartupDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kStartupDockNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<StartupDock>(QStringLiteral("startup")); }

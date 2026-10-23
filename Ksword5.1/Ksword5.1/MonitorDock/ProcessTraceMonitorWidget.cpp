@@ -1,3 +1,6 @@
+#include "MonitorCanonicalExport.h"
+#include "ProcessTraceEventMetadata.h"
+#include "MonitorEventFilterProjection.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeStatusRole.h"
@@ -16,6 +19,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QLabel>
+#include <QItemSelectionModel>
 #include <QList>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -44,6 +48,10 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
     info << initEvent << "[ProcessTraceMonitorWidget] 开始初始化进程定向监控页。" << eol;
 
     initializeUi();
+    if (m_targetTable) m_targetTable->installEventFilter(this);
+    if (m_eventTable) m_eventTable->installEventFilter(this);
+    if (m_availableTable) ks::ui::SetTableRowFilterBusinessOwnership(m_availableTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     initializeConnections();
     refreshAvailableProcessListAsync();
     updateActionState();
@@ -54,8 +62,11 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
 
 ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
 {
+    if (m_eventExport) m_eventExport->close();
+    if (m_eventFilterProjection) m_eventFilterProjection->close();
+    if (m_targetLookup) m_targetLookup->close();
     m_uiDispatcher->close();
-    // 析构阶段同步停止后台线程，避免对象释放后回调仍访问成员。
+    // Only signal and enqueue retained value cleanup; the GUI never joins capture workers.
     stopMonitoringInternal(true);
 
     if (m_uiUpdateTimer != nullptr)
@@ -121,15 +132,16 @@ QString ProcessTraceMonitorWidget::collapsePanelStyle(const QWidget* panel)
         "  color:%2;"
         "  border:none;"
         "}")
-        .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+        .arg(ks::ui::UsesTransparentMainSurface(panel) ? QStringLiteral("transparent")
+            : ks::ui::UsesMainSurfaceHierarchy(panel)
             ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex());
 }
 
-QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle()
+QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle(const QAbstractButton* button)
 {
     // 纯色主题只接管颜色；保留本页按钮尺寸和业务选中状态。
-    return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+    return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Auto, button)
         + QStringLiteral("QToolButton{border-radius:5px;padding:5px 8px;font-weight:600;text-align:left;}");
 
 }
@@ -217,65 +229,8 @@ QString ProcessTraceMonitorWidget::guidToText(const GUID& guidValue)
 
 QString ProcessTraceMonitorWidget::queryEtwEventName(const struct _EVENT_RECORD* eventRecordPtr)
 {
-    const auto textAtOffset = [](const unsigned char* bufferPointer, const ULONG offsetValue) -> QString {
-        if (bufferPointer == nullptr || offsetValue == 0)
-        {
-            return QString();
-        }
-
-        const wchar_t* textPointer = reinterpret_cast<const wchar_t*>(bufferPointer + offsetValue);
-        if (textPointer == nullptr || *textPointer == L'\0')
-        {
-            return QString();
-        }
-        return QString::fromWCharArray(textPointer).trimmed();
-    };
-
-    const EVENT_RECORD* eventRecord = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
-    if (eventRecord == nullptr)
-    {
-        return QString();
-    }
-
-    DWORD bufferSize = 0;
-    ULONG status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        nullptr,
-        &bufferSize);
-    if (status != ERROR_INSUFFICIENT_BUFFER || bufferSize == 0)
-    {
-        return QString();
-    }
-
-    std::vector<unsigned char> infoBuffer(bufferSize, 0);
-    auto* eventInfo = reinterpret_cast<PTRACE_EVENT_INFO>(infoBuffer.data());
-    status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        eventInfo,
-        &bufferSize);
-    if (status != ERROR_SUCCESS || eventInfo == nullptr)
-    {
-        return QString();
-    }
-
-    const unsigned char* infoBufferPointer = infoBuffer.data();
-    const QString eventNameText = textAtOffset(infoBufferPointer, eventInfo->EventNameOffset);
-    if (!eventNameText.isEmpty())
-    {
-        return eventNameText;
-    }
-
-    const QString taskNameText = textAtOffset(infoBufferPointer, eventInfo->TaskNameOffset);
-    if (!taskNameText.isEmpty())
-    {
-        return taskNameText;
-    }
-
-    return textAtOffset(infoBufferPointer, eventInfo->OpcodeNameOffset);
+    const auto* record = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
+    return ks::monitor::ProcessTraceEventMetadata::eventName(ks::monitor::processTraceMetadataForThread().get(record));
 }
 
 bool ProcessTraceMonitorWidget::textMatch(
@@ -356,8 +311,9 @@ QTableWidgetItem* ProcessTraceMonitorWidget::createReadOnlyItem(const QString& t
 void ProcessTraceMonitorWidget::updateActionState()
 {
     const bool hasTargets = !m_targetProcessList.empty();
-    const bool running = m_captureRunning.load();
-    const bool paused = m_capturePaused.load();
+    const bool running = m_capture->m_captureRunning.load();
+    const bool lookingUp = m_targetLookup && m_targetLookup->isInFlight();
+    const bool paused = m_capture->m_capturePaused.load();
 
     if (m_availableRefreshButton != nullptr)
     {
@@ -373,7 +329,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_addManualPidButton != nullptr)
     {
-        m_addManualPidButton->setEnabled(!running);
+        m_addManualPidButton->setEnabled(!running && !lookingUp);
     }
     if (m_removeTargetButton != nullptr)
     {
@@ -385,7 +341,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_startButton != nullptr)
     {
-        m_startButton->setEnabled((!running && hasTargets) || (running && paused));
+        m_startButton->setEnabled((!running && hasTargets && !lookingUp) || (running && paused));
         m_startButton->setIcon(QIcon(paused
             ? QStringLiteral(":/Icon/process_resume.svg")
             : QStringLiteral(":/Icon/process_start.svg")));
@@ -395,7 +351,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_stopButton != nullptr)
     {
-        m_stopButton->setEnabled(running);
+        m_stopButton->setEnabled(running || (m_captureCleanup && !m_captureCleanup->isComplete()));
     }
     if (m_pauseButton != nullptr)
     {
@@ -403,10 +359,7 @@ void ProcessTraceMonitorWidget::updateActionState()
         m_pauseButton->setIcon(QIcon(QStringLiteral(":/Icon/process_pause.svg")));
         m_pauseButton->setToolTip(QStringLiteral("暂停处理与目标进程相关的事件"));
     }
-    if (m_exportButton != nullptr)
-    {
-        m_exportButton->setEnabled(m_eventTable != nullptr && m_eventTable->rowCount() > 0);
-    }
+    updateEventExportAction();
 }
 
 void ProcessTraceMonitorWidget::updateStatusLabel()
@@ -418,19 +371,34 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
 
     std::size_t trackedCount = 0;
     {
-        std::lock_guard<std::mutex> lock(m_runtimeMutex);
-        trackedCount = m_trackedProcessMap.size();
+        std::lock_guard<std::mutex> lock(m_capture->m_runtimeMutex);
+        trackedCount = m_capture->m_trackedProcessMap.size();
     }
 
-    const int eventCount = (m_eventTable != nullptr) ? m_eventTable->rowCount() : 0;
+    const auto eventCount = m_eventArchive.size();
     const QString summaryText = QStringLiteral("目标=%1 | 进程树=%2 | 事件=%3")
         .arg(m_targetProcessList.size())
         .arg(static_cast<qulonglong>(trackedCount))
         .arg(eventCount);
 
-    if (m_captureRunning.load())
+    if (m_captureCleanup && m_captureCleanup->hasFailed())
     {
-        if (m_capturePaused.load())
+        m_statusLabel->setText(QStringLiteral("● 停止失败，可重试（错误码=%1）  %2").arg(m_capture->operationError.load()).arg(summaryText));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
+    }
+    else if (m_captureCleanup && m_captureCleanup->isCleanupRequested() && !m_captureCleanup->isComplete())
+    {
+        m_statusLabel->setText(QStringLiteral("● 正在停止  %1").arg(summaryText));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
+    }
+    else if (m_capture->m_captureRunning.load())
+    {
+        if (!m_capture->processStarted.load())
+        {
+            m_statusLabel->setText(QStringLiteral("● 准备中  %1").arg(summaryText));
+            ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
+        }
+        else if (m_capture->m_capturePaused.load())
         {
             m_statusLabel->setText(QStringLiteral("● 已暂停  %1").arg(summaryText));
             ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
@@ -441,9 +409,35 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
             ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
         }
     }
+    else if (const auto error = m_capture->startupError.load() ? m_capture->startupError.load() : m_capture->processStatus.load())
+    {
+        m_statusLabel->setText(QStringLiteral("ProcessTrace 结束，状态码=%1。").arg(error));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
+    }
     else
     {
         m_statusLabel->setText(QStringLiteral("● 空闲  %1").arg(summaryText));
         ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Idle);
     }
+}
+
+bool ProcessTraceMonitorWidget::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_targetTable && event->type() == QEvent::Show)
+        QTimer::singleShot(0, this, [this]() { if (m_targetProjectionDirty) refreshTargetTable(); });
+    if (watched == m_eventTable && event->type() == QEvent::Hide)
+    {
+        m_restoreSelectedEvents.clear();
+        if (m_eventTable->selectionModel())
+            for (const auto& index : m_eventTable->selectionModel()->selectedRows())
+                if (auto record = eventRecordAt(index.row())) m_restoreSelectedEvents.push_back(std::move(record));
+        m_restoreCurrentEvent = eventRecordAt(m_eventTable->currentRow());
+        m_restoreTopEvent = eventRecordAt(m_eventTable->indexAt(QPoint(0,0)).row());
+        m_eventProjectionStale = true; m_eventProjectionQueue.clear(); m_expiredEventProjection.clear();
+        if (m_eventFilterProjection) m_eventFilterProjection->setSuspended(true);
+        updateActionState();
+    }
+    if (watched == m_eventTable && event->type() == QEvent::Show)
+        QTimer::singleShot(0, this, [this]() { flushPendingRows(); });
+    return QWidget::eventFilter(watched, event);
 }

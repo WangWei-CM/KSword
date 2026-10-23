@@ -1,4 +1,5 @@
-﻿#include "FileDock.h"
+#include "FileDock.h"
+#include "FilePropertyTableModel.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
@@ -8,6 +9,9 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/AsyncCleanupRegistry.h"
+#include "../UI/ResultTableHost.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/UI_All.h"
 #include "FilePropertyPeAnalyzer.h"
@@ -82,6 +86,7 @@
 #include <QInputDialog>
 #include <QImage>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
@@ -102,6 +107,7 @@
 #include <QPalette>
 #include <QScopedValueRollback>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -121,6 +127,7 @@
 #include <QStatusBar>
 #include <QStorageInfo>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QStringList>
 #include <QStackedWidget>
 #include <QTabWidget>
@@ -195,6 +202,18 @@
 #define LABEL_SECURITY_INFORMATION 0x00000010L
 #endif
 
+// Recovery snapshots contain values only. The table and its row projection stay on the GUI thread.
+struct FileRecoverySnapshot
+{
+    std::vector<ks::file::NtfsDeletedFileEntry> entries;
+    QString volumeRoot;
+    std::uint64_t revision = 0;
+    int residentReady = 0;
+    int nonResidentReady = 0;
+    int safelyRecoverable = 0;
+    int highIntegrity = 0;
+};
+
 namespace
 {
     // isDeletedFileSafelyRecoverable 作用：
@@ -215,21 +234,196 @@ namespace
     QString deletedFileRecoveryCapabilityText(
         const ks::file::NtfsDeletedFileEntry& entryValue)
     {
-        switch (entryValue.recoveryCapability)
+        // Canonical search labels are immutable values shared by all candidates. Display
+        // translation remains in model::data() on the GUI thread.
+        static const std::array<QString, 5> labels{ QStringLiteral("仅元数据"),
+            QStringLiteral("Resident 可恢复"), QStringLiteral("非驻留完整可恢复（需其它卷）"),
+            QStringLiteral("非驻留簇已复用或完整度未知"), QStringLiteral("压缩、加密或跨记录流暂不支持") };
+        const int capability = static_cast<int>(entryValue.recoveryCapability);
+        return labels[capability >= 0 && capability < static_cast<int>(labels.size())
+            ? static_cast<std::size_t>(capability) : 0U];
+    }
+
+    struct RecoveryProjection
+    {
+        std::vector<int> rows;
+        std::vector<int> sourceToView;
+    };
+
+    QString recoverySizeText(std::uint64_t sizeBytes)
+    {
+        static const std::array<const char*, 5> units{ "B", "KB", "MB", "GB", "TB" };
+        double value = static_cast<double>(sizeBytes);
+        std::size_t unit = 0;
+        while (value >= 1024.0 && unit + 1 < units.size()) { value /= 1024.0; ++unit; }
+        return unit == 0
+            ? QStringLiteral("%1 %2").arg(static_cast<qulonglong>(sizeBytes)).arg(units[unit])
+            : QStringLiteral("%1 %2").arg(QString::number(value, 'f', 2)).arg(units[unit]);
+    }
+
+    QString recoveryCellText(const ks::file::NtfsDeletedFileEntry& entry, int column)
+    {
+        switch (column)
         {
-        case ks::file::NtfsRecoveryCapability::Resident:
-            return QStringLiteral("Resident 可恢复");
-        case ks::file::NtfsRecoveryCapability::NonResidentIntact:
-            return QStringLiteral("非驻留完整可恢复（需其它卷）");
-        case ks::file::NtfsRecoveryCapability::NonResidentAtRisk:
-            return QStringLiteral("非驻留簇已复用或完整度未知");
-        case ks::file::NtfsRecoveryCapability::UnsupportedStream:
-            return QStringLiteral("压缩、加密或跨记录流暂不支持");
-        case ks::file::NtfsRecoveryCapability::MetadataOnly:
-        default:
-            return QStringLiteral("仅元数据");
+        case 0: return entry.fileName;
+        case 1: return entry.pathHint;
+        case 2: return recoverySizeText(entry.sizeBytes);
+        case 3: return entry.modifiedTime.isValid()
+            ? entry.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-");
+        case 4: return QStringLiteral("%1 / seq %2")
+            .arg(static_cast<qulonglong>(entry.fileReference)).arg(entry.sequenceNumber);
+        case 5: return entry.estimatedIntegrityPercent >= 0
+            ? QStringLiteral("%1%").arg(entry.estimatedIntegrityPercent) : QStringLiteral("未知");
+        case 6: return deletedFileRecoveryCapabilityText(entry)
+            + (entry.hasOriginalName ? QString() : QStringLiteral(" / 缺名"));
+        default: return {};
         }
     }
+
+    struct RecoveryProjectionRequest
+    {
+        std::shared_ptr<const FileRecoverySnapshot> snapshot;
+        QString query;
+        bool regex = false;
+        int sortColumn = -1;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+    };
+
+    struct RecoveryProjectionResult
+    {
+        RecoveryProjectionRequest request;
+        std::shared_ptr<const RecoveryProjection> projection;
+    };
+
+    RecoveryProjectionResult buildRecoveryProjection(const RecoveryProjectionRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        RecoveryProjectionResult result{ request, {} };
+        auto projection = std::make_shared<RecoveryProjection>();
+        const auto& entries = request.snapshot->entries;
+        projection->rows.reserve(entries.size());
+        QRegularExpression expression;
+        if (request.regex && !request.query.isEmpty())
+            expression = QRegularExpression(request.query, QRegularExpression::CaseInsensitiveOption);
+        const auto matches = [&request, &expression](const QString& text)
+        { return request.regex ? expression.match(text).hasMatch()
+            : text.contains(request.query, Qt::CaseInsensitive); };
+        for (std::size_t row = 0; row < entries.size(); ++row)
+        {
+            if ((row & 127U) == 0 && token.isCanceled()) return result;
+            const auto& entry = entries[row];
+            bool matched = request.query.isEmpty();
+            if (!matched)
+            {
+                // Keep field boundaries: regex cannot match across name/path/capability.
+                // Names and paths already belong to the immutable scan snapshot.
+                matched = matches(entry.fileName) || matches(entry.pathHint)
+                    || matches(deletedFileRecoveryCapabilityText(entry));
+            }
+            if (matched) projection->rows.push_back(static_cast<int>(row));
+        }
+        if (request.sortColumn >= 0 && request.sortColumn < 7)
+        {
+            // Precompute display sort keys once; never format cells in a GUI comparator.
+            std::vector<QString> keys(entries.size());
+            for (int row : projection->rows)
+            {
+                if (token.isCanceled()) return result;
+                keys[static_cast<std::size_t>(row)] = recoveryCellText(entries[static_cast<std::size_t>(row)], request.sortColumn);
+            }
+            std::stable_sort(projection->rows.begin(), projection->rows.end(),
+                [&keys, order = request.sortOrder](int left, int right)
+                {
+                    const int compared = QString::localeAwareCompare(keys[static_cast<std::size_t>(left)], keys[static_cast<std::size_t>(right)]);
+                    return order == Qt::AscendingOrder ? compared < 0 : compared > 0;
+                });
+        }
+        if (token.isCanceled()) return result;
+        projection->sourceToView.assign(entries.size(), -1);
+        for (std::size_t row = 0; row < projection->rows.size(); ++row)
+            projection->sourceToView[static_cast<std::size_t>(projection->rows[row])] = static_cast<int>(row);
+        result.projection = std::move(projection);
+        return result;
+    }
+
+    struct RecoverySnapshotDeleter
+    {
+        void operator()(const FileRecoverySnapshot* snapshot) const
+        {
+            // A delayed filter/menu closure may own the final reference after model retirement.
+            // Always destroy the large values on the pool, regardless of that last owner's thread.
+            QThreadPool::globalInstance()->start(QRunnable::create([snapshot]() { delete snapshot; }));
+        }
+    };
+
+    std::shared_ptr<FileRecoverySnapshot> makeRecoverySnapshot()
+    { return { new FileRecoverySnapshot, RecoverySnapshotDeleter{} }; }
+
+    void retireRecoverySnapshot(std::shared_ptr<const FileRecoverySnapshot> snapshot)
+    {
+        if (snapshot) QThreadPool::globalInstance()->start(QRunnable::create(
+            [snapshot = std::move(snapshot)]() mutable { snapshot.reset(); }));
+    }
+
+    class DeletedRecoveryModel final : public QAbstractTableModel
+    {
+    public:
+        explicit DeletedRecoveryModel(QObject* parent) : QAbstractTableModel(parent) {}
+        ~DeletedRecoveryModel() override { retireRecoverySnapshot(std::move(m_snapshot)); }
+        std::function<void(int, Qt::SortOrder)> sortRequested;
+        const std::shared_ptr<const FileRecoverySnapshot>& snapshot() const { return m_snapshot; }
+        int sourceRow(int row) const
+        { return m_projection && row >= 0 && row < rowCount() ? m_projection->rows[static_cast<std::size_t>(row)] : -1; }
+        int viewRow(int source) const
+        { return m_projection && source >= 0 && source < static_cast<int>(m_projection->sourceToView.size())
+            ? m_projection->sourceToView[static_cast<std::size_t>(source)] : -1; }
+        const ks::file::NtfsDeletedFileEntry* entry(int row) const
+        {
+            const int source = sourceRow(row);
+            return source >= 0 ? &m_snapshot->entries[static_cast<std::size_t>(source)] : nullptr;
+        }
+        void publish(std::shared_ptr<const FileRecoverySnapshot> snapshot,
+            std::shared_ptr<const RecoveryProjection> projection)
+        {
+            const QPointer<DeletedRecoveryModel> lifetime(this);
+            beginResetModel();
+            if (!lifetime) return;
+            auto retired = std::move(m_snapshot);
+            m_snapshot = std::move(snapshot);
+            m_projection = std::move(projection);
+            const bool changedSnapshot = retired != m_snapshot;
+            endResetModel();
+            if (changedSnapshot) retireRecoverySnapshot(std::move(retired));
+        }
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() || !m_projection ? 0 : static_cast<int>(m_projection->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 7; }
+        QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+        {
+            static const QStringList headers{ QStringLiteral("文件名"), QStringLiteral("路径提示"),
+                QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("记录号"),
+                QStringLiteral("完整度"), QStringLiteral("恢复能力") };
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size())
+                return ks::i18n::displayText(headers[section]);
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.model() != this || index.column() < 0 || index.column() >= 7) return {};
+            const auto* value = entry(index.row());
+            if (!value) return {};
+            if (role == Qt::ToolTipRole && index.column() == 0 && !value->hasOriginalName)
+                return ks::i18n::displayText(QStringLiteral("该条目原始文件名已丢失，当前名称为系统生成的占位名。"));
+            if (role != Qt::DisplayRole) return {};
+            const QString text = recoveryCellText(*value, index.column());
+            return index.column() >= 5 ? ks::i18n::displayText(text) : text;
+        }
+        void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override
+        { if (sortRequested) sortRequested(column, order); }
+    private:
+        std::shared_ptr<const FileRecoverySnapshot> m_snapshot;
+        std::shared_ptr<const RecoveryProjection> m_projection;
+    };
 
     // localVolumeRootForPath 作用：
     // - 从本地绝对路径提取“C:\”形式卷根；
@@ -2026,111 +2220,251 @@ namespace
         return content;
     }
 
-    // 仅为请求显示的单元格排队。查询无论多慢都不占用模型/UI 线程；
-    // 一次至多查询 32 项，空结果也缓存，重置后用代次和路径复核拒绝旧结果。
-    class AsyncReparseMarkerCache final : public QObject
+    // 展示需求只由面板视口发布。data() 只读缓存，不为排序、复制或尺寸计算入队。
+    struct FileVisualDemand
+    {
+        QString path;
+        QPersistentModelIndex index;
+        int pathRole = Qt::UserRole;
+
+        bool operator==(const FileVisualDemand& other) const
+        {
+            return path == other.path && index == other.index && pathRole == other.pathRole;
+        }
+    };
+
+    constexpr int FileVisualDemandLimit = 512;
+
+    // 同批、同父项、连续行共用通知；隐藏/过期需求不会产生展示通知。
+    void notifyFileVisualRows(QAbstractItemModel* model, const QVector<QModelIndex>& changed,
+        const int firstColumn, const int lastColumn, const QList<int>& roles)
+    {
+        QPointer<QAbstractItemModel> guard(model);
+        QHash<QPersistentModelIndex, QVector<int>> groups;
+        for (const QModelIndex& index : changed)
+            groups[QPersistentModelIndex(index.parent())].push_back(index.row());
+        for (auto it = groups.begin(); it != groups.end(); ++it)
+        {
+            auto& rows = it.value();
+            std::sort(rows.begin(), rows.end());
+            rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+            for (qsizetype begin = 0; begin < rows.size();)
+            {
+                qsizetype end = begin;
+                while (end + 1 < rows.size() && rows[end + 1] == rows[end] + 1)
+                    ++end;
+                emit model->dataChanged(model->index(rows[begin], firstColumn, it.key()),
+                    model->index(rows[end], lastColumn, it.key()), roles);
+                if (!guard)
+                    return;
+                begin = end + 1;
+            }
+        }
+    }
+
+    template<class Result, class Cached = Result>
+    class AsyncFileVisualCache final : public QObject
     {
     public:
-        explicit AsyncReparseMarkerCache(
-            QObject* parent, std::function<void(const QModelIndex&)> changed)
-            : QObject(parent), m_changed(std::move(changed)), m_timer(this)
+        using Canceled = std::function<bool()>;
+        using Query = std::function<Result(const QString&, const Canceled&)>;
+        using Convert = std::function<Cached(Result, const QModelIndex&)>;
+
+        AsyncFileVisualCache(QObject* parent, const int batchSize, Query query, Convert convert,
+            std::function<void(const QVector<QModelIndex>&)> changed)
+            : QObject(parent), m_batchSize(batchSize), m_query(std::move(query)),
+              m_convert(std::move(convert)), m_changed(std::move(changed)), m_timer(this),
+              m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
         {
             m_timer.setSingleShot(true);
             connect(&m_timer, &QTimer::timeout, this, [this]() { startBatch(); });
         }
 
-        QString marker(const QString& path, const QModelIndex& index)
+        ~AsyncFileVisualCache() override
+        {
+            m_dispatcher->close();
+            m_epoch->fetch_add(1);
+        }
+
+        const Cached* lookup(const QString& path) const
         {
             const auto cached = m_cache.constFind(path);
-            if (cached != m_cache.cend())
+            return cached == m_cache.cend() ? nullptr : &cached.value();
+        }
+
+        void setDemand(const QVector<FileVisualDemand>& requested)
+        {
+            QVector<FileVisualDemand> demand;
+            QSet<QString> paths;
+            demand.reserve(std::min<qsizetype>(requested.size(), FileVisualDemandLimit));
+            for (const auto& item : requested)
             {
-                return cached.value();
+                if (!valid(item) || paths.contains(item.path))
+                    continue;
+                paths.insert(item.path);
+                demand.push_back(item);
+                if (demand.size() == FileVisualDemandLimit)
+                    break;
             }
-            if (!m_pending.contains(path) && !m_inFlight.contains(path))
-            {
-                m_pending.insert(path, QPersistentModelIndex(index.siblingAtColumn(0)));
-            }
-            if (!m_running && !m_timer.isActive())
-            {
-                m_timer.start(0);
-            }
-            return QString();
+            if (demand == m_demand)
+                return;
+            m_demand = std::move(demand);
+            m_demandPaths = std::move(paths);
+            m_epoch->fetch_add(1);
+            rebuildPending();
         }
 
         void reset()
         {
             ++m_generation;
+            m_epoch->fetch_add(1);
+            m_timer.stop();
             m_cache.clear();
+            m_cacheOrder.clear();
+            m_demand.clear();
+            m_demandPaths.clear();
             m_pending.clear();
-            m_inFlight.clear();
         }
 
     private:
+        static bool valid(const FileVisualDemand& item)
+        {
+            return item.index.isValid() && !item.path.isEmpty()
+                && item.index.data(item.pathRole).toString() == item.path;
+        }
+
+        void rebuildPending()
+        {
+            m_pending.clear();
+            // 新视口顺序覆盖旧队列；当前有界批次完成后立即处理最新项。
+            for (const auto& item : m_demand)
+                if (!m_cache.contains(item.path) && !m_inFlight.contains(item.path) && valid(item))
+                    m_pending.push_back(item);
+            if (!m_running && !m_pending.isEmpty() && !m_timer.isActive())
+                m_timer.start(0);
+            else if (m_pending.isEmpty())
+                m_timer.stop();
+        }
+
+        void cacheResult(const QString& path, Cached value)
+        {
+            if (!m_cache.contains(path) && m_cache.size() >= FileVisualDemandLimit)
+            {
+                // 优先淘汰旧视口结果，不能在稳定的 512 项需求中反复淘汰可见项。
+                auto victim = std::find_if(m_cacheOrder.begin(), m_cacheOrder.end(),
+                    [this](const QString& key) { return !m_demandPaths.contains(key); });
+                if (victim == m_cacheOrder.end())
+                    victim = m_cacheOrder.begin();
+                m_cache.remove(*victim);
+                m_cacheOrder.erase(victim);
+            }
+            if (!m_cache.contains(path))
+                m_cacheOrder.push_back(path);
+            m_cache.insert(path, std::move(value)); // 查询失败/空标记同样缓存。
+        }
+
         void startBatch()
         {
             if (m_running || m_pending.isEmpty())
-            {
                 return;
-            }
-            QHash<QString, QPersistentModelIndex> batch;
-            while (!m_pending.isEmpty() && batch.size() < 32)
+            QVector<FileVisualDemand> batch;
+            const int count = std::min<int>(m_batchSize, static_cast<int>(m_pending.size()));
+            batch.reserve(count);
+            for (int i = 0; i < count; ++i)
             {
-                auto next = m_pending.begin();
-                batch.insert(next.key(), next.value());
-                m_inFlight.insert(next.key());
-                m_pending.erase(next);
+                batch.push_back(m_pending[i]);
+                m_inFlight.insert(m_pending[i].path);
             }
+            m_pending.remove(0, count);
             m_running = true;
             const int generation = m_generation;
-            QPointer<AsyncReparseMarkerCache> guard(this);
-            QThreadPool::globalInstance()->start(QRunnable::create([guard, generation, batch]() {
-                QHash<QString, QString> results;
-                for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                {
-                    results.insert(it.key(), reparseKindMarkerForPath(it.key()));
-                }
-                // QPointer 只在 UI 线程解引用，不在工作线程与模型销毁竞争。
-                QMetaObject::invokeMethod(qApp, [guard, generation, batch, results]() {
-                    if (!guard)
+            const auto epoch = m_epoch;
+            const auto expectedEpoch = epoch->load();
+            const auto dispatcher = m_dispatcher;
+            const Query query = m_query;
+            // 持久索引只在 UI 回调中读取；worker 只使用路径与共享取消代次。
+            QStringList paths;
+            for (const auto& item : batch)
+                paths.push_back(item.path);
+            QPointer<AsyncFileVisualCache> guard(this);
+            QThreadPool::globalInstance()->start(QRunnable::create(
+                [guard, dispatcher, generation, epoch, expectedEpoch, batch, paths, query]() {
+                    const Canceled canceled = [epoch, expectedEpoch]() {
+                        return epoch->load() != expectedEpoch;
+                    };
+                    QHash<QString, Result> results;
+                    for (const QString& path : paths)
                     {
-                        return;
+                        if (canceled())
+                            break;
+                        Result result = query(path, canceled);
+                        if (canceled())
+                            break;
+                        results.insert(path, std::move(result));
                     }
-                    guard->m_running = false;
-                    if (guard->m_generation == generation)
-                    {
-                        for (auto it = batch.cbegin(); it != batch.cend(); ++it)
+                    dispatcher->post([guard, generation, batch, results = std::move(results)]() mutable {
+                        if (!guard)
+                            return;
+                        guard->m_running = false;
+                        for (const auto& item : batch)
+                            guard->m_inFlight.remove(item.path);
+                        QVector<QModelIndex> changed;
+                        if (guard->m_generation == generation)
                         {
-                            guard->m_inFlight.remove(it.key());
-                            const QModelIndex index = it.value();
-                            const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
-                            if (!index.isValid() || (fs ? fs->filePath(index) :
-                                index.data(Qt::UserRole).toString()) != it.key())
+                            for (const auto& item : batch)
                             {
-                                continue;
-                            }
-                            const QString markerText = results.value(it.key());
-                            guard->m_cache.insert(it.key(), markerText);
-                            if (!markerText.isEmpty())
-                            {
-                                guard->m_changed(index);
+                                auto result = results.find(item.path);
+                                if (result == results.end() || !valid(item))
+                                    continue;
+                                guard->cacheResult(item.path,
+                                    guard->m_convert(std::move(result.value()), item.index));
+                                if (guard->m_demandPaths.contains(item.path))
+                                    changed.push_back(item.index);
                             }
                         }
-                    }
-                    if (!guard->m_pending.isEmpty())
-                    {
-                        guard->m_timer.start(0);
-                    }
-                }, Qt::QueuedConnection);
-            }));
+                        guard->rebuildPending();
+                        if (!changed.isEmpty())
+                            guard->m_changed(changed);
+                    });
+                }));
         }
 
-        std::function<void(const QModelIndex&)> m_changed;
+        int m_batchSize;
+        Query m_query;
+        Convert m_convert;
+        std::function<void(const QVector<QModelIndex>&)> m_changed;
         QTimer m_timer;
-        QHash<QString, QString> m_cache;
-        QHash<QString, QPersistentModelIndex> m_pending;
+        QHash<QString, Cached> m_cache;
+        QStringList m_cacheOrder;
+        QVector<FileVisualDemand> m_demand;
+        QSet<QString> m_demandPaths;
+        QVector<FileVisualDemand> m_pending;
         QSet<QString> m_inFlight;
+        std::shared_ptr<std::atomic<quint64>> m_epoch = std::make_shared<std::atomic<quint64>>(0);
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
         int m_generation = 0;
         bool m_running = false;
+    };
+
+    class AsyncReparseMarkerCache final
+    {
+    public:
+        AsyncReparseMarkerCache(QObject* parent,
+            std::function<void(const QVector<QModelIndex>&)> changed)
+            : m_cache(parent, 32,
+                [](const QString& path, const auto&) { return reparseKindMarkerForPath(path); },
+                [](QString value, const QModelIndex&) { return value; }, std::move(changed)) {}
+
+        QString marker(const QString& path) const
+        {
+            const QString* value = m_cache.lookup(path);
+            return value ? *value : QString();
+        }
+        void setDemand(const QVector<FileVisualDemand>& demand) { m_cache.setDemand(demand); }
+        void reset() { m_cache.reset(); }
+
+    private:
+        AsyncFileVisualCache<QString> m_cache;
     };
 
     struct FilePresentation
@@ -2139,7 +2473,8 @@ namespace
         QString type;
     };
 
-    FilePresentation queryFilePresentation(const QString& path)
+    FilePresentation queryFilePresentation(const QString& path,
+        const std::function<bool()>& canceled)
     {
         FilePresentation result;
         const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -2154,6 +2489,9 @@ namespace
         if (SUCCEEDED(comResult))
             ::CoUninitialize();
 
+        // Shell 已开始的调用允许安全结束，隐藏/换视口后不再启动下一次阻塞调用。
+        if (canceled())
+            return result;
         // MIME 数据库初始化、名称匹配及内容嗅探全部在工作线程。
         const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);
         result.type = mime.comment();
@@ -2162,104 +2500,36 @@ namespace
         return result;
     }
 
-    // 只为被视图请求的项补充展示信息；QPixmap 和持久索引只在 UI 线程使用。
-    class AsyncFilePresentationCache final : public QObject
+    // QPixmap 仅在 UI 回填创建；未富化项保持 QFileSystemModel 的原缓存值。
+    class AsyncFilePresentationCache final
     {
     public:
         explicit AsyncFilePresentationCache(QObject* parent)
-            : QObject(parent), m_timer(this)
-        {
-            m_timer.setSingleShot(true);
-            connect(&m_timer, &QTimer::timeout, this, [this]() { startBatch(); });
-        }
+            : m_cache(parent, 8, queryFilePresentation,
+                [](FilePresentation result, const QModelIndex& index) {
+                    CachedPresentation cached;
+                    if (!result.icon.isNull())
+                        cached.icon = QIcon(QPixmap::fromImage(result.icon));
+                    const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
+                    if (fs && !fs->isDir(index) && !result.type.isEmpty())
+                        cached.type = result.type;
+                    return cached;
+                }, [parent](const QVector<QModelIndex>& changed) {
+                    notifyFileVisualRows(static_cast<QAbstractItemModel*>(parent), changed, 0, 2,
+                        { Qt::DecorationRole, Qt::DisplayRole });
+                }) {}
 
-        QVariant value(const QString& path, const QModelIndex& index, const int role)
+        QVariant value(const QString& path, const int role) const
         {
-            const auto cached = m_cache.constFind(path);
-            if (cached != m_cache.cend())
-                return role == Qt::DecorationRole ? cached->icon : cached->type;
-            if (!m_pending.contains(path) && !m_inFlight.contains(path))
-                m_pending.insert(path, QPersistentModelIndex(index.siblingAtColumn(0)));
-            if (!m_running && !m_timer.isActive())
-                m_timer.start(0);
-            return QVariant();
+            const auto* value = m_cache.lookup(path);
+            return value ? (role == Qt::DecorationRole ? value->icon : value->type) : QVariant();
         }
-
-        void reset()
-        {
-            ++m_generation;
-            m_cache.clear();
-            m_pending.clear();
-            m_inFlight.clear();
-        }
+        void setDemand(const QVector<FileVisualDemand>& demand) { m_cache.setDemand(demand); }
+        void reset() { m_cache.reset(); }
 
     private:
-        struct CachedPresentation
-        {
-            QVariant icon;
-            QVariant type;
-        };
-
-        void startBatch()
-        {
-            if (m_running || m_pending.isEmpty())
-                return;
-            QHash<QString, QPersistentModelIndex> batch;
-            while (!m_pending.isEmpty() && batch.size() < 8)
-            {
-                auto next = m_pending.begin();
-                batch.insert(next.key(), next.value());
-                m_inFlight.insert(next.key());
-                m_pending.erase(next);
-            }
-            m_running = true;
-            const int generation = m_generation;
-            QPointer<AsyncFilePresentationCache> guard(this);
-            QThreadPool::globalInstance()->start(QRunnable::create([guard, generation, batch]() {
-                QHash<QString, FilePresentation> results;
-                for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                    results.insert(it.key(), queryFilePresentation(it.key()));
-                QMetaObject::invokeMethod(qApp, [guard, generation, batch, results]() {
-                    if (!guard)
-                        return;
-                    guard->m_running = false;
-                    if (guard->m_generation == generation)
-                    {
-                        for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                        {
-                            guard->m_inFlight.remove(it.key());
-                            const QModelIndex index = it.value();
-                            const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
-                            if (!index.isValid() || !fs || fs->filePath(index) != it.key())
-                                continue;
-                            const FilePresentation result = results.value(it.key());
-                            CachedPresentation cached;
-                            if (!result.icon.isNull())
-                                cached.icon = QIcon(QPixmap::fromImage(result.icon));
-                            if (!fs->isDir(index) && !result.type.isEmpty())
-                                cached.type = result.type;
-                            // 限制图标的 GUI 资源数量，切目录时也只需释放有界缓存。
-                            if (guard->m_cache.size() >= 512)
-                                guard->m_cache.erase(guard->m_cache.begin());
-                            // 包括失败结果，避免绘制时重复投递慢查询。
-                            guard->m_cache.insert(it.key(), cached);
-                            auto* model = const_cast<QFileSystemModel*>(fs);
-                            emit model->dataChanged(index, index.siblingAtColumn(2),
-                                { Qt::DecorationRole, Qt::DisplayRole });
-                        }
-                    }
-                    if (!guard->m_pending.isEmpty())
-                        guard->m_timer.start(0);
-                }, Qt::QueuedConnection);
-            }));
-        }
-
-        QTimer m_timer;
-        QHash<QString, CachedPresentation> m_cache;
-        QHash<QString, QPersistentModelIndex> m_pending;
-        QSet<QString> m_inFlight;
-        int m_generation = 0;
-        bool m_running = false;
+        struct CachedPresentation { QVariant icon; QVariant type; };
+        AsyncFileVisualCache<FilePresentation, CachedPresentation> m_cache;
     };
 
     // Qt 6.9 在 UI 线程为目录整批结果调用 icon/type；这条路径只读已 stat 的
@@ -2297,9 +2567,8 @@ namespace
     {
     public:
         explicit ReparseAwareFileSystemModel(QObject* parent = nullptr)
-            : QFileSystemModel(parent), m_presentation(this), m_markers(this, [this](const QModelIndex& index) {
-                emit dataChanged(index, index.siblingAtColumn(2),
-                    { Qt::DisplayRole, Qt::ToolTipRole });
+            : QFileSystemModel(parent), m_presentation(this), m_markers(this, [this](const QVector<QModelIndex>& changed) {
+                notifyFileVisualRows(this, changed, 0, 2, { Qt::DisplayRole, Qt::ToolTipRole });
             })
         {
             setIconProvider(&m_iconProvider);
@@ -2308,7 +2577,13 @@ namespace
             connect(this, &QAbstractItemModel::modelReset, this,
                 [this]() { m_markers.reset(); m_presentation.reset(); });
             connect(this, &QFileSystemModel::fileRenamed, this,
-                [this](const QString&, const QString&, const QString&) { m_presentation.reset(); });
+                [this](const QString&, const QString&, const QString&) { m_markers.reset(); m_presentation.reset(); });
+        }
+
+        void setVisualDemand(const QVector<FileVisualDemand>& demand)
+        {
+            m_markers.setDemand(demand);
+            m_presentation.setDemand(demand);
         }
 
         QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
@@ -2322,7 +2597,7 @@ namespace
             if ((role == Qt::DecorationRole && index.column() == 0)
                 || (role == Qt::DisplayRole && index.column() == 2 && !isDir(index)))
             {
-                const QVariant enriched = m_presentation.value(filePath(index), index, role);
+                const QVariant enriched = m_presentation.value(filePath(index), role);
                 if (enriched.isValid())
                     baseValue = enriched;
             }
@@ -2346,7 +2621,7 @@ namespace
                 localizedBaseValue = ks::i18n::displayText(baseValue.toString());
             }
 
-            const QString markerText = m_markers.marker(filePath(index), index);
+            const QString markerText = m_markers.marker(filePath(index));
             if (markerText.isEmpty())
             {
                 return localizedBaseValue;
@@ -2396,8 +2671,8 @@ namespace
 
     private:
         FastFileIconProvider m_iconProvider;
-        mutable AsyncFilePresentationCache m_presentation;
-        mutable AsyncReparseMarkerCache m_markers;
+        AsyncFilePresentationCache m_presentation;
+        AsyncReparseMarkerCache m_markers;
     };
 
     // ExplorerFileSortProxyModel：
@@ -4244,6 +4519,23 @@ namespace
         }
     }
 
+    template<class Value, class Enqueue>
+    std::shared_ptr<Value> makeBackgroundRetiredValue(Enqueue enqueue)
+    {
+        return std::shared_ptr<Value>(new Value,
+            [enqueue = std::move(enqueue)](Value* value) mutable {
+                enqueue([value]() { delete value; });
+            });
+    }
+
+    struct ManualDirectoryParsePayload
+    {
+        std::vector<ks::file::ManualDirectoryEntry> entries;
+        QStringList suspiciousNames;
+        QSet<QString> suspiciousNameSet;
+        QStringList retiredPanelNames;
+    };
+
     // 直接发布后台枚举快照，避免在 UI 上为 N 行创建 6N 个 QStandardItem。
     // 类型/图标/时间等展示内容只为视图请求的单元格生成。
     class ManualDirectoryModel final : public QAbstractTableModel
@@ -4256,9 +4548,8 @@ namespace
             : QAbstractTableModel(parent), m_sizeText(std::move(sizeText)),
               m_directoryIcon(QApplication::style()->standardIcon(QStyle::SP_DirIcon)),
               m_fileIcon(QApplication::style()->standardIcon(QStyle::SP_FileIcon)),
-              m_markers(this, [this](const QModelIndex& index) {
-                  emit dataChanged(index.siblingAtColumn(2), index.siblingAtColumn(2),
-                      { Qt::DisplayRole, Qt::ToolTipRole });
+              m_markers(this, [this](const QVector<QModelIndex>& changed) {
+                  notifyFileVisualRows(this, changed, 2, 2, { Qt::DisplayRole, Qt::ToolTipRole });
               })
         {
         }
@@ -4282,6 +4573,8 @@ namespace
                     }));
             }
         }
+
+        void setVisualDemand(const QVector<FileVisualDemand>& demand) { m_markers.setDemand(demand); }
 
         int rowCount(const QModelIndex& parent = {}) const override
         {
@@ -4350,7 +4643,7 @@ namespace
                 return entry.isDirectory ? QStringLiteral("-") : m_sizeText(entry.sizeBytes);
             case ManualModelColumn::Type:
             {
-                const QString marker = m_markers.marker(entry.absolutePath, index);
+                const QString marker = m_markers.marker(entry.absolutePath);
                 const QString typeText = ks::i18n::displayText(entry.typeText);
                 return marker.isEmpty() ? typeText :
                     QStringLiteral("%1 / %2").arg(ks::i18n::displayText(marker), typeText);
@@ -4372,17 +4665,220 @@ namespace
         std::function<QString(std::uint64_t)> m_sizeText;
         QIcon m_directoryIcon;
         QIcon m_fileIcon;
-        mutable AsyncReparseMarkerCache m_markers;
+        AsyncReparseMarkerCache m_markers;
+    };
+
+    // 原委托继续拥有绘制、编辑、提示和尺寸语义；观察器只接收 Qt 已选择的可见索引。
+    class FileVisualDemandDelegate final : public QAbstractItemDelegate
+    {
+    public:
+        FileVisualDemandDelegate(QAbstractItemDelegate* original, QObject* parent,
+            std::function<void(const QModelIndex&, const QRect&)> painted)
+            : QAbstractItemDelegate(parent), m_original(original), m_fallback(this),
+              m_painted(std::move(painted))
+        {
+            for (QAbstractItemDelegate* delegate : { original, static_cast<QAbstractItemDelegate*>(&m_fallback) })
+            {
+                if (!delegate)
+                    continue;
+                connect(delegate, &QAbstractItemDelegate::commitData, this, &QAbstractItemDelegate::commitData);
+                connect(delegate, &QAbstractItemDelegate::closeEditor, this, &QAbstractItemDelegate::closeEditor);
+                connect(delegate, &QAbstractItemDelegate::sizeHintChanged, this, &QAbstractItemDelegate::sizeHintChanged);
+            }
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            m_painted(index, option.rect);
+            target()->paint(painter, option, index);
+        }
+        QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { return target()->sizeHint(option, index); }
+        QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { return target()->createEditor(parent, option, index); }
+        void destroyEditor(QWidget* editor, const QModelIndex& index) const override
+            { target()->destroyEditor(editor, index); }
+        void setEditorData(QWidget* editor, const QModelIndex& index) const override
+            { target()->setEditorData(editor, index); }
+        void setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const override
+            { target()->setModelData(editor, model, index); }
+        void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { target()->updateEditorGeometry(editor, option, index); }
+        bool editorEvent(QEvent* event, QAbstractItemModel* model,
+            const QStyleOptionViewItem& option, const QModelIndex& index) override
+            { return target()->editorEvent(event, model, option, index); }
+        bool helpEvent(QHelpEvent* event, QAbstractItemView* view,
+            const QStyleOptionViewItem& option, const QModelIndex& index) override
+            { return target()->helpEvent(event, view, option, index); }
+        QList<int> paintingRoles() const override { return target()->paintingRoles(); }
+        bool eventFilter(QObject* object, QEvent* event) override
+            { return static_cast<QObject*>(target())->eventFilter(object, event); }
+
+    private:
+        QAbstractItemDelegate* target() const { return m_original ? m_original.data() : &m_fallback; }
+        QPointer<QAbstractItemDelegate> m_original;
+        mutable QStyledItemDelegate m_fallback;
+        std::function<void(const QModelIndex&, const QRect&)> m_painted;
+    };
+
+    // 每面板只观察自己的两种视图。复用 Qt 的可见项绘制，不额外扫描模型或强迫 Batched 布局。
+    class FileVisualDemandScheduler final : public QObject
+    {
+    public:
+        FileVisualDemandScheduler(QTreeView* tree, QListView* list,
+            QSortFilterProxyModel* fsProxy, QSortFilterProxyModel* manualProxy, QObject* parent,
+            std::function<void(const QVector<FileVisualDemand>&)> publish)
+            : QObject(parent), m_publish(std::move(publish)), m_timer(this)
+        {
+            m_views[0].view = tree;
+            m_views[1].view = list;
+            m_timer.setSingleShot(true);
+            connect(&m_timer, &QTimer::timeout, this, [this]() { publishDemand(); });
+            for (auto& state : m_views)
+            {
+                auto* view = state.view.data();
+                view->installEventFilter(this);
+                view->viewport()->installEventFilter(this);
+                connect(view->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { invalidate(); });
+                connect(view->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this]() { invalidate(); });
+                ensureDelegate(state);
+            }
+            connect(tree, &QTreeView::expanded, this, [this]() { invalidate(); });
+            connect(tree, &QTreeView::collapsed, this, [this]() { invalidate(); });
+            for (auto* proxy : { fsProxy, manualProxy })
+            {
+                connect(proxy, &QAbstractItemModel::modelReset, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::layoutChanged, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::rowsInserted, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::rowsRemoved, this, [this]() { invalidate(); });
+            }
+            connect(fsProxy, &QAbstractProxyModel::sourceModelChanged, this,
+                [this, fsProxy]() { watchFileSystemSource(fsProxy); invalidate(); });
+            watchFileSystemSource(fsProxy);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Hide)
+                invalidate(false); // 立即清需求；已开始的阻塞调用允许安全结束。
+            else if (event->type() == QEvent::Show || event->type() == QEvent::Resize
+                || event->type() == QEvent::LayoutRequest || event->type() == QEvent::FontChange)
+                invalidate();
+            else if (event->type() == QEvent::Paint)
+            {
+                for (auto& state : m_views)
+                    if (state.view && watched == state.view->viewport())
+                        ensureDelegate(state);
+            }
+            return false;
+        }
+
+    private:
+        struct ViewState
+        {
+            QPointer<QAbstractItemView> view;
+            QPointer<FileVisualDemandDelegate> delegate;
+            QVector<FileVisualDemand> demand;
+            QSet<QString> paths;
+        };
+
+        void watchFileSystemSource(QSortFilterProxyModel* proxy)
+        {
+            if (m_fsSource)
+                disconnect(m_fsSource, nullptr, this, nullptr);
+            m_fsSource = qobject_cast<QFileSystemModel*>(proxy->sourceModel());
+            if (m_fsSource)
+            {
+                connect(m_fsSource, &QFileSystemModel::directoryLoaded, this, [this]() { invalidate(); });
+                connect(m_fsSource, &QFileSystemModel::fileRenamed, this, [this]() { invalidate(); });
+            }
+        }
+
+        void ensureDelegate(ViewState& state)
+        {
+            if (state.view->itemDelegate() == state.delegate && state.delegate)
+                return;
+            QPointer<FileVisualDemandScheduler> guard(this);
+            QAbstractItemView* const view = state.view;
+            auto* replacement = new FileVisualDemandDelegate(view->itemDelegate(), view,
+                [guard, view](const QModelIndex& index, const QRect& rect) {
+                    if (guard)
+                        guard->observe(view, index, rect);
+                });
+            state.delegate = replacement;
+            view->setItemDelegate(replacement);
+        }
+
+        void invalidate(const bool repaint = true)
+        {
+            bool hadDemand = false;
+            for (auto& state : m_views)
+            {
+                hadDemand = hadDemand || !state.demand.isEmpty();
+                state.demand.clear();
+                state.paths.clear();
+                // 滚动优化可能只重画露出的条带；需求重建必须覆盖当前完整视口。
+                if (repaint && state.view && state.view->isVisible())
+                    state.view->viewport()->update();
+            }
+            if (hadDemand)
+                m_publish({});
+            m_timer.stop();
+        }
+
+        void observe(QAbstractItemView* view, const QModelIndex& viewIndex, const QRect& rect)
+        {
+            if (!view->isVisible() || !rect.intersects(view->viewport()->rect()))
+                return;
+            ViewState& state = m_views[view == m_views[0].view ? 0 : 1];
+            if (state.demand.size() >= FileVisualDemandLimit)
+                return;
+            QModelIndex source = viewIndex.siblingAtColumn(0);
+            while (const auto* proxy = qobject_cast<const QAbstractProxyModel*>(source.model()))
+                source = proxy->mapToSource(source);
+            if (!source.isValid())
+                return;
+            const bool fs = qobject_cast<const QFileSystemModel*>(source.model()) != nullptr;
+            const int pathRole = fs ? QFileSystemModel::FilePathRole : Qt::UserRole;
+            const QString path = source.data(pathRole).toString();
+            if (path.isEmpty() || state.paths.contains(path))
+                return;
+            state.paths.insert(path);
+            state.demand.push_back({ path, QPersistentModelIndex(source), pathRole });
+            if (!m_timer.isActive())
+                m_timer.start(0);
+        }
+
+        void publishDemand()
+        {
+            for (const auto& state : m_views)
+            {
+                if (state.view && state.view->isVisible() && state.view->viewport()->isVisible())
+                {
+                    m_publish(state.demand);
+                    return;
+                }
+            }
+            m_publish({});
+        }
+
+        std::array<ViewState, 2> m_views;
+        QPointer<QFileSystemModel> m_fsSource;
+        std::function<void(const QVector<FileVisualDemand>&)> m_publish;
+        QTimer m_timer;
     };
 
     // buildSuspiciousNameSet 作用：把疑似隐藏项名单折叠大小写后转成集合，
     // 避免在逐行回填时做 O(n) 线性查找。
-    QSet<QString> buildSuspiciousNameSet(const QStringList& names)
+    QSet<QString> buildSuspiciousNameSet(const QStringList& names,
+        const ks::file::DirectoryCancellationCallback& canceled = {})
     {
         QSet<QString> nameSet;
         nameSet.reserve(names.size() + 8);
         for (const QString& nameText : names)
         {
+            if (canceled && canceled()) break;
             nameSet.insert(nameText.toCaseFolded());
         }
         return nameSet;
@@ -5576,7 +6072,7 @@ namespace
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("metadata")), QStringLiteral("元数据编辑"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("reparse")), QStringLiteral("重解析点 / 符号链接"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("security")), QStringLiteral("安全与权限"));
-            m_tabWidget->addTab(buildHashTab(), QStringLiteral("哈希与完整性"));
+            m_tabWidget->addTab(buildDeferredTab(QStringLiteral("hash")), QStringLiteral("哈希与完整性"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("usage")), QStringLiteral("文件占用与解锁"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("fileobject")), QStringLiteral("FileObject / Section / ControlArea"));
             m_tabWidget->addTab(buildDeferredTab(QStringLiteral("storage")), QStringLiteral("Storage / MountMgr / FVE"));
@@ -5762,6 +6258,13 @@ namespace
             {
                 m_hashCancelRequested->store(true);
             }
+            if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
+            if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
+            if (m_stagingSnapshotCancel != nullptr) m_stagingSnapshotCancel->store(true);
+            if (m_peReadCancel) m_peReadCancel->store(true);
+            if (m_dependencyReadCancel) m_dependencyReadCancel->store(true);
+            for (const auto& state : m_metadataReadStates)
+                if (state != nullptr && state->cancel != nullptr) state->cancel->store(true);
             if (m_usageScanCancelRequested != nullptr)
             {
                 m_usageScanCancelRequested->store(true);
@@ -5775,7 +6278,7 @@ namespace
             {
                 return;
             }
-            if (m_transactionBusy)
+            if (m_transactionBusy && m_savePreflightCancel == nullptr)
             {
                 QMessageBox::information(
                     this,
@@ -5785,6 +6288,7 @@ namespace
                 event->ignore();
                 return;
             }
+            if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
             if (pendingTargetCount() > 0)
             {
                 const QMessageBox::StandardButton choice = QMessageBox::question(
@@ -6488,11 +6992,21 @@ namespace
             return flagRows;
         }
 
-        void refreshGeneralTab()
+        struct GeneralFileSnapshot
         {
-            if (m_generalPropertyView == nullptr) return;
+            ks::ui::FieldDocument document;
+            QFileInfo info;
+            QString ntPath;
+        };
+
+        static GeneralFileSnapshot readGeneralFileSnapshot(const QString& path)
+        {
             using ks::ui::FieldDocument;
-            const QFileInfo info(m_filePath);
+            const QFileInfo info(path);
+            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
+            const auto nativePath = QDir::toNativeSeparators(info.absoluteFilePath()).toStdWString();
+            const DWORD attributes = ::GetFileAttributesW(nativePath.c_str());
+            const DWORD attributeError = attributes == INVALID_FILE_ATTRIBUTES ? ::GetLastError() : ERROR_SUCCESS;
             FieldDocument doc;
             doc.section(QStringLiteral("基本信息"));
             doc.field(QStringLiteral("文件名"), info.fileName());
@@ -6505,12 +7019,58 @@ namespace
             doc.field(QStringLiteral("可执行"), info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"), true);
             doc.field(QStringLiteral("隐藏"), info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"), true);
             doc.field(QStringLiteral("可写"), info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"), true);
-            doc.field(QStringLiteral("重解析点"), isPathReparsePoint(info.absoluteFilePath())
+            doc.field(QStringLiteral("重解析点"), (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
                 ? QStringLiteral("是（首屏只判断属性位，不追踪链接目标）") : QStringLiteral("否"), true);
             doc.section(QStringLiteral("路径"));
             doc.field(QStringLiteral("Win32 路径"), QDir::toNativeSeparators(info.absoluteFilePath()));
-            doc.field(QStringLiteral("NT 路径"), m_generalNtPathText.isEmpty()
-                ? QStringLiteral("<转换失败>") : m_generalNtPathText, m_generalNtPathText.isEmpty());
+            doc.field(QStringLiteral("NT 路径"), ntPathText.isEmpty()
+                ? QStringLiteral("<转换失败>") : ntPathText, ntPathText.isEmpty());
+            if (attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                doc.field(QStringLiteral("状态"), QStringLiteral("不存在或不可访问"), true);
+                doc.field(QStringLiteral("Win32 错误码"), formatWin32ErrorText(attributeError));
+            }
+            return { std::move(doc), info, ntPathText };
+        }
+
+        void startGeneralFileSnapshotLoad()
+        {
+            if (m_generalPropertyView == nullptr) return;
+            m_generalR3Loaded = false;
+            m_generalR0Loaded = false;
+            ++m_generalR0LoadGeneration;
+            const quint64 generation = ++m_generalR3LoadGeneration;
+            const QString path = m_filePath;
+            refreshGeneralTab();
+            const QPointer<FileDetailDialog> guardThis(this);
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, path, generation]()
+                {
+                    const auto snapshot = readGeneralFileSnapshot(path);
+                    QMetaObject::invokeMethod(qApp, [guardThis, path, generation, snapshot]()
+                        {
+                            if (guardThis == nullptr || guardThis->m_filePath != path ||
+                                guardThis->m_generalR3LoadGeneration != generation) return;
+                            guardThis->m_generalR3Document = snapshot.document;
+                            guardThis->m_generalNtPathText = snapshot.ntPath;
+                            guardThis->m_generalR3Loaded = true;
+                            guardThis->refreshGeneralTab();
+                            guardThis->startR0FileInfoLoad(snapshot.info, snapshot.ntPath);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        void refreshGeneralTab()
+        {
+            if (m_generalPropertyView == nullptr) return;
+            if (!m_generalR3Loaded)
+            {
+                ks::ui::FieldDocument loading;
+                loading.note(QStringLiteral("● 正在后台读取文件元数据..."));
+                loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
+                m_generalPropertyView->setDocument(loading);
+                return;
+            }
+            auto doc = m_generalR3Document;
             doc.field(QStringLiteral("查询来源"), !m_generalR0Loaded
                 ? QStringLiteral("R3 QFileInfo（R0 信息正在后台加载）")
                 : (m_generalR0Info.io.ok ? QStringLiteral("R3 QFileInfo + R0 KswordARK")
@@ -6747,29 +7307,29 @@ namespace
         static constexpr int usageDirectoryMatchRole = Qt::UserRole + 4;
         static constexpr int usageObjectAddressRole = Qt::UserRole + 5;
 
-        static bool readUsageSelection(QTreeWidget* table, UsageSelection& selectionOut)
+        static bool readUsageSelection(QTableView* table, UsageSelection& selectionOut)
         {
             // 用途：从当前行取回扫描时的 PID/创建时间/句柄身份。
             // 这些隐藏字段必须与可见行一起保存，操作前才能拒绝 PID 复用或陈旧句柄。
-            if (table == nullptr || table->currentItem() == nullptr)
+            if (table == nullptr || !table->currentIndex().isValid())
             {
                 return false;
             }
 
-            QTreeWidgetItem* const item = table->currentItem();
-            selectionOut.processId = item->data(0, usageProcessIdRole).toUInt();
+            const QModelIndex item = table->model()->index(table->currentIndex().row(), 0);
+            selectionOut.processId = item.data(usageProcessIdRole).toUInt();
             selectionOut.processCreationTime =
-                item->data(0, usageProcessCreationTimeRole).toULongLong();
-            selectionOut.handleValue = item->data(0, usageHandleValueRole).toULongLong();
-            selectionOut.objectAddress = item->data(0, usageObjectAddressRole).toULongLong();
-            selectionOut.processName = item->text(1);
-            selectionOut.matchedTargetPath = item->data(0, usageMatchedTargetPathRole).toString();
-            selectionOut.matchedByDirectoryRule = item->data(0, usageDirectoryMatchRole).toBool();
+                item.data(usageProcessCreationTimeRole).toULongLong();
+            selectionOut.handleValue = item.data(usageHandleValueRole).toULongLong();
+            selectionOut.objectAddress = item.data(usageObjectAddressRole).toULongLong();
+            selectionOut.processName = item.sibling(item.row(), 1).data().toString();
+            selectionOut.matchedTargetPath = item.data(usageMatchedTargetPathRole).toString();
+            selectionOut.matchedByDirectoryRule = item.data(usageDirectoryMatchRole).toBool();
             return selectionOut.processId != 0U;
         }
 
         void closeSelectedUsageHandle(
-            QTreeWidget* table,
+            QTableView* table,
             QLabel* statusLabel,
             QPushButton* refreshButton)
         {
@@ -6809,7 +7369,7 @@ namespace
         }
 
         void closeSelectedUsageHandleR0(
-            QTreeWidget* table, QLabel* statusLabel, QPushButton* refreshButton,
+            QTableView* table, QLabel* statusLabel, QPushButton* refreshButton,
             const QList<QPushButton*>& actionButtons)
         {
             // Copy the selected identity before the confirmation's nested event loop.
@@ -6866,7 +7426,7 @@ namespace
         }
 
         void terminateSelectedUsageProcess(
-            QTreeWidget* table,
+            QTableView* table,
             QLabel* statusLabel,
             QPushButton* refreshButton,
             const bool useKernelDriver)
@@ -6927,228 +7487,128 @@ namespace
             refreshUsageTable(table, statusLabel, refreshButton);
         }
 
-        void refreshUsageTable(QTreeWidget* table, QLabel* statusLabel, QPushButton* refreshButton)
+        void refreshUsageTable(QTableView* table, QLabel* statusLabel, QPushButton* refreshButton)
         {
-            // 用途：异步刷新属性页内的文件占用列表。
-            // 处理：调用 FileHandleUsageScanner，结果显示 PID/Handle/GrantedAccess/来源。
-            // 返回：无。
-            if (m_usageCloseInProgress || table == nullptr || statusLabel == nullptr || refreshButton == nullptr)
-            {
-                return;
-            }
-
-            QFileInfo info(m_filePath);
-            if (!info.exists())
-            {
-                statusLabel->setText(QStringLiteral("● 目标不存在，无法扫描占用。"));
-                return;
-            }
-
-            refreshButton->setEnabled(false);
-            table->clear();
-            statusLabel->setText(QStringLiteral("● 正在扫描文件占用..."));
-            if (m_usageScanProgressBar != nullptr)
-            {
-                m_usageScanProgressBar->setRange(0, 100);
-                m_usageScanProgressBar->setValue(0);
-                m_usageScanProgressBar->setFormat(QStringLiteral("%p%"));
-            }
+            if (m_usageCloseInProgress || !table || !statusLabel || !refreshButton) return;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QTableView> tableGuard(table);
+            const QPointer<QLabel> statusGuard(statusLabel);
+            const QPointer<QPushButton> refreshGuard(refreshButton);
+            const QPointer<QProgressBar> progressGuard(m_usageScanProgressBar);
+            m_usageScanCancelRequested->store(true);
+            const auto cancel = m_usageScanCancelRequested = std::make_shared<std::atomic_bool>(false);
             m_usageScanInProgress = true;
             m_usageRetryAfterR0Start = false;
             m_usageR0StartedDuringScan = false;
-            m_usageScanCancelRequested->store(false);
-
-            const std::vector<QString> targetPaths{ info.absoluteFilePath() };
-            const std::shared_ptr<std::atomic_bool> cancelRequested =
-                m_usageScanCancelRequested;
-            QPointer<FileDetailDialog> guardThis(this);
-            QPointer<QTreeWidget> tableGuard(table);
-            QPointer<QLabel> statusGuard(statusLabel);
-            QPointer<QPushButton> refreshGuard(refreshButton);
-            QPointer<QProgressBar> progressGuard(m_usageScanProgressBar);
-            QPointer<QObject> uiDispatcher(QCoreApplication::instance());
-
-            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, refreshGuard,
-                                             progressGuard, uiDispatcher, targetPaths, cancelRequested]()
+            propertyTableModel(table)->invalidateRequest();
+            refreshButton->setEnabled(false);
+            if (!owner || !tableGuard || !statusGuard) return;
+            statusLabel->setText(QStringLiteral("● 正在扫描文件占用..."));
+            if (!owner || !tableGuard) return;
+            if (progressGuard)
+            {
+                progressGuard->setRange(0, 100);
+                progressGuard->setValue(0);
+                progressGuard->setFormat(QStringLiteral("%p%"));
+            }
+            const QString path = m_filePath;
+            QThreadPool::globalInstance()->start(QRunnable::create([owner, tableGuard, statusGuard, refreshGuard, progressGuard, cancel, path]()
                 {
-                    const filedock::handleusage::HandleUsageScanResult scanResult =
-                        filedock::handleusage::scanHandleUsageByPaths(
-                            targetPaths,
-                            0,
-                            true,
-                            [cancelRequested]()
-                            {
-                                return cancelRequested->load();
-                            },
-                            [guardThis, progressGuard, uiDispatcher, cancelRequested](
-                                const QString&,
-                                const float progressValue)
-                            {
-                                QObject* const dispatcher = uiDispatcher.data();
-                                if (cancelRequested->load() || guardThis == nullptr ||
-                                    progressGuard == nullptr || dispatcher == nullptr)
-                                {
-                                    return;
-                                }
-                                const int percentage = static_cast<int>(std::clamp(progressValue, 0.0f, 100.0f));
-                                QMetaObject::invokeMethod(
-                                    dispatcher,
-                                    [guardThis, progressGuard, cancelRequested, percentage]()
-                                    {
-                                        if (!cancelRequested->load() && guardThis != nullptr &&
-                                            progressGuard != nullptr)
-                                        {
-                                            progressGuard->setValue(percentage);
-                                        }
-                                    },
-                                    Qt::QueuedConnection);
-                            });
-                    QObject* dispatcher = uiDispatcher.data();
-                    if (cancelRequested->load() || dispatcher == nullptr)
+                    const QFileInfo info(path);
+                    if (!info.exists())
                     {
+                        QMetaObject::invokeMethod(qApp, [owner, tableGuard, statusGuard, refreshGuard, cancel]()
+                            {
+                                if (!owner || !tableGuard || !statusGuard || !refreshGuard || cancel->load()) return;
+                                owner->m_usageScanInProgress = false;
+                                propertyTableModel(tableGuard)->setSnapshot(ks::fileui::makePropertyTableSnapshot(),
+                                    [owner, statusGuard, refreshGuard, cancel]()
+                                    {
+                                        if (!owner || !statusGuard || !refreshGuard || cancel->load()) return;
+                                        statusGuard->setText(QStringLiteral("● 目标不存在，无法扫描占用。"));
+                                        if (refreshGuard) refreshGuard->setEnabled(true);
+                                    });
+                            }, Qt::QueuedConnection);
                         return;
                     }
-
-                    QMetaObject::invokeMethod(
-                        dispatcher,
-                        [guardThis, tableGuard, statusGuard, refreshGuard,
-                         progressGuard, cancelRequested, scanResult]()
+                    auto scanResult = filedock::handleusage::scanHandleUsageByPaths({info.absoluteFilePath()}, 0, true,
+                        [cancel]() { return cancel->load(); },
+                        [owner, progressGuard, cancel](const QString&, float progress)
+                            {
+                                if (cancel->load()) return;
+                                const int percentage = static_cast<int>(std::clamp(progress, 0.0f, 100.0f));
+                                QMetaObject::invokeMethod(qApp, [owner, progressGuard, cancel, percentage]()
+                                    { if (owner && progressGuard && !cancel->load()) progressGuard->setValue(percentage); }, Qt::QueuedConnection);
+                            });
+                    if (cancel->load()) return;
+                    auto rows = ks::fileui::makePropertyTableSnapshot();
+                    rows->rows.reserve(scanResult.entries.size());
+                    for (const auto& entry : scanResult.entries)
+                    {
+                        if (cancel->load()) return;
+                        const QString source = entry.enumerationSource.trimmed().isEmpty() ? QStringLiteral("R3 DuplicateHandle") : entry.enumerationSource;
+                        const QString rule = entry.matchRuleText.trimmed().isEmpty()
+                            ? (entry.matchedByDirectoryRule ? QStringLiteral("目录前缀") : QStringLiteral("精确")) : entry.matchRuleText;
+                        rows->append({ks::fileui::propertyRowKey({QString::number(entry.processId), QString::number(entry.processCreationTime),
+                            QString::number(entry.handleValue), QString::number(entry.objectAddress), entry.matchedTargetPath, entry.objectName, source, rule}),
+                            {QString::number(entry.processId), entry.processName,
+                                entry.handleValue == 0 ? QStringLiteral("-") : formatHex64(entry.handleValue),
+                                entry.grantedAccess == 0 ? QStringLiteral("-") : QStringLiteral("0x%1").arg(entry.grantedAccess, 8, 16, QChar('0')).toUpper(),
+                                entry.objectName, entry.matchedTargetPath, QStringLiteral("%1 | %2").arg(source, rule)},
+                            {{usageProcessIdRole, static_cast<qulonglong>(entry.processId)},
+                             {usageProcessCreationTimeRole, static_cast<qulonglong>(entry.processCreationTime)},
+                             {usageHandleValueRole, static_cast<qulonglong>(entry.handleValue)},
+                             {usageMatchedTargetPathRole, entry.matchedTargetPath},
+                             {usageDirectoryMatchRole, entry.matchedByDirectoryRule},
+                             {usageObjectAddressRole, static_cast<qulonglong>(entry.objectAddress)}}, {6}});
+                    }
+                    // All consumed evidence is in rows; only scan totals/diagnostics/flags go to the UI.
+                    scanResult.entries.clear();
+                    const auto summary = std::shared_ptr<filedock::handleusage::HandleUsageScanResult>(
+                        new filedock::handleusage::HandleUsageScanResult(std::move(scanResult)),
+                        [](auto* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                    QMetaObject::invokeMethod(qApp, [owner, tableGuard, statusGuard, refreshGuard, progressGuard, cancel, rows, summary]()
                         {
-                            if (cancelRequested->load() || guardThis == nullptr || tableGuard == nullptr ||
-                                statusGuard == nullptr || refreshGuard == nullptr)
+                            if (!owner || !tableGuard || !statusGuard || !refreshGuard || cancel->load()) return;
+                            propertyTableModel(tableGuard)->setSnapshot(rows, [owner, tableGuard, statusGuard, refreshGuard, progressGuard, cancel, summary]()
+                                {
+                                    if (!owner || !tableGuard || !statusGuard || !refreshGuard || cancel->load()) return;
+                                    QString status = QStringLiteral("● 扫描完成 %1 ms | 总句柄:%2 | 文件句柄:%3 | 命中:%4")
+                                        .arg(summary->elapsedMs).arg(summary->totalHandleCount).arg(summary->fileLikeHandleCount).arg(summary->matchedHandleCount);
+                                    if (summary->fileHandleScanIncomplete)
+                                        status += ks::i18n::sourceText(QStringLiteral(" | 扫描不完整：部分文件句柄路径查询超时或阻塞。"));
+                                    if (!summary->diagnosticText.trimmed().isEmpty()) status += QStringLiteral(" | 存在诊断；详情已写入日志。");
+                                    statusGuard->setText(status);
+                                    if (!owner) return;
+                                    if (progressGuard) progressGuard->setValue(100);
+                                    if (refreshGuard) refreshGuard->setEnabled(true);
+                                });
+                            if (!owner || cancel->load()) return;
+                            // Collection completion and the R0 retry remain active while the display is hidden.
+                            owner->m_usageScanInProgress = false;
+                            if (!summary->diagnosticText.trimmed().isEmpty())
                             {
-                                return;
+                                kLogEvent event;
+                                warn << event << "[FileDetailDialog] usage scan completed with diagnostics, matchedHandleCount="
+                                    << summary->matchedHandleCount << ", diagnostic=" << summary->diagnosticText.toStdString() << eol;
                             }
-
-                            const auto scanSnapshot =
-                                std::make_shared<filedock::handleusage::HandleUsageScanResult>(scanResult);
-                            const auto commitSnapshot =
-                                [guardThis, tableGuard, statusGuard, refreshGuard, progressGuard, scanSnapshot]()
+                            if (!summary->r3HandleFallbackUsed)
                             {
-                                if (guardThis == nullptr || tableGuard == nullptr || statusGuard == nullptr ||
-                                    refreshGuard == nullptr)
-                                {
-                                    return;
-                                }
-
-                                tableGuard->setSortingEnabled(false);
-                                tableGuard->clear();
-                                for (const filedock::handleusage::HandleUsageEntry& entry : scanSnapshot->entries)
-                                {
-                                    auto* item = new QTreeWidgetItem();
-                                    item->setText(0, QString::number(entry.processId));
-                                    item->setText(1, entry.processName);
-                                    item->setText(2, entry.handleValue == 0
-                                        ? QStringLiteral("-")
-                                        : formatHex64(entry.handleValue));
-                                    item->setText(3, entry.grantedAccess == 0
-                                        ? QStringLiteral("-")
-                                        : QStringLiteral("0x%1").arg(entry.grantedAccess, 8, 16, QChar('0')).toUpper());
-                                    item->setText(4, entry.objectName);
-                                    item->setText(5, entry.matchedTargetPath);
-                                    const QString sourceText = entry.enumerationSource.trimmed().isEmpty()
-                                        ? QStringLiteral("R3 DuplicateHandle")
-                                        : entry.enumerationSource;
-                                    const QString ruleText = entry.matchRuleText.trimmed().isEmpty()
-                                        ? (entry.matchedByDirectoryRule ? QStringLiteral("目录前缀") : QStringLiteral("精确"))
-                                        : entry.matchRuleText;
-                                    item->setText(6, QStringLiteral("%1 | %2").arg(sourceText, ruleText));
-                                    item->setData(0, usageProcessIdRole, static_cast<qulonglong>(entry.processId));
-                                    item->setData(0, usageProcessCreationTimeRole, static_cast<qulonglong>(entry.processCreationTime));
-                                    item->setData(0, usageHandleValueRole, static_cast<qulonglong>(entry.handleValue));
-                                    item->setData(0, usageMatchedTargetPathRole, entry.matchedTargetPath);
-                                    item->setData(0, usageDirectoryMatchRole, entry.matchedByDirectoryRule);
-                                    item->setData(0, usageObjectAddressRole, static_cast<qulonglong>(entry.objectAddress));
-                                    tableGuard->addTopLevelItem(item);
-                                }
-                                tableGuard->setSortingEnabled(true);
-                                if (tableGuard->header() != nullptr)
-                                {
-                                    tableGuard->resizeColumnToContents(0);
-                                    tableGuard->resizeColumnToContents(1);
-                                    tableGuard->resizeColumnToContents(2);
-                                    tableGuard->resizeColumnToContents(3);
-                                }
-                                if (tableGuard->topLevelItemCount() > 0)
-                                {
-                                    tableGuard->setCurrentItem(tableGuard->topLevelItem(0));
-                                }
-
-                                QString statusText = QStringLiteral("● 扫描完成 %1 ms | 总句柄:%2 | 文件句柄:%3 | 命中:%4")
-                                    .arg(scanSnapshot->elapsedMs)
-                                    .arg(scanSnapshot->totalHandleCount)
-                                    .arg(scanSnapshot->fileLikeHandleCount)
-                                    .arg(scanSnapshot->matchedHandleCount);
-                                if (scanSnapshot->fileHandleScanIncomplete)
-                                {
-                                    statusText += ks::i18n::sourceText(QStringLiteral(" | 扫描不完整：部分文件句柄路径查询超时或阻塞。"));
-                                }
-                                if (!scanSnapshot->diagnosticText.trimmed().isEmpty())
-                                {
-                                    statusText += QStringLiteral(
-                                        " | 存在诊断；详情已写入日志。");
-                                    kLogEvent diagnosticEvent;
-                                    warn << diagnosticEvent
-                                        << "[FileDetailDialog] usage scan completed with diagnostics, matchedHandleCount="
-                                        << scanSnapshot->matchedHandleCount
-                                        << ", diagnostic="
-                                        << scanSnapshot->diagnosticText.toStdString()
-                                        << eol;
-                                }
-                                statusGuard->setText(statusText);
-                                if (progressGuard != nullptr)
-                                {
-                                    progressGuard->setValue(100);
-                                }
-                                refreshGuard->setEnabled(true);
-
-                                guardThis->m_usageScanInProgress = false;
-                                if (!scanSnapshot->r3HandleFallbackUsed)
-                                {
-                                    guardThis->m_usageRetryAfterR0Start = false;
-                                    guardThis->m_usageR0StartedDuringScan = false;
-                                    return;
-                                }
-
-                                // DriverClient 已在本轮先调用 R0，并由 MainWindow 在 UI 线程提示启用。
-                                // 若服务在 R3 回落期间启动，提交当前 R3 结果后只自动重扫一次；
-                                // 否则保持 R3 结果并等待后续的 R0 启动成功通知。
-                                if (guardThis->m_usageR0StartedDuringScan)
-                                {
-                                    guardThis->m_usageR0StartedDuringScan = false;
-                                    QMetaObject::invokeMethod(
-                                        guardThis.data(),
-                                        [guardThis, tableGuard, statusGuard, refreshGuard]()
-                                        {
-                                            if (guardThis != nullptr && tableGuard != nullptr &&
-                                                statusGuard != nullptr && refreshGuard != nullptr)
-                                            {
-                                                guardThis->refreshUsageTable(
-                                                    tableGuard.data(),
-                                                    statusGuard.data(),
-                                                    refreshGuard.data());
-                                            }
-                                        },
-                                        Qt::QueuedConnection);
-                                    return;
-                                }
-                                guardThis->m_usageRetryAfterR0Start = true;
-                            };
-
-                            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-                                guardThis.data(),
-                                QStringLiteral("file-detail-usage-snapshot"),
-                                { tableGuard.data() },
-                                commitSnapshot))
-                            {
-                                return;
+                                owner->m_usageRetryAfterR0Start = false;
+                                owner->m_usageR0StartedDuringScan = false;
                             }
-                            commitSnapshot();
-                        },
-                        Qt::QueuedConnection);
-                });
-            task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+                            else if (owner->m_usageR0StartedDuringScan)
+                            {
+                                owner->m_usageR0StartedDuringScan = false;
+                                QMetaObject::invokeMethod(qApp, [owner, tableGuard, statusGuard, refreshGuard, cancel]()
+                                    {
+                                        if (owner && tableGuard && statusGuard && refreshGuard && !cancel->load())
+                                            owner->refreshUsageTable(tableGuard, statusGuard, refreshGuard);
+                                    }, Qt::QueuedConnection);
+                            }
+                            else owner->m_usageRetryAfterR0Start = true;
+                        }, Qt::QueuedConnection);
+                }));
         }
 
         void startR0FileInfoLoad(const QFileInfo& info, const QString& ntPathText)
@@ -7992,6 +8452,12 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
+        static QThreadPool& peAnalysisPool()
+        {
+            static QThreadPool* pool = []() { auto* value = new QThreadPool(qApp); value->setMaxThreadCount(2); return value; }();
+            return *pool;
+        }
+
         void startPeAnalysisLoad(ks::ui::StructuredFieldView* textEditorWidget)
         {
             // 用途：后台执行 PE 深度解析，返回分组字段快照。
@@ -8003,29 +8469,37 @@ namespace
                 return;
             }
 
+            if (m_peReadCancel) m_peReadCancel->store(true);
+            const auto cancel = m_peReadCancel = std::make_shared<std::atomic_bool>(false);
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<ks::ui::StructuredFieldView> editorGuard(textEditorWidget);
+            connect(textEditorWidget, &QObject::destroyed, [cancel]() { cancel->store(true); });
             ks::ui::FieldDocument loading;
             loading.note(QStringLiteral("PE 信息加载中..."));
             loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
             textEditorWidget->setDocument(loading);
+            if (!guardThis || !editorGuard) return;
             const QString filePathSnapshot = m_filePath;
-            QPointer<FileDetailDialog> guardThis(this);
-            QPointer<ks::ui::StructuredFieldView> editorGuard(textEditorWidget);
-            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot, cancel]()
                 {
-                    const auto peDocument = file_dock_detail::buildPeAnalysisDocument(filePathSnapshot);
+                    if (cancel->load()) return;
+                    const auto peDocument = std::shared_ptr<const ks::ui::FieldDocument>(
+                        new ks::ui::FieldDocument(file_dock_detail::buildPeAnalysisDocument(filePathSnapshot, cancel)),
+                        [](const auto* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                    if (cancel->load()) return;
                     QMetaObject::invokeMethod(
                         qApp,
-                        [guardThis, editorGuard, peDocument]()
+                        [guardThis, editorGuard, peDocument, filePathSnapshot, cancel]()
                         {
-                            if (guardThis != nullptr && editorGuard != nullptr)
+                            if (guardThis != nullptr && editorGuard != nullptr && !cancel->load() && guardThis->m_filePath == filePathSnapshot)
                             {
-                                editorGuard->setDocument(peDocument);
+                                editorGuard->setDocument(*peDocument);
                             }
                         },
                         Qt::QueuedConnection);
                 });
             task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+            peAnalysisPool().start(task);
         }
 
         static PrintableStringsPreview extractPrintableStringsPreview(
@@ -8145,7 +8619,7 @@ namespace
             return result;
         }
 
-        static QString dependencyRowsToClipboardText(QTableWidget* table, const bool dllOnly)
+        static QString dependencyRowsToClipboardText(QTableView* table, const bool dllOnly)
         {
             // 用途：把依赖 DLL 表格选中行转换为剪贴板文本。
             // 输入：table 为依赖页表格，dllOnly 控制只复制 DLL 名称还是整行。
@@ -8164,23 +8638,22 @@ namespace
                     selectedRows.insert(index.row());
                 }
             }
-            if (selectedRows.empty() && table->currentRow() >= 0)
+            if (selectedRows.empty() && table->currentIndex().row() >= 0)
             {
-                selectedRows.insert(table->currentRow());
+                selectedRows.insert(table->currentIndex().row());
             }
 
             QStringList lines;
             QStringList seenDllNames;
             for (const int rowIndex : selectedRows)
             {
-                if (rowIndex < 0 || rowIndex >= table->rowCount())
+                if (rowIndex < 0 || rowIndex >= table->model()->rowCount())
                 {
                     continue;
                 }
                 if (dllOnly)
                 {
-                    const QTableWidgetItem* dllItem = table->item(rowIndex, 0);
-                    const QString dllName = dllItem != nullptr ? dllItem->text().trimmed() : QString();
+                    const QString dllName = propertyCell(table, rowIndex, 0).toString().trimmed();
                     if (!dllName.isEmpty() && !seenDllNames.contains(dllName, Qt::CaseInsensitive))
                     {
                         seenDllNames.push_back(dllName);
@@ -8190,17 +8663,16 @@ namespace
                 }
 
                 QStringList columns;
-                for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+                for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
                 {
-                    const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-                    columns.push_back(item != nullptr ? item->text() : QString());
+                    columns.push_back(propertyCell(table, rowIndex, columnIndex).toString());
                 }
                 lines.push_back(columns.join('\t'));
             }
             return lines.join('\n');
         }
 
-        void populateDependencyTable(QTableWidget* table, QLabel* statusLabel, const file_dock_detail::PeDependencyResult& result, const qint64 elapsedMs)
+        void populateDependencyTable(QTableView* table, QLabel* statusLabel, const file_dock_detail::PeDependencyResult& result, const qint64 elapsedMs)
         {
             // 用途：把后台解析出的依赖 DLL 结果填入表格。
             // 输入：table/statusLabel 为 UI 控件，result 为结构化导入表，elapsedMs 为解析耗时。
@@ -8211,36 +8683,9 @@ namespace
                 return;
             }
 
-            table->setSortingEnabled(false);
-            table->setUpdatesEnabled(false);
-            table->clearContents();
             constexpr int kMaxDisplayedDependencyRows = 20000;
             const int totalRowCount = static_cast<int>(result.rows.size());
             const int displayedRowCount = std::min(totalRowCount, kMaxDisplayedDependencyRows);
-            table->setRowCount(displayedRowCount);
-            for (int rowIndex = 0; rowIndex < displayedRowCount; ++rowIndex)
-            {
-                const file_dock_detail::PeDependencyRow& row = result.rows[rowIndex];
-                const QString functionText = row.importMode == QStringLiteral("Ordinal")
-                    ? QStringLiteral("#%1").arg(row.ordinalText)
-                    : (row.functionName.trimmed().isEmpty() ? QStringLiteral("-") : row.functionName);
-
-                table->setItem(rowIndex, 0, new QTableWidgetItem(row.dllName));
-                table->setItem(rowIndex, 1, new QTableWidgetItem(functionText));
-                table->setItem(rowIndex, 2, new QTableWidgetItem(row.hintText));
-                table->setItem(rowIndex, 3, new QTableWidgetItem(row.importMode));
-                table->setItem(rowIndex, 4, new QTableWidgetItem(row.thunkRvaText));
-                table->setItem(rowIndex, 5, new QTableWidgetItem(row.diagnosticText));
-            }
-            table->setUpdatesEnabled(true);
-            table->setSortingEnabled(true);
-            if (table->horizontalHeader() != nullptr)
-            {
-                table->resizeColumnToContents(0);
-                table->resizeColumnToContents(1);
-                table->resizeColumnToContents(2);
-                table->resizeColumnToContents(3);
-            }
 
             if (!result.success)
             {
@@ -8265,7 +8710,7 @@ namespace
             statusLabel->setText(statusText);
         }
 
-        void startDependencyLoad(QTableWidget* table, QLabel* statusLabel, ks::ui::StructuredFieldView* detailEditor)
+        void startDependencyLoad(QTableView* table, QLabel* statusLabel, ks::ui::StructuredFieldView* detailEditor)
         {
             // 用途：后台读取 EXE/DLL Import Directory 并展示依赖 DLL。
             // 输入：table/statusLabel/detailEditor 为依赖页 UI 控件。
@@ -8276,43 +8721,70 @@ namespace
                 return;
             }
 
+            if (m_dependencyReadCancel) m_dependencyReadCancel->store(true);
+            const auto cancel = m_dependencyReadCancel = std::make_shared<std::atomic_bool>(false);
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QTableView> tableGuard(table);
+            const QPointer<QLabel> statusGuard(statusLabel);
+            const QPointer<ks::ui::StructuredFieldView> detailGuard(detailEditor);
+            connect(table, &QObject::destroyed, [cancel]() { cancel->store(true); });
+            propertyTableModel(table)->invalidateRequest();
             statusLabel->setText(QStringLiteral("● 正在后台读取 Import Directory..."));
+            if (!guardThis || !tableGuard || !statusGuard || !detailGuard) return;
             ks::ui::FieldDocument loading;
             loading.note(QStringLiteral("依赖 DLL 加载中..."));
             loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
             detailEditor->setDocument(loading);
-
+            if (!guardThis || !tableGuard || !statusGuard || !detailGuard) return;
             const QString filePathSnapshot = m_filePath;
-            QPointer<FileDetailDialog> guardThis(this);
-            QPointer<QTableWidget> tableGuard(table);
-            QPointer<QLabel> statusGuard(statusLabel);
-            QPointer<ks::ui::StructuredFieldView> detailGuard(detailEditor);
-            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, detailGuard, filePathSnapshot]()
+            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, detailGuard, filePathSnapshot, cancel]()
                 {
                     const auto beginTime = std::chrono::steady_clock::now();
                     const file_dock_detail::PeDependencyResult result =
-                        file_dock_detail::analyzePeDependencies(filePathSnapshot);
+                        file_dock_detail::analyzePeDependencies(filePathSnapshot, cancel);
+                    if (cancel->load()) return;
                     const qint64 elapsedMs = static_cast<qint64>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - beginTime).count());
 
+                    auto rows = ks::fileui::makePropertyTableSnapshot();
+                    rows->rows.reserve(std::min<qsizetype>(result.rows.size(), 20000));
+                    for (qsizetype index = 0; index < result.rows.size() && index < 20000; ++index)
+                    {
+                        if (cancel->load()) return;
+                        const auto& row = result.rows.at(index);
+                        const QString functionText = row.importMode == QStringLiteral("Ordinal")
+                            ? QStringLiteral("#%1").arg(row.ordinalText)
+                            : (row.functionName.trimmed().isEmpty() ? QStringLiteral("-") : row.functionName);
+                        rows->append({ks::fileui::propertyRowKey({row.dllName, row.thunkRvaText, row.importMode, functionText}),
+                            {row.dllName, functionText, row.hintText, row.importMode, row.thunkRvaText, row.diagnosticText}, {}});
+                    }
+                    ks::ui::FieldDocument document;
+                    document.field(QStringLiteral("目标"), QDir::toNativeSeparators(filePathSnapshot));
+                    if (!result.errorText.trimmed().isEmpty()) document.note(result.errorText.trimmed());
+                    document.section(QStringLiteral("依赖 DLL 名称"));
+                    for (qsizetype index = 0; index < result.dllNames.size(); ++index)
+                    {
+                        if (cancel->load()) return;
+                        document.field(QString::number(index + 1), result.dllNames.at(index));
+                    }
+                    const auto resultSnapshot = std::shared_ptr<file_dock_detail::PeDependencyResult>(new file_dock_detail::PeDependencyResult(result),
+                        [](file_dock_detail::PeDependencyResult* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
                     QMetaObject::invokeMethod(
                         qApp,
-                        [guardThis, tableGuard, statusGuard, detailGuard, result, elapsedMs]()
+                        [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, rows, document, elapsedMs, cancel, filePathSnapshot]()
                         {
                             if (guardThis == nullptr || tableGuard == nullptr ||
-                                statusGuard == nullptr || detailGuard == nullptr)
+                                statusGuard == nullptr || detailGuard == nullptr || cancel->load() || guardThis->m_filePath != filePathSnapshot)
                             {
                                 return;
                             }
 
-                            const auto resultSnapshot =
-                                std::make_shared<file_dock_detail::PeDependencyResult>(result);
                             const auto commitSnapshot =
-                                [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, elapsedMs]()
+                                [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, document, elapsedMs, cancel, filePathSnapshot]()
                             {
                                 if (guardThis == nullptr || tableGuard == nullptr ||
-                                    statusGuard == nullptr || detailGuard == nullptr)
+                                    statusGuard == nullptr || detailGuard == nullptr || cancel->load() || guardThis->m_filePath != filePathSnapshot)
                                 {
                                     return;
                                 }
@@ -8322,30 +8794,17 @@ namespace
                                     statusGuard,
                                     *resultSnapshot,
                                     elapsedMs);
-                                ks::ui::FieldDocument doc;
-                                doc.field(QStringLiteral("目标"), QDir::toNativeSeparators(guardThis->m_filePath));
-                                if (!resultSnapshot->errorText.trimmed().isEmpty())
-                                    doc.note(resultSnapshot->errorText.trimmed());
-                                doc.section(QStringLiteral("依赖 DLL 名称"));
-                                for (qsizetype index = 0; index < resultSnapshot->dllNames.size(); ++index)
-                                    doc.field(QString::number(index + 1), resultSnapshot->dllNames.at(index));
-                                detailGuard->setDocument(doc);
+                                if (!guardThis || !detailGuard) return;
+                                detailGuard->setDocument(document);
                             };
 
-                            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                                guardThis.data(),
-                                QStringLiteral("file-detail-dependency-snapshot"),
-                                { tableGuard.data() },
-                                commitSnapshot))
-                            {
-                                return;
-                            }
-                            commitSnapshot();
+                            propertyTableModel(tableGuard)->setSnapshot(rows, commitSnapshot);
+
                         },
                         Qt::QueuedConnection);
                 });
             task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+            peAnalysisPool().start(task);
         }
 
         void setMetadataEditorBusy(const bool busy)
@@ -8485,7 +8944,7 @@ namespace
 
         void refreshMetadataEditor()
         {
-            if (m_metadataStatusLabel == nullptr || m_metadataEditorBusy)
+            if (m_metadataStatusLabel == nullptr || m_metadataEditorBusy || m_stagingSnapshotBusy || m_transactionBusy)
             {
                 return;
             }
@@ -8682,35 +9141,457 @@ namespace
                 }));
         }
 
-        bool ensurePendingPatchesForStaging()
+        struct MetadataReadValue
         {
-            if (!m_pendingPatches.isEmpty())
+            DWORD error = ERROR_SUCCESS;
+            QString text;
+            QByteArray bytes;
+            QString name;
+            int format = -1;
+            bool needEa = false;
+        };
+
+        class MetadataReadState final : public QObject
+        {
+        public:
+            explicit MetadataReadState(QObject* parent) : QObject(parent) {}
+            ~MetadataReadState() override { if (cancel != nullptr) cancel->store(true); }
+            quint64 generation = 0;
+            bool active = false;
+            bool projecting = false;
+            bool readOnly = false;
+            bool undoEnabled = false;
+            bool layoutEnabled = true;
+            int revision = 0;
+            QString toolTip;
+            QVector<QPair<QPointer<QObject>, QVariant>> projectionInputs;
+            std::shared_ptr<std::atomic_bool> cancel;
+            QPointer<QPushButton> button;
+            QPointer<QPlainTextEdit> editor;
+        };
+
+        static QThreadPool& metadataReadPool()
+        {
+            // The application owns the read queue; closing a page never waits for OS I/O.
+            static QThreadPool* pool = []()
+                {
+                    auto* value = new QThreadPool(qApp);
+                    value->setMaxThreadCount(2);
+                    return value;
+                }();
+            return *pool;
+        }
+
+        static QString formatMetadataHex(const QByteArray& bytes,
+            const std::shared_ptr<std::atomic_bool>& cancel)
+        {
+            static constexpr char digits[] = "0123456789ABCDEF";
+            QByteArray text;
+            if (!bytes.isEmpty()) text.reserve(bytes.size() * 3 - 1);
+            for (qsizetype index = 0; index < bytes.size(); ++index)
             {
-                return true;
+                if (index % 256 == 0 && cancel->load()) return {};
+                if (index > 0) text.append(index % 256 == 0 ? '\n' : ' ');
+                const auto byte = static_cast<unsigned char>(bytes.at(index));
+                text.append(digits[byte >> 4]);
+                text.append(digits[byte & 15]);
             }
-            QList<ks::file::metadata::TargetPatch> patches;
-            for (const QString& path : m_filePaths)
+            return QString::fromLatin1(text);
+        }
+
+        static bool sameMetadataReadIdentity(
+            const ks::file::metadata::FileSnapshot& before,
+            const ks::file::metadata::FileSnapshot& after)
+        {
+            return before.ok && after.ok && before.identity.available && after.identity.available &&
+                before.identity.volumeSerialNumber == after.identity.volumeSerialNumber &&
+                before.identity.fileIndex == after.identity.fileIndex &&
+                before.basicInfo.LastWriteTime.QuadPart == after.basicInfo.LastWriteTime.QuadPart &&
+                before.basicInfo.ChangeTime.QuadPart == after.basicInfo.ChangeTime.QuadPart;
+        }
+
+        bool metadataReadBusy() const
+        {
+            for (const auto& state : m_metadataReadStates)
+                if (state != nullptr && state->active) return true;
+            return false;
+        }
+
+        void finishMetadataRead(MetadataReadState* state)
+        {
+            if (state == nullptr) return;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<MetadataReadState> stateGuard(state);
+            state->active = false;
+            if (state->projecting && state->editor != nullptr)
             {
-                const ks::file::metadata::FileSnapshot snapshot =
-                    ks::file::metadata::readFileSnapshot(path);
+                const QPointer<QPlainTextEdit> editor(state->editor);
+                const bool readOnly = state->readOnly;
+                const bool undoEnabled = state->undoEnabled;
+                const bool layoutEnabled = state->layoutEnabled;
+                state->projecting = false;
+                editor->setReadOnly(readOnly);
+                if (owner == nullptr || stateGuard == nullptr || editor == nullptr) return;
+                editor->setUndoRedoEnabled(undoEnabled);
+                if (owner == nullptr || stateGuard == nullptr || editor == nullptr) return;
+                editor->document()->setLayoutEnabled(layoutEnabled);
+            }
+            if (owner == nullptr || stateGuard == nullptr) return;
+            if (state->button != nullptr)
+            {
+                const QPointer<QPushButton> button(state->button);
+                const QString toolTip = state->toolTip;
+                const bool enabled = !m_transactionBusy;
+                button->setToolTip(toolTip);
+                if (owner == nullptr || stateGuard == nullptr || button == nullptr) return;
+                button->setEnabled(enabled);
+            }
+            if (owner != nullptr) updatePendingSaveUi();
+        }
+
+        static ks::file::metadata::FileSnapshot metadataReadSnapshot(const QString& path, bool followTarget)
+        {
+            ks::file::metadata::FileSnapshot result;
+            const auto native = QDir::toNativeSeparators(path).toStdWString();
+            const HANDLE handle = ::CreateFileW(native.c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | (followTarget ? 0U : FILE_FLAG_OPEN_REPARSE_POINT), nullptr);
+            if (handle == INVALID_HANDLE_VALUE) { result.win32Error = ::GetLastError(); return result; }
+            BY_HANDLE_FILE_INFORMATION identity{};
+            const BOOL basicOk = ::GetFileInformationByHandleEx(handle, FileBasicInfo, &result.basicInfo, sizeof(result.basicInfo));
+            const DWORD basicError = basicOk ? ERROR_SUCCESS : ::GetLastError();
+            const BOOL identityOk = ::GetFileInformationByHandle(handle, &identity);
+            result.win32Error = !basicOk ? basicError : (identityOk ? ERROR_SUCCESS : ::GetLastError());
+            ::CloseHandle(handle);
+            result.ok = basicOk && identityOk;
+            result.identity.available = identityOk;
+            result.identity.volumeSerialNumber = identity.dwVolumeSerialNumber;
+            result.identity.fileIndex = (static_cast<quint64>(identity.nFileIndexHigh) << 32U) | identity.nFileIndexLow;
+            return result;
+        }
+
+        template <typename Work, typename Apply>
+        void runMetadataRead(QWidget* output, QPushButton* button, const QString& path,
+            Work work, Apply apply, bool followTarget = false)
+        {
+            if (output == nullptr || button == nullptr || m_transactionBusy || m_stagingSnapshotBusy) return;
+            auto state = m_metadataReadStates.value(output);
+            if (state == nullptr)
+            {
+                state = new MetadataReadState(output);
+                m_metadataReadStates.insert(output, state);
+                if (auto* editor = qobject_cast<QPlainTextEdit*>(output))
+                {
+                    const QPointer<QPlainTextEdit> editorGuard(editor);
+                    connect(editor->document(), &QTextDocument::contentsChange, state,
+                        [state, editorGuard](int, int removed, int added)
+                        {
+                            if (state == nullptr || editorGuard == nullptr || state->projecting || (removed == 0 && added == 0)) return;
+                            // Undo/retyping can revisit a Qt document revision; a real
+                            // edit always invalidates both the old read and raw-byte cache.
+                            editorGuard->setProperty("ks_file_metadata_original_bytes", QVariant());
+                            editorGuard->setProperty("ks_file_metadata_incomplete", false);
+                            if (state->active && state->cancel != nullptr) state->cancel->store(true);
+                        });
+                }
+            }
+            if (state->active) return;
+            state->active = true;
+            state->cancel = std::make_shared<std::atomic_bool>(false);
+            state->button = button;
+            state->toolTip = button->toolTip();
+            const auto cancel = state->cancel;
+            const quint64 generation = ++state->generation;
+            const QStringList paths = m_filePaths;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QWidget> outputGuard(output);
+            const QPointer<QPushButton> buttonGuard(button);
+            button->setEnabled(false);
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            if (buttonGuard == nullptr) { finishMetadataRead(state); return; }
+            button->setToolTip(ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            updatePendingSaveUi();
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            metadataReadPool().start(QRunnable::create(
+                [owner, outputGuard, state, cancel, generation, paths, path, followTarget, work = std::move(work), apply = std::move(apply)]()
+                {
+                    auto result = std::shared_ptr<MetadataReadValue>(new MetadataReadValue(), [](MetadataReadValue* value)
+                        { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                    const auto before = metadataReadSnapshot(path, followTarget);
+                    if (!cancel->load())
+                    {
+                        if (!before.ok) result->error = before.win32Error;
+                        else
+                        {
+                            *result = work(cancel);
+                            if (!cancel->load() && result->error == ERROR_SUCCESS)
+                            {
+                                const auto after = metadataReadSnapshot(path, followTarget);
+                                if (!sameMetadataReadIdentity(before, after)) result->error = ERROR_FILE_INVALID;
+                            }
+                        }
+                    }
+                    QMetaObject::invokeMethod(qApp,
+                        [owner, outputGuard, state, cancel, generation, paths, result, apply]()
+                        {
+                            if (owner == nullptr || outputGuard == nullptr || state == nullptr || state->generation != generation) return;
+                            if (cancel->load() || owner->m_filePaths != paths)
+                            {
+                                owner->finishMetadataRead(state);
+                                return;
+                            }
+                            // A true return keeps the read active until full document publication ends.
+                            if (!apply(*result, state) && owner != nullptr && state != nullptr)
+                                owner->finishMetadataRead(state);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        static qsizetype metadataTextSliceLength(const QString& text, const qsizetype offset)
+        {
+            if (offset < 0 || offset >= text.size()) return 0;
+            qsizetype count = std::min<qsizetype>(8192, text.size() - offset);
+            if (offset + count < text.size() && text.at(offset + count - 1).isHighSurrogate()) --count;
+            return count;
+        }
+
+        void continueMetadataTextProjection(const QPointer<MetadataReadState>& state,
+            const std::shared_ptr<const MetadataReadValue>& result, qsizetype offset)
+        {
+            if (state == nullptr || state->editor == nullptr || !state->active) return;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QPlainTextEdit> editor(state->editor);
+            if (state->cancel->load() || editor->document()->revision() != state->revision ||
+                !stagingInputsUnchanged(state->projectionInputs, stagingWidgetValue))
+            {
+                // A partial document is never a replacement payload. Preserve changed
+                // parameter intent and require a fresh complete read or explicit new text.
+                editor->clear();
+                if (owner == nullptr || state == nullptr || editor == nullptr) return;
+                editor->setProperty("ks_file_metadata_incomplete", true);
+                finishMetadataRead(state);
+                return;
+            }
+            QElapsedTimer budget;
+            budget.start();
+            do
+            {
+                const qsizetype count = metadataTextSliceLength(result->text, offset);
+                QTextCursor cursor(editor->document());
+                cursor.movePosition(QTextCursor::End);
+                cursor.insertText(result->text.mid(offset, count));
+                if (owner == nullptr || state == nullptr || editor == nullptr) return;
+                offset += count;
+                state->revision = editor->document()->revision();
+            } while (offset < result->text.size() && budget.nsecsElapsed() < 4'000'000);
+            if (offset < result->text.size())
+            {
+                QTimer::singleShot(0, this, [owner, state, result, offset]()
+                    { if (owner != nullptr) owner->continueMetadataTextProjection(state, result, offset); });
+                return;
+            }
+            editor->setProperty("ks_file_metadata_incomplete", false);
+            editor->setProperty("ks_file_metadata_original_bytes", result->bytes);
+            editor->setProperty("ks_file_metadata_original_revision", state->revision);
+            editor->setProperty("ks_file_metadata_original_format", result->format);
+            QTextCursor first(editor->document());
+            first.movePosition(QTextCursor::Start);
+            editor->setTextCursor(first);
+            if (owner != nullptr && state != nullptr) finishMetadataRead(state);
+            if (owner != nullptr && editor != nullptr)
+                editor->setProperty("ks_file_metadata_original_revision", editor->document()->revision());
+        }
+
+        void publishMetadataText(QPlainTextEdit* editor, MetadataReadState* state, const MetadataReadValue& value, const QList<QObject*>& inputs = {})
+        {
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<MetadataReadState> stateGuard(state);
+            const QPointer<QPlainTextEdit> editorGuard(editor);
+            state->editor = editor;
+            state->projecting = true;
+            state->readOnly = editor->isReadOnly();
+            state->undoEnabled = editor->isUndoRedoEnabled();
+            state->layoutEnabled = editor->document()->isLayoutEnabled();
+            editor->setReadOnly(true);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->setUndoRedoEnabled(false);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->document()->setLayoutEnabled(false);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->setProperty("ks_file_metadata_original_bytes", QVariant());
+            editor->setProperty("ks_file_metadata_incomplete", true);
+            if (!editor->property("ks_file_metadata_text_wrap_mode").isValid())
+                editor->setProperty("ks_file_metadata_text_wrap_mode", static_cast<int>(editor->lineWrapMode()));
+            editor->setLineWrapMode(value.format == 1 ? QPlainTextEdit::NoWrap :
+                static_cast<QPlainTextEdit::LineWrapMode>(editor->property("ks_file_metadata_text_wrap_mode").toInt()));
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->clear();
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            state->revision = editor->document()->revision();
+            state->projectionInputs.clear();
+            for (QObject* input : inputs)
+            {
+                const auto value = stagingWidgetValue(input);
+                if (value.isValid()) state->projectionInputs.push_back({input, value});
+            }
+            auto snapshot = std::shared_ptr<const MetadataReadValue>(new MetadataReadValue(value), [](const MetadataReadValue* retired)
+                { QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; })); });
+            QTimer::singleShot(0, this, [owner, stateGuard, snapshot]()
+                { if (owner != nullptr) owner->continueMetadataTextProjection(stateGuard, snapshot, 0); });
+        }
+
+        using StagingInputValue = QPair<QPointer<QObject>, QVariant>;
+
+        static QVariant stagingWidgetValue(QObject* object)
+        {
+            if (auto* edit = qobject_cast<QPlainTextEdit*>(object)) return edit->document()->revision();
+            if (auto* date = qobject_cast<QDateTimeEdit*>(object)) return date->dateTime();
+            if (auto* spin = qobject_cast<QSpinBox*>(object)) return spin->value();
+            if (auto* combo = qobject_cast<QComboBox*>(object))
+                return QVariantList{ combo->currentIndex(), combo->currentData() };
+            if (auto* line = qobject_cast<QLineEdit*>(object))
+            {
+                if (qobject_cast<QAbstractSpinBox*>(line->parentWidget()) != nullptr ||
+                    qobject_cast<QComboBox*>(line->parentWidget()) != nullptr) return {};
+                return line->text();
+            }
+            if (auto* check = qobject_cast<QCheckBox*>(object)) return static_cast<int>(check->checkState());
+            if (auto* button = qobject_cast<QAbstractButton*>(object))
+                return button->isCheckable() ? QVariant(button->isChecked()) : QVariant();
+            if (auto* table = qobject_cast<QTableView*>(object))
+            {
+                const auto current = table->currentIndex();
+                QVariantList value{ QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(table->model())),
+                    current.row(), current.column() };
+                if (current.isValid())
+                {
+                    for (int column = 0; column < table->model()->columnCount(); ++column)
+                        value.push_back(current.sibling(current.row(), column).data());
+                    const auto first = current.sibling(current.row(), 0);
+                    for (int role = Qt::UserRole + 3; role <= Qt::UserRole + 6; ++role) value.push_back(first.data(role));
+                }
+                return value;
+            }
+            return {};
+        }
+
+        static bool stagingInputsUnchanged(const QVector<StagingInputValue>& inputs,
+            const std::function<QVariant(QObject*)>& value)
+        {
+            for (const auto& input : inputs)
+                if (input.first == nullptr || value(input.first) != input.second) return false;
+            return true;
+        }
+
+        struct StagingSnapshotResult
+        {
+            QList<ks::file::metadata::TargetPatch> patches;
+            QString failedPath;
+            DWORD error = ERROR_SUCCESS;
+            bool cancelled = false;
+        };
+
+        static StagingSnapshotResult collectStagingSnapshots(const QStringList& paths,
+            const std::shared_ptr<std::atomic_bool>& cancel,
+            const std::function<ks::file::metadata::FileSnapshot(const QString&)>& read)
+        {
+            StagingSnapshotResult result;
+            result.patches.reserve(paths.size());
+            for (const QString& path : paths)
+            {
+                if (cancel->load()) { result.cancelled = true; result.patches.clear(); return result; }
+                const auto snapshot = read(path);
                 if (!snapshot.ok)
                 {
-                    QMessageBox::warning(
-                        this,
-                        ks::i18n::sourceText(QStringLiteral("元数据编辑")),
-                        ks::i18n::sourceText(QStringLiteral("无法读取目标快照：%1\n%2"))
-                            .arg(QDir::toNativeSeparators(path))
-                            .arg(formatWin32ErrorText(snapshot.win32Error)));
-                    return false;
+                    result.failedPath = path;
+                    result.error = snapshot.win32Error;
+                    result.patches.clear();
+                    return result;
                 }
                 ks::file::metadata::TargetPatch patch;
                 patch.originalPath = path;
                 patch.snapshot = snapshot;
-                patches.push_back(patch);
+                result.patches.push_back(std::move(patch));
             }
-            m_pendingPatches = patches;
-            return !m_pendingPatches.isEmpty();
+            if (cancel->load()) { result.cancelled = true; result.patches.clear(); }
+            return result;
         }
+
+        bool ensurePendingPatchesForStaging()
+        {
+            if (metadataReadBusy() || m_stagingSnapshotBusy || m_transactionBusy)
+            {
+                QMessageBox::information(this, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                    ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+                return false;
+            }
+            if (!m_pendingPatches.isEmpty()) return true;
+            const QPointer<QAbstractButton> intent(qobject_cast<QAbstractButton*>(sender()));
+            if (intent == nullptr) return false;
+            QVector<StagingInputValue> inputs;
+            QWidget* const scope = m_tabWidget != nullptr ? m_tabWidget->currentWidget() : this;
+            if (scope != nullptr)
+            {
+                // A one-shot explicit staging snapshot, not a theme or paint observer.
+                for (QWidget* widget : scope->findChildren<QWidget*>())
+                {
+                    if (!widget->isVisibleTo(scope)) continue;
+                    const QVariant value = stagingWidgetValue(widget);
+                    if (value.isValid()) inputs.push_back({ widget, value });
+                }
+            }
+            m_stagingSnapshotBusy = true;
+            m_stagingSnapshotCancel = std::make_shared<std::atomic_bool>(false);
+            const auto cancel = m_stagingSnapshotCancel;
+            const auto generation = ++m_metadataOperationGeneration;
+            const auto paths = m_filePaths;
+            setMetadataEditorBusy(true);
+            if (m_tabWidget != nullptr) m_tabWidget->setEnabled(false);
+            if (m_tabNavigation != nullptr) m_tabNavigation->setEnabled(false);
+            updatePendingSaveUi();
+            const QPointer<FileDetailDialog> owner(this);
+            metadataReadPool().start(QRunnable::create([owner, intent, paths, cancel, generation, inputs]()
+                {
+                    auto result = std::shared_ptr<const StagingSnapshotResult>(
+                        new StagingSnapshotResult(collectStagingSnapshots(paths, cancel,
+                            [](const QString& path) { return ks::file::metadata::readFileSnapshot(path); })),
+                        [](const StagingSnapshotResult* retired)
+                        { QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; })); });
+                    QMetaObject::invokeMethod(qApp, [owner, intent, paths, cancel, generation, inputs, result]()
+                        {
+                            if (owner == nullptr || owner->m_metadataOperationGeneration != generation) return;
+                            owner->m_stagingSnapshotBusy = false;
+                            owner->m_stagingSnapshotCancel.reset();
+                            owner->setMetadataEditorBusy(false);
+                            if (owner == nullptr) return;
+                            if (owner->m_tabWidget != nullptr) owner->m_tabWidget->setEnabled(true);
+                            if (owner == nullptr) return;
+                            if (owner->m_tabNavigation != nullptr) owner->m_tabNavigation->setEnabled(true);
+                            if (owner == nullptr) return;
+                            owner->updatePendingSaveUi();
+                            if (owner == nullptr) return;
+                            if (cancel->load() || result->cancelled || owner->m_filePaths != paths || intent == nullptr) return;
+                            if (result->error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(owner, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                                    ks::i18n::sourceText(QStringLiteral("无法读取目标快照：%1\n%2"))
+                                        .arg(QDir::toNativeSeparators(result->failedPath)).arg(formatWin32ErrorText(result->error)));
+                                return;
+                            }
+                            if (!stagingInputsUnchanged(inputs, stagingWidgetValue))
+                            {
+                                QMessageBox::information(owner, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                                    ks::i18n::sourceText(QStringLiteral("暂存输入已变化，请检查当前内容后重新暂存。")));
+                                return;
+                            }
+                            owner->m_pendingPatches = result->patches;
+                            if (!result->patches.isEmpty()) intent->click();
+                        }, Qt::QueuedConnection);
+                }));
+            return false;
+        }
+
 
         int pendingOperationCount() const
         {
@@ -8746,9 +9627,12 @@ namespace
         {
             const int targetCount = pendingTargetCount();
             const int operationCount = pendingOperationCount();
+            const bool reading = m_stagingSnapshotBusy || metadataReadBusy();
             if (m_pendingChangesLabel != nullptr)
             {
-                m_pendingChangesLabel->setText(targetCount > 0
+                m_pendingChangesLabel->setText(reading
+                    ? ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据..."))
+                    : targetCount > 0
                     ? ks::i18n::sourceText(QStringLiteral(
                         "● 已暂存：%1 个目标，%2 类操作。文件尚未发生变化。"))
                         .arg(targetCount)
@@ -8757,11 +9641,11 @@ namespace
             }
             if (m_saveAllButton != nullptr)
             {
-                m_saveAllButton->setEnabled(targetCount > 0 && !m_transactionBusy);
+                m_saveAllButton->setEnabled(targetCount > 0 && !m_transactionBusy && !reading);
             }
             if (m_discardPendingButton != nullptr)
             {
-                m_discardPendingButton->setEnabled(targetCount > 0 && !m_transactionBusy);
+                m_discardPendingButton->setEnabled(targetCount > 0 && !m_transactionBusy && !reading);
             }
         }
 
@@ -8776,7 +9660,7 @@ namespace
 
         void discardPendingChanges()
         {
-            if (m_transactionBusy)
+            if (m_transactionBusy || m_stagingSnapshotBusy || metadataReadBusy())
             {
                 return;
             }
@@ -8837,7 +9721,198 @@ namespace
             return operation;
         }
 
-        void showTransactionResults(const ks::file::metadata::TransactionResult& result)
+        using FileDetailRows = QVector<QStringList>;
+
+        static std::shared_ptr<FileDetailRows> makeFileDetailRows()
+        {
+            // A canceled/closed display callback can be the last owner too.
+            // Keep destruction of a large uncommitted snapshot off the GUI thread.
+            return std::shared_ptr<FileDetailRows>(new FileDetailRows(), [](FileDetailRows* rows)
+                {
+                    QThreadPool::globalInstance()->start(QRunnable::create([rows]() { delete rows; }));
+                });
+        }
+
+        // The transaction owns complete immutable display rows before GUI delivery.
+        // A view asks only for visible cells; no per-operation QWidget items exist.
+        class FileDetailRowsModel final : public QAbstractTableModel
+        {
+        public:
+            FileDetailRowsModel(std::shared_ptr<const FileDetailRows> rows, QObject* parent,
+                QStringList headers = {}, QSet<int> translatedColumns = { 1, 2 })
+                : QAbstractTableModel(parent), m_rows(std::move(rows)),
+                  m_headers(headers.isEmpty() ? QStringList{ QStringLiteral("目标"), QStringLiteral("操作"),
+                    QStringLiteral("结果"), QStringLiteral("错误"), QStringLiteral("详情"),
+                    QStringLiteral("备份") } : std::move(headers)), m_translatedColumns(std::move(translatedColumns))
+            {
+                if (parent != nullptr) parent->installEventFilter(this);
+            }
+
+            void setSnapshot(std::shared_ptr<const FileDetailRows> rows)
+            {
+                const QPointer<FileDetailRowsModel> lifetime(this);
+                beginResetModel();
+                if (lifetime == nullptr) return;
+                auto retired = std::move(m_rows);
+                m_rows = std::move(rows);
+                endResetModel();
+                if (retired != nullptr)
+                    QThreadPool::globalInstance()->start(QRunnable::create(
+                        [retired = std::move(retired)]() mutable { retired.reset(); }));
+            }
+
+            ~FileDetailRowsModel() override
+            {
+                if (m_rows != nullptr)
+                    QThreadPool::globalInstance()->start(QRunnable::create(
+                        [retired = std::move(m_rows)]() mutable { retired.reset(); }));
+            }
+
+            int rowCount(const QModelIndex& parent = {}) const override
+            {
+                return parent.isValid() || m_rows == nullptr ? 0 : static_cast<int>(m_rows->size());
+            }
+
+            int columnCount(const QModelIndex& parent = {}) const override
+            {
+                return parent.isValid() ? 0 : static_cast<int>(m_headers.size());
+            }
+
+            QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
+            {
+                if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() ||
+                    index.column() < 0 || index.column() >= columnCount() ||
+                    (role != Qt::DisplayRole && role != Qt::ToolTipRole))
+                {
+                    return {};
+                }
+                const QString value = m_rows->at(index.row()).value(index.column());
+                return m_translatedColumns.contains(index.column()) ? ks::i18n::displayText(value) : value;
+            }
+
+            QVariant headerData(const int section, const Qt::Orientation orientation,
+                const int role = Qt::DisplayRole) const override
+            {
+                if (orientation == Qt::Horizontal && role == Qt::DisplayRole &&
+                    section >= 0 && section < columnCount())
+                {
+                    return ks::i18n::displayText(m_headers.at(section));
+                }
+                return QAbstractTableModel::headerData(section, orientation, role);
+            }
+
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override
+            {
+                if (event != nullptr && event->type() == QEvent::LanguageChange)
+                {
+                    emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
+                    if (rowCount() > 0)
+                        emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), { Qt::DisplayRole, Qt::ToolTipRole });
+                }
+                return QAbstractTableModel::eventFilter(watched, event);
+            }
+
+        private:
+            std::shared_ptr<const FileDetailRows> m_rows;
+            QStringList m_headers;
+            QSet<int> m_translatedColumns;
+        };
+
+        static std::shared_ptr<const FileDetailRows> transactionDisplayRows(
+            const ks::file::metadata::TransactionResult& result)
+        {
+            auto rows = makeFileDetailRows();
+            qsizetype rowCount = 0;
+            for (const auto& target : result.targets) rowCount += target.operations.size();
+            rows->reserve(rowCount);
+            for (const ks::file::metadata::TargetResult& target : result.targets)
+            {
+                const QString path = QDir::toNativeSeparators(target.originalPath);
+                const QString backup = QDir::toNativeSeparators(target.backupPath);
+                for (const ks::file::metadata::OperationResult& operation : target.operations)
+                {
+                    rows->push_back(QStringList{ path, transactionOperationText(operation.operation),
+                        operation.ok
+                            ? (operation.verified ? QStringLiteral("成功并验证") : QStringLiteral("成功，未验证"))
+                            : QStringLiteral("失败"),
+                        operation.ok ? QStringLiteral("0") : QStringLiteral("%1 · %2")
+                            .arg(operation.win32Error).arg(formatWin32ErrorText(operation.win32Error)),
+                        operation.detail, backup });
+                }
+            }
+            return rows;
+        }
+
+        static QString transactionTargetKey(const QString& path)
+        {
+            return QDir::cleanPath(path).toCaseFolded();
+        }
+
+        // Match against the original target catalog, never against a path already
+        // renamed by another result. Failed targets retain their exact pending patch.
+        static void reconcileTransactionResults(
+            const ks::file::metadata::TransactionResult& result,
+            QList<ks::file::metadata::TargetPatch>& pendingPatches, QStringList& paths)
+        {
+            QHash<QString, qsizetype> resultByTarget;
+            resultByTarget.reserve(result.targets.size());
+            for (qsizetype index = 0; index < result.targets.size(); ++index)
+            {
+                const QString key = transactionTargetKey(result.targets.at(index).originalPath);
+                if (!resultByTarget.contains(key)) resultByTarget.insert(key, index);
+            }
+            QHash<QString, QString> finalPathByTarget;
+            finalPathByTarget.reserve(pendingPatches.size());
+            for (ks::file::metadata::TargetPatch& pendingPatch : pendingPatches)
+            {
+                const QString key = transactionTargetKey(pendingPatch.originalPath);
+                const auto found = resultByTarget.constFind(key);
+                if (found == resultByTarget.cend()) continue;
+                const auto& target = result.targets.at(found.value());
+                if (!target.ok) continue;
+                finalPathByTarget.insert(key, target.finalPath);
+                pendingPatch = {};
+                pendingPatch.originalPath = target.finalPath;
+                pendingPatch.snapshot = target.finalSnapshot;
+            }
+            for (QString& path : paths)
+            {
+                const auto found = finalPathByTarget.constFind(transactionTargetKey(path));
+                if (found != finalPathByTarget.cend()) path = found.value();
+            }
+        }
+
+        static void installValueTableCopyMenu(QTableView* table)
+        {
+            table->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(table, &QTableView::customContextMenuRequested, table,
+                [table](const QPoint& localPosition)
+                {
+                    const QModelIndex clicked = table->indexAt(localPosition);
+                    if (clicked.isValid()) table->setCurrentIndex(clicked);
+                    const QPersistentModelIndex selected(table->currentIndex());
+                    const QPointer<QTableView> tableGuard(table);
+                    QMenu menu;
+                    menu.setPalette(table->palette());
+                    menu.setStyleSheet(buildContextMenuStyle());
+                    connect(table, &QObject::destroyed, &menu, &QMenu::close);
+                    QAction* copy = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                        QStringLiteral("复制当前行"));
+                    ks::ui::SetTableContextActionRole(copy, ks::ui::TableContextActionRole::CopyRows);
+                    copy->setEnabled(selected.isValid());
+                    if (menu.exec(table->viewport()->mapToGlobal(localPosition)) != copy ||
+                        tableGuard == nullptr || !selected.isValid()) return;
+                    QStringList values;
+                    for (int column = 0; column < table->model()->columnCount(); ++column)
+                        values.push_back(selected.sibling(selected.row(), column).data().toString());
+                    if (QClipboard* clipboard = QApplication::clipboard())
+                        clipboard->setText(values.join(QLatin1Char('\t')));
+                });
+        }
+
+        void showTransactionResults(const ks::file::metadata::TransactionResult& result,
+            std::shared_ptr<const FileDetailRows> rows)
         {
             QDialog* dialog = new QDialog(this);
             dialog->setAttribute(Qt::WA_DeleteOnClose, true);
@@ -8853,53 +9928,29 @@ namespace
             summaryLabel->setWordWrap(true);
             layout->addWidget(summaryLabel);
 
-            QTableWidget* table = new ks::ui::VisibleTableWidget(dialog);
+            QTableView* table = new ks::ui::TableActionTableView(dialog);
             // 保存结果是一次事务报告，仅保留紧凑复制/导出入口。
             ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-            table->setColumnCount(6);
-            table->setHorizontalHeaderLabels(QStringList{
-                QStringLiteral("目标"),
-                QStringLiteral("操作"),
-                QStringLiteral("结果"),
-                QStringLiteral("错误"),
-                QStringLiteral("详情"),
-                QStringLiteral("备份") });
+            auto* model = new FileDetailRowsModel(std::move(rows), table);
+            auto* proxy = new QSortFilterProxyModel(table);
+            proxy->setDynamicSortFilter(false);
+            proxy->setSourceModel(model);
+            table->setProperty("ks_i18n_preserve_model_data", true);
+            table->setModel(proxy);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
             table->setSelectionMode(QAbstractItemView::ExtendedSelection);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers);
             table->setAlternatingRowColors(true);
-            int rowCount = 0;
-            for (const ks::file::metadata::TargetResult& target : result.targets)
-            {
-                rowCount += target.operations.size();
-            }
-            table->setRowCount(rowCount);
-            int row = 0;
-            for (const ks::file::metadata::TargetResult& target : result.targets)
-            {
-                for (const ks::file::metadata::OperationResult& operation : target.operations)
-                {
-                    table->setItem(row, 0, new QTableWidgetItem(QDir::toNativeSeparators(target.originalPath)));
-                    table->setItem(row, 1, new QTableWidgetItem(transactionOperationText(operation.operation)));
-                    table->setItem(row, 2, new QTableWidgetItem(operation.ok
-                        ? (operation.verified ? QStringLiteral("成功并验证") : QStringLiteral("成功，未验证"))
-                        : QStringLiteral("失败")));
-                    table->setItem(row, 3, new QTableWidgetItem(operation.ok
-                        ? QStringLiteral("0")
-                        : QStringLiteral("%1 · %2")
-                            .arg(operation.win32Error)
-                            .arg(formatWin32ErrorText(operation.win32Error))));
-                    table->setItem(row, 4, new QTableWidgetItem(operation.detail));
-                    table->setItem(row, 5, new QTableWidgetItem(QDir::toNativeSeparators(target.backupPath)));
-                    ++row;
-                }
-            }
-            installFileTableCopyMenu(table);
+            ks::ui::SetTableColumnAutoFitEnabled(table, false);
             if (table->horizontalHeader() != nullptr)
             {
+                table->horizontalHeader()->setResizeContentsPrecision(64);
                 table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
                 table->horizontalHeader()->setStretchLastSection(true);
+                table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
             }
+            table->setSortingEnabled(true);
+            installValueTableCopyMenu(table);
             layout->addWidget(table, 1);
             QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
             connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
@@ -8919,7 +9970,7 @@ namespace
 
         void saveAllPendingChanges()
         {
-            if (m_transactionBusy)
+            if (m_transactionBusy || m_stagingSnapshotBusy || metadataReadBusy())
             {
                 return;
             }
@@ -8933,21 +9984,89 @@ namespace
                 return;
             }
 
-            bool requiresBackup = false;
+            const auto cancel = std::make_shared<std::atomic_bool>(false);
+            m_savePreflightCancel = cancel;
+            const quint64 generation = ++m_savePreflightGeneration;
+            setTransactionBusy(true);
+            auto* progress = new QDialog(this);
+            progress->setAttribute(Qt::WA_DeleteOnClose, true);
+            progress->setWindowTitle(ks::i18n::sourceText(QStringLiteral("数字签名")));
+            progress->setWindowModality(Qt::NonModal);
+            auto* progressLayout = new QVBoxLayout(progress);
+            auto* progressText = new QLabel(ks::i18n::text(
+                QStringLiteral("driver.signature.pending.detail"),
+                QStringLiteral("数字签名信任链等待后台验证。")), progress);
+            progressText->setWordWrap(true);
+            progressLayout->addWidget(progressText);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, progress);
+            progressLayout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::rejected, progress, &QDialog::reject);
+            connect(progress, &QDialog::finished, this, [this, cancel](int)
+                {
+                    if (m_savePreflightCancel != cancel) return;
+                    cancel->store(true);
+                    ++m_savePreflightGeneration;
+                    m_savePreflightCancel.reset();
+                    setTransactionBusy(false);
+                });
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QDialog> progressGuard(progress);
+            progress->show();
+            QThreadPool::globalInstance()->start(QRunnable::create(
+                [guardThis, progressGuard, patches, cancel, generation]()
+                {
+                    const auto preflight = inspectSaveSignatures(patches, cancel,
+                        [](const QString& path) { return ks::file::metadata::inspectSignature(path); });
+                    QMetaObject::invokeMethod(qApp,
+                        [guardThis, progressGuard, patches, cancel, generation, preflight]() mutable
+                        {
+                            if (guardThis == nullptr ||
+                                guardThis->m_savePreflightGeneration != generation ||
+                                guardThis->m_savePreflightCancel != cancel) return;
+                            guardThis->m_savePreflightCancel.reset();
+                            if (progressGuard != nullptr) progressGuard->close();
+                            if (guardThis == nullptr) return;
+                            guardThis->setTransactionBusy(false);
+                            if (guardThis != nullptr && !cancel->load() && !preflight.cancelled)
+                                guardThis->continueSaveAfterSignaturePreflight(
+                                    std::move(patches), preflight.signedTargetWillChange,
+                                    preflight.hasCatalogSignature);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        struct SaveSignaturePreflight
+        {
             bool signedTargetWillChange = false;
             bool hasCatalogSignature = false;
-            for (const ks::file::metadata::TargetPatch& patch : patches)
+            bool cancelled = false;
+        };
+
+        static SaveSignaturePreflight inspectSaveSignatures(
+            const QList<ks::file::metadata::TargetPatch>& patches,
+            const std::shared_ptr<std::atomic_bool>& cancel,
+            const std::function<ks::file::metadata::SignatureInspection(const QString&)>& inspect)
+        {
+            SaveSignaturePreflight result;
+            for (const auto& patch : patches)
             {
-                requiresBackup = requiresBackup || patch.highRisk();
-                if (!patch.snapshot.directory)
-                {
-                    const ks::file::metadata::SignatureInspection signature =
-                        ks::file::metadata::inspectSignature(patch.originalPath);
-                    signedTargetWillChange = signedTargetWillChange ||
-                        signature.embedded || signature.catalog;
-                    hasCatalogSignature = hasCatalogSignature || signature.catalog;
-                }
+                if (cancel->load()) { result.cancelled = true; return result; }
+                if (patch.snapshot.directory) continue;
+                const auto signature = inspect(patch.originalPath);
+                if (cancel->load()) { result.cancelled = true; return result; }
+                result.signedTargetWillChange = result.signedTargetWillChange || signature.embedded || signature.catalog;
+                result.hasCatalogSignature = result.hasCatalogSignature || signature.catalog;
             }
+            return result;
+        }
+
+        void continueSaveAfterSignaturePreflight(
+            QList<ks::file::metadata::TargetPatch> patches,
+            const bool signedTargetWillChange, const bool hasCatalogSignature)
+        {
+            const QPointer<FileDetailDialog> lifetime(this);
+            bool requiresBackup = std::any_of(patches.cbegin(), patches.cend(),
+                [](const auto& patch) { return patch.highRisk(); });
             if (requiresBackup &&
                 (m_backupBeforeSaveCheck == nullptr || !m_backupBeforeSaveCheck->isChecked()))
             {
@@ -8961,32 +10080,34 @@ namespace
 
             if (signedTargetWillChange)
             {
-                QMessageBox signaturePrompt(this);
-                signaturePrompt.setIcon(QMessageBox::Warning);
-                signaturePrompt.setWindowTitle(
+                QPointer<QMessageBox> signaturePrompt = new QMessageBox(this);
+                signaturePrompt->setIcon(QMessageBox::Warning);
+                signaturePrompt->setWindowTitle(
                     ks::i18n::sourceText(QStringLiteral("已签名文件将被修改")));
-                signaturePrompt.setText(
+                signaturePrompt->setText(
                     ks::i18n::sourceText(QStringLiteral(
                         "修改已签名文件后，Authenticode 验证可能失效。请选择签名数据处理方式。")) +
                     (hasCatalogSignature
                         ? QLatin1Char('\n') + ks::i18n::sourceText(QStringLiteral(
                             "检测到 Catalog 签名。Catalog 只能显示失效状态，无法从文件本身删除。"))
                         : QString()));
-                QPushButton* removeButton = signaturePrompt.addButton(
+                QPushButton* removeButton = signaturePrompt->addButton(
                     ks::i18n::sourceText(QStringLiteral("清除嵌入式签名并继续")),
                     QMessageBox::AcceptRole);
-                QPushButton* preserveButton = signaturePrompt.addButton(
+                QPushButton* preserveButton = signaturePrompt->addButton(
                     ks::i18n::sourceText(QStringLiteral("保留签名数据并继续")),
                     QMessageBox::DestructiveRole);
-                QPushButton* cancelButton = signaturePrompt.addButton(
+                QPushButton* cancelButton = signaturePrompt->addButton(
                     QMessageBox::Cancel);
-                signaturePrompt.setDefaultButton(cancelButton);
-                signaturePrompt.exec();
-                if (signaturePrompt.clickedButton() == cancelButton)
+                signaturePrompt->setDefaultButton(cancelButton);
+                signaturePrompt->exec();
+                if (lifetime == nullptr || signaturePrompt == nullptr) return;
+                signaturePrompt->deleteLater();
+                if (signaturePrompt->clickedButton() == cancelButton)
                 {
                     return;
                 }
-                if (signaturePrompt.clickedButton() == removeButton)
+                if (signaturePrompt->clickedButton() == removeButton)
                 {
                     for (ks::file::metadata::TargetPatch& patch : patches)
                     {
@@ -8997,7 +10118,7 @@ namespace
                         }
                     }
                 }
-                else if (signaturePrompt.clickedButton() != preserveButton)
+                else if (signaturePrompt->clickedButton() != preserveButton)
                 {
                     return;
                 }
@@ -9027,7 +10148,7 @@ namespace
                     .arg(pendingOperationCount()),
                 QMessageBox::Yes | QMessageBox::No,
                 QMessageBox::No);
-            if (confirmation != QMessageBox::Yes)
+            if (lifetime == nullptr || confirmation != QMessageBox::Yes)
             {
                 return;
             }
@@ -9042,49 +10163,31 @@ namespace
             options.createBackup = m_backupBeforeSaveCheck != nullptr &&
                 m_backupBeforeSaveCheck->isChecked();
             QPointer<FileDetailDialog> guardThis(this);
-            auto* task = QRunnable::create([guardThis, patches, options]()
+            const auto pendingPatches = m_pendingPatches;
+            const auto originalPaths = m_filePaths;
+            auto* task = QRunnable::create([guardThis, patches, options, pendingPatches, originalPaths]()
                 {
                     const ks::file::metadata::TransactionResult result =
                         ks::file::metadata::executeTransaction(patches, options);
-                    if (guardThis == nullptr) return;
+                    auto updatedPending = pendingPatches;
+                    auto updatedPaths = originalPaths;
+                    reconcileTransactionResults(result, updatedPending, updatedPaths);
+                    const auto rows = transactionDisplayRows(result);
+                    // Accepted transactions finish independently of the page. Only
+                    // the queued GUI callback may dereference the dialog guard.
                     QMetaObject::invokeMethod(
-                        guardThis.data(),
-                        [guardThis, result]()
+                        qApp,
+                        [guardThis, result, updatedPending, updatedPaths, rows]()
                         {
                             if (guardThis == nullptr) return;
-                            QStringList updatedPaths = guardThis->m_filePaths;
-                            for (ks::file::metadata::TargetPatch& pendingPatch : guardThis->m_pendingPatches)
-                            {
-                                const auto resultIterator = std::find_if(
-                                    result.targets.cbegin(),
-                                    result.targets.cend(),
-                                    [&pendingPatch](const ks::file::metadata::TargetResult& target)
-                                    {
-                                        return QDir::cleanPath(target.originalPath).compare(
-                                            QDir::cleanPath(pendingPatch.originalPath),
-                                            Qt::CaseInsensitive) == 0;
-                                    });
-                                if (resultIterator == result.targets.cend() || !resultIterator->ok)
-                                {
-                                    continue;
-                                }
-                                for (QString& path : updatedPaths)
-                                {
-                                    if (QDir::cleanPath(path).compare(
-                                        QDir::cleanPath(pendingPatch.originalPath),
-                                        Qt::CaseInsensitive) == 0)
-                                    {
-                                        path = resultIterator->finalPath;
-                                    }
-                                }
-                                pendingPatch = {};
-                                pendingPatch.originalPath = resultIterator->finalPath;
-                                pendingPatch.snapshot = resultIterator->finalSnapshot;
-                            }
+                            guardThis->m_pendingPatches = updatedPending;
                             guardThis->m_filePaths = updatedPaths;
                             guardThis->m_filePath = updatedPaths.value(0);
+                            if (guardThis->m_batchMode)
+                                guardThis->startBatchGeneralFileSnapshotLoad(
+                                    guardThis->m_generalBatchTable, guardThis->m_generalBatchSummary);
                             guardThis->setTransactionBusy(false);
-                            guardThis->showTransactionResults(result);
+                            guardThis->showTransactionResults(result, rows);
                             guardThis->updatePendingSaveUi();
                             if (result.ok)
                             {
@@ -9102,11 +10205,7 @@ namespace
                                 guardThis->m_generalR0Loaded = false;
                                 if (!guardThis->m_batchMode)
                                 {
-                                    guardThis->refreshGeneralTab();
-                                    const QFileInfo refreshedInfo(guardThis->m_filePath);
-                                    guardThis->startR0FileInfoLoad(
-                                        refreshedInfo,
-                                        guardThis->m_generalNtPathText);
+                                    guardThis->startGeneralFileSnapshotLoad();
                                 }
                             }
                         },
@@ -9181,6 +10280,30 @@ namespace
                     {
                         realPage = buildMetadataTab();
                     }
+                    else if (lazyKey == QStringLiteral("metadata_name"))
+                    {
+                        realPage = buildMetadataNameAndFilesystemPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_shell"))
+                    {
+                        realPage = buildMetadataShellPropertyPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_ads"))
+                    {
+                        realPage = buildMetadataAdsPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_ea"))
+                    {
+                        realPage = buildMetadataEaPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_security"))
+                    {
+                        realPage = buildMetadataSecurityPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_pe"))
+                    {
+                        realPage = buildMetadataPeAndReparsePage(tabGuard.data());
+                    }
                     else if (lazyKey == QStringLiteral("security"))
                     {
                         realPage = buildSecurityTab();
@@ -9188,6 +10311,10 @@ namespace
                     else if (lazyKey == QStringLiteral("reparse"))
                     {
                         realPage = buildReparseTab();
+                    }
+                    else if (lazyKey == QStringLiteral("hash"))
+                    {
+                        realPage = buildHashTab();
                     }
                     else if (lazyKey == QStringLiteral("usage"))
                     {
@@ -9236,6 +10363,7 @@ namespace
                         return;
                     }
 
+                    ks::ui::ScopedWidgetThemePreparation prepareTheme(tabGuard.data());
                     const QString titleText = tabGuard->tabText(tabIndex);
                     // 编辑表单由共享详情框架按页面内部用途适配；禁止在整个 Tab 外再套滚动区。
                     tabGuard->removeTab(tabIndex);
@@ -9243,7 +10371,12 @@ namespace
                     // 新建的懒加载页也必须立即拿到 Surface 调色板，不能回退到系统 Base。
                     realPage->setMinimumSize(0, 0);
                     realPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-                    tabGuard->tabBar()->hide();
+                    // Only the outer detail navigation owns a hidden tab bar.
+                    // Metadata keeps its original seven visible inner tabs.
+                    if (tabGuard.data() == m_tabWidget)
+                    {
+                        tabGuard->tabBar()->hide();
+                    }
                     ks::ui::InstallDetailWindowFramework(this);
                     applyThemeStyle();
                     tabGuard->setCurrentIndex(tabIndex);
@@ -9254,12 +10387,34 @@ namespace
         // 创建全宽对象摘要；文件位置与复制动作在切换任何详情页时仍可达。
         QWidget* buildIdentityHeader()
         {
-            QFileIconProvider iconProvider;
             const QString title = m_batchMode
                 ? ks::i18n::sourceText(QStringLiteral("批量文件属性 - %1 项")).arg(m_filePaths.size())
                 : QFileInfo(m_filePath).fileName();
             QWidget* header = ks::ui::CreateDetailSummaryHeader(this, title,
-                QDir::toNativeSeparators(m_filePath), iconProvider.icon(QFileInfo(m_filePath)));
+                QDir::toNativeSeparators(m_filePath), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+            const QPointer<QLabel> imageGuard(qobject_cast<QLabel*>(header->layout()->itemAt(0)->widget()));
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QString path = m_filePath;
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, imageGuard, path]()
+                {
+                    const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                    const QString nativePath = QDir::toNativeSeparators(path);
+                    SHFILEINFOW shellInfo{};
+                    QImage image;
+                    if (::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(nativePath.utf16()), 0,
+                        &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_LARGEICON) && shellInfo.hIcon)
+                    {
+                        image = QImage::fromHICON(shellInfo.hIcon);
+                        ::DestroyIcon(shellInfo.hIcon);
+                    }
+                    if (SUCCEEDED(comResult)) ::CoUninitialize();
+                    QMetaObject::invokeMethod(qApp, [guardThis, imageGuard, path, image]()
+                        {
+                            if (guardThis == nullptr || imageGuard == nullptr ||
+                                guardThis->m_filePath != path || image.isNull()) return;
+                            imageGuard->setPixmap(QIcon(QPixmap::fromImage(image)).pixmap(48, 48));
+                        }, Qt::QueuedConnection);
+                }));
             auto* actions = qobject_cast<QHBoxLayout*>(header->layout());
             auto* location = new QPushButton(ks::i18n::sourceText(QStringLiteral("打开所在位置")), header);
             auto* copyPath = new QPushButton(ks::i18n::sourceText(QStringLiteral("复制路径")), header);
@@ -9288,82 +10443,109 @@ namespace
             return header;
         }
 
+        void startBatchGeneralFileSnapshotLoad(QTableView* table, QLabel* summary)
+        {
+            if (table == nullptr || summary == nullptr || m_generalBatchRowsModel == nullptr) return;
+            if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
+            summary->setText(ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+            const QStringList paths = m_filePaths;
+            const auto cancel = std::make_shared<std::atomic_bool>(false);
+            m_generalReadCancel = cancel;
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QTableView> tableGuard(table);
+            const QPointer<QLabel> summaryGuard(summary);
+            const QPointer<FileDetailRowsModel> modelGuard(m_generalBatchRowsModel);
+            QThreadPool::globalInstance()->start(QRunnable::create([guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel]()
+                {
+                    auto rows = makeFileDetailRows();
+                    rows->reserve(paths.size());
+                    quint64 totalSize = 0;
+                    int directoryCount = 0;
+                    int fileCount = 0;
+                    for (const QString& path : paths)
+                    {
+                        if (cancel->load()) return;
+                        const QFileInfo info(path);
+                        const bool exists = info.exists();
+                        if (exists && info.isDir()) ++directoryCount;
+                        if (exists && info.isFile())
+                        {
+                            ++fileCount;
+                            totalSize += static_cast<quint64>(std::max<qint64>(0, info.size()));
+                        }
+                        const auto nativePath = QDir::toNativeSeparators(path).toStdWString();
+                        const DWORD attributes = ::GetFileAttributesW(nativePath.c_str());
+                        rows->push_back(QStringList{ QDir::toNativeSeparators(path),
+                            info.isDir() ? QStringLiteral("目录") : (info.isFile() ? QStringLiteral("文件") : QStringLiteral("其它")),
+                            info.isFile() ? formatFileSizeText(static_cast<qulonglong>(std::max<qint64>(0, info.size()))) : QStringLiteral("-"),
+                            attributes == INVALID_FILE_ATTRIBUTES ? QStringLiteral("-") : fileAttributesToText(attributes),
+                            info.lastModified().isValid() ? info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-"),
+                            exists ? QStringLiteral("可访问") : QStringLiteral("不存在或不可访问") });
+                    }
+                    QMetaObject::invokeMethod(qApp,
+                        [guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel, rows, totalSize, directoryCount, fileCount]()
+                        {
+                            const auto commitSnapshot =
+                                [guardThis, tableGuard, summaryGuard, modelGuard, paths, cancel, rows, totalSize, directoryCount, fileCount]()
+                                {
+                                    if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                        cancel->load() || guardThis->m_filePaths != paths) return;
+                                    modelGuard->setSnapshot(rows);
+                                    if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                        cancel->load() || guardThis->m_filePaths != paths) return;
+                                    summaryGuard->setText(ks::i18n::sourceText(QStringLiteral(
+                                        "已选择 %1 项：文件 %2，目录 %3，文件总大小 %4。"))
+                                        .arg(paths.size()).arg(fileCount).arg(directoryCount).arg(formatFileSizeText(totalSize)));
+                                };
+                            if (guardThis == nullptr || tableGuard == nullptr || summaryGuard == nullptr || modelGuard == nullptr ||
+                                cancel->load() || guardThis->m_filePaths != paths) return;
+                            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                                guardThis.data(), QStringLiteral("file-detail-general-snapshot"),
+                                { tableGuard.data() }, commitSnapshot)) return;
+                            commitSnapshot();
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
         QWidget* buildGeneralTab()
         {
             if (m_batchMode)
             {
                 QWidget* page = new QWidget(this);
                 QVBoxLayout* layout = new QVBoxLayout(page);
-                quint64 totalSize = 0U;
-                int fileCount = 0;
-                int directoryCount = 0;
-                QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-                table->setColumnCount(6);
-                // 批量属性摘要固定于本批目标，不需要通用前后快照。
+                QTableView* table = new ks::ui::TableActionTableView(page);
                 ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-                table->setHorizontalHeaderLabels(QStringList{
-                    QStringLiteral("路径"),
-                    QStringLiteral("类型"),
-                    QStringLiteral("大小"),
-                    QStringLiteral("属性"),
-                    QStringLiteral("最后修改"),
-                    QStringLiteral("状态") });
-                table->setRowCount(m_filePaths.size());
                 table->setSelectionBehavior(QAbstractItemView::SelectRows);
                 table->setSelectionMode(QAbstractItemView::ExtendedSelection);
                 table->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 table->setAlternatingRowColors(true);
-                for (qsizetype row = 0; row < m_filePaths.size(); ++row)
-                {
-                    const QString path = m_filePaths.at(row);
-                    const QFileInfo info(path);
-                    const bool exists = info.exists();
-                    if (exists && info.isDir()) ++directoryCount;
-                    if (exists && info.isFile())
-                    {
-                        ++fileCount;
-                        totalSize += static_cast<quint64>(std::max<qint64>(0, info.size()));
-                    }
-                    const std::wstring nativePathText = QDir::toNativeSeparators(path).toStdWString();
-                    const DWORD attributes = ::GetFileAttributesW(nativePathText.c_str());
-                    table->setItem(static_cast<int>(row), 0,
-                        new QTableWidgetItem(QDir::toNativeSeparators(path)));
-                    table->setItem(static_cast<int>(row), 1,
-                        new QTableWidgetItem(info.isDir()
-                            ? QStringLiteral("目录")
-                            : (info.isFile() ? QStringLiteral("文件") : QStringLiteral("其它"))));
-                    table->setItem(static_cast<int>(row), 2,
-                        new QTableWidgetItem(info.isFile()
-                            ? formatFileSizeText(static_cast<qulonglong>(std::max<qint64>(0, info.size())))
-                            : QStringLiteral("-")));
-                    table->setItem(static_cast<int>(row), 3,
-                        new QTableWidgetItem(attributes == INVALID_FILE_ATTRIBUTES
-                            ? QStringLiteral("-")
-                            : fileAttributesToText(attributes)));
-                    table->setItem(static_cast<int>(row), 4,
-                        new QTableWidgetItem(info.lastModified().isValid()
-                            ? info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                            : QStringLiteral("-")));
-                    table->setItem(static_cast<int>(row), 5,
-                        new QTableWidgetItem(exists ? QStringLiteral("可访问") : QStringLiteral("不存在或不可访问")));
-                }
-                QLabel* summary = new QLabel(
-                    ks::i18n::sourceText(QStringLiteral(
-                        "已选择 %1 项：文件 %2，目录 %3，文件总大小 %4。"))
-                        .arg(m_filePaths.size())
-                        .arg(fileCount)
-                        .arg(directoryCount)
-                        .arg(formatFileSizeText(totalSize)),
-                    page);
+                table->setProperty("ks_i18n_preserve_model_data", true);
+                QLabel* summary = new QLabel(ks::i18n::sourceText(
+                    QStringLiteral("● 正在后台读取文件元数据...")), page);
                 summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
                 layout->addWidget(summary);
-                installFileTableCopyMenu(table);
+                installValueTableCopyMenu(table);
+                ks::ui::SetTableColumnAutoFitEnabled(table, false);
                 if (table->horizontalHeader() != nullptr)
                 {
+                    table->horizontalHeader()->setResizeContentsPrecision(64);
                     table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
                     table->horizontalHeader()->setStretchLastSection(true);
+                    table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
                 }
                 layout->addWidget(table, 1);
+                auto* model = new FileDetailRowsModel(std::make_shared<const FileDetailRows>(), table,
+                    { QStringLiteral("目标"), QStringLiteral("类型"), QStringLiteral("大小"),
+                      QStringLiteral("属性"), QStringLiteral("修改时间"), QStringLiteral("状态") }, {1, 2, 3, 5});
+                auto* proxy = new QSortFilterProxyModel(table);
+                proxy->setDynamicSortFilter(false);
+                proxy->setSourceModel(model);
+                table->setModel(proxy);
+                table->setSortingEnabled(true);
+                m_generalBatchTable = table;
+                m_generalBatchSummary = summary;
+                m_generalBatchRowsModel = model;
+                startBatchGeneralFileSnapshotLoad(table, summary);
                 return page;
             }
 
@@ -9371,13 +10553,9 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
 
             m_generalPropertyView = new ks::ui::StructuredFieldView(page);
-            const QFileInfo info(m_filePath);
-            m_generalNtPathText = buildDriverNtPath(info.absoluteFilePath());
-            m_generalR0Loaded = false;
             m_generalR0Info = {};
-            refreshGeneralTab();
             layout->addWidget(m_generalPropertyView, 1);
-            startR0FileInfoLoad(info, m_generalNtPathText);
+            startGeneralFileSnapshotLoad();
             return page;
         }
 
@@ -9419,6 +10597,20 @@ namespace
                 if (okOut != nullptr) *okOut = false;
                 return {};
             }
+            if (editor->property("ks_file_metadata_incomplete").toBool())
+            {
+                if (okOut != nullptr) *okOut = false;
+                return {};
+            }
+            const QVariant original = editor->property("ks_file_metadata_original_bytes");
+            const int format = formatCombo == nullptr ? 0 : formatCombo->currentIndex();
+            if (original.isValid() &&
+                editor->property("ks_file_metadata_original_revision").toInt() == editor->document()->revision() &&
+                editor->property("ks_file_metadata_original_format").toInt() == format)
+            {
+                if (okOut != nullptr) *okOut = true;
+                return original.toByteArray();
+            }
             if (formatCombo != nullptr && formatCombo->currentIndex() == 1)
             {
                 return parseMetadataHexText(editor->toPlainText(), okOut);
@@ -9427,106 +10619,82 @@ namespace
             return editor->toPlainText().toUtf8();
         }
 
-        void refreshMetadataStreamTable(QTableWidget* table)
+        static QTableView* createPropertyTable(QWidget* parent, QStringList headers, const QString& key)
         {
-            if (table == nullptr) return;
-            table->setRowCount(0);
-            const QStringList paths = m_filePaths;
-            QPointer<QTableWidget> tableGuard(table);
-            auto* task = QRunnable::create([tableGuard, paths]()
-                {
-                    QList<QStringList> rows;
-                    for (const QString& path : paths)
-                    {
-                        DWORD error = ERROR_SUCCESS;
-                        const QList<ks::file::metadata::StreamEntry> streams =
-                            ks::file::metadata::enumerateStreams(path, &error);
-                        if (error != ERROR_SUCCESS)
-                        {
-                            rows.push_back(QStringList{
-                                path,
-                                QStringLiteral("<读取失败>"),
-                                QString::number(error) });
-                            continue;
-                        }
-                        for (const ks::file::metadata::StreamEntry& stream : streams)
-                        {
-                            rows.push_back(QStringList{
-                                path,
-                                stream.name,
-                                QString::number(stream.size) });
-                        }
-                    }
-                    if (tableGuard == nullptr) return;
-                    QMetaObject::invokeMethod(tableGuard.data(), [tableGuard, rows]()
-                        {
-                            if (tableGuard == nullptr) return;
-                            tableGuard->setRowCount(rows.size());
-                            for (qsizetype row = 0; row < rows.size(); ++row)
-                            {
-                                const QStringList values = rows.at(row);
-                                for (int column = 0; column < values.size(); ++column)
-                                {
-                                    tableGuard->setItem(static_cast<int>(row), column,
-                                        new QTableWidgetItem(values.at(column)));
-                                }
-                            }
-                        }, Qt::QueuedConnection);
-                });
-            task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+            auto* table = new ks::ui::TableActionTableView(parent);
+            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
+            auto* model = new ks::fileui::PropertyTableModel(std::move(headers), table,
+                [](const QString& value) { return ks::i18n::displayText(value); });
+            table->setModel(model);
+            new ks::fileui::PropertyTableCommitHost(table, model, parent, key);
+            table->setProperty("ksword_detail_preserve_model_data", true);
+            table->setProperty("ks_i18n_preserve_model_data", true);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+            table->setAlternatingRowColors(true);
+            table->setWordWrap(false);
+            table->verticalHeader()->hide();
+            table->horizontalHeader()->setStretchLastSection(true);
+            for (int column = 0; column < model->columnCount(); ++column) table->setColumnWidth(column, column == 0 ? 220 : 160);
+            table->setSortingEnabled(true);
+            return table;
+        }
+        static ks::fileui::PropertyTableModel* propertyTableModel(QTableView* table)
+        {
+            return table == nullptr ? nullptr : static_cast<ks::fileui::PropertyTableModel*>(table->model());
+        }
+        static QVariant propertyCell(QTableView* table, int row, int column, int role = Qt::DisplayRole)
+        {
+            return table->model()->index(row, column).data(role);
         }
 
-        void refreshMetadataEaTable(QTableWidget* table)
+        void refreshMetadataStreamTable(QTableView* table) { refreshMetadataBinaryTable(table, false); }
+
+        void refreshMetadataEaTable(QTableView* table) { refreshMetadataBinaryTable(table, true); }
+
+        void refreshMetadataBinaryTable(QTableView* table, bool ea)
         {
             if (table == nullptr) return;
-            table->setRowCount(0);
+            const auto generation = table->property("ks_file_metadata_list_generation").toULongLong() + 1;
+            table->setProperty("ks_file_metadata_list_generation", generation);
+            propertyTableModel(table)->invalidateRequest();
             const QStringList paths = m_filePaths;
-            QPointer<QTableWidget> tableGuard(table);
-            auto* task = QRunnable::create([tableGuard, paths]()
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QTableView> tableGuard(table);
+            QThreadPool::globalInstance()->start(QRunnable::create([owner, tableGuard, paths, generation, ea]()
                 {
-                    QList<QStringList> rows;
+                    auto snapshot = ks::fileui::makePropertyTableSnapshot();
                     for (const QString& path : paths)
                     {
                         DWORD error = ERROR_SUCCESS;
-                        const QList<ks::file::metadata::ExtendedAttributeEntry> entries =
-                            ks::file::metadata::enumerateExtendedAttributes(path, &error);
+                        if (ea)
+                        {
+                            const auto entries = ks::file::metadata::enumerateExtendedAttributes(path, &error);
+                            if (error == ERROR_SUCCESS) for (const auto& entry : entries)
+                                snapshot->append({ ks::fileui::propertyRowKey({path, entry.name}),
+                                    {path, entry.name, QString::number(entry.value.size()),
+                                        QString::fromLatin1(entry.value.left(64).toHex(' ').toUpper())}, {} });
+                        }
+                        else
+                        {
+                            const auto streams = ks::file::metadata::enumerateStreams(path, &error);
+                            if (error == ERROR_SUCCESS) for (const auto& stream : streams)
+                                snapshot->append({ ks::fileui::propertyRowKey({path, stream.name}),
+                                    {path, stream.name, QString::number(stream.size)}, {} });
+                        }
                         if (error != ERROR_SUCCESS)
-                        {
-                            rows.push_back(QStringList{
-                                path,
-                                QStringLiteral("<读取失败>"),
-                                QString::number(error),
-                                QString() });
-                            continue;
-                        }
-                        for (const ks::file::metadata::ExtendedAttributeEntry& entry : entries)
-                        {
-                            rows.push_back(QStringList{
-                                path,
-                                entry.name,
-                                QString::number(entry.value.size()),
-                                QString::fromLatin1(entry.value.left(64).toHex(' ').toUpper()) });
-                        }
+                            snapshot->append({ks::fileui::propertyRowKey({path, QStringLiteral("<读取失败>")}),
+                                ea ? QStringList{path, QStringLiteral("<读取失败>"), QString::number(error), {}}
+                                   : QStringList{path, QStringLiteral("<读取失败>"), QString::number(error)}, {}, {1}});
                     }
-                    if (tableGuard == nullptr) return;
-                    QMetaObject::invokeMethod(tableGuard.data(), [tableGuard, rows]()
+                    QMetaObject::invokeMethod(qApp, [owner, tableGuard, paths, generation, snapshot]()
                         {
-                            if (tableGuard == nullptr) return;
-                            tableGuard->setRowCount(rows.size());
-                            for (qsizetype row = 0; row < rows.size(); ++row)
-                            {
-                                const QStringList values = rows.at(row);
-                                for (int column = 0; column < values.size(); ++column)
-                                {
-                                    tableGuard->setItem(static_cast<int>(row), column,
-                                        new QTableWidgetItem(values.at(column)));
-                                }
-                            }
+                            if (!owner || !tableGuard || owner->m_filePaths != paths ||
+                                tableGuard->property("ks_file_metadata_list_generation").toULongLong() != generation) return;
+                            propertyTableModel(tableGuard)->setSnapshot(snapshot);
                         }, Qt::QueuedConnection);
-                });
-            task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+                }));
         }
 
         QWidget* buildMetadataNameAndFilesystemPage(QWidget* parent)
@@ -9605,13 +10773,23 @@ namespace
             layout->addStretch(1);
 
             connect(queryHardLinksButton, &QPushButton::clicked, this,
-                [this, hardLinkQueryResult]()
+                [this, queryHardLinksButton, hardLinkQueryResult]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QStringList links = ks::file::metadata::enumerateHardLinks(m_filePath, &error);
-                    hardLinkQueryResult->setText(error == ERROR_SUCCESS
-                        ? links.join(QStringLiteral(" | "))
-                        : QStringLiteral("枚举失败：%1").arg(formatWin32ErrorText(error)));
+                    const QString path = m_filePath;
+                    runMetadataRead(hardLinkQueryResult, queryHardLinksButton, path,
+                        [path](const auto&)
+                        {
+                            MetadataReadValue result;
+                            const auto links = ks::file::metadata::enumerateHardLinks(path, &result.error);
+                            result.text = links.join(QStringLiteral(" | "));
+                            return result;
+                        },
+                        [this, hardLinkQueryResult](const MetadataReadValue& result, MetadataReadState*)
+                        {
+                            hardLinkQueryResult->setText(result.error == ERROR_SUCCESS ? result.text
+                                : QStringLiteral("枚举失败：%1").arg(formatWin32ErrorText(result.error)));
+                            return false;
+                        });
                 });
 
             connect(stageButton, &QPushButton::clicked, this,
@@ -9787,15 +10965,13 @@ namespace
         {
             QWidget* page = new QWidget(parent);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTableWidget* table = new ks::ui::VisibleTableWidget(page);
+            QTableView* table = createPropertyTable(page, QStringList{
+                QStringLiteral("目标"), QStringLiteral("数据流"), QStringLiteral("字节数") }, QStringLiteral("file-detail-ads"));
             ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-            table->setColumnCount(3);
-            table->setHorizontalHeaderLabels(QStringList{
-                QStringLiteral("目标"), QStringLiteral("数据流"), QStringLiteral("字节数") });
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
             table->setSelectionMode(QAbstractItemView::SingleSelection);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            installFileTableCopyMenu(table);
+            installValueTableCopyMenu(table);
             layout->addWidget(table, 1);
 
             QGridLayout* editorLayout = new QGridLayout();
@@ -9854,30 +11030,43 @@ namespace
                         content += QStringLiteral("HostUrl=%1\r\n").arg(hostEdit->text().trimmed());
                     dataEdit->setPlainText(content);
                 });
-            connect(loadButton, &QPushButton::clicked, this, [this, table, nameEdit, formatCombo, dataEdit]()
+            connect(loadButton, &QPushButton::clicked, this, [this, table, loadButton, nameEdit, formatCombo, dataEdit]()
                 {
-                    const int row = table->currentRow();
-                    if (row < 0 || table->item(row, 0) == nullptr || table->item(row, 1) == nullptr) return;
-                    const QString path = table->item(row, 0)->text();
-                    const QString name = table->item(row, 1)->text();
-                    nameEdit->setText(name);
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readStream(path, name, &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("ADS"),
-                            QStringLiteral("读取数据流失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    const bool printable = std::all_of(data.cbegin(), data.cend(), [](const char value)
+                    const int row = table->currentIndex().row();
+                    if (row < 0) return;
+                    const QString path = propertyCell(table, row, 0).toString();
+                    const QString name = propertyCell(table, row, 1).toString();
+                    const QString inputName = nameEdit->text();
+                    const int revision = dataEdit->document()->revision();
+                    runMetadataRead(dataEdit, loadButton, path,
+                        [path, name](const auto& cancel)
                         {
-                            const unsigned char byte = static_cast<unsigned char>(value);
-                            return byte == '\r' || byte == '\n' || byte == '\t' || byte >= 0x20U;
-                        });
-                    formatCombo->setCurrentIndex(printable ? 0 : 1);
-                    dataEdit->setPlainText(printable
-                        ? QString::fromUtf8(data)
-                        : QString::fromLatin1(data.toHex(' ').toUpper()));
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readStream(path, name, &result.error);
+                            result.name = name;
+                            const bool printable = std::all_of(result.bytes.cbegin(), result.bytes.cend(), [](char value)
+                                { const auto byte = static_cast<unsigned char>(value); return byte == '\r' || byte == '\n' || byte == '\t' || byte >= 0x20U; });
+                            result.format = printable ? 0 : 1;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                                result.text = printable ? QString::fromUtf8(result.bytes) : formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, table, nameEdit, formatCombo, dataEdit, path, name, inputName, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            const int selected = table->currentIndex().row();
+                            if (dataEdit->document()->revision() != revision || nameEdit->text() != inputName || selected < 0 ||
+                                propertyCell(table, selected, 0).toString() != path || propertyCell(table, selected, 1).toString() != name) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("ADS"),
+                                    QStringLiteral("读取数据流失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            nameEdit->setText(name);
+                            formatCombo->setCurrentIndex(result.format);
+                            publishMetadataText(dataEdit, state, result, {table, nameEdit, formatCombo});
+                            return true;
+                        }, true);
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, nameEdit, formatCombo, removeCheck, dataEdit]()
@@ -9930,16 +11119,14 @@ namespace
         {
             QWidget* page = new QWidget(parent);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-            table->setColumnCount(4);
-            table->setHorizontalHeaderLabels(QStringList{
+            QTableView* table = createPropertyTable(page, QStringList{
                 QStringLiteral("目标"), QStringLiteral("EA 名称"),
-                QStringLiteral("字节数"), QStringLiteral("值预览") });
+                QStringLiteral("字节数"), QStringLiteral("值预览") }, QStringLiteral("file-detail-ea"));
+            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
             table->setSelectionMode(QAbstractItemView::SingleSelection);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            installFileTableCopyMenu(table);
+            installValueTableCopyMenu(table);
             layout->addWidget(table, 1);
 
             QLineEdit* nameEdit = new QLineEdit(page);
@@ -9972,29 +11159,49 @@ namespace
             connect(refreshButton, &QPushButton::clicked, this,
                 [this, table]() { refreshMetadataEaTable(table); });
             connect(loadButton, &QPushButton::clicked, this,
-                [this, table, nameEdit, formatCombo, dataEdit, needEaCheck]()
+                [this, table, loadButton, nameEdit, formatCombo, dataEdit, needEaCheck]()
                 {
-                    const int row = table->currentRow();
-                    if (row < 0 || table->item(row, 0) == nullptr || table->item(row, 1) == nullptr) return;
-                    DWORD error = ERROR_SUCCESS;
-                    const auto entries = ks::file::metadata::enumerateExtendedAttributes(
-                        table->item(row, 0)->text(), &error);
-                    const QString name = table->item(row, 1)->text();
-                    const auto iterator = std::find_if(entries.cbegin(), entries.cend(),
-                        [&name](const ks::file::metadata::ExtendedAttributeEntry& item)
+                    const int row = table->currentIndex().row();
+                    if (row < 0) return;
+                    const QString path = propertyCell(table, row, 0).toString();
+                    const QString name = propertyCell(table, row, 1).toString();
+                    const QString inputName = nameEdit->text();
+                    const int revision = dataEdit->document()->revision();
+                    const bool needEa = needEaCheck->isChecked();
+                    runMetadataRead(dataEdit, loadButton, path,
+                        [path, name](const auto& cancel)
                         {
-                            return item.name == name;
+                            MetadataReadValue result;
+                            const auto entries = ks::file::metadata::enumerateExtendedAttributes(path, &result.error);
+                            const auto found = std::find_if(entries.cbegin(), entries.cend(), [&name](const auto& item) { return item.name == name; });
+                            if (result.error == ERROR_SUCCESS && found == entries.cend()) result.error = ERROR_NOT_FOUND;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                            {
+                                result.name = found->name;
+                                result.needEa = found->needEa;
+                                result.bytes = found->value;
+                                result.format = 1;
+                                result.text = formatMetadataHex(result.bytes, cancel);
+                            }
+                            return result;
+                        },
+                        [this, table, nameEdit, formatCombo, dataEdit, needEaCheck, path, name, inputName, revision, needEa](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            const int selected = table->currentIndex().row();
+                            if (dataEdit->document()->revision() != revision || nameEdit->text() != inputName || needEaCheck->isChecked() != needEa || selected < 0 ||
+                                propertyCell(table, selected, 0).toString() != path || propertyCell(table, selected, 1).toString() != name) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("EA"),
+                                    QStringLiteral("读取 EA 失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            nameEdit->setText(result.name);
+                            needEaCheck->setChecked(result.needEa);
+                            formatCombo->setCurrentIndex(1);
+                            publishMetadataText(dataEdit, state, result, {table, nameEdit, formatCombo, needEaCheck});
+                            return true;
                         });
-                    if (error != ERROR_SUCCESS || iterator == entries.cend())
-                    {
-                        QMessageBox::warning(this, QStringLiteral("EA"),
-                            QStringLiteral("读取 EA 失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    nameEdit->setText(iterator->name);
-                    needEaCheck->setChecked(iterator->needEa);
-                    formatCombo->setCurrentIndex(1);
-                    dataEdit->setPlainText(QString::fromLatin1(iterator->value.toHex(' ').toUpper()));
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, nameEdit, formatCombo, dataEdit, needEaCheck, removeCheck]()
@@ -10130,18 +11337,26 @@ namespace
                     QThreadPool::globalInstance()->start(task);
                 });
             connect(effectiveButton, &QPushButton::clicked, this,
-                [this, effectiveTrusteeEdit, effectiveResult]()
+                [this, effectiveButton, effectiveTrusteeEdit, effectiveResult]()
                 {
-                    DWORD accessMask = 0U;
-                    const DWORD error = ks::file::metadata::queryEffectiveAccessMask(
-                        m_filePath,
-                        effectiveTrusteeEdit->text(),
-                        &accessMask);
-                    effectiveResult->setText(error == ERROR_SUCCESS
-                        ? QStringLiteral("Mask: 0x%1 · %2")
-                            .arg(accessMask, 8, 16, QLatin1Char('0'))
-                            .arg(accessMaskToText(accessMask))
-                        : QStringLiteral("检查失败：%1").arg(formatWin32ErrorText(error)));
+                    const QString path = m_filePath;
+                    const QString trustee = effectiveTrusteeEdit->text();
+                    runMetadataRead(effectiveResult, effectiveButton, path,
+                        [path, trustee](const auto&)
+                        {
+                            MetadataReadValue result;
+                            DWORD mask = 0;
+                            result.error = ks::file::metadata::queryEffectiveAccessMask(path, trustee, &mask);
+                            result.text = QStringLiteral("Mask: 0x%1 · %2").arg(mask, 8, 16, QLatin1Char('0')).arg(accessMaskToText(mask));
+                            return result;
+                        },
+                        [effectiveTrusteeEdit, effectiveResult, trustee](const MetadataReadValue& result, MetadataReadState*)
+                        {
+                            if (effectiveTrusteeEdit->text() != trustee) return false;
+                            effectiveResult->setText(result.error == ERROR_SUCCESS ? result.text
+                                : QStringLiteral("检查失败：%1").arg(formatWin32ErrorText(result.error)));
+                            return false;
+                        });
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, sddlEdit, ownerCheck, groupCheck, daclCheck, saclCheck,
@@ -10277,38 +11492,64 @@ namespace
                         resourceFormatCombo->setCurrentIndex(0);
                     }
                 });
-            connect(loadReparseButton, &QPushButton::clicked, this, [this, reparseEdit]()
+            connect(loadReparseButton, &QPushButton::clicked, this, [this, loadReparseButton, reparseEdit]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readRawReparseData(m_filePath, &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("重解析点"),
-                            QStringLiteral("读取原始缓冲失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    reparseEdit->setPlainText(QString::fromLatin1(data.toHex(' ').toUpper()));
+                    const QString path = m_filePath;
+                    const int revision = reparseEdit->document()->revision();
+                    runMetadataRead(reparseEdit, loadReparseButton, path,
+                        [path](const auto& cancel)
+                        {
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readRawReparseData(path, &result.error);
+                            result.format = 1;
+                            if (result.error == ERROR_SUCCESS && !cancel->load()) result.text = formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, reparseEdit, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            if (reparseEdit->document()->revision() != revision) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("重解析点"),
+                                    QStringLiteral("读取原始缓冲失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            publishMetadataText(reparseEdit, state, result);
+                            return true;
+                        });
                 });
             connect(loadResourceButton, &QPushButton::clicked, this,
-                [this, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin,
-                 resourceFormatCombo, resourceDataEdit]()
+                [this, loadResourceButton, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo, resourceDataEdit]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readPeResource(
-                        m_filePath,
-                        resourceTypeEdit->text(),
-                        resourceNameEdit->text(),
-                        static_cast<WORD>(resourceLanguageSpin->value()),
-                        &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("PE 资源"),
-                            QStringLiteral("读取资源失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    resourceDataEdit->setPlainText(resourceFormatCombo->currentIndex() == 0
-                        ? QString::fromUtf8(data)
-                        : QString::fromLatin1(data.toHex(' ').toUpper()));
+                    const QString path = m_filePath;
+                    const QString type = resourceTypeEdit->text();
+                    const QString name = resourceNameEdit->text();
+                    const int language = resourceLanguageSpin->value();
+                    const int format = resourceFormatCombo->currentIndex();
+                    const int revision = resourceDataEdit->document()->revision();
+                    runMetadataRead(resourceDataEdit, loadResourceButton, path,
+                        [path, type, name, language, format](const auto& cancel)
+                        {
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readPeResource(path, type, name, static_cast<WORD>(language), &result.error);
+                            result.format = format;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                                result.text = format == 0 ? QString::fromUtf8(result.bytes) : formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo, resourceDataEdit, type, name, language, format, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            if (resourceTypeEdit->text() != type || resourceNameEdit->text() != name || resourceLanguageSpin->value() != language ||
+                                resourceFormatCombo->currentIndex() != format || resourceDataEdit->document()->revision() != revision) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("PE 资源"),
+                                    QStringLiteral("读取资源失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            publishMetadataText(resourceDataEdit, state, result, {resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo});
+                            return true;
+                        }, true);
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, reparseAction, reparseEdit, resourceTypeEdit, resourceNameEdit,
@@ -10493,12 +11734,16 @@ namespace
             tabs->addTab(
                 buildMetadataBasicPropertiesPage(tabs),
                 ks::i18n::sourceText(QStringLiteral("基础属性")));
-            tabs->addTab(buildMetadataNameAndFilesystemPage(tabs), QStringLiteral("名称与文件系统"));
-            tabs->addTab(buildMetadataShellPropertyPage(tabs), QStringLiteral("Shell 属性"));
-            tabs->addTab(buildMetadataAdsPage(tabs), QStringLiteral("ADS"));
-            tabs->addTab(buildMetadataEaPage(tabs), QStringLiteral("EA"));
-            tabs->addTab(buildMetadataSecurityPage(tabs), QStringLiteral("安全描述符"));
-            tabs->addTab(buildMetadataPeAndReparsePage(tabs), QStringLiteral("重解析点 / PE / 签名"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_name")), QStringLiteral("名称与文件系统"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_shell")), QStringLiteral("Shell 属性"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_ads")), QStringLiteral("ADS"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_ea")), QStringLiteral("EA"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_security")), QStringLiteral("安全描述符"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_pe")), QStringLiteral("重解析点 / PE / 签名"));
+            connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](const int tabIndex)
+                {
+                    activateDeferredTab(tabs, tabIndex);
+                });
             return tabs;
         }
 
@@ -10528,7 +11773,17 @@ namespace
 
             m_metadataHasSnapshot = false;
             setMetadataEditorBusy(false);
-            QMetaObject::invokeMethod(page, [this]() { refreshMetadataEditor(); }, Qt::QueuedConnection);
+            if (!m_pendingPatches.isEmpty())
+            {
+                QList<ks::file::metadata::FileSnapshot> snapshots;
+                snapshots.reserve(m_pendingPatches.size());
+                for (const auto& patch : m_pendingPatches) snapshots.push_back(patch.snapshot);
+                applyBatchMetadataSnapshotsToEditor(snapshots);
+            }
+            else
+            {
+                QMetaObject::invokeMethod(page, [this]() { refreshMetadataEditor(); }, Qt::QueuedConnection);
+            }
             return page;
         }
 
@@ -10869,6 +12124,72 @@ namespace
             return page;
         }
 
+        class BatchHashRowsModel final : public QAbstractTableModel
+        {
+        public:
+            BatchHashRowsModel(QStringList paths, const QStringList& algorithms, QObject* parent)
+                : QAbstractTableModel(parent), m_paths(std::move(paths)),
+                  m_headers(QStringList{QStringLiteral("目标"), QStringLiteral("状态")} + algorithms + QStringList{QStringLiteral("错误")})
+            {
+                if (parent != nullptr) parent->installEventFilter(this);
+            }
+            ~BatchHashRowsModel() override { retireResults(); }
+
+            quint64 resetPaths(QStringList paths)
+            {
+                beginResetModel(); m_paths = std::move(paths); retireResults(); ++m_generation; endResetModel();
+                return m_generation;
+            }
+            quint64 generation() const { return m_generation; }
+            int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_paths.size()); }
+            int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_headers.size()); }
+            QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+            {
+                return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < columnCount()
+                    ? QVariant(ks::i18n::displayText(m_headers.at(section))) : QAbstractTableModel::headerData(section, orientation, role);
+            }
+            QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+            {
+                if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 ||
+                    index.column() >= columnCount() || (role != Qt::DisplayRole && role != Qt::ToolTipRole)) return {};
+                if (index.column() == 0) return QDir::toNativeSeparators(m_paths.at(index.row()));
+                const auto found = m_results.constFind(index.row());
+                const QString value = found != m_results.cend() ? found.value().value(index.column() - 1)
+                    : (index.column() == 1 ? QStringLiteral("等待") : QString());
+                return index.column() == 1 ? ks::i18n::displayText(value) : value;
+            }
+            void setResult(qsizetype row, const QString& state, const QStringList& hashes, const QString& error)
+            {
+                if (row < 0 || row >= rowCount()) return;
+                QStringList values; values.reserve(columnCount() - 1); values.push_back(state);
+                for (int i = 0; i < columnCount() - 3; ++i) values.push_back(hashes.value(i));
+                values.push_back(error); m_results.insert(row, std::move(values));
+                emit dataChanged(index(static_cast<int>(row), 1), index(static_cast<int>(row), columnCount() - 1));
+            }
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override
+            {
+                if (event != nullptr && event->type() == QEvent::LanguageChange)
+                {
+                    emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
+                    if (rowCount() > 0) emit dataChanged(index(0, 1), index(rowCount() - 1, 1));
+                }
+                return QAbstractTableModel::eventFilter(watched, event);
+            }
+
+        private:
+            void retireResults()
+            {
+                if (m_results.isEmpty()) return;
+                QThreadPool::globalInstance()->start(QRunnable::create(
+                    [retired = std::move(m_results)]() mutable { retired.clear(); }));
+            }
+            QStringList m_paths;
+            QStringList m_headers;
+            QHash<qsizetype, QStringList> m_results;
+            quint64 m_generation = 0;
+        };
+
         QWidget* buildHashTab()
         {
             if (m_batchMode)
@@ -10889,30 +12210,25 @@ namespace
                 progress->setRange(0, m_filePaths.size());
                 progress->setValue(0);
                 layout->addWidget(progress);
-                QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-                const QStringList algorithms = commonHashNames();
+                QTableView* table = new ks::ui::TableActionTableView(page);
                 ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
-                table->setColumnCount(algorithms.size() + 3);
-                table->setHorizontalHeaderLabels(QStringList{
-                    QStringLiteral("目标"), QStringLiteral("状态") }
-                    + algorithms + QStringList{QStringLiteral("错误")});
-                table->setRowCount(m_filePaths.size());
+                auto* model = new BatchHashRowsModel(m_filePaths, commonHashNames(), table);
+                auto* proxy = new QSortFilterProxyModel(table);
+                proxy->setDynamicSortFilter(false);
+                proxy->setSourceModel(model);
+                table->setProperty("ks_i18n_preserve_model_data", true);
+                table->setModel(proxy);
                 table->setSelectionBehavior(QAbstractItemView::SelectRows);
                 table->setSelectionMode(QAbstractItemView::ExtendedSelection);
                 table->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 table->setAlternatingRowColors(true);
-                for (qsizetype row = 0; row < m_filePaths.size(); ++row)
-                {
-                    table->setItem(static_cast<int>(row), 0,
-                        new QTableWidgetItem(QDir::toNativeSeparators(m_filePaths.at(row))));
-                    table->setItem(static_cast<int>(row), 1,
-                        new QTableWidgetItem(QStringLiteral("等待")));
-                    for (int column = 2; column < table->columnCount(); ++column)
-                        table->setItem(static_cast<int>(row), column, new QTableWidgetItem());
-                }
-                installFileTableCopyMenu(table);
+                installValueTableCopyMenu(table);
                 if (table->horizontalHeader() != nullptr)
+                {
                     table->horizontalHeader()->setStretchLastSection(true);
+                    table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
+                }
+                table->setSortingEnabled(true);
                 layout->addWidget(table, 1);
                 connect(cancelButton, &QPushButton::clicked, this, [this, cancelButton]()
                     {
@@ -10921,23 +12237,25 @@ namespace
                         cancelButton->setEnabled(false);
                     });
                 connect(startButton, &QPushButton::clicked, this,
-                    [this, table, progress, statusLabel, startButton, cancelButton]()
+                    [this, table, model, progress, statusLabel, startButton, cancelButton]()
                     {
                         m_hashCancelRequested = std::make_shared<std::atomic_bool>(false);
                         const auto cancelRequested = m_hashCancelRequested;
                         const QStringList paths = m_filePaths;
+                        const quint64 generation = model->resetPaths(paths);
                         startButton->setEnabled(false);
                         cancelButton->setEnabled(true);
                         progress->setValue(0);
                         statusLabel->setText(QStringLiteral("● 正在后台计算批量哈希..."));
-                        QPointer<QTableWidget> tableGuard(table);
+                        QPointer<QTableView> tableGuard(table);
+                        QPointer<BatchHashRowsModel> modelGuard(model);
                         QPointer<QProgressBar> progressGuard(progress);
                         QPointer<QLabel> statusGuard(statusLabel);
                         QPointer<QPushButton> startGuard(startButton);
                         QPointer<QPushButton> cancelGuard(cancelButton);
                         auto* task = QRunnable::create(
-                            [tableGuard, progressGuard, statusGuard, startGuard, cancelGuard,
-                             cancelRequested, paths]()
+                            [tableGuard, modelGuard, progressGuard, statusGuard, startGuard, cancelGuard,
+                             cancelRequested, paths, generation]()
                             {
                                 int completed = 0;
                                 for (qsizetype row = 0; row < paths.size(); ++row)
@@ -10987,23 +12305,18 @@ namespace
                                         }
                                     }
                                     ++completed;
-                                    if (tableGuard == nullptr) return;
-                                    QMetaObject::invokeMethod(tableGuard.data(),
-                                        [tableGuard, progressGuard, row, completed, stateText, hashValues, errorText]()
+                                    QMetaObject::invokeMethod(qApp,
+                                        [tableGuard, modelGuard, progressGuard, row, completed, stateText, hashValues, errorText, generation]()
                                         {
-                                            if (tableGuard == nullptr) return;
-                                            tableGuard->item(static_cast<int>(row), 1)->setText(stateText);
-                                            for (qsizetype index = 0; index < hashValues.size(); ++index)
-                                                tableGuard->item(static_cast<int>(row), static_cast<int>(index) + 2)->setText(hashValues.at(index));
-                                            tableGuard->item(static_cast<int>(row), tableGuard->columnCount() - 1)->setText(errorText);
+                                            if (tableGuard == nullptr || modelGuard == nullptr || modelGuard->generation() != generation) return;
+                                            modelGuard->setResult(row, stateText, hashValues, errorText);
                                             if (progressGuard != nullptr) progressGuard->setValue(completed);
                                         }, Qt::QueuedConnection);
                                 }
-                                if (statusGuard == nullptr) return;
-                                QMetaObject::invokeMethod(statusGuard.data(),
-                                    [statusGuard, startGuard, cancelGuard, cancelRequested, completed, paths]()
+                                QMetaObject::invokeMethod(qApp,
+                                    [statusGuard, modelGuard, startGuard, cancelGuard, cancelRequested, completed, paths, generation]()
                                     {
-                                        if (statusGuard == nullptr) return;
+                                        if (statusGuard == nullptr || modelGuard == nullptr || modelGuard->generation() != generation) return;
                                         statusGuard->setText(cancelRequested->load()
                                             ? QStringLiteral("● 批量哈希已取消，完成 %1 / %2。")
                                                 .arg(completed).arg(paths.size())
@@ -11056,6 +12369,35 @@ namespace
                     requestHashCancel(cancelButton);
                 });
             return page;
+        }
+
+        static void installUsageCopyMenu(QTableView* table)
+        {
+            table->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& point)
+                {
+                    const QModelIndex clicked = table->indexAt(point);
+                    if (clicked.isValid()) table->setCurrentIndex(clicked);
+                    const QPersistentModelIndex selected(table->currentIndex());
+                    const QPointer<QTableView> guard(table);
+                    const quint32 pid = selected.sibling(selected.row(), 0).data(usageProcessIdRole).toUInt();
+                    QMenu menu;
+                    menu.setStyleSheet(buildContextMenuStyle());
+                    connect(table, &QObject::destroyed, &menu, &QMenu::close);
+                    auto* copy = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
+                    ks::ui::SetTableContextActionRole(copy, ks::ui::TableContextActionRole::CopyRows);
+                    copy->setEnabled(selected.isValid());
+                    auto* open = menu.addAction(QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("转到进程详细信息"));
+                    open->setEnabled(pid != 0);
+                    auto* action = menu.exec(table->viewport()->mapToGlobal(point));
+                    if (!guard || !selected.isValid()) return;
+                    if (action == open) { ks::ui::OpenProcessDetailByPid(pid); return; }
+                    if (action != copy || !QApplication::clipboard()) return;
+                    QStringList fields;
+                    for (int column = 0; column < table->model()->columnCount(); ++column)
+                        fields.push_back(selected.sibling(selected.row(), column).data().toString());
+                    QApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+                });
         }
 
         QWidget* buildUsageTab()
@@ -11118,49 +12460,31 @@ namespace
             m_usageScanProgressBar = usageProgressBar;
             layout->addWidget(usageProgressBar, 0);
 
-            QTreeWidget* table = new QTreeWidget(page);
-            table->setColumnCount(7);
-            table->setHeaderLabels(QStringList{
-                QStringLiteral("PID"),
-                QStringLiteral("进程名"),
-                QStringLiteral("Handle"),
-                QStringLiteral("GrantedAccess"),
-                QStringLiteral("对象/路径"),
-                QStringLiteral("命中目标"),
-                QStringLiteral("枚举来源")
-                });
-            table->setRootIsDecorated(false);
-            table->setAlternatingRowColors(true);
-            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            QTableView* table = createPropertyTable(page, {QStringLiteral("PID"), QStringLiteral("进程名"), QStringLiteral("Handle"), QStringLiteral("GrantedAccess"), QStringLiteral("对象/路径"), QStringLiteral("命中目标"), QStringLiteral("枚举来源")}, QStringLiteral("file-detail-usage"));
+            ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::None);
             table->setSelectionMode(QAbstractItemView::SingleSelection);
-            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            table->setSortingEnabled(true);
-            if (table->header() != nullptr)
-            {
-                table->header()->setStretchLastSection(true);
-            }
-            installFileTreeCopyMenu(table, 0);
+            installUsageCopyMenu(table);
             layout->addWidget(table, 1);
 
             connect(refreshButton, &QPushButton::clicked, this, [this, table, statusLabel, refreshButton]()
                 {
                     refreshUsageTable(table, statusLabel, refreshButton);
                 });
-            connect(table, &QTreeWidget::currentItemChanged, this,
-                [this, closeHandleButton, closeHandleR0Button, terminateR3Button, terminateR0Button](QTreeWidgetItem* currentItem)
+            connect(table->selectionModel(), &QItemSelectionModel::currentChanged, this,
+                [this, table, closeHandleButton, closeHandleR0Button, terminateR3Button, terminateR0Button](const QModelIndex& currentItem)
                 {
-                    const std::uint32_t processId = currentItem == nullptr
+                    const std::uint32_t processId = !currentItem.isValid()
                         ? 0U
-                        : currentItem->data(0, usageProcessIdRole).toUInt();
-                    const std::uint64_t creationTime = currentItem == nullptr
+                        : currentItem.sibling(currentItem.row(), 0).data(usageProcessIdRole).toUInt();
+                    const std::uint64_t creationTime = !currentItem.isValid()
                         ? 0U
-                        : currentItem->data(0, usageProcessCreationTimeRole).toULongLong();
-                    const std::uint64_t handleValue = currentItem == nullptr
+                        : currentItem.sibling(currentItem.row(), 0).data(usageProcessCreationTimeRole).toULongLong();
+                    const std::uint64_t handleValue = !currentItem.isValid()
                         ? 0U
-                        : currentItem->data(0, usageHandleValueRole).toULongLong();
-                    const QString processName = currentItem == nullptr ? QString() : currentItem->text(1);
-                    const std::uint64_t objectAddress = currentItem == nullptr ? 0U
-                        : currentItem->data(0, usageObjectAddressRole).toULongLong();
+                        : currentItem.sibling(currentItem.row(), 0).data(usageHandleValueRole).toULongLong();
+                    const QString processName = !currentItem.isValid() ? QString() : currentItem.sibling(currentItem.row(), 1).data().toString();
+                    const std::uint64_t objectAddress = !currentItem.isValid() ? 0U
+                        : currentItem.sibling(currentItem.row(), 0).data(usageObjectAddressRole).toULongLong();
                     const bool processActionAllowed = !m_usageCloseInProgress && processId > 4U &&
                         processId != static_cast<std::uint32_t>(::GetCurrentProcessId()) &&
                         creationTime != 0U && !isCriticalProcessName(processName);
@@ -11168,19 +12492,18 @@ namespace
                     closeHandleR0Button->setEnabled(processActionAllowed && handleValue != 0U &&
                         handleValue < 0x80000000ULL && objectAddress != 0U);
                     QString closeReason = QStringLiteral("校验选中记录后，从用户态关闭该远程文件句柄");
-                    if (currentItem != nullptr && handleValue == 0U)
+                    if (currentItem.isValid() && handleValue == 0U)
                         closeReason = QStringLiteral("无句柄值：该来源可能是进程映像/模块映射，不能用 R3 关闭句柄处理");
                     else if (processId == static_cast<std::uint32_t>(::GetCurrentProcessId()))
                         closeReason = QStringLiteral("已保护：当前 Ksword 进程，不可关闭句柄");
-                    else if (currentItem != nullptr && (processId <= 4U || isCriticalProcessName(processName)))
+                    else if (currentItem.isValid() && (processId <= 4U || isCriticalProcessName(processName)))
                         closeReason = QStringLiteral("已保护：关键系统进程，不可关闭句柄");
-                    else if (currentItem != nullptr && creationTime == 0U)
+                    else if (currentItem.isValid() && creationTime == 0U)
                         closeReason = QStringLiteral("无法确认进程身份，请重新扫描后再关闭句柄。");
                     closeHandleButton->setToolTip(ks::i18n::sourceText(closeReason));
-                    if (currentItem != nullptr)
-                        currentItem->setToolTip(2, ks::i18n::sourceText(closeReason));
+                    table->setToolTip(ks::i18n::sourceText(closeReason));
                     QString r0Reason = QStringLiteral("校验进程和对象身份后，由 KswordARK 驱动关闭选中的文件句柄");
-                    if (currentItem != nullptr && handleValue == 0U)
+                    if (currentItem.isValid() && handleValue == 0U)
                         r0Reason = QStringLiteral("模块或映像映射没有可关闭的文件句柄。");
                     else if (!processActionAllowed) { r0Reason = closeReason; }
                     else if (objectAddress == 0U || handleValue >= 0x80000000ULL)
@@ -11992,20 +13315,11 @@ namespace
             QWidget* tablePane = new QWidget(splitter);
             QVBoxLayout* tableLayout = new QVBoxLayout(tablePane);
             tableLayout->setContentsMargins(0, 0, 0, 0);
-            QTableWidget* table = new ks::ui::VisibleTableWidget(tablePane);
+            QTableView* table = createPropertyTable(tablePane, {QStringLiteral("DLL 名称"), QStringLiteral("函数名 / Ordinal"), QStringLiteral("Hint"), QStringLiteral("导入方式"), QStringLiteral("Thunk/IAT RVA"), QStringLiteral("诊断")}, QStringLiteral("file-detail-dependency"));
             // PE 依赖来自静态文件解析，通用现场快照/对比不适用。
             ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
             table->setMinimumHeight(0);
             table->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
-            table->setColumnCount(6);
-            table->setHorizontalHeaderLabels(QStringList{
-                QStringLiteral("DLL 名称"),
-                QStringLiteral("函数名 / Ordinal"),
-                QStringLiteral("Hint"),
-                QStringLiteral("导入方式"),
-                QStringLiteral("Thunk/IAT RVA"),
-                QStringLiteral("诊断")
-                });
             table->setAlternatingRowColors(true);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
             table->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -12033,21 +13347,23 @@ namespace
             splitter->setSizes({400, 200});
             layout->addWidget(splitter, 1);
 
-            connect(table, &QTableWidget::customContextMenuRequested, this, [table](const QPoint& position)
+            connect(table, &QTableView::customContextMenuRequested, this, [table](const QPoint& position)
                 {
                     if (table == nullptr)
                     {
                         return;
                     }
 
-                    QMenu menu(table);
+                    const QPointer<QTableView> tableGuard(table);
+                    QMenu menu;
+                    connect(table, &QObject::destroyed, &menu, &QMenu::close);
                     menu.setStyleSheet(buildContextMenuStyle());
                     QAction* copyRowsAction = menu.addAction(QStringLiteral("复制选中行"));
                     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
                     ks::ui::SetTableContextActionRole(copyRowsAction, ks::ui::TableContextActionRole::CopyRows);
                     QAction* copyDllAction = menu.addAction(QStringLiteral("复制 DLL 名称"));
                     QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(position));
-                    if (selectedAction == nullptr)
+                    if (tableGuard == nullptr || selectedAction == nullptr)
                     {
                         return;
                     }
@@ -12107,10 +13423,7 @@ namespace
             status->setTextFormat(Qt::PlainText);
             status->setWordWrap(true);
             layout->addWidget(status);
-            QTableWidget* table = new ks::ui::VisibleTableWidget(page);
-            table->setColumnCount(3);
-            table->setHorizontalHeaderLabels({ks::i18n::sourceText(QStringLiteral("命中偏移")),
-                ks::i18n::sourceText(QStringLiteral("编码")), ks::i18n::sourceText(QStringLiteral("字符串预览"))});
+            QTableView* table = createPropertyTable(page, {QStringLiteral("命中偏移"), QStringLiteral("编码"), QStringLiteral("字符串预览")}, QStringLiteral("file-detail-strings"));
             ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -12120,7 +13433,7 @@ namespace
             table->horizontalHeader()->setStretchLastSection(true);
             table->setMinimumSize(0, 0);
             layout->addWidget(table, 1);
-            installFileTableCopyMenu(table);
+            installValueTableCopyMenu(table);
             QLabel* hint = new QLabel(ks::i18n::sourceText(QStringLiteral(
                 "搜索覆盖整个文件，仅显示匹配项。双击可在十六进制页定位；超长字符串分段展示，列表最多显示 20000 条。")), page);
             hint->setWordWrap(true);
@@ -12136,7 +13449,7 @@ namespace
                 });
             const QString path = m_filePath;
             const QPointer<QWidget> pageGuard(page);
-            const QPointer<QTableWidget> tableGuard(table);
+            const QPointer<QTableView> tableGuard(table);
             const QPointer<QLabel> statusGuard(status);
             const QPointer<QPushButton> cancelGuard(cancel);
             const auto launch = [query, regex, caseSensitive, encoding, minimumLength, control, path,
@@ -12144,15 +13457,20 @@ namespace
                 {
                     if (control->cancel != nullptr) control->cancel->store(true);
                     const quint64 generation = ++control->generation;
-                    tableGuard->setRowCount(0);
+                    propertyTableModel(tableGuard)->invalidateRequest();
                     if (regex->isChecked())
                     {
                         const QRegularExpression expression(query->text());
                         if (!expression.isValid())
                         {
-                            statusGuard->setText(ks::i18n::sourceText(QStringLiteral("正则表达式无效：%1"))
-                                .arg(expression.errorString()));
+                            const QString error = expression.errorString();
                             cancelGuard->setEnabled(false);
+                            propertyTableModel(tableGuard)->setSnapshot(ks::fileui::makePropertyTableSnapshot(),
+                                [tableGuard, statusGuard, generation, control, error]()
+                                {
+                                    if (tableGuard && statusGuard && generation == control->generation)
+                                        statusGuard->setText(ks::i18n::sourceText(QStringLiteral("正则表达式无效：%1")).arg(error));
+                                });
                             return;
                         }
                     }
@@ -12161,7 +13479,7 @@ namespace
                     const QString queryText = query->text();
                     const bool useRegex = regex->isChecked(), sensitive = caseSensitive->isChecked();
                     const int minimum = minimumLength->value(), mode = encoding->currentIndex();
-                    tableGuard->setRowCount(0);
+                    propertyTableModel(tableGuard)->invalidateRequest();
                     statusGuard->setText(ks::i18n::sourceText(QStringLiteral("正在扫描整个文件...")));
                     cancelGuard->setEnabled(true);
                     auto* task = QRunnable::create([path, queryText, useRegex, sensitive, minimum, mode,
@@ -12169,8 +13487,7 @@ namespace
                         {
                             const auto progress = [generation, control, pageGuard, statusGuard](qint64 bytes, qint64 total)
                                 {
-                                    if (pageGuard == nullptr) return;
-                                    QMetaObject::invokeMethod(pageGuard.data(), [generation, control, statusGuard, bytes, total]()
+                                    QMetaObject::invokeMethod(qApp, [generation, control, statusGuard, bytes, total]()
                                         {
                                             if (statusGuard != nullptr && generation == control->generation)
                                                 statusGuard->setText(ks::i18n::sourceText(QStringLiteral("正在扫描：%1 / %2 字节"))
@@ -12179,33 +13496,28 @@ namespace
                                 };
                             const auto result = extractPrintableStringsPreview(path, queryText, useRegex, sensitive,
                                 minimum, mode != 1, mode != 0, cancelRequested, progress);
-                            if (pageGuard == nullptr) return;
-                            QMetaObject::invokeMethod(pageGuard.data(), [result, generation, control, tableGuard, statusGuard, cancelGuard]()
+                            auto rows = ks::fileui::makePropertyTableSnapshot();
+                            rows->rows.reserve(result.matches.size());
+                            for (const auto& match : result.matches)
+                                rows->append({ks::fileui::propertyRowKey({QString::number(match.offset), match.encoding}),
+                                    {QStringLiteral("0x%1").arg(match.offset, 16, 16, QLatin1Char('0')), match.encoding, match.text},
+                                    {{Qt::UserRole, match.offset}}});
+                            const auto resultSnapshot = std::shared_ptr<PrintableStringsPreview>(new PrintableStringsPreview(result),
+                                [](PrintableStringsPreview* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                            QMetaObject::invokeMethod(qApp, [resultSnapshot, rows, generation, control, tableGuard, statusGuard, cancelGuard]()
                                 {
                                     if (tableGuard == nullptr || statusGuard == nullptr || cancelGuard == nullptr
                                         || generation != control->generation) return;
-                                    cancelGuard->setEnabled(false);
-                                    tableGuard->setSortingEnabled(false);
-                                    tableGuard->setUpdatesEnabled(false);
-                                    tableGuard->setRowCount(static_cast<int>(result.matches.size()));
-                                    for (qsizetype row = 0; row < result.matches.size(); ++row)
+                                    propertyTableModel(tableGuard)->setSnapshot(rows, [resultSnapshot, generation, control, tableGuard, statusGuard, cancelGuard]()
                                     {
-                                        const auto& match = result.matches.at(row);
-                                        auto* offset = new QTableWidgetItem(QStringLiteral("0x%1").arg(match.offset, 16, 16, QLatin1Char('0')));
-                                        offset->setData(Qt::UserRole, match.offset);
-                                        tableGuard->setItem(static_cast<int>(row), 0, offset);
-                                        tableGuard->setItem(static_cast<int>(row), 1, new QTableWidgetItem(match.encoding));
-                                        tableGuard->setItem(static_cast<int>(row), 2, new QTableWidgetItem(match.text));
-                                    }
-                                    tableGuard->resizeColumnToContents(0);
-                                    tableGuard->resizeColumnToContents(1);
-                                    tableGuard->setUpdatesEnabled(true);
-                                    tableGuard->setSortingEnabled(true);
+                                        if (!tableGuard || !statusGuard || !cancelGuard || generation != control->generation) return;
+                                        cancelGuard->setEnabled(false);
                                     QString summary = ks::i18n::sourceText(QStringLiteral("已扫描 %1 / %2 字节；命中 %3 条，显示 %4 条。"))
-                                        .arg(result.scannedBytes).arg(result.fileBytes).arg(result.matchedCount).arg(result.matches.size());
-                                    if (result.cancelled) summary.prepend(ks::i18n::sourceText(QStringLiteral("已取消。")));
-                                    if (!result.errorText.isEmpty()) summary += QLatin1Char('\n') + result.errorText;
+                                        .arg(resultSnapshot->scannedBytes).arg(resultSnapshot->fileBytes).arg(resultSnapshot->matchedCount).arg(resultSnapshot->matches.size());
+                                    if (resultSnapshot->cancelled) summary.prepend(ks::i18n::sourceText(QStringLiteral("已取消。")));
+                                    if (!resultSnapshot->errorText.isEmpty()) summary += QLatin1Char('\n') + resultSnapshot->errorText;
                                     statusGuard->setText(summary);
+                                    });
                                 }, Qt::QueuedConnection);
                         });
                     task->setAutoDelete(true);
@@ -12213,10 +13525,10 @@ namespace
                 };
             connect(scan, &QPushButton::clicked, page, launch);
             connect(query, &QLineEdit::returnPressed, page, launch);
-            connect(table, &QTableWidget::cellDoubleClicked, this, [this, table](int row, int)
+            connect(table, &QTableView::doubleClicked, this, [this, table](const QModelIndex& index)
                 {
-                    if (m_tabWidget == nullptr || table->item(row, 0) == nullptr) return;
-                    m_tabWidget->setProperty("ks_file_detail_hex_offset", table->item(row, 0)->data(Qt::UserRole));
+                    if (m_tabWidget == nullptr || !index.isValid()) return;
+                    m_tabWidget->setProperty("ks_file_detail_hex_offset", propertyCell(table, index.row(), 0, Qt::UserRole));
                     m_tabWidget->setCurrentIndex(13);
                 });
             launch();
@@ -12477,6 +13789,13 @@ namespace
         QVector<QToolButton*> m_tabNavigationButtons; // 与 Tab 索引一一对应，供切页时同步选中态。
         ks::ui::StructuredFieldView* m_generalPropertyView = nullptr; // 直接呈现字段快照，不依赖文本编辑器。
         std::function<void()> m_signatureLanguageRefresh; // UI 快照重译不重新验证文件。
+        QTableView* m_generalBatchTable = nullptr;
+        QLabel* m_generalBatchSummary = nullptr;
+        FileDetailRowsModel* m_generalBatchRowsModel = nullptr;
+        ks::ui::FieldDocument m_generalR3Document; // R0/语言更新复用同一版R3快照，不重新stat。
+        bool m_generalR3Loaded = false;
+        quint64 m_generalR3LoadGeneration = 0;
+        std::shared_ptr<std::atomic_bool> m_generalReadCancel; // 关闭后不继续遍历批量常规目标。
         QString m_generalNtPathText; // 常规页复用的 NT 路径，避免切换语言时重复查询。
         bool m_generalR0Loaded = false; // R0 文件信息是否已完成后台读取。
         ksword::ark::FileInfoQueryResult m_generalR0Info{}; // 保留原始 R0 数据供双语重绘。
@@ -12499,8 +13818,15 @@ namespace
         QLabel* m_pendingChangesLabel = nullptr; // 底部统一保存栏的待处理摘要。
         QPushButton* m_discardPendingButton = nullptr; // 放弃全部未写入补丁。
         QPushButton* m_saveAllButton = nullptr; // 唯一会触发文件写入的入口。
+        QHash<QObject*, QPointer<MetadataReadState>> m_metadataReadStates;
+        bool m_stagingSnapshotBusy = false;
+        std::shared_ptr<std::atomic_bool> m_stagingSnapshotCancel;
         bool m_transactionBusy = false; // 保存事务运行期间锁定编辑和重复提交。
+        std::shared_ptr<std::atomic_bool> m_savePreflightCancel; // 只读签名预检可以取消，不中断已确认的写事务。
+        quint64 m_savePreflightGeneration = 0; // 取消/重试后旧签名计划不能进入确认或写入。
         std::shared_ptr<std::atomic_bool> m_hashCancelRequested; // 哈希计算取消标记，后台线程共享。
+        std::shared_ptr<std::atomic_bool> m_peReadCancel;
+        std::shared_ptr<std::atomic_bool> m_dependencyReadCancel;
         std::shared_ptr<std::atomic_bool> m_usageScanCancelRequested; // 文件占用扫描取消标记，关闭属性窗时置位。
         QProgressBar* m_usageScanProgressBar = nullptr; // 属性页文件占用扫描的阶段进度条。
         bool m_usageScanInProgress = false; // 属性页占用扫描是否仍在后台执行。
@@ -12509,6 +13835,403 @@ namespace
         bool m_usageR0StartedDuringScan = false; // R0 是否在当前 R3 回落扫描完成前已经启动。
         bool m_themeStyleApplying = false; // 避免 PaletteChange 触发样式重入。
     };
+
+    // Pure stream accumulator: no QWidget/model/document or filesystem ownership.
+    struct FileAnalysisValues
+    {
+        QCryptographicHash md5{ QCryptographicHash::Md5 };
+        QCryptographicHash sha1{ QCryptographicHash::Sha1 };
+        QCryptographicHash sha256{ QCryptographicHash::Sha256 };
+        std::array<std::uint64_t, 256> buckets{};
+        std::uint64_t bytes = 0;
+
+        void consume(const QByteArray& chunk, const bool hash)
+        {
+            if (hash)
+            {
+                md5.addData(chunk); sha1.addData(chunk); sha256.addData(chunk);
+            }
+            else
+            {
+                for (const unsigned char byte : chunk) ++buckets[byte];
+            }
+            bytes += static_cast<std::uint64_t>(chunk.size());
+        }
+
+        double entropy() const
+        {
+            double result = 0.0;
+            if (bytes == 0) return result;
+            for (const auto count : buckets)
+            {
+                if (count == 0) continue;
+                const double probability = static_cast<double>(count) / static_cast<double>(bytes);
+                result -= probability * std::log2(probability);
+            }
+            return result;
+        }
+    };
+
+    enum class FileAnalysisReadState { Complete, Canceled, Failed };
+
+    template<class Read, class Cancel, class Progress>
+    FileAnalysisReadState readFileAnalysisValues(FileAnalysisValues& values, const bool hash,
+        Read read, Cancel canceled, Progress progress)
+    {
+        QByteArray chunk(256 * 1024, Qt::Uninitialized);
+        while (!canceled())
+        {
+            const qint64 bytes = read(chunk.data(), 256 * 1024);
+            if (bytes < 0) return FileAnalysisReadState::Failed;
+            if (bytes == 0) return canceled() ? FileAnalysisReadState::Canceled : FileAnalysisReadState::Complete;
+            chunk.resize(bytes);
+            values.consume(chunk, hash);
+            chunk.resize(256 * 1024);
+            progress(values.bytes);
+        }
+        return FileAnalysisReadState::Canceled;
+    }
+
+    struct FileAnalysisProgress
+    {
+        std::atomic_bool cancel{ false };
+        std::atomic<int> percent{ 0 };
+    };
+
+    struct FileAnalysisRequest
+    {
+        std::vector<QString> paths;
+        QString panelName;
+        bool hash = true;
+        std::shared_ptr<FileAnalysisProgress> progress;
+    };
+
+    struct FileAnalysisResult
+    {
+        int successes = 0;
+        int failures = 0;
+        bool canceled = false;
+    };
+
+    bool sameFileAnalysisIdentity(const BY_HANDLE_FILE_INFORMATION& before,
+        const BY_HANDLE_FILE_INFORMATION& after)
+    {
+        return before.dwVolumeSerialNumber == after.dwVolumeSerialNumber
+            && before.nFileIndexHigh == after.nFileIndexHigh && before.nFileIndexLow == after.nFileIndexLow
+            && before.nFileSizeHigh == after.nFileSizeHigh && before.nFileSizeLow == after.nFileSizeLow
+            && ::CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) == 0;
+    }
+
+    // Only value requests/tokens cross the worker boundary. Complete results go to the
+    // thread-safe log directly; a large selection cannot become a GUI logging loop.
+    FileAnalysisResult analyzeMenuFiles(const FileAnalysisRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileAnalysisResult result;
+        const auto canceled = [&]() { return token.isCanceled() || request.progress->cancel.load(); };
+        kLogEvent event;
+        for (std::size_t index = 0; index < request.paths.size(); ++index)
+        {
+            if (canceled()) { result.canceled = true; break; }
+            const QString& path = request.paths[index];
+            if (!QFileInfo(path).isFile()) continue; // Preserve directory skipping.
+            HANDLE handle = ::CreateFileW(path.toStdWString().c_str(), GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            DWORD failure = handle == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+            BY_HANDLE_FILE_INFORMATION before{};
+            if (failure == ERROR_SUCCESS && !::GetFileInformationByHandle(handle, &before)) failure = ::GetLastError();
+            FileAnalysisValues values;
+            const auto size = (static_cast<std::uint64_t>(before.nFileSizeHigh) << 32) | before.nFileSizeLow;
+            if (failure == ERROR_SUCCESS)
+            {
+                readFileAnalysisValues(values, request.hash,
+                    [handle, &failure](char* buffer, const DWORD capacity) -> qint64
+                    {
+                        DWORD bytes = 0;
+                        if (!::ReadFile(handle, buffer, capacity, &bytes, nullptr))
+                        { failure = ::GetLastError(); return -1; }
+                        return bytes;
+                    }, canceled, [&request, index, size](const std::uint64_t bytes)
+                    {
+                        const double fraction = size == 0 ? 1.0 : std::min(1.0, static_cast<double>(bytes) / size);
+                        request.progress->percent.store(static_cast<int>(99.0 * (index + fraction) / request.paths.size()));
+                    });
+            }
+            BY_HANDLE_FILE_INFORMATION after{};
+            if (failure == ERROR_SUCCESS && !canceled())
+            {
+                if (!::GetFileInformationByHandle(handle, &after)) failure = ::GetLastError();
+                else if (values.bytes != size || !sameFileAnalysisIdentity(before, after)) failure = ERROR_FILE_INVALID;
+                // The completed handle must still identify the selected pathname.
+                HANDLE current = ::CreateFileW(path.toStdWString().c_str(), FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                BY_HANDLE_FILE_INFORMATION currentInfo{};
+                if (failure == ERROR_SUCCESS && current == INVALID_HANDLE_VALUE) failure = ::GetLastError();
+                if (failure == ERROR_SUCCESS && !::GetFileInformationByHandle(current, &currentInfo)) failure = ::GetLastError();
+                if (failure == ERROR_SUCCESS && !sameFileAnalysisIdentity(before, currentInfo)) failure = ERROR_FILE_INVALID;
+                closeWin32Handle(current);
+            }
+            closeWin32Handle(handle);
+            if (canceled()) { result.canceled = true; break; }
+            if (failure != ERROR_SUCCESS)
+            {
+                ++result.failures;
+                warn << event << "[FileDock] file analysis failed, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", error=" << formatWin32ErrorText(failure).toStdString() << eol;
+                continue;
+            }
+            ++result.successes;
+            if (request.hash)
+            {
+                info << event << "[FileDock] 哈希计算结果, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", md5=" << QString::fromLatin1(values.md5.result().toHex()).toStdString()
+                    << ", sha1=" << QString::fromLatin1(values.sha1.result().toHex()).toStdString()
+                    << ", sha256=" << QString::fromLatin1(values.sha256.result().toHex()).toStdString() << eol;
+            }
+            else
+            {
+                info << event << "[FileDock] 熵值计算结果, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", entropy=" << QString::number(values.entropy(), 'f', 4).toStdString() << eol;
+            }
+        }
+        info << event << (request.hash ? "[FileDock] 哈希计算完成, panel=" : "[FileDock] 熵值计算完成, panel=")
+            << request.panelName.toStdString() << ", successCount=" << result.successes
+            << ", failCount=" << result.failures << ", canceled=" << result.canceled << eol;
+        return result;
+    }
+
+    // Keep entry/event/OVERLAPPED alive until the actual wait thread ends.
+    // No GUI wait, detached waiter or worker-held pointer is destroyed early.
+    template<class Entry, class Complete>
+    void retireFileOplockEntries(std::vector<std::shared_ptr<Entry>> entries, Complete complete)
+    {
+        std::thread([entries = std::move(entries), complete = std::move(complete)]() mutable
+        {
+            for (const auto& entry : entries)
+                if (entry && entry->waitThread.joinable()) entry->waitThread.join();
+            complete(entries);
+        }).detach();
+    }
+
+    struct FileMutationRequest
+    {
+        int kind = 0; // 0 file, 1 directory, 2 rename, 3 integrity.
+        std::vector<QString> paths;
+        QString destination;
+        QString panelName;
+        DWORD integrityRid = 0;
+        std::shared_ptr<FileAnalysisProgress> progress;
+        int progressPid = 0;
+    };
+
+    struct FileMutationResult
+    {
+        std::size_t successCount = 0;
+        std::size_t failureCount = 0;
+        DWORD privilegeError = ERROR_SUCCESS;
+        QString failures;
+        bool canceled = false;
+    };
+
+    template<class Apply, class Canceled, class Progress>
+    FileMutationResult runFileMutationBatch(const std::vector<QString>& paths,
+        Apply apply, Canceled canceled, Progress progress)
+    {
+        FileMutationResult result;
+        QStringList failures;
+        for (std::size_t index = 0; index < paths.size(); ++index)
+        {
+            if (canceled()) { result.canceled = true; break; }
+            QString detail;
+            const DWORD code = apply(paths[index], detail);
+            if (code == ERROR_SUCCESS) ++result.successCount;
+            else
+            {
+                ++result.failureCount;
+                failures.push_back(QStringLiteral("%1 | code=%2 | %3")
+                    .arg(QDir::toNativeSeparators(paths[index])).arg(code).arg(detail));
+                if (result.privilegeError == ERROR_SUCCESS && ks::ui::isPrivilegeRequiredError(code))
+                    result.privilegeError = code;
+            }
+            // Cancellation is checked only before the next transaction, never
+            // while an already-entered mutation still owns its completion work.
+            progress(index + 1, paths.size());
+        }
+        result.failures = failures.join(QLatin1Char('\n'));
+        return result;
+    }
+
+    FileMutationResult runFileMutation(const FileMutationRequest& request)
+    {
+        QElapsedTimer progressTimer;
+        progressTimer.start();
+        FileMutationResult result = runFileMutationBatch(request.paths,
+            [&request](const QString& path, QString& detail) -> DWORD
+            {
+                DWORD code = ERROR_SUCCESS;
+                if (request.kind == 3)
+                    code = setFileIntegrityLevelByR0ThenR3(path, request.integrityRid, &detail);
+                else if (request.kind == 2)
+                {
+                    const QFileInfo old(path);
+                    const bool ok = old.isDir()
+                        ? QDir(old.absolutePath()).rename(old.fileName(), request.destination)
+                        : QFile::rename(path, request.destination);
+                    if (!ok) code = ERROR_GEN_FAILURE;
+                }
+                else if (request.kind == 1)
+                {
+                    if (!QDir().mkpath(request.destination)) code = ERROR_GEN_FAILURE;
+                }
+                else
+                {
+                    QFile file(request.destination);
+                    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                    { code = ERROR_GEN_FAILURE; detail = file.errorString(); }
+                    file.close();
+                }
+                kLogEvent event;
+                if (code == ERROR_SUCCESS)
+                    info << event << "[FileDock] file mutation completed, kind=" << request.kind
+                        << ", panel=" << request.panelName.toStdString() << ", path=" << path.toStdString()
+                        << ", destination=" << request.destination.toStdString() << ", rid=" << request.integrityRid
+                        << ", detail=" << detail.toStdString() << eol;
+                else
+                    warn << event << "[FileDock] file mutation failed, kind=" << request.kind
+                        << ", path=" << path.toStdString() << ", code=" << code << ", detail=" << detail.toStdString() << eol;
+                return code;
+            },
+            [&request]() { return request.progress->cancel.load(); },
+            [&request, &progressTimer](std::size_t completed, std::size_t total)
+            {
+                const int percent = static_cast<int>(95.0 * completed / total);
+                request.progress->percent.store(percent);
+                if (completed == total || progressTimer.elapsed() >= 100)
+                {
+                    progressTimer.restart();
+                    kPro.set(request.progressPid, "处理中", 0, static_cast<float>(std::max(2, percent)));
+                }
+            });
+        // Accepted writes finish independently of the page. Only an explicit
+        // progress-dialog cancel stops the next transaction boundary.
+        kPro.finish(request.progressPid,
+            result.canceled ? kProgressState::Canceled
+                : (result.failureCount == 0 ? kProgressState::Success : kProgressState::Failure),
+            result.canceled ? "用户取消" : (result.failureCount == 0 ? "完成" : "失败"));
+        return result;
+    }
+
+    struct FileNavigationRequest
+    {
+        QString path;
+        QString previous;
+    };
+
+    struct FileNavigationResult
+    {
+        QString path;
+        QString parentOfPrevious;
+        bool exists = false;
+    };
+
+    FileNavigationResult probeFileNavigation(const FileNavigationRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileNavigationResult result;
+        if (token.isCanceled()) return result;
+        QDir directory(request.path);
+        result.path = QDir::cleanPath(directory.absolutePath());
+        result.exists = directory.exists();
+        if (!token.isCanceled() && !request.previous.isEmpty())
+        {
+            QDir previous(request.previous);
+            if (previous.cdUp()) result.parentOfPrevious = previous.absolutePath();
+        }
+        return result;
+    }
+
+    struct FileMenuMetadata
+    {
+        bool integrityKnown = false;
+        DWORD integrityRid = 0;
+        bool implicitMedium = false;
+        QString integrityDetail;
+        QStringList links;
+        QString locatePath;
+        ks::process::RunAsAvailability runAs;
+    };
+
+    struct FileMenuMetadataRequest
+    {
+        std::vector<QString> paths;
+        bool executable = false;
+    };
+
+    FileMenuMetadata queryFileMenuMetadata(const FileMenuMetadataRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileMenuMetadata result;
+        if (request.paths.empty() || token.isCanceled()) return result;
+        result.integrityKnown = queryFileIntegrityRid(request.paths.front(), &result.integrityRid,
+            &result.implicitMedium, &result.integrityDetail);
+        QSet<QString> linkKeys;
+        for (const QString& path : request.paths)
+        {
+            if (token.isCanceled()) return result;
+            if (!isPathReparsePoint(path)) continue;
+            const auto reparse = queryReparsePointForUi(path);
+            const QString target = reparseTargetFromResult(reparse).trimmed();
+            const QString key = target.toCaseFolded();
+            if (!target.isEmpty() && !linkKeys.contains(key))
+            { linkKeys.insert(key); result.links.push_back(target); }
+        }
+        if (!token.isCanceled() && request.paths.size() == 1 && !result.links.isEmpty())
+        {
+            const QFileInfo target(result.links.front());
+            result.locatePath = target.isDir() ? target.absoluteFilePath() : target.absolutePath();
+            if (!QDir(result.locatePath).exists()) result.locatePath.clear();
+        }
+        if (!token.isCanceled() && request.executable) result.runAs = ks::process::QueryRunAsAvailability();
+        return result;
+    }
+
+    struct FileShortNameResult
+    {
+        QString text;
+        int hits = 0;
+        int fallbacks = 0;
+        bool canceled = false;
+    };
+
+    template<class Query, class Canceled>
+    FileShortNameResult queryFileShortNames(const std::vector<QString>& paths, Query query, Canceled canceled)
+    {
+        FileShortNameResult result;
+        QStringList lines;
+        lines.reserve(static_cast<qsizetype>(paths.size()));
+        for (const QString& path : paths)
+        {
+            if (canceled()) { result.canceled = true; return result; }
+            const QString shortPath = query(path);
+            QString name;
+            if (!shortPath.isEmpty())
+            {
+                name = QFileInfo(shortPath).fileName().trimmed();
+                if (name.isEmpty()) name = QDir::toNativeSeparators(shortPath);
+                ++result.hits;
+            }
+            else
+            {
+                name = QFileInfo(path).fileName().trimmed();
+                if (name.isEmpty()) name = QDir::toNativeSeparators(path);
+                ++result.fallbacks;
+            }
+            lines.push_back(name);
+        }
+        result.text = lines.join(QLatin1Char('\n'));
+        return result;
+    }
 
     // kRecoveryVolumeProbeGenerationProperty 作用：
     // - 用途：记录“这是第几次卷探测请求”，以动态属性挂在恢复页的卷下拉框上；
@@ -12593,6 +14316,9 @@ struct FileDock::FileOplockAccessRecord
 
 struct FileDock::FileOplockEntry
 {
+    // Declared first so the lease is the last member destroyed: native handles,
+    // joined waiter and complete attribution values retire before exit admission.
+    std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> cleanupLease;
     QString path;
     FileOplockLevel level = FileOplockLevel::Level1;
     HANDLE fileHandle = INVALID_HANDLE_VALUE;
@@ -12791,7 +14517,8 @@ std::size_t FileDock::recordFileOplockAccessPrograms(
 
     const std::vector<QString> scanTargets{ entry.path };
     const filedock::handleusage::HandleUsageScanResult scanResult =
-        filedock::handleusage::scanHandleUsageByPaths(scanTargets, 0, true);
+        filedock::handleusage::scanHandleUsageByPaths(scanTargets, 0, true,
+            [&entry]() { return entry.releaseRequested.load(); });
 
     const std::uint32_t currentProcessId = static_cast<std::uint32_t>(::GetCurrentProcessId());
     const QString nowText = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
@@ -12898,6 +14625,313 @@ std::size_t FileDock::recordFileOplockAccessPrograms(
     return scanRecordByPid.size();
 }
 
+struct FileDock::NavigationPageDefinition
+{
+    QString id;
+    QString parentId;
+    QString languageKey;
+    QString sourceTitle;
+    QStringList sourceSearchTexts;
+    QWidget* FileDock::* pageMember;
+    void (FileDock::* initialize)();
+};
+
+const std::vector<FileDock::NavigationPageDefinition>& FileDock::navigationPageDefinitions()
+{
+    static const std::vector<NavigationPageDefinition> definitions{
+        { QStringLiteral("file.tab.manager"), QString(), QStringLiteral("file.tab.manager"), QStringLiteral("文件管理"),
+          { QStringLiteral("后退"),
+              QStringLiteral("前进"),
+              QStringLiteral("上级目录"),
+              QStringLiteral("刷新当前目录"),
+              QStringLiteral("输入路径后按回车跳转"),
+              QStringLiteral("快速跳转到任意驱动器根目录"),
+              QStringLiteral("图标视图"),
+              QStringLiteral("列表视图"),
+              QStringLiteral("详情视图"),
+              QStringLiteral("树形视图"),
+              QStringLiteral("切换文件显示模式，默认使用详情视图"),
+              QStringLiteral("系统"),
+              QStringLiteral("隐藏"),
+              QStringLiteral("名称"),
+              QStringLiteral("大小"),
+              QStringLiteral("修改时间"),
+              QStringLiteral("类型"),
+              QStringLiteral("Windows API"),
+              QStringLiteral("手动解析文件系统"),
+              QStringLiteral("R0 驱动解析"),
+              QStringLiteral("作为NTFS解析"),
+              QStringLiteral("作为FAT32解析"),
+              QStringLiteral("作为exFAT解析"),
+              QStringLiteral("作为MFT解析"),
+              QStringLiteral("R0 IRP 解析"),
+              QStringLiteral("切换目录读取方式：Windows API、R3 原始卷手动解析、R0 驱动目录解析，强制按 NTFS/FAT32/exFAT 解析，\n作为MFT解析（仅 NTFS：卷偏移直读 $MFT，禁用一切 WinAPI/FSCTL 回退），\nR0 IRP 解析（内核自建 IRP 把目录查询直发基础文件系统设备，绕过过滤层；\n打开阶段仍走正常路径，只在 CREATE 上做的拦截发现不了）。\n后两种会与常规视图对照，把只有绕过路径可见的条目标为疑似隐藏项。"),
+              QStringLiteral("快速过滤"),
+              QStringLiteral("路径: -"),
+              QStringLiteral("选中: 0"),
+              QStringLiteral("磁盘: -"),
+              QStringLiteral("解析器: Windows API") }, &FileDock::m_fileManagerPage, &FileDock::initializeManagerPage },
+        { QStringLiteral("file.tab.storage_controller"), QString(), QStringLiteral("file.tab.storage_controller"), QStringLiteral("存储控制器"),
+          { QStringLiteral("KSword Controller / 存储控制器"),
+              QStringLiteral("持续风险提示：此页直接驱动专用控制器的 BAR、DMA/队列或 IDE task-file。写入可立即破坏文件系统、分区表和启动数据；控制器重置可使设备离线。仅允许手动绑定的非启动、无挂载卷控制器。expected-hash 条件比较与写后复读不是硬件原子操作，不能消除设备并发写、固件缓存或掉电风险。"),
+              QStringLiteral("资源与一致性"),
+              QStringLiteral("控制器：未查询"),
+              QStringLiteral("ownership=none；coherency=unknown；session=none"),
+              QStringLiteral("刷新状态"),
+              QStringLiteral("取得独占会话"),
+              QStringLiteral("释放会话"),
+              QStringLiteral("受控复位"),
+              QStringLiteral("取得对该存储控制器的独占访问会话，用于底层 BAR/DMA 操作"),
+              QStringLiteral("对存储控制器执行受控复位（可能使设备暂时离线，操作危险）"),
+              QStringLiteral("刷新审计"),
+              QStringLiteral("事务化原始访问"),
+              QStringLiteral("字节偏移"),
+              QStringLiteral("字节长度"),
+              QStringLiteral("读取结果或待写入 HEX，例如：00 11 22 FF"),
+              QStringLiteral("读取并建立条件写快照"),
+              QStringLiteral("按快照写入并复读验证"),
+              QStringLiteral("读取该区间并建立“条件写”比对快照，供后续按快照安全写入"),
+              QStringLiteral("仅当区间内容仍与快照一致时才写入，写完再读回校验，防止误写"),
+              QStringLiteral("回滚最近一次写入"),
+              QStringLiteral("序号"),
+              QStringLiteral("操作"),
+              QStringLiteral("偏移"),
+              QStringLiteral("长度"),
+              QStringLiteral("结果"),
+              QStringLiteral("风险"),
+              QStringLiteral("进程") }, &FileDock::m_storageControllerPage, &FileDock::initializeStorageControllerPage },
+        { QStringLiteral("file.tab.recovery"), QString(), QStringLiteral("file.tab.recovery"), QStringLiteral("文件恢复"),
+          { QStringLiteral("选择要扫描误删文件的 NTFS 卷。"),
+              QStringLiteral("刷新可扫描卷列表"),
+              QStringLiteral("扫描误删"),
+              QStringLiteral("解析 NTFS MFT，扫描删除项"),
+              QStringLiteral("恢复选中"),
+              QStringLiteral("支持 Resident 与完整非驻留数据；非驻留文件必须导出到其它卷，恢复前后都会复核卷位图。"),
+              QStringLiteral("查找结果（文件名/路径/恢复能力）"),
+              QStringLiteral("按输入内容实时筛选扫描结果，匹配行以外的条目会被隐藏。"),
+              QStringLiteral("按正则表达式筛选，例如 \\.docx?$ 只看 doc/docx"),
+              QStringLiteral("卷: "),
+              QStringLiteral("选择 NTFS 卷后开始扫描，可在此列出仍可恢复的误删文件。"),
+              QStringLiteral("开始扫描误删文件"),
+              QStringLiteral("请选择NTFS卷并开始扫描。") }, &FileDock::m_fileRecoveryPage, &FileDock::initializeRecoveryPage },
+        { QStringLiteral("file.tab.irpbuilder"), QString(), QStringLiteral("file.tab.irpbuilder"), QStringLiteral("IRP 构造"),
+          { QStringLiteral("正在加载..."),
+              QStringLiteral("0x%1"),
+              QStringLiteral("完成"),
+              QStringLiteral("请求参数被 R0 拒绝"),
+              QStringLiteral("目标打开失败"),
+              QStringLiteral("目标栈层不可用"),
+              QStringLiteral("内核内存不足"),
+              QStringLiteral("该 major 需要额外确认"),
+              QStringLiteral("缺少写入确认令牌"),
+              QStringLiteral("等待超时，请求已取消"),
+              QStringLiteral("IRP 构造失败"),
+              QStringLiteral("输出缓冲不足"),
+              QStringLiteral("被安全策略拒绝"),
+              QStringLiteral("未知状态(%1)"),
+              QStringLiteral("目标请求"),
+              QStringLiteral("已取消"),
+              QStringLiteral("输出被截断"),
+              QStringLiteral("0x%1  未知"),
+              QStringLiteral("0x%1  %2"),
+              QStringLiteral("无法解析数值: %1"),
+              QStringLiteral("十六进制输入必须是偶数个字符。"),
+              QStringLiteral("十六进制输入含非法字符: %1"),
+              QStringLiteral("(无输出数据)"),
+              QStringLiteral("目标与请求"),
+              QStringLiteral("目标路径，例如 C:\\Windows 或 \\??\\C:\\Windows\\notepad.exe"),
+              QStringLiteral("Win32 路径会自动转换为 \\??\\ 命名空间路径；也可直接填 NT 路径。"),
+              QStringLiteral("自定义（手工参数）"),
+              QStringLiteral("查询文件全部信息"),
+              QStringLiteral("读取文件"),
+              QStringLiteral("写入文件（填写下方十六进制数据）"),
+              QStringLiteral("刷新文件缓冲"),
+              QStringLiteral("创建空文件"),
+              QStringLiteral("创建目录"),
+              QStringLiteral("枚举目录"),
+              QStringLiteral("删除（FileDispositionInformation）"),
+              QStringLiteral("删除（POSIX / FileDispositionInformationEx）"),
+              QStringLiteral("截断为 0 字节"),
+              QStringLiteral("设置基本属性为 NORMAL"),
+              QStringLiteral("查询卷属性"),
+              QStringLiteral("查询安全描述符"),
+              QStringLiteral("选择常用操作后自动填写 Major、访问权、InformationClass 与输入结构。预设只填参数、不自动发送；写操作仍需显式勾选确认。"),
+              QStringLiteral("浏览..."),
+              QStringLiteral("选择要构造的 IRP 主功能码。参数区会按所选 major 自动启停。"),
+              QStringLiteral("IRP_MN_* 次功能码，十进制或 0x 前缀十六进制；不适用时填 0。"),
+              QStringLiteral("设备栈顶（等价 Zw* 路径，作为对照基线）"),
+              QStringLiteral("基础文件系统设备（跳过其上的过滤层）"),
+              QStringLiteral("VPB 挂载文件系统设备"),
+              QStringLiteral("卷设备本身"),
+              QStringLiteral("选择 IRP 投递到设备栈的哪一层。\n选择非栈顶时，连 IRP_MJ_CREATE 都由 R0 自行构造并直发，不经过过滤层。\n注意：手工构造的文件对象缺少 I/O 管理器建立的完整关联，NTFS 在后续\n目录查询等操作上可能回 STATUS_INVALID_PARAMETER，这属于预期现象；\n只想绕过目录查询请改用文件页的“R0 IRP 解析”读取方式。\n目标层不可用时 R0 会回退到栈顶，并在结果里如实标出实际生效的层。"),
+              QStringLiteral("等待完成的毫秒数，上限 60000；超时后 R0 会取消 IRP 并等待其排空。"),
+              QStringLiteral("常用操作:"),
+              QStringLiteral("目标路径:"),
+              QStringLiteral("MajorFunction:"),
+              QStringLiteral("MinorFunction:"),
+              QStringLiteral("目标栈层:"),
+              QStringLiteral("超时(ms):"),
+              QStringLiteral("IO_STACK_LOCATION 参数"),
+              QStringLiteral("CREATE 阶段 ACCESS_MASK；留空时按只读属性访问打开。"),
+              QStringLiteral("CREATE 阶段共享位；留空时按读/写/删除全共享打开。"),
+              QStringLiteral("1 (FILE_OPEN)"),
+              QStringLiteral("CREATE 处置方式：1=FILE_OPEN，2=FILE_CREATE，3=FILE_OPEN_IF 等。"),
+              QStringLiteral("CREATE 选项位；R0 会额外补上同步与备份语义。"),
+              QStringLiteral("CREATE 文件属性；留空按 FILE_ATTRIBUTE_NORMAL。"),
+              QStringLiteral("信息类：QUERY/SET_INFORMATION 用 FILE_INFORMATION_CLASS，\nQUERY/SET_VOLUME_INFORMATION 用 FS_INFORMATION_CLASS，\nDIRECTORY_CONTROL 用目录信息类，POWER 复用为目标电源状态。"),
+              QStringLiteral("DEVICE_CONTROL/FILE_SYSTEM_CONTROL 的控制码，低两位决定缓冲方式。"),
+              QStringLiteral("QUERY/SET_SECURITY 的 SECURITY_INFORMATION 位。"),
+              QStringLiteral("READ/WRITE/LOCK_CONTROL 的起始字节偏移。"),
+              QStringLiteral("READ/WRITE 的 Key，或 LOCK_CONTROL 的锁 Key。"),
+              QStringLiteral("LOCK_CONTROL 的加锁字节数。"),
+              QStringLiteral("期望的输出缓冲长度，上限 256 KiB。"),
+              QStringLiteral("DIRECTORY_CONTROL 的文件名通配符，留空表示不限定。"),
+              QStringLiteral("DesiredAccess:"),
+              QStringLiteral("ShareAccess:"),
+              QStringLiteral("CreateDisposition:"),
+              QStringLiteral("CreateOptions:"),
+              QStringLiteral("FileAttributes:"),
+              QStringLiteral("InformationClass:"),
+              QStringLiteral("ControlCode:"),
+              QStringLiteral("SecurityInformation:"),
+              QStringLiteral("ByteOffset:"),
+              QStringLiteral("Key:"),
+              QStringLiteral("LockLength:"),
+              QStringLiteral("OutputBytes:"),
+              QStringLiteral("FileName 通配符:"),
+              QStringLiteral("标志与输入数据"),
+              QStringLiteral("确认写入语义"),
+              QStringLiteral("写类 major 必须勾选；勾选后客户端才会附带确认令牌，R0 会二次校验。"),
+              QStringLiteral("允许 PnP/电源类请求"),
+              QStringLiteral("IRP_MJ_POWER/PNP/SHUTDOWN/SYSTEM_CONTROL/DEVICE_CHANGE 需要额外勾选。\n这些请求正常由系统按状态机下发，手工构造可能让目标驱动进入非法状态。"),
+              QStringLiteral("只执行 CREATE"),
+              QStringLiteral("只验证打开阶段，不再下发目标 major，用于单独观察 CREATE 是否被拦截。"),
+              QStringLiteral("内联输入数据，十六进制，例如 01 00 00 00；留空表示无输入。"),
+              QStringLiteral("作为 IRP 数据段的输入内容，上限 64 KiB。\n空白、逗号和短横线会被忽略，方便直接粘贴各种转储格式。"),
+              QStringLiteral("构造并发送 IRP"),
+              QStringLiteral("尚未发送。写类与 PnP/电源类请求需要先勾选对应确认项。"),
+              QStringLiteral("项目"),
+              QStringLiteral("值"),
+              QStringLiteral("目标驱动写回的数据将以十六进制转储显示。"),
+              QStringLiteral("选择 IRP 目标文件"),
+              QStringLiteral("已填入查询 FileAllInformation 的安全栈顶预设。"),
+              QStringLiteral("已填入从偏移 0 读取 4096 字节的预设，可修改偏移与长度。"),
+              QStringLiteral("已填入写入预设；请在下方填写十六进制数据，并勾选写入确认。"),
+              QStringLiteral("已填入刷新文件缓冲预设。"),
+              QStringLiteral("已填入 FILE_CREATE 空文件预设；目标必须不存在，并需勾选写入确认。"),
+              QStringLiteral("已填入 FILE_CREATE 目录预设；目标必须不存在，并需勾选写入确认。"),
+              QStringLiteral("已填入 FileIdBothDirectoryInformation 目录枚举预设。"),
+              QStringLiteral("已填入传统 IRP 删除预设；目录目标需另勾 FILE_DIRECTORY_FILE，并需写入确认。"),
+              QStringLiteral("已填入 IRP POSIX 删除预设；支持情况取决于系统与文件系统，并需写入确认。"),
+              QStringLiteral("已填入 FileEndOfFileInformation 截断到 0 字节预设，并需写入确认。"),
+              QStringLiteral("已填入 FileBasicInformation 的 NORMAL 属性模板，并需写入确认。"),
+              QStringLiteral("已填入 FileFsAttributeInformation 卷属性查询预设。"),
+              QStringLiteral("已填入所有者、组与 DACL 安全描述符查询预设。"),
+              QStringLiteral("%1 由 PnP/电源管理器按状态机下发，手工构造可能让目标驱动进入非法状态；需要同时勾选写入确认与 PnP/电源允许项。"),
+              QStringLiteral("%1 属于写语义，会改变磁盘或设备状态；需要勾选写入确认。"),
+              QStringLiteral("%1 为只读语义，可直接发送。"),
+              QStringLiteral("正在发送..."),
+              QStringLiteral("IRP 构造"),
+              QStringLiteral("请先填写目标路径。"),
+              QStringLiteral("%1 会改变磁盘或设备状态，请先勾选“确认写入语义”。"),
+              QStringLiteral("%1 需要同时勾选“允许 PnP/电源类请求”。"),
+              QStringLiteral("即将向文件系统栈手工投递 %1。\n\n这类请求正常只由 PnP/电源管理器按状态机下发，手工构造可能让目标驱动进入非法状态甚至触发系统崩溃。\n\n确认继续？"),
+              QStringLiteral("字段 %1 解析失败：%2"),
+              QStringLiteral("输入数据解析失败：%1"),
+              QStringLiteral("输入数据超出上限 %1 字节。"),
+              QStringLiteral("输出缓冲超出上限 %1 字节。"),
+              QStringLiteral("正在向 R0 提交 %1 ..."),
+              QStringLiteral("当前 KswordARK 驱动不支持自建 IRP 提交，请重新部署本次构建的驱动。"),
+              QStringLiteral("R0 通信失败：Win32=%1；%2"),
+              QStringLiteral("通信结果"),
+              QStringLiteral("失败"),
+              QStringLiteral("Win32 错误"),
+              QStringLiteral("诊断"),
+              QStringLiteral("协议状态"),
+              QStringLiteral("执行阶段"),
+              QStringLiteral("MajorFunction"),
+              QStringLiteral("MinorFunction"),
+              QStringLiteral("请求栈层"),
+              QStringLiteral("实际栈层"),
+              QStringLiteral("栈层提示"),
+              QStringLiteral("目标层不可用，R0 已回退到栈顶，本次未绕过过滤层"),
+              QStringLiteral("CREATE 状态"),
+              QStringLiteral("目标请求状态"),
+              QStringLiteral("CLEANUP 状态"),
+              QStringLiteral("CLOSE 状态"),
+              QStringLiteral("Information"),
+              QStringLiteral("%1 (0x%2)"),
+              QStringLiteral("输出字节数"),
+              QStringLiteral("接收驱动"),
+              QStringLiteral("接收设备"),
+              QStringLiteral("目标 DEVICE_OBJECT"),
+              QStringLiteral("栈顶 DEVICE_OBJECT"),
+              QStringLiteral("基础 FS DEVICE_OBJECT"),
+              QStringLiteral("VPB DEVICE_OBJECT"),
+              QStringLiteral("分发入口"),
+              QStringLiteral("目标 StackSize"),
+              QStringLiteral("目标 DeviceFlags"),
+              QStringLiteral("%1：协议=%2；目标请求=%3；Information=%4；输出 %5 字节") }, &FileDock::m_irpBuilderPage, &FileDock::initializeIrpBuilderPage }
+    };
+    return definitions;
+}
+
+ks::ui::PageNavigationCatalog FileDock::navigationCatalog(const FileDock* const existing)
+{
+    ks::ui::PageNavigationCatalog catalog;
+    const auto& definitions = navigationPageDefinitions();
+    catalog.reserve(static_cast<qsizetype>(definitions.size()));
+    for (std::size_t ordinal = 0; ordinal < definitions.size(); ++ordinal)
+    {
+        const auto& definition = definitions[ordinal];
+        ks::ui::PageNavigationDescriptor page;
+        page.id = definition.id;
+        page.parentId = definition.parentId;
+        page.title = ks::i18n::text(definition.languageKey, definition.sourceTitle);
+        page.current = ordinal == 0;
+        for (const auto& text : definition.sourceSearchTexts)
+            page.searchTexts.append(ks::i18n::sourceText(text));
+        if (existing)
+        {
+            const auto* tabs = existing->m_rootTabWidget;
+            QWidget* const widget = existing->*(definition.pageMember);
+            const int index = tabs && widget ? tabs->indexOf(widget) : -1;
+            page.visible = index >= 0 && tabs->isTabVisible(index);
+            page.enabled = index >= 0 && tabs->isEnabled() && tabs->isTabEnabled(index) && widget->isEnabled();
+            page.current = index >= 0 && tabs->currentWidget() == widget;
+            if (index >= 0) page.title = tabs->tabText(index);
+        }
+        catalog.append(std::move(page));
+    }
+    return catalog;
+}
+
+QWidget* FileDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto catalog = navigationCatalog(this);
+    const auto record = std::find_if(catalog.cbegin(), catalog.cend(),
+        [&id](const auto& page) { return page.id == id; });
+    if (record == catalog.cend() || !record->visible || !record->enabled) return nullptr;
+    const auto& definitions = navigationPageDefinitions();
+    const auto definition = std::find_if(definitions.cbegin(), definitions.cend(),
+        [&id](const auto& page) { return page.id == id; });
+    if (definition == definitions.cend()) return nullptr;
+    const QPointer<FileDock> self(this);
+    const QPointer<QTabWidget> tabs(m_rootTabWidget);
+    const QPointer<QWidget> page(this->*(definition->pageMember));
+    if (!tabs || !page) return nullptr;
+    const int index = tabs->indexOf(page);
+    if (index < 0 || !tabs->isTabVisible(index) || !tabs->isTabEnabled(index)) return nullptr;
+    tabs->setCurrentIndex(index);
+    if (!self || !tabs || !page || tabs->currentWidget() != page) return nullptr;
+    ks::ui::PrepareWidgetThemeBindingsForShow(page);
+    if (!self || !tabs || !page || tabs->currentWidget() != page) return nullptr;
+    const int finalIndex = tabs->indexOf(page);
+    if (finalIndex < 0 || !tabs->isTabVisible(finalIndex) || !tabs->isTabEnabled(finalIndex)
+        || !page->isEnabled()) return nullptr;
+    return page.data();
+}
+
 FileDock::FileDock(QWidget* parent)
     : QWidget(parent)
     , m_uiDispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
@@ -12911,6 +14945,18 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
+    if (m_leftPanel.navigationOperation) m_leftPanel.navigationOperation->close();
+    if (m_rightPanel.navigationOperation) m_rightPanel.navigationOperation->close();
+    if (m_fileMenuOperation) m_fileMenuOperation->close();
+    if (m_shortNameOperation) m_shortNameOperation->close();
+    if (m_fileMutationOperation != nullptr) m_fileMutationOperation->close();
+    if (m_recoveryFilterTimer) m_recoveryFilterTimer->stop();
+    if (m_recoveryScanOperation) m_recoveryScanOperation->close();
+    if (m_recoveryProjectionOperation) m_recoveryProjectionOperation->close();
+    retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
+    if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
+    if (m_leftPanel.manualParseCanceled) m_leftPanel.manualParseCanceled->store(true);
+    if (m_rightPanel.manualParseCanceled) m_rightPanel.manualParseCanceled->store(true);
     m_uiDispatcher->close();
     // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
     releaseAllActiveOplocks(false);
@@ -12952,10 +14998,52 @@ void FileDock::changeEvent(QEvent* event)
         };
     refreshPanelView(m_leftPanel);
     refreshPanelView(m_rightPanel);
+    if (m_recoveryTable)
+    {
+        m_recoveryTable->viewport()->update();
+        m_recoveryTable->horizontalHeader()->viewport()->update();
+    }
 }
 
 bool FileDock::eventFilter(QObject* watched, QEvent* event)
 {
+    // A projection keeps filtered-out selections by source identity. Normal replacement
+    // selection still clears those latent rows, just as QTableWidget did before filtering.
+    if (m_recoveryTable && m_recoveryModel && event && !m_recoveryProjectionCommit)
+    {
+        auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+        if (watched == m_recoveryTable->viewport() && event->type() == QEvent::MouseButtonPress)
+        {
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            const auto clicked = m_recoveryTable->indexAt(mouse->position().toPoint());
+            if (!(mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                && (mouse->button() == Qt::LeftButton || (mouse->button() == Qt::RightButton
+                    && clicked.isValid() && !m_recoveryTable->selectionModel()->isSelected(clicked))))
+            {
+                for (auto it = m_recoverySelectedSourceRows.begin(); it != m_recoverySelectedSourceRows.end();)
+                    if (model->viewRow(*it) < 0) it = m_recoverySelectedSourceRows.erase(it); else ++it;
+            }
+        }
+        if (watched == m_recoveryTable && event->type() == QEvent::KeyPress)
+        {
+            const auto* key = static_cast<QKeyEvent*>(event);
+            if (key->matches(QKeySequence::SelectAll) && model->snapshot())
+            {
+                m_recoverySelectedSourceRows.clear();
+                for (int source = 0; source < static_cast<int>(model->snapshot()->entries.size()); ++source)
+                    m_recoverySelectedSourceRows.insert(source);
+            }
+            else if (!(key->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                && (key->key() == Qt::Key_Escape || key->key() == Qt::Key_Up || key->key() == Qt::Key_Down
+                    || key->key() == Qt::Key_Home || key->key() == Qt::Key_End
+                    || key->key() == Qt::Key_PageUp || key->key() == Qt::Key_PageDown))
+            {
+                for (auto it = m_recoverySelectedSourceRows.begin(); it != m_recoverySelectedSourceRows.end();)
+                    if (model->viewRow(*it) < 0) it = m_recoverySelectedSourceRows.erase(it); else ++it;
+            }
+        }
+    }
+
     // 读取方式下拉框吞掉滚轮：它的每一次切换都会触发一轮目录重解析，
     // 纯 MFT / R0 IRP 这两种还是全卷级别的重活。鼠标从列表滚到工具条上时
     // 一次滚动就能连着切好几档，等于连续排队几轮全盘扫描。
@@ -13037,6 +15125,19 @@ void FileDock::initializeUi()
     ks::ui::StyleSquarePageTabsFrame(m_rootTabWidget);
     m_rootLayout->addWidget(m_rootTabWidget, 1);
 
+    for (const auto& definition : navigationPageDefinitions())
+    {
+        (this->*(definition.initialize))();
+        QWidget* const page = this->*(definition.pageMember);
+        if (!page) continue;
+        m_rootTabWidget->addTab(page, ks::i18n::text(definition.languageKey, definition.sourceTitle));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_rootTabWidget, page, definition.languageKey, definition.sourceTitle);
+    }
+}
+
+void FileDock::initializeManagerPage()
+{
     m_fileManagerPage = new QWidget(m_rootTabWidget);
     QVBoxLayout* managerLayout = new QVBoxLayout(m_fileManagerPage);
     managerLayout->setContentsMargins(0, 0, 0, 0);
@@ -13056,34 +15157,11 @@ void FileDock::initializeUi()
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 1);
 
-    m_rootTabWidget->addTab(m_fileManagerPage, QStringLiteral("文件管理"));
+}
+
+void FileDock::initializeStorageControllerPage()
+{
     m_storageControllerPage = new ks::misc::StorageControllerResearchDialog(m_rootTabWidget);
-    m_rootTabWidget->addTab(m_storageControllerPage, QStringLiteral("存储控制器"));
-    initializeRecoveryPage();
-    if (m_fileRecoveryPage != nullptr)
-    {
-        m_rootTabWidget->addTab(m_fileRecoveryPage, QStringLiteral("文件恢复"));
-    }
-    initializeIrpBuilderPage();
-    if (m_irpBuilderPage != nullptr)
-    {
-        m_rootTabWidget->addTab(m_irpBuilderPage, QStringLiteral("IRP 构造"));
-    }
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rootTabWidget, m_fileManagerPage, QStringLiteral("file.tab.manager"), QStringLiteral("文件管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rootTabWidget, m_storageControllerPage,
-        QStringLiteral("file.tab.storage_controller"), QStringLiteral("存储控制器"));
-    if (m_fileRecoveryPage != nullptr)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_rootTabWidget, m_fileRecoveryPage, QStringLiteral("file.tab.recovery"), QStringLiteral("文件恢复"));
-    }
-    if (m_irpBuilderPage != nullptr)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_rootTabWidget, m_irpBuilderPage, QStringLiteral("file.tab.irpbuilder"), QStringLiteral("IRP 构造"));
-    }
 }
 
 void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText)
@@ -13326,6 +15404,22 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.fileViewStack->setCurrentWidget(panel.fileView);
     panel.rootLayout->addWidget(panel.fileViewStack, 1);
 
+    new FileVisualDemandScheduler(panel.fileView, panel.compactFileView,
+        panel.proxyModel, panel.manualProxyModel, panel.rootWidget,
+        [&panel](const QVector<FileVisualDemand>& demand) {
+            QVector<FileVisualDemand> fsDemand;
+            QVector<FileVisualDemand> manualDemand;
+            for (const auto& item : demand)
+            {
+                if (item.index.model() == panel.fsModel)
+                    fsDemand.push_back(item);
+                else if (item.index.model() == panel.manualModel)
+                    manualDemand.push_back(item);
+            }
+            static_cast<ReparseAwareFileSystemModel*>(panel.fsModel)->setVisualDemand(fsDemand);
+            static_cast<ManualDirectoryModel*>(panel.manualModel)->setVisualDemand(manualDemand);
+        });
+
     panel.statusBar = new QStatusBar(panel.rootWidget);
     panel.pathStatusLabel = new QLabel(QStringLiteral("路径: -"), panel.statusBar);
     panel.selectionStatusLabel = new QLabel(QStringLiteral("选中: 0"), panel.statusBar);
@@ -13413,24 +15507,8 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
             return;
         }
 
-        QDir currentDir(panel.currentPath);
-        if (!currentDir.cdUp())
-        {
-            return;
-        }
-
-        {
-            kLogEvent event;
-            info << event
-                << "[FileDock] 上级目录跳转, panel="
-                << panel.panelNameText.toStdString()
-                << ", from="
-                << QDir::toNativeSeparators(panel.currentPath).toStdString()
-                << ", to="
-                << QDir::toNativeSeparators(currentDir.absolutePath()).toStdString()
-                << eol;
-        }
-        navigateToPath(panel, currentDir.absolutePath(), true);
+        const QString parentPath = QDir::cleanPath(QDir(panel.currentPath).absoluteFilePath(QStringLiteral("..")));
+        if (!pathEqualsCaseInsensitive(parentPath, panel.currentPath)) navigateToPath(panel, parentPath, true);
     });
 
     // 刷新按钮：重新加载当前目录。
@@ -13734,28 +15812,53 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
         normalizedPath += QDir::separator();
     }
 
-    QDir targetDir(normalizedPath);
-    if (!targetDir.exists())
-    {
-        kLogEvent event;
-        warn << event << "[FileDock] 导航失败，目录不存在: " << normalizedPath.toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("路径无效"), QStringLiteral("目录不存在：%1").arg(normalizedPath));
-        return;
-    }
+    const auto generation = ++panel.navigationGeneration;
+    if (!panel.navigationOperation) panel.navigationOperation = new ks::ui::AsyncOperation(this);
+    const bool left = &panel == &m_leftPanel;
+    panel.pathStatusLabel->setText(ks::i18n::displayText(QStringLiteral("正在加载...")));
+    panel.navigationOperation->submit<FileNavigationRequest, FileNavigationResult>(
+        { normalizedPath, panel.currentPath }, probeFileNavigation,
+        [this, left, recordHistory, generation](const FileNavigationResult& result, std::uint64_t ticket)
+        {
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            if (target.navigationGeneration != generation) return true;
+            const QPointer<FileDock> self(this);
+            const auto commit = [self, left, recordHistory, generation, ticket, result]()
+            {
+                if (!self) return;
+                FilePanelWidgets& current = left ? self->m_leftPanel : self->m_rightPanel;
+                if (current.navigationGeneration == generation && current.navigationOperation->isCurrent(ticket))
+                {
+                    if (!result.exists)
+                    {
+                        self->updatePanelStatus(current);
+                        QMessageBox::warning(self, QStringLiteral("路径无效"), QStringLiteral("目录不存在：%1").arg(result.path));
+                    }
+                    else self->commitFileNavigation(current, result.path, result.parentOfPrevious, recordHistory);
+                }
+                if (self) current.navigationOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                left ? QStringLiteral("file-navigation-left") : QStringLiteral("file-navigation-right"),
+                { target.fileView, target.compactFileView }, commit)) return false;
+            commit();
+            return true;
+        },
+        [this, left, generation](std::exception_ptr)
+        {
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            if (target.navigationGeneration == generation) updatePanelStatus(target);
+            kLogEvent event; warn << event << "[FileDock] navigation probe failed" << eol;
+        });
+}
 
-    // 如果目标正好是当前目录的父目录，记住刚离开的目录，稍后在新模型
-    // 可见后恢复选中。模型加载是异步的，所以不能只依赖一次 setCurrentIndex。
+void FileDock::commitFileNavigation(FilePanelWidgets& panel, const QString& normalizedPath,
+    const QString& parentOfPrevious, const bool recordHistory)
+{
     const QString previousPath = panel.currentPath;
     panel.pendingSelectionPath.clear();
-    if (!previousPath.isEmpty())
-    {
-        QDir previousDir(previousPath);
-        if (previousDir.cdUp() &&
-            pathEqualsCaseInsensitive(previousDir.absolutePath(), normalizedPath))
-        {
-            panel.pendingSelectionPath = previousPath;
-        }
-    }
+    if (!previousPath.isEmpty() && pathEqualsCaseInsensitive(parentOfPrevious, normalizedPath))
+        panel.pendingSelectionPath = previousPath;
 
     // 根据当前读取模式更新模型根路径。
     if (currentModeIsManual(panel))
@@ -14305,6 +16408,8 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
             (panel.manualLoadedPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
         const bool samePathParsing =
             panel.manualParseInProgress
+            && panel.manualParseCanceled && !panel.manualParseCanceled->load()
+            && panel.manualParsingReadMode == panel.readModeCombo->currentIndex()
             && (panel.manualParsingPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
         if (!loadedMatchesCurrentPath && !samePathParsing)
         {
@@ -14524,6 +16629,10 @@ void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
     }
     else
     {
+        if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+        panel.manualParsePending = false;
+        panel.manualParsePendingShowWarning = false;
+        panel.manualParseResultPending = false;
         panel.fileView->setModel(panel.proxyModel);
         panel.compactFileView->setModel(panel.proxyModel);
         panel.compactFileView->setModelColumn(0);
@@ -14627,6 +16736,21 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
         && panel.manualRequestedFsType == requestedFsType
         && panel.manualRequestedReadMode == requestedReadMode)
     {
+        if (panel.manualParseResultPending)
+        {
+            if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+            panel.manualParseResultPending = false;
+        }
+        return;
+    }
+
+    const bool sameRequest =
+        panel.manualParsingPath.compare(requestedPath, Qt::CaseInsensitive) == 0
+        && panel.manualParsingReadMode == requestedReadMode
+        && panel.manualParseCanceled && !panel.manualParseCanceled->load();
+    if (panel.manualParseResultPending && sameRequest)
+    {
+        panel.manualParsePendingShowWarning |= showWarningMessage;
         return;
     }
 
@@ -14642,7 +16766,8 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
     {
         const bool samePathRunning =
             (panel.manualParsingPath.compare(requestedPath, Qt::CaseInsensitive) == 0)
-            && (panel.manualParsingReadMode == requestedReadMode);
+            && (panel.manualParsingReadMode == requestedReadMode)
+            && panel.manualParseCanceled && !panel.manualParseCanceled->load();
         if (samePathRunning)
         {
             panel.manualParsePendingShowWarning =
@@ -14650,6 +16775,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
             return;
         }
 
+        if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
         panel.manualParsePending = true;
         panel.manualParsePendingShowWarning = panel.manualParsePendingShowWarning || showWarningMessage;
 
@@ -14667,6 +16793,10 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
         return;
     }
 
+    if (panel.manualParseCanceled) panel.manualParseCanceled->store(true);
+    panel.manualParseCanceled = std::make_shared<std::atomic_bool>(false);
+    const auto canceled = panel.manualParseCanceled;
+    panel.manualParseResultPending = false;
     panel.manualParseInProgress = true;
     panel.manualParsePending = false;
     panel.manualParsePendingShowWarning = false;
@@ -14692,7 +16822,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
     }
     if (panel.readModeCombo != nullptr)
     {
-        panel.readModeCombo->setEnabled(false);
+        panel.readModeCombo->setEnabled(true);
     }
 
     {
@@ -14711,21 +16841,25 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
     QPointer<FileDock> safeThis(this);
     const auto dispatcher = m_uiDispatcher;
-    std::thread([safeThis, dispatcher, leftPanelRequest, requestPath, requestedFsType, requestedReadMode, parseBackend, driverMode, backendText, panelNameText, showWarningMessage, requestSerial, progressPid]() {
+    std::thread([safeThis, dispatcher, leftPanelRequest, requestPath, requestedFsType, requestedReadMode, parseBackend, driverMode, backendText, panelNameText, showWarningMessage, requestSerial, progressPid, canceled]() {
         kPro.set(
             progressPid,
             (backendText + QStringLiteral("目录中")).toStdString(),
             0,
             35.0f);
 
-        std::vector<ks::file::ManualDirectoryEntry> parsedEntries;
+        const auto payload = makeBackgroundRetiredValue<ManualDirectoryParsePayload>(
+            [](auto dispose) {
+                QThreadPool::globalInstance()->start(QRunnable::create(std::move(dispose)));
+            });
+        auto& parsedEntries = payload->entries;
         ks::file::ManualFsType parsedFsType = ks::file::ManualFsType::Unknown;
         QString parseErrorText;
         // usedWinApiFallback：记录后台解析是否已退回到 Windows API，供 UI 正确显示状态。
         bool usedWinApiFallback = false;
         bool partialResult = false;
         QString sourceDetail;
-        QStringList suspiciousNames;
+        auto& suspiciousNames = payload->suspiciousNames;
         const bool parseOk = runManualParseBackend(
             parseBackend,
             requestPath,
@@ -14736,10 +16870,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
             usedWinApiFallback,
             partialResult,
             sourceDetail,
-            suspiciousNames);
+            suspiciousNames,
+            [canceled]() { return canceled->load(); });
 
         kPro.set(progressPid, parseOk ? "生成目录列表中" : "解析失败，整理错误信息", 0, 78.0f);
-        const QSet<QString> suspiciousNameSet = buildSuspiciousNameSet(suspiciousNames);
+        if (!canceled->load())
+            payload->suspiciousNameSet = buildSuspiciousNameSet(
+                suspiciousNames, [canceled]() { return canceled->load(); });
 
         dispatcher->post(
             [safeThis,
@@ -14755,14 +16892,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
              requestSerial,
              progressPid,
              parseOk,
-             parsedEntries = std::move(parsedEntries),
+             payload,
+             canceled,
              parsedFsType,
              parseErrorText,
              usedWinApiFallback,
              partialResult,
-             sourceDetail,
-              suspiciousNames,
-              suspiciousNameSet]() mutable {
+             sourceDetail]() mutable {
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
@@ -14770,23 +16906,26 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                 }
 
                 FilePanelWidgets& targetPanel = leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
-                if (targetPanel.manualParseRequestSerial != requestSerial ||
+                if (targetPanel.manualParseCanceled == canceled)
+                {
+                    targetPanel.manualParseInProgress = false;
+                    targetPanel.manualParseResultPending = true;
+                }
+                if (canceled->load() || targetPanel.manualParseCanceled != canceled ||
+                    targetPanel.manualParseRequestSerial != requestSerial ||
                     targetPanel.currentPath.compare(requestPath, Qt::CaseInsensitive) != 0 ||
                     targetPanel.readModeCombo->currentIndex() != requestedReadMode)
                 {
                     // 过期结果直接丢弃，避免“慢任务覆盖新路径数据”。
                     // 运行状态只有在这一批结果确实属于当前那次运行时才清：
                     // 路径不符说明面板已经在跑另一次解析，清了会让它误以为空闲。
-                    if (targetPanel.manualParsingPath.compare(requestPath, Qt::CaseInsensitive) == 0)
+                    if (targetPanel.manualParseCanceled == canceled)
                     {
                         targetPanel.manualParseInProgress = false;
+                        targetPanel.manualParseResultPending = false;
                         targetPanel.manualParsingPath.clear();
                     }
-                    // 下拉框的可用性与运行状态解绑，无条件恢复。
-                    // 它是在本次请求开始时被禁用的，只要这次请求走到了终点
-                    //（无论采纳还是丢弃）就必须放开；放在上面的条件分支里，
-                    // 一旦路径对不上就再也没有人把它打开，表现就是"选了某个
-                    // 读取方式之后下拉框彻底点不动"。
+                    // 读取方式保持可切换；取消只在后端安全边界生效。
                     if (targetPanel.readModeCombo != nullptr &&
                         !targetPanel.manualParseInProgress)
                     {
@@ -14821,9 +16960,8 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                     return;
                 }
 
-                const auto parsedEntriesSnapshot =
-                    std::make_shared<std::vector<ks::file::ManualDirectoryEntry>>(
-                        std::move(parsedEntries));
+                const std::shared_ptr<const std::vector<ks::file::ManualDirectoryEntry>> parsedEntriesSnapshot(
+                    payload, &payload->entries);
                 const auto commitSnapshot =
                     [safeThis,
                      leftPanelRequest,
@@ -14839,13 +16977,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                      progressPid,
                      parseOk,
                      parsedEntriesSnapshot,
+                     payload,
+                     canceled,
                      parsedFsType,
                      parseErrorText,
                      usedWinApiFallback,
                      partialResult,
-                     sourceDetail,
-                      suspiciousNames,
-                      suspiciousNameSet]()
+                     sourceDetail]()
                 {
                     if (safeThis.isNull())
                     {
@@ -14855,13 +16993,15 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
                     FilePanelWidgets& commitPanel =
                         leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
-                    if (commitPanel.manualParseRequestSerial != requestSerial ||
+                    if (canceled->load() || commitPanel.manualParseCanceled != canceled ||
+                        commitPanel.manualParseRequestSerial != requestSerial ||
                         commitPanel.currentPath.compare(requestPath, Qt::CaseInsensitive) != 0 ||
                         commitPanel.readModeCombo->currentIndex() != requestedReadMode)
                     {
-                        if (commitPanel.manualParseRequestSerial == requestSerial)
+                        if (commitPanel.manualParseCanceled == canceled)
                         {
                             commitPanel.manualParseInProgress = false;
+                            commitPanel.manualParseResultPending = false;
                             commitPanel.manualParsingPath.clear();
                             commitPanel.readModeCombo->setEnabled(true);
                             const bool pendingWarning = commitPanel.manualParsePendingShowWarning;
@@ -14873,13 +17013,17 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                         return;
                     }
 
+                    const bool warnOnFailure = showWarningMessage || commitPanel.manualParsePendingShowWarning;
+                    commitPanel.manualParsePendingShowWarning = false;
                     commitPanel.manualParseInProgress = false;
+                    commitPanel.manualParseResultPending = false;
                     commitPanel.manualParsingPath.clear();
                     commitPanel.manualRequestedFsType = requestedFsType;
                     commitPanel.manualRequestedReadMode = requestedReadMode;
                     commitPanel.manualResultPartial = partialResult;
                     commitPanel.manualSourceDetail = sourceDetail;
-                    commitPanel.manualSuspiciousNames = suspiciousNames;
+                    payload->retiredPanelNames = std::move(commitPanel.manualSuspiciousNames);
+                    commitPanel.manualSuspiciousNames = payload->suspiciousNames;
                     if (commitPanel.readModeCombo != nullptr)
                     {
                         commitPanel.readModeCombo->setEnabled(true);
@@ -14908,7 +17052,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                                 ? QStringLiteral("%1目录").arg(backendText)
                                 : QStringLiteral("读取原始文件系统数据"),
                                 parseErrorText);
-                        if (showWarningMessage && !privilegePromptHandled)
+                        if (warnOnFailure && !privilegePromptHandled)
                         {
                             QMessageBox::warning(
                                 safeThis.data(),
@@ -14933,7 +17077,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                     else
                     {
                         static_cast<ManualDirectoryModel*>(commitPanel.manualModel)->setSnapshot(
-                            parsedEntriesSnapshot, suspiciousNameSet);
+                            parsedEntriesSnapshot, payload->suspiciousNameSet);
                         commitPanel.fileView->setRootIndex(QModelIndex());
                         commitPanel.compactFileView->setRootIndex(QModelIndex());
 
@@ -14944,10 +17088,10 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                             {
                                 QString statusText =
                                     QStringLiteral("解析器: %1").arg(sourceDetail);
-                                if (!suspiciousNames.isEmpty())
+                                if (!payload->suspiciousNames.isEmpty())
                                 {
                                     statusText += QStringLiteral("；疑似隐藏项 %1 个")
-                                        .arg(suspiciousNames.size());
+                                        .arg(payload->suspiciousNames.size());
                                 }
                                 commitPanel.parserStatusLabel->setText(statusText);
                             }
@@ -15137,8 +17281,10 @@ bool FileDock::runManualParseBackend(
     bool& usedWinApiFallbackOut,
     bool& partialOut,
     QString& sourceDetailOut,
-    QStringList& suspiciousNamesOut)
+    QStringList& suspiciousNamesOut,
+    const ks::file::DirectoryCancellationCallback& canceled)
 {
+    if (canceled && canceled()) return false;
     usedWinApiFallbackOut = false;
     partialOut = false;
     sourceDetailOut.clear();
@@ -15153,7 +17299,8 @@ bool FileDock::runManualParseBackend(
             fsTypeOut,
             errorTextOut,
             &partialOut,
-            &sourceDetailOut);
+            &sourceDetailOut,
+            canceled);
 
     case ManualParseBackend::R0Irp:
     {
@@ -15165,7 +17312,8 @@ bool FileDock::runManualParseBackend(
             errorTextOut,
             &partialOut,
             &sourceDetailOut,
-            &diagnostics);
+            &diagnostics,
+            canceled);
         if (parseOk)
         {
             suspiciousNamesOut = diagnostics.bypassOnlyNames;
@@ -15181,7 +17329,8 @@ bool FileDock::runManualParseBackend(
             pathText,
             entriesOut,
             errorTextOut,
-            &diagnostics);
+            &diagnostics,
+            canceled);
         if (!parseOk)
         {
             return false;
@@ -15206,7 +17355,9 @@ bool FileDock::runManualParseBackend(
             fsTypeOut,
             errorTextOut,
             &usedWinApiFallbackOut,
-            requestedFsType);
+            requestedFsType,
+            false,
+            canceled);
     }
 }
 
@@ -15265,18 +17416,51 @@ void FileDock::initializeRecoveryPage()
     ks::ui::NormalizeToolbarRow(toolLayout);
     recoveryLayout->addWidget(toolWidget, 0);
 
-    m_recoveryTable = new ks::ui::VisibleTableWidget(m_fileRecoveryPage);
-    // 恢复候选属于一次扫描结果，保留导出即可，避免通用快照栏挤占清单。
-    ks::ui::SetTableActionBarMode(m_recoveryTable, ks::ui::TableActionBarMode::Compact);
-    m_recoveryTable->setColumnCount(7);
-    m_recoveryTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("文件名"),
-        QStringLiteral("路径提示"),
-        QStringLiteral("大小"),
-        QStringLiteral("修改时间"),
-        QStringLiteral("记录号"),
-        QStringLiteral("完整度"),
-        QStringLiteral("恢复能力")
+    m_recoveryScanOperation = new ks::ui::AsyncOperation(this);
+    m_recoveryProjectionOperation = new ks::ui::AsyncOperation(this);
+    m_recoveryTable = new ks::ui::TableActionTableView(m_fileRecoveryPage);
+    auto* recoveryModel = new DeletedRecoveryModel(m_recoveryTable);
+    m_recoveryModel = recoveryModel;
+    ks::ui::ResultTableCapabilities capabilities;
+    capabilities.actionBar = ks::ui::TableActionBarMode::Compact;
+    ks::ui::ResultTableHost::ensure(m_recoveryTable)->bindModel(recoveryModel, {
+        {0, QStringLiteral("file-name")}, {1, QStringLiteral("path-hint")},
+        {2, QStringLiteral("size")}, {3, QStringLiteral("modified")},
+        {4, QStringLiteral("record-sequence")}, {5, QStringLiteral("integrity")},
+        {6, QStringLiteral("recovery-capability")} }, capabilities);
+    recoveryModel->sortRequested = [this](int column, Qt::SortOrder order)
+    {
+        m_recoverySortColumn = column;
+        m_recoverySortOrder = order;
+        applyRecoveryFilter();
+    };
+    m_recoveryTable->horizontalHeader()->setSectionsClickable(true);
+    connect(m_recoveryTable->horizontalHeader(), &QHeaderView::sectionClicked, this, [this, recoveryModel](int column)
+    {
+        const Qt::SortOrder order = m_recoverySortColumn == column && m_recoverySortOrder == Qt::AscendingOrder
+            ? Qt::DescendingOrder : Qt::AscendingOrder;
+        m_recoveryTable->horizontalHeader()->setSortIndicator(column, order);
+        m_recoveryTable->horizontalHeader()->setSortIndicatorShown(true);
+        recoveryModel->sort(column, order);
+    });
+    m_recoveryTable->viewport()->installEventFilter(this);
+    m_recoveryTable->installEventFilter(this);
+    connect(m_recoveryTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+        [this, recoveryModel](const QItemSelection& selected, const QItemSelection& deselected)
+        {
+            if (m_recoveryProjectionCommit) return;
+            for (const auto& range : deselected) for (int row = range.top(); row <= range.bottom(); ++row)
+                m_recoverySelectedSourceRows.remove(recoveryModel->sourceRow(row));
+            for (const auto& range : selected) for (int row = range.top(); row <= range.bottom(); ++row)
+            {
+                const int source = recoveryModel->sourceRow(row);
+                if (source >= 0) m_recoverySelectedSourceRows.insert(source);
+            }
+        });
+    connect(m_recoveryTable->selectionModel(), &QItemSelectionModel::currentChanged, this,
+        [this, recoveryModel](const QModelIndex& current, const QModelIndex&)
+        {
+            if (!m_recoveryProjectionCommit) m_recoveryCurrentSourceRow = recoveryModel->sourceRow(current.row());
         });
     m_recoveryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recoveryTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -15340,102 +17524,143 @@ void FileDock::initializeRecoveryPage()
     connect(m_recoveryExportButton, &QPushButton::clicked, this, [this]() {
         recoverSelectedDeletedFiles();
     });
-    connect(m_recoveryFilterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        applyRecoveryFilter();
-    });
-    connect(m_recoveryFilterRegexButton, &QToolButton::toggled, this, [this](bool) {
-        applyRecoveryFilter();
-    });
+    m_recoveryFilterTimer = new QTimer(this);
+    m_recoveryFilterTimer->setSingleShot(true);
+    m_recoveryFilterTimer->setInterval(100);
+    connect(m_recoveryFilterTimer, &QTimer::timeout, this, &FileDock::applyRecoveryFilter);
+    const auto scheduleFilter = [this]()
+    {
+        // Invalidate immediately, before debounce: an old result may arrive during typing.
+        m_recoveryProjectionOperation->cancel();
+        m_recoveryFilterTimer->start();
+    };
+    connect(m_recoveryFilterEdit, &QLineEdit::textChanged, this,
+        [scheduleFilter](const QString&) { scheduleFilter(); });
+    connect(m_recoveryFilterRegexButton, &QToolButton::toggled, this,
+        [scheduleFilter](bool) { scheduleFilter(); });
 
     refreshRecoveryVolumeList();
 }
 
 void FileDock::applyRecoveryFilter()
 {
-    // applyRecoveryFilter：
-    // - 输入：查找框文本与正则开关；
-    // - 处理：逐行比对已缓存的删除项字段，用 setRowHidden 就地隐藏不匹配行；
-    // - 返回：无。只影响可见性，不改动 m_deletedRecoveryItems 与行号映射，
-    //   因此右键属性、恢复选中拿到的行号依然直接对应缓存下标。
-    if (m_recoveryTable == nullptr || m_recoveryFilterEdit == nullptr)
+    if (m_recoveryFilterTimer) m_recoveryFilterTimer->stop();
+    if (m_recoveryTable == nullptr || m_recoveryFilterEdit == nullptr || m_recoveryModel == nullptr) return;
+    auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+    if (m_recoveryScanInProgress && !m_recoveryPendingSnapshot) return;
+    auto snapshot = m_recoveryPendingSnapshot ? m_recoveryPendingSnapshot : model->snapshot();
+    if (!snapshot) return;
+    QString query = m_recoveryFilterEdit->text().trimmed();
+    bool regex = m_recoveryFilterRegexButton != nullptr && m_recoveryFilterRegexButton->isChecked();
+    const bool invalid = !query.isEmpty() && regex
+        && !QRegularExpression(query, QRegularExpression::CaseInsensitiveOption).isValid();
+    if (invalid)
     {
-        return;
+        m_recoveryProjectionOperation->cancel();
+        m_recoveryFilterEdit->setToolTip(QStringLiteral("正则表达式无效，已暂不筛选。"));
+        if (!m_recoveryPendingSnapshot && m_recoverySortColumn == m_recoveryAppliedSortColumn
+            && m_recoverySortOrder == m_recoveryAppliedSortOrder) return;
+        // A newly completed scan uses the last committed predicate while the editor is invalid.
+        query = m_recoveryAppliedFilterText;
+        regex = m_recoveryAppliedFilterRegex;
     }
-
-    const QString queryText = m_recoveryFilterEdit->text().trimmed();
-    const bool useRegex =
-        m_recoveryFilterRegexButton != nullptr && m_recoveryFilterRegexButton->isChecked();
-
-    QRegularExpression regexValue;
-    bool regexUsable = false;
-    if (!queryText.isEmpty() && useRegex)
-    {
-        regexValue = QRegularExpression(
-            queryText,
-            QRegularExpression::CaseInsensitiveOption);
-        regexUsable = regexValue.isValid();
-        // 正则写到一半必然是非法的，这里不把整张表清空，保持上一次的可见状态。
-        if (!regexUsable)
-        {
-            m_recoveryFilterEdit->setToolTip(QStringLiteral("正则表达式无效，已暂不筛选。"));
-            return;
-        }
-    }
-    m_recoveryFilterEdit->setToolTip(QStringLiteral(
+    else m_recoveryFilterEdit->setToolTip(QStringLiteral(
         "按输入内容实时筛选扫描结果，匹配行以外的条目会被隐藏。"));
 
-    const int rowCount = m_recoveryTable->rowCount();
-    int visibleCount = 0;
-    // 上万行逐行改可见性会触发大量重排，先关掉刷新再统一恢复。
-    m_recoveryTable->setUpdatesEnabled(false);
-    for (int row = 0; row < rowCount; ++row)
-    {
-        bool matched = queryText.isEmpty();
-        if (!matched && row < static_cast<int>(m_deletedRecoveryItems.size()))
+    // Clearing back to the committed predicate needs no model reset or selection replay.
+    if (!m_recoveryPendingSnapshot && model->snapshot() == snapshot
+        && query == m_recoveryAppliedFilterText && regex == m_recoveryAppliedFilterRegex
+        && m_recoverySortColumn == m_recoveryAppliedSortColumn
+        && m_recoverySortOrder == m_recoveryAppliedSortOrder) return;
+
+    const RecoveryProjectionRequest request{ snapshot, query, regex,
+        m_recoverySortColumn, m_recoverySortOrder };
+    m_recoveryProjectionOperation->submit<RecoveryProjectionRequest, RecoveryProjectionResult>(request,
+        [](const RecoveryProjectionRequest& value, const ks::ui::AsyncOperationToken& token)
+        { return buildRecoveryProjection(value, token); },
+        [this](const RecoveryProjectionResult& result, std::uint64_t ticket)
         {
-            const ks::file::NtfsDeletedFileEntry& itemValue =
-                m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-            // 只比对用户真正会搜的三个字段，避免大小/时间数字造成误命中。
-            const QStringList searchFields{
-                itemValue.fileName,
-                itemValue.pathHint,
-                deletedFileRecoveryCapabilityText(itemValue) };
-            for (const QString& fieldText : searchFields)
+            // Only shared values survive apply; AsyncOperation does not retain this result reference.
+            const auto commit = [this, result, ticket]()
             {
-                if (useRegex)
+                if (!m_recoveryProjectionOperation->isCurrent(ticket))
+                { m_recoveryProjectionOperation->completeDeferred(ticket); return; }
+                auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+                const auto expected = m_recoveryPendingSnapshot ? m_recoveryPendingSnapshot : model->snapshot();
+                if (!result.projection || expected != result.request.snapshot)
+                { m_recoveryProjectionOperation->completeDeferred(ticket); return; }
+                const bool newSnapshot = model->snapshot() != result.request.snapshot;
+                if (newSnapshot)
                 {
-                    if (regexUsable && regexValue.match(fieldText).hasMatch())
-                    {
-                        matched = true;
-                        break;
-                    }
+                    m_recoverySelectedSourceRows.clear();
+                    m_recoveryCurrentSourceRow = -1;
                 }
-                else if (fieldText.contains(queryText, Qt::CaseInsensitive))
+                const QPointer<FileDock> lifetime(this);
+                m_recoveryProjectionCommit = true;
+                model->publish(result.request.snapshot, result.projection);
+                if (!lifetime) return;
+                // Preserve selected source identities even while a filter removes them from the view.
+                std::vector<int> selectedViewRows;
+                selectedViewRows.reserve(static_cast<std::size_t>(m_recoverySelectedSourceRows.size()));
+                for (int source : m_recoverySelectedSourceRows)
                 {
-                    matched = true;
-                    break;
+                    const int row = model->viewRow(source);
+                    if (row >= 0) selectedViewRows.push_back(row);
                 }
-            }
-        }
-
-        m_recoveryTable->setRowHidden(row, !matched);
-        if (matched)
+                std::sort(selectedViewRows.begin(), selectedViewRows.end());
+                QItemSelection selection;
+                for (std::size_t first = 0; first < selectedViewRows.size();)
+                {
+                    std::size_t last = first;
+                    while (last + 1 < selectedViewRows.size() && selectedViewRows[last + 1] == selectedViewRows[last] + 1) ++last;
+                    selection.select(model->index(selectedViewRows[first], 0), model->index(selectedViewRows[last], 6));
+                    first = last + 1;
+                }
+                m_recoveryTable->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                const int current = model->viewRow(m_recoveryCurrentSourceRow);
+                if (current >= 0) m_recoveryTable->selectionModel()->setCurrentIndex(model->index(current, 0), QItemSelectionModel::NoUpdate);
+                m_recoveryProjectionCommit = false;
+                m_recoveryAppliedFilterText = result.request.query;
+                m_recoveryAppliedFilterRegex = result.request.regex;
+                m_recoveryAppliedSortColumn = result.request.sortColumn;
+                m_recoveryAppliedSortOrder = result.request.sortOrder;
+                if (newSnapshot)
+                {
+                    const auto& value = *result.request.snapshot;
+                    m_recoveryBaseStatusText = QStringLiteral(
+                        "扫描完成：%1 项（可安全恢复 %2 项：Resident %3，完整非驻留 %4；完整度≥80%% %5 项）")
+                        .arg(value.entries.size()).arg(value.safelyRecoverable).arg(value.residentReady)
+                        .arg(value.nonResidentReady).arg(value.highIntegrity);
+                    m_recoveryPendingSnapshot.reset();
+                    m_recoveryScanInProgress = false;
+                    m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                    m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                    m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                    updateRecoveryViewState(!value.entries.empty(), QStringLiteral(
+                        "本次扫描未发现仍可恢复的删除项，可更换卷后重新扫描。"));
+                }
+                m_recoveryStatusLabel->setText(result.request.query.isEmpty() ? m_recoveryBaseStatusText
+                    : QStringLiteral("%1｜筛选出 %2 / %3 项").arg(m_recoveryBaseStatusText)
+                        .arg(model->rowCount()).arg(result.request.snapshot->entries.size()));
+                m_recoveryProjectionOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("file-recovery-projection"), { m_recoveryTable }, commit)) return false;
+            commit();
+            return true;
+        },
+        [this](std::exception_ptr)
         {
-            ++visibleCount;
-        }
-    }
-    m_recoveryTable->setUpdatesEnabled(true);
-
-    if (m_recoveryStatusLabel != nullptr && !m_deletedRecoveryItems.empty())
-    {
-        m_recoveryStatusLabel->setText(
-            queryText.isEmpty()
-            ? m_recoveryBaseStatusText
-            : QStringLiteral("%1｜筛选出 %2 / %3 项")
-                .arg(m_recoveryBaseStatusText)
-                .arg(visibleCount)
-                .arg(rowCount));
-    }
+            if (m_recoveryPendingSnapshot)
+            {
+                retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
+                m_recoveryScanInProgress = false;
+                m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryStatusLabel->setText(QStringLiteral("扫描失败"));
+            }
+        });
 }
 
 void FileDock::updateRecoveryViewState(const bool hasResults, const QString& emptyHintText)
@@ -15467,7 +17692,7 @@ void FileDock::installRecoveryTableMenu()
     }
 
     m_recoveryTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_recoveryTable, &QTableWidget::customContextMenuRequested, this,
+    connect(m_recoveryTable, &QTableView::customContextMenuRequested, this,
         [this](const QPoint& localPosition)
     {
         if (m_recoveryTable == nullptr)
@@ -15483,13 +17708,29 @@ void FileDock::installRecoveryTableMenu()
 
         const int currentRow = clickedIndex.isValid()
             ? clickedIndex.row()
-            : m_recoveryTable->currentRow();
-        const bool hasRow = currentRow >= 0
-            && currentRow < static_cast<int>(m_deletedRecoveryItems.size());
-        const bool hasSelection =
-            !m_recoveryTable->selectionModel()->selectedRows().isEmpty();
+            : m_recoveryTable->currentIndex().row();
+        const auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+        const auto snapshot = model->snapshot();
+        const auto* entry = model->entry(currentRow);
+        const bool hasRow = entry != nullptr;
+        const ks::file::NtfsDeletedFileEntry currentItem = hasRow ? *entry : ks::file::NtfsDeletedFileEntry{};
+        std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
+        if (snapshot)
+        {
+            auto selected = m_recoverySelectedSourceRows.values();
+            std::sort(selected.begin(), selected.end());
+            selectedItems.reserve(static_cast<std::size_t>(selected.size()));
+            for (int source : selected) if (source >= 0 && source < static_cast<int>(snapshot->entries.size()))
+                selectedItems.push_back(snapshot->entries[static_cast<std::size_t>(source)]);
+        }
+        const bool hasSelection = !selectedItems.empty();
+        QStringList fields;
+        if (hasRow) for (int column = 0; column < model->columnCount(); ++column)
+            fields.push_back(model->data(model->index(currentRow, column), Qt::DisplayRole).toString());
+        const QString copyText = fields.join(QLatin1Char('\t'));
 
-        QMenu menu(m_recoveryTable);
+        const QPointer<FileDock> guardThis(this);
+        QMenu menu;
         menu.setStyleSheet(buildContextMenuStyle());
 
         QAction* propertyAction = menu.addAction(
@@ -15500,7 +17741,7 @@ void FileDock::installRecoveryTableMenu()
         QAction* recoverAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/log_export.svg")),
             QStringLiteral("恢复选中"));
-        recoverAction->setEnabled(hasSelection && !m_recoveryRecoverInProgress);
+        recoverAction->setEnabled(hasSelection && !m_recoveryRecoverInProgress && !m_recoveryScanInProgress);
 
         menu.addSeparator();
         QAction* copyRowAction = menu.addAction(
@@ -15512,18 +17753,18 @@ void FileDock::installRecoveryTableMenu()
 
         QAction* selectedAction =
             menu.exec(m_recoveryTable->viewport()->mapToGlobal(localPosition));
-        if (selectedAction == nullptr)
+        if (!guardThis || selectedAction == nullptr)
         {
             return;
         }
         if (selectedAction == propertyAction)
         {
-            showDeletedFilePropertiesDialog(currentRow);
+            showDeletedFilePropertiesDialog(currentItem);
             return;
         }
         if (selectedAction == recoverAction)
         {
-            recoverSelectedDeletedFiles();
+            if (snapshot) recoverDeletedFileEntriesAsync(snapshot->volumeRoot, std::move(selectedItems));
             return;
         }
         if (selectedAction != copyRowAction)
@@ -15531,43 +17772,26 @@ void FileDock::installRecoveryTableMenu()
             return;
         }
 
-        QClipboard* clipboardObject = QApplication::clipboard();
-        if (clipboardObject == nullptr
-            || currentRow < 0
-            || currentRow >= m_recoveryTable->rowCount())
-        {
-            return;
-        }
-        QStringList fields;
-        fields.reserve(m_recoveryTable->columnCount());
-        for (int columnIndex = 0; columnIndex < m_recoveryTable->columnCount(); ++columnIndex)
-        {
-            const QTableWidgetItem* item = m_recoveryTable->item(currentRow, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
-        }
-        clipboardObject->setText(fields.join(QLatin1Char('\t')));
+        if (hasRow) if (QClipboard* clipboardObject = QApplication::clipboard())
+            clipboardObject->setText(copyText);
     });
 }
 
-void FileDock::showDeletedFilePropertiesDialog(const int rowIndex)
+void FileDock::showDeletedFilePropertiesDialog(const ks::file::NtfsDeletedFileEntry& entry)
 {
-    if (rowIndex < 0 || rowIndex >= static_cast<int>(m_deletedRecoveryItems.size()))
-    {
-        return;
-    }
-    const ks::file::NtfsDeletedFileEntry& itemValue =
-        m_deletedRecoveryItems[static_cast<std::size_t>(rowIndex)];
+    const ks::file::NtfsDeletedFileEntry itemValue = entry;
 
-    QDialog dialog(this);
-    dialog.setObjectName(QStringLiteral("DeletedFilePropertyDialog"));
-    dialog.setStyleSheet(buildOpaqueStandaloneDialogStyle(dialog.objectName()));
-    dialog.setWindowTitle(QStringLiteral("删除项属性"));
-    dialog.resize(620, 460);
+    QDialog* dialog = new QDialog(this);
+    const QPointer<QDialog> guardedDialog(dialog);
+    dialog->setObjectName(QStringLiteral("DeletedFilePropertyDialog"));
+    dialog->setStyleSheet(buildOpaqueStandaloneDialogStyle(dialog->objectName()));
+    dialog->setWindowTitle(QStringLiteral("删除项属性"));
+    dialog->resize(620, 460);
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(&dialog);
+    QVBoxLayout* rootLayout = new QVBoxLayout(dialog);
 
     // 属性用只读表格展示：字段多且需要整段复制，比 QFormLayout 更实用。
-    QTableWidget* propertyTable = new ks::ui::VisibleTableWidget(&dialog);
+    QTableWidget* propertyTable = new ks::ui::VisibleTableWidget(dialog);
     // 单个删除项的属性对话框沿用右键复制，不显示快照操作栏。
     ks::ui::SetTableActionBarMode(propertyTable, ks::ui::TableActionBarMode::None);
     propertyTable->setColumnCount(2);
@@ -15624,18 +17848,19 @@ void FileDock::showDeletedFilePropertiesDialog(const int rowIndex)
 
     QLabel* noteLabel = new QLabel(
         QStringLiteral("以上为扫描时刻的 MFT 快照；恢复前会按记录号和序列号重新校验，不依赖此处的旧数据。"),
-        &dialog);
+        dialog);
     noteLabel->setWordWrap(true);
     noteLabel->setContentsMargins(8, 6, 8, 6);
     rootLayout->addWidget(noteLabel, 0);
 
-    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
     buttonBox->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
-    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttonBox, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     rootLayout->addWidget(buttonBox, 0);
 
-    ks::ui::ApplyDetailDialogChrome(&dialog);
-    dialog.exec();
+    ks::ui::ApplyDetailDialogChrome(dialog);
+    dialog->exec();
+    if (guardedDialog) guardedDialog->deleteLater();
 }
 
 void FileDock::refreshRecoveryVolumeList()
@@ -15791,250 +18016,98 @@ void FileDock::scanDeletedFilesForRecovery()
 
 void FileDock::scanDeletedFilesForRecoveryAsync()
 {
-    if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr)
-    {
-        return;
-    }
-    if (m_recoveryScanInProgress)
-    {
-        return;
-    }
+    if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr) return;
+    if (m_recoveryScanInProgress || m_recoveryRecoverInProgress || m_recoveryScanOperation->isInFlight()) return;
     if (m_recoveryVolumeCombo->currentIndex() < 0)
     {
         QMessageBox::warning(this, QStringLiteral("文件恢复"), QStringLiteral("请先选择 NTFS 卷。"));
         return;
     }
-
-    const QString rootPath = m_recoveryVolumeCombo->currentData().toString();
-    m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(rootPath));
-    m_recoveryScanInProgress = true;
-    if (m_recoveryScanButton != nullptr)
-    {
-        m_recoveryScanButton->setEnabled(false);
-        if (m_recoveryEmptyScanButton != nullptr) { m_recoveryEmptyScanButton->setEnabled(false); }
-    }
-    if (m_recoveryExportButton != nullptr)
-    {
-        m_recoveryExportButton->setEnabled(false);
-    }
-
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 开始扫描误删文件, volume="
-            << QDir::toNativeSeparators(rootPath).toStdString()
-            << eol;
-    }
-
+    struct Request { QString volume; std::uint64_t revision; int progressPid; };
+    struct Result { std::shared_ptr<const FileRecoverySnapshot> snapshot; QString error; bool ok = false; };
+    const QString volume = m_recoveryVolumeCombo->currentData().toString();
     const int progressPid = kPro.add(this, "文件恢复", "扫描误删");
+    const Request request{ volume, ++m_recoverySnapshotRevision, progressPid };
+    m_recoveryProjectionOperation->cancel();
+    m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(volume));
+    m_recoveryScanInProgress = true;
+    m_recoveryScanButton->setEnabled(false);
+    m_recoveryEmptyScanButton->setEnabled(false);
+    m_recoveryExportButton->setEnabled(false);
     kPro.set(progressPid, "准备扫描卷", 0, 5.0f);
-
-    QPointer<FileDock> safeThis(this);
-    const auto dispatcher = m_uiDispatcher;
-    std::thread([safeThis, dispatcher, rootPath, progressPid]() {
-        QString errorText;
-        std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
-
-        kPro.set(progressPid, "准备读取 NTFS 元数据", 0, 3.0f);
-        const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
-            rootPath,
-            deletedItems,
-            errorText,
-            [progressPid](const int percentValue, const QString& stageText) {
-                const int boundedPercent = std::clamp(percentValue, 0, 100);
-                kPro.set(progressPid, stageText.toStdString(), 0, static_cast<float>(boundedPercent));
-            });
-        if (!scanOk)
+    m_recoveryScanOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token)
         {
-            kPro.set(progressPid, "扫描失败，整理错误信息", 0, 82.0f);
-        }
-
-        dispatcher->post(
-            [safeThis,
-             rootPath,
-             progressPid,
-             scanOk,
-             deletedItems = std::move(deletedItems),
-             errorText]() mutable {
-                if (safeThis.isNull())
+            Result result;
+            auto snapshot = makeRecoverySnapshot();
+            snapshot->volumeRoot = value.volume;
+            snapshot->revision = value.revision;
+            result.ok = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(value.volume,
+                snapshot->entries, result.error,
+                [progressPid = value.progressPid, token](int percent, const QString& stage)
                 {
-                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-                    return;
-                }
-
-                const auto deletedItemsSnapshot =
-                    std::make_shared<std::vector<ks::file::NtfsDeletedFileEntry>>(
-                        std::move(deletedItems));
-                const auto commitSnapshot =
-                    [safeThis,
-                     rootPath,
-                     progressPid,
-                     scanOk,
-                     deletedItemsSnapshot,
-                     errorText]()
-                {
-                    if (safeThis.isNull())
-                    {
-                        kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-                        return;
-                    }
-
-                    safeThis->m_recoveryScanInProgress = false;
-                    if (safeThis->m_recoveryScanButton != nullptr)
-                    {
-                        safeThis->m_recoveryScanButton->setEnabled(true);
-                        if (safeThis->m_recoveryEmptyScanButton != nullptr) { safeThis->m_recoveryEmptyScanButton->setEnabled(true); }
-                    }
-                    if (safeThis->m_recoveryExportButton != nullptr)
-                    {
-                        safeThis->m_recoveryExportButton->setEnabled(true);
-                    }
-
-                    if (!scanOk)
-                    {
-                        safeThis->m_recoveryStatusLabel->setText(
-                            QStringLiteral("扫描失败：%1").arg(errorText));
-                        kLogEvent event;
-                        err << event
-                            << "[FileDock] 扫描误删失败, volume="
-                            << QDir::toNativeSeparators(rootPath).toStdString()
-                            << ", error="
-                            << errorText.toStdString()
-                            << eol;
-                        safeThis->updateRecoveryViewState(
-                            false,
-                            QStringLiteral("扫描未能完成，可更换卷或确认程序以管理员权限运行后重试。"));
-                        QMessageBox::warning(safeThis.data(), QStringLiteral("扫描失败"), errorText);
-                        kPro.set(progressPid, "扫描失败", 0, 100.0f);
-                        return;
-                    }
-
-                    safeThis->m_deletedRecoveryItems = std::move(*deletedItemsSnapshot);
-                    safeThis->m_recoveryTable->setUpdatesEnabled(false);
-                    safeThis->m_recoveryTable->setSortingEnabled(false);
-                    safeThis->m_recoveryTable->clearContents();
-                    safeThis->m_recoveryTable->setRowCount(
-                        static_cast<int>(safeThis->m_deletedRecoveryItems.size()));
-                    for (int row = 0;
-                         row < static_cast<int>(safeThis->m_deletedRecoveryItems.size());
-                         ++row)
-                    {
-                        const ks::file::NtfsDeletedFileEntry& itemValue =
-                            safeThis->m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-                        // 完整度文本：优先显示估计百分比，无法评估时明确标记为未知。
-                        const QString integrityText =
-                            (itemValue.estimatedIntegrityPercent >= 0)
-                            ? QStringLiteral("%1%").arg(itemValue.estimatedIntegrityPercent)
-                            : QStringLiteral("未知");
-
-                        // 恢复能力文本：明确区分驻留、完整非驻留、已复用与不支持布局。
-                        QString recoverabilityText =
-                            deletedFileRecoveryCapabilityText(itemValue);
-                        if (!itemValue.hasOriginalName)
-                        {
-                            recoverabilityText += QStringLiteral(" / 缺名");
-                        }
-
-                        QTableWidgetItem* nameItem = new QTableWidgetItem(itemValue.fileName);
-                        if (!itemValue.hasOriginalName)
-                        {
-                            nameItem->setToolTip(
-                                QStringLiteral("该条目原始文件名已丢失，当前名称为系统生成的占位名。"));
-                        }
-                        safeThis->m_recoveryTable->setItem(row, 0, nameItem);
-                        safeThis->m_recoveryTable->setItem(
-                            row, 1, new QTableWidgetItem(itemValue.pathHint));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
-                        safeThis->m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
-                            itemValue.modifiedTime.isValid()
-                            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                            : QStringLiteral("-")));
-                        safeThis->m_recoveryTable->setItem(
-                            row,
-                            4,
-                            new QTableWidgetItem(
-                                QStringLiteral("%1 / seq %2")
-                                    .arg(static_cast<qulonglong>(itemValue.fileReference))
-                                    .arg(itemValue.sequenceNumber)));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 5, new QTableWidgetItem(integrityText));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 6, new QTableWidgetItem(recoverabilityText));
-                    }
-                    safeThis->m_recoveryTable->setUpdatesEnabled(true);
-
-                    const int residentReadyCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.recoveryCapability ==
-                                ks::file::NtfsRecoveryCapability::Resident;
-                        }));
-                    const int nonResidentReadyCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.recoveryCapability ==
-                                ks::file::NtfsRecoveryCapability::NonResidentIntact;
-                        }));
-                    const int safelyRecoverableCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return isDeletedFileSafelyRecoverable(item);
-                        }));
-                    const int highIntegrityCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.estimatedIntegrityPercent >= 80;
-                        }));
-
-                    // 基准文案单独留存：筛选时要在它后面追加“筛选出 N / M 项”，
-                    // 清空查找框后还要能原样还原。
-                    safeThis->m_recoveryBaseStatusText =
-                        QStringLiteral(
-                            "扫描完成：%1 项（可安全恢复 %2 项：Resident %3，完整非驻留 %4；完整度≥80%% %5 项）")
-                        .arg(safeThis->m_deletedRecoveryItems.size())
-                        .arg(safelyRecoverableCount)
-                        .arg(residentReadyCount)
-                        .arg(nonResidentReadyCount)
-                        .arg(highIntegrityCount);
-                    safeThis->m_recoveryStatusLabel->setText(safeThis->m_recoveryBaseStatusText);
-
-                    safeThis->updateRecoveryViewState(
-                        !safeThis->m_deletedRecoveryItems.empty(),
-                        QStringLiteral("本次扫描未发现仍可恢复的删除项，可更换卷后重新扫描。"));
-
-                    // 重新扫描后沿用当前查找条件，省去用户再输一次。
-                    safeThis->applyRecoveryFilter();
-
-                    kLogEvent event;
-                    info << event
-                        << "[FileDock] 扫描误删完成, volume="
-                        << QDir::toNativeSeparators(rootPath).toStdString()
-                        << ", total="
-                        << safeThis->m_deletedRecoveryItems.size()
-                        << eol;
-                    kPro.set(progressPid, "扫描完成", 0, 100.0f);
-                };
-
-                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                    safeThis.data(),
-                    QStringLiteral("file-recovery-scan-snapshot"),
-                    { safeThis->m_recoveryTable },
-                    commitSnapshot))
-                {
-                    return;
-                }
-                commitSnapshot();
-            },
-            [progressPid]()
+                    if (!token.isCanceled()) kPro.set(progressPid, stage.toStdString(), 0,
+                        static_cast<float>(std::clamp(percent, 0, 100)));
+                });
+            if (!result.ok || token.isCanceled()) return result;
+            for (const auto& entry : snapshot->entries)
             {
+                if (token.isCanceled()) return result;
+                snapshot->residentReady += entry.recoveryCapability == ks::file::NtfsRecoveryCapability::Resident;
+                snapshot->nonResidentReady += entry.recoveryCapability == ks::file::NtfsRecoveryCapability::NonResidentIntact;
+                snapshot->safelyRecoverable += isDeletedFileSafelyRecoverable(entry);
+                snapshot->highIntegrity += entry.estimatedIntegrityPercent >= 80;
+            }
+            result.snapshot = std::move(snapshot);
+            return result;
+        },
+        [this, request](const Result& result, std::uint64_t)
+        {
+            if (!result.ok || !result.snapshot)
+            {
+                m_recoveryScanInProgress = false;
+                m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryStatusLabel->setText(QStringLiteral("扫描失败：%1").arg(result.error));
+                updateRecoveryViewState(false, QStringLiteral(
+                    "扫描未能完成，可更换卷或确认程序以管理员权限运行后重试。"));
+                kLogEvent event;
+                err << event << "[FileDock] 扫描误删失败, volume=" << request.volume.toStdString()
+                    << ", error=" << result.error.toStdString() << eol;
+                kPro.set(request.progressPid, "扫描失败", 0, 100.0f);
+                QMessageBox::warning(this, QStringLiteral("扫描失败"), result.error);
+                return true;
+            }
+            // Publication, including the current filter, is a separate pure-value worker.
+            // Keep the old model intact until that complete projection passes the menu barrier.
+            retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
+            m_recoveryPendingSnapshot = result.snapshot;
+            // The previous table's one-shot header sort was reset by a fresh scan.
+            m_recoverySortColumn = -1;
+            m_recoverySortOrder = Qt::AscendingOrder;
+            m_recoveryTable->horizontalHeader()->setSortIndicatorShown(false);
+            applyRecoveryFilter();
+            kLogEvent event;
+            info << event << "[FileDock] 扫描误删完成, volume=" << request.volume.toStdString()
+                << ", total=" << result.snapshot->entries.size() << eol;
+            kPro.set(request.progressPid, "扫描完成", 0, 100.0f);
+            return true;
+        },
+        [this, progressPid](std::exception_ptr)
+        {
+            m_recoveryScanInProgress = false;
+            m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryStatusLabel->setText(QStringLiteral("扫描失败"));
+            kPro.set(progressPid, "扫描失败", 0, 100.0f);
+        },
+        [progressPid](ks::ui::AsyncOperationOutcome outcome)
+        {
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied && outcome != ks::ui::AsyncOperationOutcome::Failed)
                 kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-            });
-    }).detach();
+        });
 }
 
 void FileDock::recoverSelectedDeletedFiles()
@@ -16045,47 +18118,33 @@ void FileDock::recoverSelectedDeletedFiles()
 
 void FileDock::recoverSelectedDeletedFilesAsync()
 {
-    if (m_recoveryTable == nullptr || m_recoveryVolumeCombo == nullptr)
-    {
-        return;
-    }
-    if (m_recoveryRecoverInProgress)
-    {
-        return;
-    }
-    const QModelIndexList selectedRows = m_recoveryTable->selectionModel()->selectedRows();
-    if (selectedRows.empty())
+    if (m_recoveryTable == nullptr || m_recoveryRecoverInProgress) return;
+    const auto snapshot = static_cast<DeletedRecoveryModel*>(m_recoveryModel)->snapshot();
+    if (!snapshot) return;
+    auto selected = m_recoverySelectedSourceRows.values();
+    std::sort(selected.begin(), selected.end());
+    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
+    selectedItems.reserve(static_cast<std::size_t>(selected.size()));
+    for (int source : selected) if (source >= 0 && source < static_cast<int>(snapshot->entries.size()))
+        selectedItems.push_back(snapshot->entries[static_cast<std::size_t>(source)]);
+    recoverDeletedFileEntriesAsync(snapshot->volumeRoot, std::move(selectedItems));
+}
+
+void FileDock::recoverDeletedFileEntriesAsync(const QString& sourceVolume,
+    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems)
+{
+    if (m_recoveryRecoverInProgress || m_recoveryScanInProgress) return;
+    if (selectedItems.empty())
     {
         QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("请先在列表中选择要恢复的条目。"));
         return;
     }
-
-    const QString exportDir = QFileDialog::getExistingDirectory(
-        this,
-        QStringLiteral("选择恢复输出目录"),
-        QDir::homePath());
-    if (exportDir.isEmpty())
-    {
-        return;
-    }
-
-    const QString volumeRoot = m_recoveryVolumeCombo->currentData().toString();
-    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
-    selectedItems.reserve(static_cast<std::size_t>(selectedRows.size()));
-    for (const QModelIndex& rowIndex : selectedRows)
-    {
-        const int rowValue = rowIndex.row();
-        if (rowValue < 0 || rowValue >= static_cast<int>(m_deletedRecoveryItems.size()))
-        {
-            continue;
-        }
-        selectedItems.push_back(m_deletedRecoveryItems[static_cast<std::size_t>(rowValue)]);
-    }
-    if (selectedItems.empty())
-    {
-        QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("未读取到有效恢复条目。"));
-        return;
-    }
+    const QString volumeRoot = sourceVolume;
+    const QPointer<FileDock> guardThis(this);
+    const QString exportDir = QFileDialog::getExistingDirectory(this,
+        QStringLiteral("选择恢复输出目录"), QDir::homePath());
+    if (!guardThis || exportDir.isEmpty()) return;
+    if (m_recoveryRecoverInProgress || m_recoveryScanInProgress) return;
     const bool hasSafelyRecoverableItem = std::any_of(
         selectedItems.begin(),
         selectedItems.end(),
@@ -16324,34 +18383,33 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     const bool hasSelection = !menuPaths.empty();
     const bool isSingleSelection = menuPaths.size() == 1;
     const QString firstPath = isSingleSelection ? menuPaths.front() : QString();
-    DWORD firstFileIntegrityRid = 0;
-    bool firstFileIntegrityImplicitMedium = false;
-    QString firstFileIntegrityDetailText;
-    const bool firstFileIntegrityKnown = hasSelection &&
-        queryFileIntegrityRid(
-            menuPaths.front(),
-            &firstFileIntegrityRid,
-            &firstFileIntegrityImplicitMedium,
-            &firstFileIntegrityDetailText);
-
-    // 统计选中内容类型：用于控制菜单可用状态，避免多选时误触单文件功能。
     bool hasAnyFile = false;
-    QStringList linkTargetList;
-    for (const QString& path : menuPaths)
+    std::vector<QString> menuFilePaths;
+    QSet<QString> selectedFileKeys;
+    if (selectionModel)
     {
-        QFileInfo info(path);
-        hasAnyFile = hasAnyFile || info.isFile();
-        if (isPathReparsePoint(path))
+        QModelIndexList fileRows = selectionModel->selectedRows(0);
+        if (fileRows.isEmpty() && menuView->currentIndex().isValid())
+            fileRows.push_back(menuView->currentIndex().siblingAtColumn(0));
+        for (const QModelIndex& selected : fileRows)
         {
-            const ks::file::ReparsePointQueryResult reparseResult = queryReparsePointForUi(path);
-            const QString targetText = reparseTargetFromResult(reparseResult).trimmed();
-            if (!targetText.isEmpty() && !linkTargetList.contains(targetText, Qt::CaseInsensitive))
+            const bool manual = currentModeIsManual(panel);
+            const QModelIndex source = manual ? panel.manualProxyModel->mapToSource(selected) : panel.proxyModel->mapToSource(selected);
+            if (!source.isValid()) continue;
+            const bool directory = manual ? source.data(Qt::UserRole + 1).toBool() : panel.fsModel->isDir(source);
+            if (!directory)
             {
-                linkTargetList.push_back(targetText);
+                const QString path = manual ? source.data(Qt::UserRole).toString() : panel.fsModel->filePath(source);
+                selectedFileKeys.insert(path.toCaseFolded());
             }
         }
     }
-    const QString firstLinkTarget = (!linkTargetList.isEmpty() && isSingleSelection) ? linkTargetList.front() : QString();
+    for (const auto& path : menuPaths)
+        if (selectedFileKeys.contains(path.toCaseFolded())) menuFilePaths.push_back(path);
+    hasAnyFile = !menuFilePaths.empty();
+    QStringList linkTargetList;
+    QString firstLinkTarget;
+    QString firstLinkLocatePath;
 
     // 复制/移动是双栏文件管理器语义：源面板的选中项会直接落到对侧面板。
     // 菜单文案必须把目标面板说清楚，避免用户误解为 Windows 剪贴板“复制/剪切”。
@@ -16435,22 +18493,10 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QMenu* fileIntegritySubMenu = menu.addMenu(QIcon(":/Icon/file_owner.svg"), QStringLiteral("文件完整性"));
     fileIntegritySubMenu->setToolTipsVisible(true);
     fileIntegritySubMenu->setEnabled(hasSelection);
-    if (!firstFileIntegrityKnown && hasSelection)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("当前文件完整性读取失败：%1")
-            .arg(firstFileIntegrityDetailText));
-    }
-    else if (firstFileIntegrityKnown && firstFileIntegrityImplicitMedium)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("当前未设置显式 Mandatory Label，Windows 按 Medium 处理。"));
-    }
-    else if (hasSelection && menuPaths.size() > 1U)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("多选时圆点按第一项的文件完整性显示，执行时会批量写入所有选中项。"));
-    }
+    if (hasSelection) fileIntegritySubMenu->setToolTip(ks::i18n::displayText(QStringLiteral("正在加载...")));
     for (const FileIntegrityLevelPreset& preset : FileIntegrityLevelPresets)
     {
-        const bool isCurrentLevel = firstFileIntegrityKnown && firstFileIntegrityRid == preset.rid;
+        const bool isCurrentLevel = false;
         QAction* integrityAction = fileIntegritySubMenu->addAction(
             QIcon(":/Icon/file_owner.svg"),
             QStringLiteral("%1 %2 - %3")
@@ -16485,11 +18531,10 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("属性..."));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
-    const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
+    const bool singleFileOnly = isSingleSelection && hasAnyFile;
     const bool executableSelected = singleFileOnly &&
         QFileInfo(firstPath).suffix().compare(QStringLiteral("exe"), Qt::CaseInsensitive) == 0;
-    const ks::process::RunAsAvailability runAsAvailability = executableSelected
-        ? ks::process::QueryRunAsAvailability() : ks::process::RunAsAvailability{};
+    const ks::process::RunAsAvailability runAsAvailability{ false, false, false, false };
     runAsMenu->setEnabled(executableSelected);
     runAsSystemAction->setEnabled(executableSelected && runAsAvailability.system);
     runAsTrustedInstallerAction->setEnabled(executableSelected && runAsAvailability.trustedInstaller);
@@ -16516,7 +18561,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     locateLinkTargetAction->setEnabled(!firstLinkTarget.isEmpty());
     copyAction->setEnabled(hasSelection);
     cutAction->setEnabled(hasSelection);
-    renameAction->setEnabled(isSingleSelection);
+    const bool mutationBusy = m_fileMutationOperation && m_fileMutationOperation->isInFlight();
+    renameAction->setEnabled(isSingleSelection && !mutationBusy);
+    newFileAction->setEnabled(!mutationBusy);
+    newFolderAction->setEnabled(!mutationBusy);
+    fileIntegritySubMenu->setEnabled(hasSelection && !mutationBusy);
     deleteAction->setEnabled(hasSelection);
     deleteModeMenu->setEnabled(hasSelection);
     permanentDeleteAction->setEnabled(hasSelection);
@@ -16528,7 +18577,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     driverPosixDeleteAction->setEnabled(hasSelection);
     driverIgnoreShareDeleteAction->setEnabled(singleFileOnly);
     unlockByDriverAction->setEnabled(isSingleSelection);
-    const bool canAddOplock = singleFileOnly && !firstPathHasOplock;
+    const bool canAddOplock = singleFileOnly && !firstPathHasOplock
+        && !m_releasingOplockPaths.contains(normalizeFileDockPath(firstPath), Qt::CaseInsensitive);
     addOplockMenu->setEnabled(canAddOplock);
     addOplockLevel1Action->setEnabled(canAddOplock);
     addOplockLevel2Action->setEnabled(canAddOplock);
@@ -16546,16 +18596,63 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     releaseAllOplocksAction->setEnabled(currentOplockCount > 0U);
     takeOwnerAction->setEnabled(hasSelection);
     detailAction->setEnabled(hasSelection);
-    hashAction->setEnabled(hasAnyFile);
+    hashAction->setEnabled(hasAnyFile && (m_fileAnalysisOperation == nullptr || !m_fileAnalysisOperation->isInFlight()));
     signAction->setEnabled(hasAnyFile);
-    entropyAction->setEnabled(hasAnyFile);
+    entropyAction->setEnabled(hasAnyFile && (m_fileAnalysisOperation == nullptr || !m_fileAnalysisOperation->isInFlight()));
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
     mappedProcessScanAction->setEnabled(hasAnyFile);
     pluginMenu->setEnabled(singleFileOnly);
 
+    if (!m_fileMenuOperation) m_fileMenuOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<QMenu> menuGuard(&menu);
+    if (hasSelection)
+    {
+        m_fileMenuOperation->submit<FileMenuMetadataRequest, FileMenuMetadata>(
+            { menuPaths, executableSelected }, queryFileMenuMetadata,
+            [menuGuard, fileIntegritySubMenu, runAsMenu, runAsSystemAction, runAsTrustedInstallerAction,
+                runAsAdministratorAction, runAsStandardAction, copyLinkTargetAction, openLinkTargetAction,
+                locateLinkTargetAction, executableSelected, isSingleSelection, selectionCount = menuPaths.size(), &linkTargetList,
+                &firstLinkTarget, &firstLinkLocatePath](const FileMenuMetadata& result, std::uint64_t)
+            {
+                if (!menuGuard || !menuGuard->isVisible()) return true;
+                fileIntegritySubMenu->setToolTip(result.integrityKnown
+                    ? (result.implicitMedium ? QStringLiteral("当前未设置显式 Mandatory Label，Windows 按 Medium 处理。")
+                        : (selectionCount > 1 ? QStringLiteral("多选时圆点按第一项的文件完整性显示，执行时会批量写入所有选中项。") : QString()))
+                    : QStringLiteral("当前文件完整性读取失败：%1").arg(result.integrityDetail));
+                for (QAction* action : fileIntegritySubMenu->actions())
+                {
+                    const DWORD rid = action->data().toUInt();
+                    const auto preset = std::find_if(std::begin(FileIntegrityLevelPresets), std::end(FileIntegrityLevelPresets),
+                        [rid](const auto& value) { return value.rid == rid; });
+                    if (preset == std::end(FileIntegrityLevelPresets)) continue;
+                    action->setText(QStringLiteral("%1 %2 - %3")
+                        .arg(result.integrityKnown && result.integrityRid == rid ? QStringLiteral("●") : QStringLiteral(" "))
+                        .arg(QString::fromLatin1(preset->nameText)).arg(QString::fromUtf8(preset->detailText)));
+                }
+                linkTargetList = result.links;
+                firstLinkTarget = isSingleSelection && !result.links.isEmpty() ? result.links.front() : QString();
+                firstLinkLocatePath = result.locatePath;
+                const auto available = [](QAction* action, const bool enabled)
+                { action->setEnabled(enabled); action->setVisible(enabled); };
+                available(copyLinkTargetAction, !linkTargetList.isEmpty());
+                available(openLinkTargetAction, !firstLinkTarget.isEmpty());
+                available(locateLinkTargetAction, !firstLinkTarget.isEmpty());
+                available(runAsSystemAction, executableSelected && result.runAs.system);
+                available(runAsTrustedInstallerAction, executableSelected && result.runAs.trustedInstaller);
+                available(runAsAdministratorAction, executableSelected && result.runAs.administrator);
+                available(runAsStandardAction, executableSelected && result.runAs.standardUser);
+                runAsMenu->setEnabled(executableSelected);
+                runAsMenu->menuAction()->setVisible(executableSelected);
+                hideUnavailableFileMenuActions(*menuGuard);
+                return true;
+            }, [](std::exception_ptr) { kLogEvent event; warn << event << "[FileDock] menu metadata failed" << eol; });
+    }
+    connect(&menu, &QMenu::aboutToHide, this, [this]() { if (m_fileMenuOperation) m_fileMenuOperation->cancel(); });
     hideUnavailableFileMenuActions(menu);
+    const QPointer<FileDock> self(this);
     QAction* selectedAction = menu.exec(menuView->viewport()->mapToGlobal(localPos));
+    if (!self) return;
     if (selectedAction == nullptr)
     {
         kLogEvent menuCancelEvent;
@@ -16616,7 +18713,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         setSelectedFileIntegrityLevel(
             panel,
             integrityRid,
-            fileIntegrityNameFromRid(integrityRid));
+            fileIntegrityNameFromRid(integrityRid), menuPaths);
         return;
     }
     if (selectedAction == openAction)
@@ -16665,11 +18762,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
     if (selectedAction == locateLinkTargetAction)
     {
-        const QFileInfo targetInfo(firstLinkTarget);
-        const QString locatePath = targetInfo.isDir()
-            ? targetInfo.absoluteFilePath()
-            : targetInfo.absolutePath();
-        if (locatePath.trimmed().isEmpty() || !QDir(locatePath).exists())
+        const QString locatePath = firstLinkLocatePath;
+        if (locatePath.trimmed().isEmpty())
         {
             QMessageBox::warning(
                 this,
@@ -16839,85 +18933,41 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             << eol;
         return;
     }
-    if (selectedAction == hashAction)
+    if (selectedAction == hashAction || selectedAction == entropyAction)
     {
-        // 哈希计算支持多选：仅对文件条目计算，目录自动跳过。
-        if (!hasAnyFile)
+        if (!hasAnyFile) return;
+        if (m_fileAnalysisOperation == nullptr) m_fileAnalysisOperation = new ks::ui::AsyncOperation(this);
+        if (m_fileAnalysisOperation->isInFlight()) return;
+        const bool hash = selectedAction == hashAction;
+        const QString title = ks::i18n::displayText(hash ? QStringLiteral("计算哈希值") : QStringLiteral("计算熵值"));
+        const auto progress = std::make_shared<FileAnalysisProgress>();
+        auto* dialog = new QProgressDialog(title, ks::i18n::displayText(QStringLiteral("取消")), 0, 100, this);
+        dialog->setWindowTitle(title);
+        dialog->setWindowModality(Qt::NonModal);
+        dialog->setAutoClose(false);
+        dialog->setAutoReset(false);
+        dialog->setMinimumDuration(0);
+        dialog->setValue(0);
+        auto* timer = new QTimer(dialog);
+        timer->setInterval(100);
+        connect(timer, &QTimer::timeout, dialog, [dialog, progress]()
         {
-            kLogEvent hashEmptyEvent;
-            warn << hashEmptyEvent
-                << "[FileDock] 哈希计算取消：未选中文件, panel="
-                << panel.panelNameText.toStdString()
-                << eol;
-            return;
-        }
-
-        kLogEvent hashEvent;
-        int successCount = 0;
-        QStringList failedLines;
-        for (const QString& path : menuPaths)
-        {
-            QFileInfo fileInfo(path);
-            if (!fileInfo.isFile())
+            const int percent = progress->percent.load();
+            if (!progress->cancel.load() && dialog->value() != percent) dialog->setValue(percent);
+        });
+        connect(dialog, &QProgressDialog::canceled, dialog, [progress]() { progress->cancel.store(true); });
+        const QPointer<QProgressDialog> guard(dialog);
+        m_fileAnalysisOperation->submit<FileAnalysisRequest, FileAnalysisResult>(
+            { menuPaths, panel.panelNameText, hash, progress }, analyzeMenuFiles,
+            [guard](const FileAnalysisResult&, std::uint64_t)
+            { if (guard) guard->deleteLater(); return true; },
+            [guard](std::exception_ptr)
             {
-                continue;
-            }
-
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                failedLines << QStringLiteral("%1 | 无法打开文件。")
-                    .arg(QDir::toNativeSeparators(path));
-                continue;
-            }
-
-            QCryptographicHash md5(QCryptographicHash::Md5);
-            QCryptographicHash sha1(QCryptographicHash::Sha1);
-            QCryptographicHash sha256(QCryptographicHash::Sha256);
-            while (!file.atEnd())
-            {
-                const QByteArray chunk = file.read(1024 * 256);
-                md5.addData(chunk);
-                sha1.addData(chunk);
-                sha256.addData(chunk);
-            }
-            file.close();
-
-            successCount += 1;
-            info << hashEvent
-                << "[FileDock] 哈希计算结果, filePath="
-                << QDir::toNativeSeparators(path).toStdString()
-                << ", md5="
-                << QString::fromLatin1(md5.result().toHex()).toStdString()
-                << ", sha1="
-                << QString::fromLatin1(sha1.result().toHex()).toStdString()
-                << ", sha256="
-                << QString::fromLatin1(sha256.result().toHex()).toStdString()
-                << eol;
-        }
-
-        if (!failedLines.isEmpty())
-        {
-            warn << hashEvent
-                << "[FileDock] 哈希计算部分失败, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << ", failCount="
-                << failedLines.size()
-                << ", failedPreview=\n"
-                << buildLogPreviewText(failedLines).toStdString()
-                << eol;
-        }
-
-        info << hashEvent
-            << "[FileDock] 哈希计算完成, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failedLines.size()
-            << eol;
+                kLogEvent event; warn << event << "[FileDock] file analysis worker failed" << eol;
+                if (guard) guard->deleteLater();
+            });
+        timer->start();
+        dialog->show();
         return;
     }
     if (selectedAction == signAction)
@@ -16935,12 +18985,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
 
         constexpr std::size_t kMaxAutoOpenSignCount = 8;
         std::size_t openedCount = 0;
-        for (const QString& path : menuPaths)
+        for (const QString& path : menuFilePaths)
         {
-            if (!QFileInfo(path).isFile())
-            {
-                continue;
-            }
             if (openedCount >= kMaxAutoOpenSignCount)
             {
                 break;
@@ -16949,13 +18995,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             openedCount += 1;
         }
 
-        const std::size_t fileSelectionCount = static_cast<std::size_t>(std::count_if(
-            menuPaths.begin(),
-            menuPaths.end(),
-            [](const QString& path)
-            {
-                return QFileInfo(path).isFile();
-            }));
+        const std::size_t fileSelectionCount = menuFilePaths.size();
         kLogEvent signEvent;
         if (openedCount == kMaxAutoOpenSignCount && fileSelectionCount > kMaxAutoOpenSignCount)
         {
@@ -16979,101 +19019,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             << eol;
         return;
     }
-    if (selectedAction == entropyAction)
-    {
-        // 熵值计算支持多选：仅统计文件条目。
-        if (!hasAnyFile)
-        {
-            kLogEvent entropyEmptyEvent;
-            warn << entropyEmptyEvent
-                << "[FileDock] 熵值计算取消：未选中文件, panel="
-                << panel.panelNameText.toStdString()
-                << eol;
-            return;
-        }
-
-        kLogEvent entropyEvent;
-        int successCount = 0;
-        QStringList failedLines;
-        for (const QString& path : menuPaths)
-        {
-            QFileInfo fileInfo(path);
-            if (!fileInfo.isFile())
-            {
-                continue;
-            }
-
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                failedLines << QStringLiteral("%1 | 无法打开文件。")
-                    .arg(QDir::toNativeSeparators(path));
-                continue;
-            }
-
-            std::array<std::uint64_t, 256> bucket{};
-            std::uint64_t totalCount = 0;
-            while (!file.atEnd())
-            {
-                const QByteArray chunk = file.read(1024 * 256);
-                for (unsigned char byteValue : chunk)
-                {
-                    bucket[byteValue] += 1;
-                    totalCount += 1;
-                }
-            }
-            file.close();
-
-            double entropy = 0.0;
-            if (totalCount > 0)
-            {
-                for (std::uint64_t count : bucket)
-                {
-                    if (count == 0)
-                    {
-                        continue;
-                    }
-                    const double p = static_cast<double>(count) / static_cast<double>(totalCount);
-                    entropy -= p * std::log2(p);
-                }
-            }
-
-            successCount += 1;
-            info << entropyEvent
-                << "[FileDock] 熵值计算结果, filePath="
-                << QDir::toNativeSeparators(path).toStdString()
-                << ", entropy="
-                << QString::number(entropy, 'f', 4).toStdString()
-                << eol;
-        }
-
-        if (!failedLines.isEmpty())
-        {
-            warn << entropyEvent
-                << "[FileDock] 熵值计算部分失败, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << ", failCount="
-                << failedLines.size()
-                << ", failedPreview=\n"
-                << buildLogPreviewText(failedLines).toStdString()
-                << eol;
-        }
-
-        info << entropyEvent
-            << "[FileDock] 熵值计算完成, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failedLines.size()
-            << eol;
-        return;
-    }
     if (selectedAction == hexAction || selectedAction == peAction)
     {
-        if (!firstPath.isEmpty() && QFileInfo(firstPath).isFile())
+        if (singleFileOnly)
         {
             showFileDetailDialog(firstPath, selectedAction == hexAction ? QStringLiteral("hex") : QStringLiteral("pe"));
         }
@@ -17222,56 +19170,32 @@ void FileDock::copySelectedItemKernelPath(FilePanelWidgets& panel)
 
 void FileDock::copySelectedItemShortName(FilePanelWidgets& panel)
 {
-    const std::vector<QString> paths = selectedPaths(panel);
-    if (paths.empty())
-    {
-        return;
-    }
-
-    QStringList shortNameLines;
-    shortNameLines.reserve(static_cast<int>(paths.size()));
-
-    int shortNameHitCount = 0;
-    int fallbackCount = 0;
-    for (const QString& path : paths)
-    {
-        const QString shortPathText = queryShortPathText(path);
-        QString shortNameText;
-        if (!shortPathText.isEmpty())
+    const auto paths = selectedPaths(panel);
+    if (paths.empty()) return;
+    if (!m_shortNameOperation) m_shortNameOperation = new ks::ui::AsyncOperation(this);
+    QObject::disconnect(m_shortNameClipboardConnection);
+    m_shortNameClipboardConnection = connect(QApplication::clipboard(), &QClipboard::dataChanged,
+        m_shortNameOperation, [this]() { m_shortNameOperation->cancel(); });
+    const QString panelName = panel.panelNameText;
+    m_shortNameOperation->submit<std::vector<QString>, FileShortNameResult>(paths,
+        [](const std::vector<QString>& targets, const ks::ui::AsyncOperationToken& token)
         {
-            shortNameText = QFileInfo(shortPathText).fileName().trimmed();
-            if (shortNameText.isEmpty())
-            {
-                shortNameText = QDir::toNativeSeparators(shortPathText);
-            }
-            shortNameHitCount += 1;
-        }
-        else
+            return queryFileShortNames(targets, queryShortPathText, [&token]() { return token.isCanceled(); });
+        },
+        [this, panelName, count = paths.size()](const FileShortNameResult& result, std::uint64_t)
         {
-            shortNameText = QFileInfo(path).fileName().trimmed();
-            if (shortNameText.isEmpty())
-            {
-                shortNameText = QDir::toNativeSeparators(path);
-            }
-            fallbackCount += 1;
-        }
-
-        shortNameLines << shortNameText;
-    }
-
-    QApplication::clipboard()->setText(shortNameLines.join('\n'));
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 复制短文件名到剪贴板, panel="
-        << panel.panelNameText.toStdString()
-        << ", count="
-        << paths.size()
-        << ", shortNameHitCount="
-        << shortNameHitCount
-        << ", fallbackCount="
-        << fallbackCount
-        << eol;
+            QObject::disconnect(m_shortNameClipboardConnection);
+            if (!result.canceled) QApplication::clipboard()->setText(result.text);
+            kLogEvent event;
+            info << event << "[FileDock] 复制短文件名到剪贴板, panel=" << panelName.toStdString()
+                << ", count=" << count << ", shortNameHitCount=" << result.hits << ", fallbackCount=" << result.fallbacks << eol;
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            QObject::disconnect(m_shortNameClipboardConnection);
+            kLogEvent event; warn << event << "[FileDock] short-name query failed" << eol;
+        });
 }
 
 void FileDock::copySelectedItems(FilePanelWidgets& panel)
@@ -17537,151 +19461,118 @@ void FileDock::transferSelectedItemsToOppositePanel(FilePanelWidgets& sourcePane
         });
 }
 
-void FileDock::createNewFileOrFolder(FilePanelWidgets& panel, bool createFolder)
+void FileDock::createNewFileOrFolder(FilePanelWidgets& panel, const bool createFolder)
 {
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 新建请求, panel="
-            << panel.panelNameText.toStdString()
-            << ", type="
-            << (createFolder ? "folder" : "file")
-            << ", currentPath="
-            << QDir::toNativeSeparators(panel.currentPath).toStdString()
-            << eol;
-    }
-
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
     bool ok = false;
-    const QString inputName = QInputDialog::getText(
-        this,
+    const QString inputName = QInputDialog::getText(this,
         createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件"),
-        QStringLiteral("请输入名称："),
-        QLineEdit::Normal,
-        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件.txt"),
-        &ok);
-    if (!ok)
-    {
-        return;
-    }
-
-    const QString trimmedName = inputName.trimmed();
-    if (trimmedName.isEmpty())
-    {
-        return;
-    }
-
-    const QString targetPath = QDir(panel.currentPath).filePath(trimmedName);
-    bool createOk = false;
-    if (createFolder)
-    {
-        QDir dir;
-        createOk = dir.mkpath(targetPath);
-    }
-    else
-    {
-        QFile file(targetPath);
-        createOk = file.open(QIODevice::WriteOnly | QIODevice::Truncate);
-        file.close();
-    }
-
-    if (!createOk)
-    {
-        kLogEvent event;
-        err << event
-            << "[FileDock] 新建失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", targetPath="
-            << QDir::toNativeSeparators(targetPath).toStdString()
-            << eol;
-        return;
-    }
-
-    refreshPanel(panel);
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 新建成功, panel="
-        << panel.panelNameText.toStdString()
-        << ", targetPath="
-        << QDir::toNativeSeparators(targetPath).toStdString()
-        << eol;
+        QStringLiteral("请输入名称："), QLineEdit::Normal,
+        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件.txt"), &ok);
+    if (!ok || inputName.trimmed().isEmpty()) return;
+    const QString targetPath = QDir(directory).filePath(inputName.trimmed());
+    submitFileMutation(panel, { targetPath }, targetPath, 0,
+        createFolder ? QStringLiteral("新建文件夹") : QStringLiteral("新建文件"),
+        createFolder ? 1 : 0, directory, directoryGeneration);
 }
 
 void FileDock::renameSelectedItem(FilePanelWidgets& panel)
 {
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
     const QString path = currentIndexPath(panel);
-    if (path.isEmpty())
-    {
-        return;
-    }
-
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 重命名请求, panel="
-            << panel.panelNameText.toStdString()
-            << ", oldPath="
-            << QDir::toNativeSeparators(path).toStdString()
-            << eol;
-    }
-
-    QFileInfo oldInfo(path);
+    if (path.isEmpty()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
+    const QFileInfo old(path); // fileName/absolutePath below are lexical only.
     bool ok = false;
-    const QString newName = QInputDialog::getText(
-        this,
-        QStringLiteral("重命名"),
-        QStringLiteral("新名称："),
-        QLineEdit::Normal,
-        oldInfo.fileName(),
-        &ok);
-    if (!ok)
-    {
-        return;
-    }
+    const QString inputName = QInputDialog::getText(this, QStringLiteral("重命名"),
+        QStringLiteral("新名称："), QLineEdit::Normal, old.fileName(), &ok);
+    const QString name = inputName.trimmed();
+    if (!ok || name.isEmpty() || name == old.fileName()) return;
+    const QString destination = QDir(old.absolutePath()).filePath(name);
+    submitFileMutation(panel, { path }, destination, 0, QStringLiteral("重命名"), 2,
+        directory, directoryGeneration);
+}
 
-    const QString trimmedName = newName.trimmed();
-    if (trimmedName.isEmpty() || trimmedName == oldInfo.fileName())
+void FileDock::submitFileMutation(FilePanelWidgets& panel, std::vector<QString> paths,
+    const QString& destination, const unsigned long integrityRid, const QString& displayText,
+    const int kind, const QString& directory, const std::uint64_t directoryGeneration)
+{
+    if (!m_fileMutationOperation) m_fileMutationOperation = new ks::ui::AsyncOperation(this);
+    if (m_fileMutationOperation->isInFlight()) return; // Never supersede an approved write.
+    const bool left = &panel == &m_leftPanel;
+    const auto progress = std::make_shared<FileAnalysisProgress>();
+    const QString title = ks::i18n::displayText(kind == 3 ? QStringLiteral("设置文件完整性") : displayText);
+    const int progressPid = kPro.add(this, "文件", title.toStdString());
+    auto* dialog = new QProgressDialog(title, ks::i18n::displayText(QStringLiteral("取消")), 0, 100, this);
+    dialog->setWindowTitle(title);
+    dialog->setWindowModality(Qt::NonModal);
+    dialog->setAutoClose(false); dialog->setAutoReset(false); dialog->setMinimumDuration(0); dialog->setValue(0);
+    auto* timer = new QTimer(dialog); timer->setInterval(100);
+    connect(timer, &QTimer::timeout, dialog, [dialog, progress]()
+    { const int value = progress->percent.load(); if (!progress->cancel.load() && dialog->value() != value) dialog->setValue(value); });
+    connect(dialog, &QProgressDialog::canceled, dialog, [progress]() { progress->cancel.store(true); });
+    const QPointer<QProgressDialog> guard(dialog);
+    const std::uint64_t acceptedTicket = m_fileMutationOperation->submitTransaction<FileMutationRequest, FileMutationResult>(
+        { kind, std::move(paths), destination, panel.panelNameText, static_cast<DWORD>(integrityRid), progress, progressPid },
+        runFileMutation,
+        [this, guard, left, kind, displayText, directory, directoryGeneration, progressPid](const FileMutationResult& result, std::uint64_t)
+        {
+            if (guard) guard->deleteLater();
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            const QPointer<FileDock> refreshOwner(this);
+            const auto refresh = [refreshOwner, left, directory, directoryGeneration]()
+            {
+                if (!refreshOwner) return;
+                FilePanelWidgets& current = left ? refreshOwner->m_leftPanel : refreshOwner->m_rightPanel;
+                if (current.navigationGeneration == directoryGeneration && pathEqualsCaseInsensitive(current.currentPath, directory))
+                    refreshOwner->refreshPanel(current);
+            };
+            if (target.navigationGeneration == directoryGeneration && pathEqualsCaseInsensitive(target.currentPath, directory))
+            {
+                // refreshPanel resets/replaces the source model before navigation;
+                // defer that whole operation while either original view owns a menu.
+                if (!ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                    left ? QStringLiteral("file-mutation-refresh-left") : QStringLiteral("file-mutation-refresh-right"),
+                    { target.fileView, target.compactFileView }, refresh)) refresh();
+            }
+            if (!refreshOwner) return true;
+            kPro.set(progressPid, result.canceled ? "用户取消" : "完成", 0, 100.0f);
+            if (kind != 3) return true; // Preserve create/rename's existing log-only completion.
+            const QString summary = (result.canceled ? ks::i18n::displayText(QStringLiteral("已取消")) + QLatin1Char('\n') : QString())
+                + QStringLiteral("文件完整性设置完成：成功 %1，失败 %2，目标=%3。")
+                    .arg(result.successCount).arg(result.failureCount).arg(displayText);
+            const QPointer<FileDock> self(this);
+            const bool privilegeHandled = result.privilegeError != ERROR_SUCCESS && ks::ui::promptForPrivilegeFailure(
+                this, QStringLiteral("设置文件完整性级别"), result.privilegeError);
+            if (!self) return true;
+            if (result.failureCount != 0 && !privilegeHandled)
+                QMessageBox::warning(this, QStringLiteral("设置文件完整性"), summary + QStringLiteral("\n\n失败明细：\n") + result.failures);
+            else if (result.failureCount == 0)
+                QMessageBox::information(this, QStringLiteral("设置文件完整性"), summary);
+            return true;
+        },
+        [guard, progressPid](std::exception_ptr)
+        {
+            if (guard) guard->deleteLater();
+            kPro.set(progressPid, "失败", 0, 100.0f);
+            kLogEvent event; warn << event << "[FileDock] file mutation worker failed" << eol;
+        },
+        [progressPid](const ks::ui::AsyncOperationOutcome outcome)
+        {
+            // Value-only fallback for rejection, failed launch or lost UI delivery.
+            // A worker's real terminal result is never overwritten by this cleanup.
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied)
+                kPro.finish(progressPid, kProgressState::Failure, "失败");
+        });
+    if (acceptedTicket == 0)
     {
-        return;
+        if (guard) guard->deleteLater();
+        return; // Shutdown admission rejected: no write was accepted or entered.
     }
-
-    const QString newPath = oldInfo.dir().filePath(trimmedName);
-    bool renameOk = false;
-    if (oldInfo.isDir())
-    {
-        QDir parentDir = oldInfo.dir();
-        renameOk = parentDir.rename(oldInfo.fileName(), trimmedName);
-    }
-    else
-    {
-        renameOk = QFile::rename(path, newPath);
-    }
-
-    if (!renameOk)
-    {
-        kLogEvent event;
-        err << event
-            << "[FileDock] 重命名失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", oldPath="
-            << QDir::toNativeSeparators(path).toStdString()
-            << ", newPath="
-            << QDir::toNativeSeparators(newPath).toStdString()
-            << eol;
-        return;
-    }
-
-    refreshPanel(panel);
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 重命名成功, panel="
-        << panel.panelNameText.toStdString()
-        << ", oldPath="
-        << QDir::toNativeSeparators(path).toStdString()
-        << ", newPath="
-        << QDir::toNativeSeparators(newPath).toStdString()
-        << eol;
+    if (guard) { timer->start(); guard->show(); }
 }
 
 void FileDock::deleteSelectedItem(FilePanelWidgets& panel)
@@ -18052,7 +19943,8 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
     }
 
     const QString normalizedPath = normalizeFileDockPath(fileInfo.absoluteFilePath());
-    if (hasActiveOplockForPath(normalizedPath))
+    if (hasActiveOplockForPath(normalizedPath)
+        || m_releasingOplockPaths.contains(normalizedPath, Qt::CaseInsensitive))
     {
         QMessageBox::information(
             this,
@@ -18060,6 +19952,47 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
             QStringLiteral("该文件已经由 FileDock 持有 Oplock：\n%1").arg(normalizedPath));
         return;
     }
+
+    auto oplockEntry = std::make_shared<FileOplockEntry>();
+    oplockEntry->path = normalizedPath;
+    oplockEntry->level = level;
+    const QPointer<FileDock> safeThis(this);
+    const auto dispatcher = m_uiDispatcher;
+    const std::weak_ptr<FileOplockEntry> weakEntry(oplockEntry);
+    oplockEntry->cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire(
+        [weakEntry, safeThis, dispatcher]()
+        {
+            if (const auto entry = weakEntry.lock())
+            {
+                entry->releaseRequested.store(true);
+                FileDock::cancelFileOplockRequest(*entry);
+            }
+            // Remove only this stopped identity. A canceled application shutdown
+            // may admit a new Oplock before this queued GUI cleanup is delivered.
+            dispatcher->post([weakEntry, safeThis, dispatcher]()
+            {
+                const auto entry = weakEntry.lock();
+                if (!safeThis || !entry) return;
+                {
+                    std::lock_guard<std::mutex> lock(safeThis->m_activeOplockMutex);
+                    const auto found = std::find(safeThis->m_activeOplocks.begin(),
+                        safeThis->m_activeOplocks.end(), entry);
+                    if (found == safeThis->m_activeOplocks.end()) return;
+                    safeThis->m_activeOplocks.erase(found);
+                }
+                const QString path = entry->path;
+                safeThis->m_releasingOplockPaths.push_back(path);
+                retireFileOplockEntries(std::vector<std::shared_ptr<FileOplockEntry>>{ entry },
+                    [safeThis, dispatcher, path](const auto&)
+                    {
+                        dispatcher->post([safeThis, path]()
+                        {
+                            if (safeThis) safeThis->m_releasingOplockPaths.removeAll(path);
+                        });
+                    });
+            });
+        });
+    if (!oplockEntry->cleanupLease) return; // Shutdown rejected admission; no native request entered.
 
     std::wstring nativePath = normalizedPath.toStdWString();
     HANDLE fileHandle = ::CreateFileW(
@@ -18092,9 +20025,6 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
         return;
     }
 
-    auto oplockEntry = std::make_shared<FileOplockEntry>();
-    oplockEntry->path = normalizedPath;
-    oplockEntry->level = level;
     oplockEntry->fileHandle = fileHandle;
     oplockEntry->eventHandle = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (oplockEntry->eventHandle == nullptr)
@@ -18161,8 +20091,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
         m_activeOplocks.push_back(oplockEntry);
     }
 
-    QPointer<FileDock> safeThis(this);
-    oplockEntry->waitThread = std::thread([safeThis, oplockEntry]() {
+    oplockEntry->waitThread = std::thread([safeThis, dispatcher, oplockEntry]() {
         for (;;)
         {
             bool completionOk = false;
@@ -18202,10 +20131,8 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
                 ? FileDock::recordFileOplockAccessPrograms(*oplockEntry, breakSequence)
                 : 0U;
 
-            if (safeThis != nullptr)
             {
-                QMetaObject::invokeMethod(
-                    safeThis,
+                dispatcher->post(
                     [
                         safeThis,
                         oplockEntry,
@@ -18225,8 +20152,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
                                 acknowledgeError,
                                 capturedProcessCount);
                         }
-                    },
-                    Qt::QueuedConnection);
+                    });
             }
 
             if (!completionOk || !acknowledgeOk)
@@ -18251,17 +20177,15 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
                     break;
                 }
 
-                if (!oplockEntry->rearmWarningReported.exchange(true) && safeThis != nullptr)
+                if (!oplockEntry->rearmWarningReported.exchange(true))
                 {
-                    QMetaObject::invokeMethod(
-                        safeThis,
+                    dispatcher->post(
                         [safeThis, oplockEntry, rearmError]() {
                             if (safeThis != nullptr)
                             {
                                 safeThis->handleOplockRearmPending(oplockEntry, rearmError);
                             }
-                        },
-                        Qt::QueuedConnection);
+                        });
                 }
 
                 if (oplockEntry->eventHandle != nullptr)
@@ -18338,47 +20262,39 @@ void FileDock::releaseSelectedFileOplock(FilePanelWidgets& panel)
         return;
     }
 
-    const std::uint64_t breakCount = targetEntry->breakCount.load();
-    std::size_t accessProcessCount = 0U;
-    std::uint64_t uncapturedBreakCount = 0U;
-    {
-        std::lock_guard<std::mutex> lock(targetEntry->accessRecordMutex);
-        accessProcessCount = targetEntry->accessRecords.size();
-        uncapturedBreakCount = targetEntry->uncapturedBreakCount;
-    }
-    const QString levelText = fileOplockLevelText(targetEntry->level);
     targetEntry->releaseRequested.store(true);
     cancelFileOplockRequest(*targetEntry);
-    if (targetEntry->waitThread.joinable() &&
-        targetEntry->waitThread.get_id() != std::this_thread::get_id())
-    {
-        targetEntry->waitThread.join();
-    }
-
-    QMessageBox::information(
-        this,
-        QStringLiteral("释放 Oplock"),
-        QStringLiteral("已释放 %1 Oplock。\n触发次数：%2\n记录进程：%3\n未捕获触发：%4\n文件：%5")
-            .arg(levelText)
-            .arg(breakCount)
-            .arg(accessProcessCount)
-            .arg(uncapturedBreakCount)
-            .arg(normalizedPath));
-    kLogEvent event;
-    info << event
-        << "[FileDock] 释放当前 Oplock, path="
-        << normalizedPath.toStdString()
-        << ", level="
-        << levelText.toStdString()
-        << ", breakCount="
-        << breakCount
-        << ", accessProcessCount="
-        << accessProcessCount
-        << ", uncapturedBreakCount="
-        << uncapturedBreakCount
-        << ", activeCount="
-        << activeOplockCount()
-        << eol;
+    m_releasingOplockPaths.push_back(normalizedPath);
+    const int progressPid = kPro.add(this, "文件", "释放 Oplock");
+    const auto dispatcher = m_uiDispatcher;
+    const QPointer<FileDock> safeThis(this);
+    retireFileOplockEntries(std::vector<std::shared_ptr<FileOplockEntry>>{ targetEntry },
+        [safeThis, dispatcher, normalizedPath, progressPid](const auto& entries)
+        {
+            const auto& entry = entries.front();
+            const std::uint64_t breakCount = entry->breakCount.load();
+            const auto accessProcessCount = entry->accessRecords.size();
+            const auto uncapturedBreakCount = entry->uncapturedBreakCount;
+            const QString levelText = FileDock::fileOplockLevelText(entry->level);
+            closeWin32Handle(entry->fileHandle);
+            closeWin32Handle(entry->eventHandle);
+            dispatcher->post([safeThis, normalizedPath, progressPid, breakCount,
+                accessProcessCount, uncapturedBreakCount, levelText]()
+            {
+                if (!safeThis) return;
+                safeThis->m_releasingOplockPaths.removeAll(normalizedPath);
+                kPro.set(progressPid, "释放 Oplock", 0, 100.0f);
+                QMessageBox::information(safeThis, QStringLiteral("释放 Oplock"),
+                    QStringLiteral("已释放 %1 Oplock。\n触发次数：%2\n记录进程：%3\n未捕获触发：%4\n文件：%5")
+                        .arg(levelText).arg(breakCount).arg(accessProcessCount)
+                        .arg(uncapturedBreakCount).arg(normalizedPath));
+                kLogEvent event;
+                info << event << "[FileDock] 释放当前 Oplock, path=" << normalizedPath.toStdString()
+                    << ", level=" << levelText.toStdString() << ", breakCount=" << breakCount
+                    << ", accessProcessCount=" << accessProcessCount << ", uncapturedBreakCount="
+                    << uncapturedBreakCount << eol;
+            });
+        });
 }
 
 void FileDock::showSelectedFileOplockAccessRecords(FilePanelWidgets& panel)
@@ -18528,60 +20444,52 @@ void FileDock::releaseAllActiveOplocks(const bool showMessage)
         entries.swap(m_activeOplocks);
     }
 
-    std::uint64_t totalBreakCount = 0;
-    std::uint64_t totalUncapturedBreakCount = 0;
-    std::size_t totalAccessProcessCount = 0U;
-    for (const std::shared_ptr<FileOplockEntry>& entry : entries)
+    if (entries.empty()) return;
+    QStringList releasedPaths;
+    for (const auto& entry : entries)
     {
-        if (entry == nullptr)
-        {
-            continue;
-        }
-        totalBreakCount += entry->breakCount.load();
-        {
-            std::lock_guard<std::mutex> lock(entry->accessRecordMutex);
-            totalAccessProcessCount += entry->accessRecords.size();
-            totalUncapturedBreakCount += entry->uncapturedBreakCount;
-        }
+        if (!entry) continue;
         entry->releaseRequested.store(true);
         cancelFileOplockRequest(*entry);
+        releasedPaths.push_back(entry->path);
+        m_releasingOplockPaths.push_back(entry->path);
     }
-
-    for (const std::shared_ptr<FileOplockEntry>& entry : entries)
-    {
-        if (entry != nullptr &&
-            entry->waitThread.joinable() &&
-            entry->waitThread.get_id() != std::this_thread::get_id())
+    const auto dispatcher = m_uiDispatcher;
+    const QPointer<FileDock> safeThis(this);
+    const int progressPid = showMessage ? kPro.add(this, "文件", "释放全部 Oplock") : 0;
+    retireFileOplockEntries(std::move(entries),
+        [safeThis, dispatcher, releasedPaths, showMessage, progressPid](const auto& retired)
         {
-            entry->waitThread.join();
-        }
-    }
-
-    if (showMessage)
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("释放全部 Oplock"),
-            QStringLiteral("已释放 %1 个 Oplock，累计触发 %2 次，记录进程 %3 个，未捕获触发 %4 次。")
-                .arg(entries.size())
-                .arg(totalBreakCount)
-                .arg(totalAccessProcessCount)
-                .arg(totalUncapturedBreakCount));
-    }
-    if (!entries.empty())
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 释放全部 Oplock, count="
-            << entries.size()
-            << ", totalBreakCount="
-            << totalBreakCount
-            << ", totalAccessProcessCount="
-            << totalAccessProcessCount
-            << ", totalUncapturedBreakCount="
-            << totalUncapturedBreakCount
-            << eol;
-    }
+            std::uint64_t totalBreakCount = 0;
+            std::uint64_t totalUncapturedBreakCount = 0;
+            std::size_t totalAccessProcessCount = 0;
+            for (const auto& entry : retired)
+            {
+                if (!entry) continue;
+                totalBreakCount += entry->breakCount.load();
+                totalAccessProcessCount += entry->accessRecords.size();
+                totalUncapturedBreakCount += entry->uncapturedBreakCount;
+                closeWin32Handle(entry->fileHandle);
+                closeWin32Handle(entry->eventHandle);
+            }
+            dispatcher->post([safeThis, releasedPaths, showMessage, progressPid, count = retired.size(),
+                totalBreakCount, totalUncapturedBreakCount, totalAccessProcessCount]()
+            {
+                if (!safeThis) return;
+                for (const auto& path : releasedPaths) safeThis->m_releasingOplockPaths.removeAll(path);
+                if (showMessage)
+                {
+                    kPro.set(progressPid, "释放全部 Oplock", 0, 100.0f);
+                    QMessageBox::information(safeThis, QStringLiteral("释放全部 Oplock"),
+                        QStringLiteral("已释放 %1 个 Oplock，累计触发 %2 次，记录进程 %3 个，未捕获触发 %4 次。")
+                            .arg(count).arg(totalBreakCount).arg(totalAccessProcessCount).arg(totalUncapturedBreakCount));
+                }
+                kLogEvent event;
+                info << event << "[FileDock] 释放全部 Oplock, count=" << count
+                    << ", totalBreakCount=" << totalBreakCount << ", totalAccessProcessCount="
+                    << totalAccessProcessCount << ", totalUncapturedBreakCount=" << totalUncapturedBreakCount << eol;
+            });
+        });
 }
 
 bool FileDock::hasActiveOplockForPath(const QString& filePath) const
@@ -19401,129 +21309,21 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
     }).detach();
 }
 
-void FileDock::setSelectedFileIntegrityLevel(
-    FilePanelWidgets& panel,
-    const unsigned long integrityRid,
-    const QString& levelDisplayText)
+void FileDock::setSelectedFileIntegrityLevel(FilePanelWidgets& panel,
+    const unsigned long integrityRid, const QString& levelDisplayText, const std::vector<QString>& menuPaths)
 {
-    // 输入：当前面板选中项、目标完整性 RID 和显示文本。
-    // 处理：逐个先调用 R0 内核 API 写入 LABEL_SECURITY_INFORMATION，驱动不可用/旧驱动时回退 R3，并汇总失败项。
-    // 返回：无返回值；成功/失败通过日志、进度条和消息框反馈。
-    const std::vector<QString> paths = selectedPaths(panel);
-    if (paths.empty())
-    {
-        kLogEvent emptyEvent;
-        warn << emptyEvent
-            << "[FileDock] 设置文件完整性被忽略：未选中路径, panel="
-            << panel.panelNameText.toStdString()
-            << eol;
-        return;
-    }
-
-    const QMessageBox::StandardButton userChoice = QMessageBox::question(
-        this,
+    if (m_fileMutationOperation && m_fileMutationOperation->isInFlight()) return;
+    const std::vector<QString> paths = menuPaths;
+    if (paths.empty()) return;
+    const QString directory = panel.currentPath;
+    const auto directoryGeneration = panel.navigationGeneration;
+    const QMessageBox::StandardButton userChoice = QMessageBox::question(this,
         QStringLiteral("设置文件完整性"),
         QStringLiteral("将对选中的 %1 项写入文件 Mandatory Label：%2。\n"
             "该操作会影响低/中/高完整性进程对对象的写入权限，可能需要管理员权限。是否继续？")
-            .arg(paths.size())
-            .arg(levelDisplayText),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (userChoice != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    const DWORD targetIntegrityRid = static_cast<DWORD>(integrityRid);
-    const int progressPid = kPro.add(this, "文件", "设置文件完整性");
-    kPro.set(progressPid, "准备执行", 0, 5.0f);
-
-    QStringList failureDetails;
-    std::size_t successCount = 0U;
-    // privilegePromptHandled：多个目标失败时最多展示一次权限恢复提示，并抑制最终重复弹窗。
-    bool privilegePromptHandled = false;
-    for (std::size_t index = 0; index < paths.size(); ++index)
-    {
-        const QString& targetPath = paths[index];
-        QString detailText;
-        const DWORD result = setFileIntegrityLevelByR0ThenR3(
-            targetPath,
-            targetIntegrityRid,
-            &detailText);
-        if (result == ERROR_SUCCESS)
-        {
-            successCount += 1U;
-            kLogEvent itemEvent;
-            info << itemEvent
-                << "[FileDock] 设置文件完整性成功, panel="
-                << panel.panelNameText.toStdString()
-                << ", path="
-                << QDir::toNativeSeparators(targetPath).toStdString()
-                << ", rid=0x"
-                << QString::number(targetIntegrityRid, 16).toStdString()
-                << ", detail="
-                << detailText.toStdString()
-                << eol;
-        }
-        else
-        {
-            if (!privilegePromptHandled)
-            {
-                privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("设置文件完整性级别"),
-                    result);
-            }
-            failureDetails.push_back(QStringLiteral("%1 | code=%2 | %3")
-                .arg(QDir::toNativeSeparators(targetPath))
-                .arg(result)
-                .arg(detailText));
-        }
-
-        const float progress = 5.0f + (static_cast<float>(index + 1) / static_cast<float>(paths.size())) * 90.0f;
-        kPro.set(progressPid, "处理中", 0, progress);
-    }
-
-    refreshPanel(panel);
-    kPro.set(progressPid, "完成", 0, 100.0f);
-
-    const QString summaryText = QStringLiteral("文件完整性设置完成：成功 %1，失败 %2，目标=%3。")
-        .arg(successCount)
-        .arg(failureDetails.size())
-        .arg(levelDisplayText);
-    if (!failureDetails.isEmpty())
-    {
-        kLogEvent failEvent;
-        warn << failEvent
-            << "[FileDock] 设置文件完整性部分失败, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failureDetails.size()
-            << ", detailPreview=\n"
-            << buildLogPreviewText(failureDetails).toStdString()
-            << eol;
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("设置文件完整性"),
-                summaryText + QStringLiteral("\n\n失败明细：\n") + failureDetails.join('\n'));
-        }
-        return;
-    }
-
-    kLogEvent finishEvent;
-    info << finishEvent
-        << "[FileDock] 设置文件完整性完成, panel="
-        << panel.panelNameText.toStdString()
-        << ", successCount="
-        << successCount
-        << ", target="
-        << levelDisplayText.toStdString()
-        << eol;
-    QMessageBox::information(this, QStringLiteral("设置文件完整性"), summaryText);
+            .arg(paths.size()).arg(levelDisplayText), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (userChoice != QMessageBox::Yes) return;
+    submitFileMutation(panel, paths, {}, integrityRid, levelDisplayText, 3, directory, directoryGeneration);
 }
 
 void FileDock::showColumnManagerDialog(FilePanelWidgets& panel)
@@ -19600,28 +21400,31 @@ void FileDock::showFileDetailDialog(const QString& filePath, const QString& init
 
 void FileDock::showFileDetailDialog(const QStringList& filePaths, const QString& initialTabKey)
 {
-    QStringList existingPaths;
+    QStringList detailPaths;
     QSet<QString> seenPaths;
     for (const QString& candidatePath : filePaths)
     {
+        // This entry point owns only lexical target identity. Existence/access
+        // are reported by the detail dialog's asynchronous snapshot, never here.
+        const QString trimmedPath = candidatePath.trimmed();
+        if (trimmedPath.isEmpty()) continue;
         const QString normalizedPath = QDir::cleanPath(
-            QDir::toNativeSeparators(candidatePath.trimmed()));
+            QDir::toNativeSeparators(trimmedPath));
         const QString identityKey = normalizedPath.toLower();
-        if (!normalizedPath.isEmpty() && !seenPaths.contains(identityKey) &&
-            QFileInfo::exists(normalizedPath))
+        if (!normalizedPath.isEmpty() && !seenPaths.contains(identityKey))
         {
             seenPaths.insert(identityKey);
-            existingPaths.push_back(normalizedPath);
+            detailPaths.push_back(normalizedPath);
         }
     }
-    if (existingPaths.isEmpty())
+    if (detailPaths.isEmpty())
     {
         kLogEvent event;
         warn << event << "[FileDock] 打开文件详情失败：没有可访问目标" << eol;
         return;
     }
 
-    FileDetailDialog* dialog = new FileDetailDialog(existingPaths, this, initialTabKey);
+    FileDetailDialog* dialog = new FileDetailDialog(detailPaths, this, initialTabKey);
     dialog->setWindowFlag(Qt::WindowStaysOnTopHint, false);
     dialog->show();
     dialog->raise();
@@ -19630,7 +21433,7 @@ void FileDock::showFileDetailDialog(const QStringList& filePaths, const QString&
     kLogEvent event;
     info << event
         << "[FileDock] 打开文件详情窗口, targetCount="
-        << existingPaths.size()
+        << detailPaths.size()
         << eol;
 }
 
@@ -19770,4 +21573,10 @@ QString FileDock::formatSizeText(std::uint64_t sizeBytes)
         return QStringLiteral("%1 %2").arg(static_cast<qulonglong>(sizeBytes)).arg(units[unitIndex]);
     }
     return QStringLiteral("%1 %2").arg(QString::number(value, 'f', 2)).arg(units[unitIndex]);
+}
+
+namespace
+{
+    [[maybe_unused]] const bool kFileNavigationRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<FileDock>(QStringLiteral("file"));
 }

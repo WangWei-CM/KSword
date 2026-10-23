@@ -1,8 +1,11 @@
 #include "DdmaPage.h"
+#include "DdmaPhysicalWriteTransaction.h"
+#include "../ksword/log/log.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/PerfTrace.h"
 
 #include "../theme.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -15,6 +18,12 @@
 #include <QCheckBox>
 #include <QEvent>
 #include <QFile>
+#include <QFutureWatcher>
+#include <QPromise>
+#include <QPointer>
+#include <QShowEvent>
+#include <QHideEvent>
+#include <QTimer>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -31,6 +40,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
+#include <exception>
+#include <utility>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -81,6 +93,116 @@ namespace
             .arg(generation).arg(session.diskIndex).arg(session.scratchLba);
     }
 
+    template<typename Value>
+    struct DdmaTaskResult
+    {
+        Value value;
+        QString failure;
+    };
+
+    // Values and ownership cross the worker boundary; no QWidget, model or
+    // document is accessed by the queued callable. The watcher dies with page.
+    template<typename Value, typename Work, typename Apply>
+    void submitPageTransaction(QObject* page, Work work, Apply apply
+#if KSWORD_PERF_TRACE_ENABLED
+        , const ks::ui::PerfTraceContext traceContext = {}
+#endif
+        )
+    {
+        using Result = DdmaTaskResult<Value>;
+        auto promise = std::make_shared<QPromise<Result>>();
+        auto* const watcher = new QFutureWatcher<Result>(page);
+        watcher->setFuture(promise->future());
+#if KSWORD_PERF_TRACE_ENABLED
+        QMetaObject::Connection receiverDestroyed;
+        if (traceContext.requestId != 0 || traceContext.actionId != 0)
+        {
+            receiverDestroyed = QObject::connect(page, &QObject::destroyed,
+                [traceContext]() {
+                // The serialized worker is not cancelled by page destruction.
+                // Its eventual return must never be reported as UI readiness.
+                ks::ui::RecordPerfAsyncTrace("ddma_transaction_receiver_destroyed", traceContext);
+            });
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_submit", traceContext);
+        }
+#endif
+        QObject::connect(watcher, &QFutureWatcher<Result>::finished, page,
+            [watcher, apply = std::move(apply)
+#if KSWORD_PERF_TRACE_ENABLED
+                , traceContext, receiverDestroyed
+#endif
+            ]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope traceScope(traceContext);
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_ui_delivery", traceContext);
+#endif
+            apply(result);
+#if KSWORD_PERF_TRACE_ENABLED
+            // Keep the bounded destruction hook through the real apply body;
+            // it is a discard outcome, not a business-ready substitute.
+            QObject::disconnect(receiverDestroyed);
+#endif
+        });
+        promise->start();
+        Result rejected;
+        bool accepted = false;
+        try
+        {
+            accepted = ksword::memory_backend::submitDdmaTransaction(
+            [promise, work = std::move(work)
+#if KSWORD_PERF_TRACE_ENABLED
+                , traceContext
+#endif
+            ]() {
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope traceScope(traceContext);
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_worker_begin", traceContext);
+#endif
+            Result result;
+            try
+            {
+                result.value = work();
+            }
+            catch (const std::exception& error)
+            {
+                result.failure = QString::fromUtf8(error.what());
+            }
+            catch (...)
+            {
+                result.failure = QStringLiteral("DDMA transaction failed unexpectedly.");
+            }
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace(result.failure.isEmpty()
+                ? "ddma_transaction_worker_returned" : "ddma_transaction_worker_exception", traceContext);
+#endif
+            promise->addResult(std::move(result));
+            promise->finish();
+        });
+        }
+        catch (const std::exception& error)
+        {
+            rejected.failure = QString::fromUtf8(error.what());
+        }
+        catch (...)
+        {
+            rejected.failure = QStringLiteral("DDMA transaction failed unexpectedly.");
+        }
+        if (!accepted)
+        {
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_queue_rejected", traceContext);
+#endif
+            if (rejected.failure.isEmpty())
+            {
+                rejected.failure = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+            }
+            promise->addResult(std::move(rejected));
+            promise->finish();
+        }
+    }
+
     // formatNtStatus：把 NTSTATUS 渲染成 8 位大写十六进制。
     QString formatNtStatus(const long status)
     {
@@ -90,6 +212,20 @@ namespace
             .replace(QStringLiteral("0X"), QStringLiteral("0x"));
     }
 }
+
+// The process retains accepted write backups and final receipts after a page
+// closes. This is evidence ownership, not automatic target rollback/retry.
+struct DdmaPage::PhysicalWriteState
+{
+    ksword::memory_backend::DdmaPhysicalWriteRequest request;
+    ksword::memory_backend::DdmaPhysicalWriteResult result;
+    ks::ui::DisassemblyArchitecture architecture = ks::ui::DisassemblyArchitecture::X64;
+    std::uint64_t currentAddress = 0;
+    bool forceApproved = false;
+    bool cancelled = false;
+    bool retained = false;
+    bool phaseStarted = false;
+};
 
 DdmaPage::DdmaPage(QWidget* const parent)
     : QWidget(parent)
@@ -116,6 +252,67 @@ void DdmaPage::changeEvent(QEvent* const event)
     {
         applySemanticStyles();
     }
+}
+
+void DdmaPage::showEvent(QShowEvent* const event)
+{
+    QWidget::showEvent(event);
+    m_pageExposed = true;
+    QWidget* const top = window();
+    if (m_exposureWindow != top)
+    {
+        if (m_exposureWindow) { m_exposureWindow->removeEventFilter(this); }
+        m_exposureWindow = top;
+        if (top) { top->installEventFilter(this); }
+        m_windowExposed = top && top->isVisible();
+    }
+    schedulePendingForce();
+}
+
+void DdmaPage::hideEvent(QHideEvent* const event)
+{
+    m_pageExposed = false; // Includes spontaneous native Hide/minimize events.
+    QWidget::hideEvent(event);
+}
+
+bool DdmaPage::eventFilter(QObject* const watched, QEvent* const event)
+{
+    if (watched == m_exposureWindow && event != nullptr)
+    {
+        if (event->type() == QEvent::Hide) { m_windowExposed = false; }
+        else if (event->type() == QEvent::Show)
+        {
+            m_windowExposed = true;
+            schedulePendingForce();
+        }
+        else if (event->type() == QEvent::WindowStateChange)
+        {
+            // Qt may deliver Show before the restored state is final. Recheck
+            // after this event instead of losing the pending decision forever.
+            schedulePendingForce();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+bool DdmaPage::canPresentOperationPopup() const
+{
+    return m_pageExposed && m_windowExposed && m_exposureWindow
+        && isVisible() && m_exposureWindow->isVisible() && !m_exposureWindow->isMinimized();
+}
+
+void DdmaPage::schedulePendingForce()
+{
+    if (m_forcePromptScheduled) { return; }
+    m_forcePromptScheduled = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_forcePromptScheduled = false;
+        if (m_pendingForceWrite && canPresentOperationPopup())
+        {
+            auto pending = std::move(m_pendingForceWrite);
+            confirmPhysicalWriteForce(std::move(pending));
+        }
+    });
 }
 
 void DdmaPage::initializeUi()
@@ -315,12 +512,12 @@ QGroupBox* DdmaPage::buildChannelGroup()
         const bool hasRow = (m_diskTable->currentRow() >= 0);
         if (m_activateButton != nullptr)
         {
-            m_activateButton->setEnabled(hasRow);
+            m_activateButton->setEnabled(hasRow && !m_operationBusy);
         }
         // 侦测要读具体某一块盘的分区表，所以同样以选中行为前提。
         if (m_detectScratchButton != nullptr)
         {
-            m_detectScratchButton->setEnabled(hasRow);
+            m_detectScratchButton->setEnabled(hasRow && !m_operationBusy);
         }
         });
 
@@ -510,6 +707,16 @@ bool DdmaPage::parseScratchLbaFromUi(std::uint64_t& lbaOut, QString& errorTextOu
 
 void DdmaPage::probeChannels()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto inputContext = ks::ui::CapturePerfTraceContext();
+    const ks::ui::PerfTraceContextScope inputScope(inputContext);
+    const auto traceContext = ks::ui::BeginPerfAsyncTrace();
+    ks::ui::RecordPerfAsyncTrace("ddma_probe_ui_accepted", traceContext);
+#endif
     std::uint64_t scratchLba = 0ULL;
     QString lbaError;
     const bool lbaValid = parseScratchLbaFromUi(scratchLba, lbaError);
@@ -535,122 +742,159 @@ void DdmaPage::probeChannels()
         }
     }
 
-    const ksword::ark::DriverClient client;
-    const ksword::ark::DdmaCapabilityResult result =
-        client.queryDdmaCapability(lbaValid, scratchLba, lbaValid);
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<ksword::ark::DdmaCapabilityResult>(this,
+        [lbaValid, scratchLba]() {
+            const ksword::ark::DriverClient client;
+            return client.queryDdmaCapability(lbaValid, scratchLba, lbaValid);
+        },
+        [this, lbaValid, lbaError, previousDeviceIndex, hadSelection
+#if KSWORD_PERF_TRACE_ENABLED
+            , traceContext
+#endif
+        ](const auto& completed) {
+#if KSWORD_PERF_TRACE_ENABLED
+        const QPointer<DdmaPage> perfAlive(this);
+#endif
+        m_operationBusy = false;
+        refreshOperationState();
+        auto result = completed.value;
+        if (!completed.failure.isEmpty())
+        {
+            result.io.ok = false;
+            result.io.message = completed.failure.toStdString();
+        }
 
-    if (!result.io.ok)
-    {
-        m_probeCompleted = false;
-        m_diskCache.clear();
+        if (!result.io.ok)
+        {
+            m_probeCompleted = false;
+            m_diskCache.clear();
+            if (m_diskTable != nullptr)
+            {
+                m_diskTable->setRowCount(0);
+            }
+            if (m_capabilityLabel != nullptr)
+            {
+                m_capabilityLabel->setText(
+                    QStringLiteral("探测失败：%1").arg(QString::fromStdString(result.io.message)));
+            }
+            refreshSessionState();
+#if KSWORD_PERF_TRACE_ENABLED
+            if (perfAlive) { ks::ui::RecordPerfAsyncTrace("ddma_probe_failed", traceContext); }
+#endif
+            return;
+        }
+
+        m_probeCompleted = true;
+        m_diskCache = result.disks;
+        m_kernelDebuggerEnabled = result.kernelDebuggerEnabled();
+        m_transferBytes = result.transferBytes;
+        m_scratchSectorCount = result.scratchSectorCount;
+
+        // 探测结果变了，之前启用的通道未必还成立，先把会话里的探测面收回。
+        m_session.kernelDebuggerEnabled = m_kernelDebuggerEnabled;
+        m_session.transferBytes = m_transferBytes;
+        m_session.scratchSectorCount = m_scratchSectorCount;
+
         if (m_diskTable != nullptr)
         {
-            m_diskTable->setRowCount(0);
-        }
-        if (m_capabilityLabel != nullptr)
-        {
-            m_capabilityLabel->setText(
-                QStringLiteral("探测失败：%1").arg(QString::fromStdString(result.io.message)));
-        }
-        refreshSessionState();
-        return;
-    }
-
-    m_probeCompleted = true;
-    m_diskCache = result.disks;
-    m_kernelDebuggerEnabled = result.kernelDebuggerEnabled();
-    m_transferBytes = result.transferBytes;
-    m_scratchSectorCount = result.scratchSectorCount;
-
-    // 探测结果变了，之前启用的通道未必还成立，先把会话里的探测面收回。
-    m_session.kernelDebuggerEnabled = m_kernelDebuggerEnabled;
-    m_session.transferBytes = m_transferBytes;
-    m_session.scratchSectorCount = m_scratchSectorCount;
-
-    if (m_diskTable != nullptr)
-    {
-        m_diskTable->setRowCount(static_cast<int>(m_diskCache.size()));
-        for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
-        {
-            const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
-
-            // 状态里写清楚"走哪条直通"：ATA 与 SCSI 是两条完全不同的路，
-            // 只说"可用"会让人无法判断这块盘到底是怎么通的。
-            QString stateText;
-            if (entry.ataReady() && entry.scsiReady())
-            {
-                stateText = QStringLiteral("可用（ATA 与 SCSI 均可）");
-            }
-            else if (entry.ataReady())
-            {
-                stateText = QStringLiteral("可用（ATA 直通）");
-            }
-            else if (entry.scsiReady())
-            {
-                stateText = QStringLiteral("可用（SCSI 直通，覆盖 NVMe）");
-            }
-            else if ((entry.diskFlags & KSWORD_ARK_DDMA_DISK_FLAG_PROBE_SKIPPED) != 0UL)
-            {
-                stateText = QStringLiteral("未探测（需先填写暂存 LBA）");
-            }
-            else
-            {
-                stateText = QStringLiteral("不可用（两条直通都被拒绝）");
-            }
-
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::Index),
-                new QTableWidgetItem(QString::number(entry.deviceIndex)));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::DeviceName),
-                new QTableWidgetItem(entry.deviceName.empty()
-                    ? QStringLiteral("(名称不可用)")
-                    : QString::fromStdWString(entry.deviceName)));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::State),
-                new QTableWidgetItem(stateText));
-            // 两条探测各自的状态都要看得见：只显示一个会让"哪条不行"变成猜。
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::ProbeStatus),
-                new QTableWidgetItem(QStringLiteral("ATA %1 / SCSI %2")
-                    .arg(formatNtStatus(entry.probeStatus))
-                    .arg(formatNtStatus(entry.scsiProbeStatus))));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::SectorSize),
-                new QTableWidgetItem(QString::number(entry.sectorSize)));
-        }
-        m_diskTable->resizeColumnsToContents();
-
-        // 按 deviceIndex 还原选择，而不是按行号：枚举顺序在两次探测之间不保证不变。
-        if (hadSelection)
-        {
+            m_diskTable->setRowCount(static_cast<int>(m_diskCache.size()));
             for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
             {
-                if (m_diskCache[static_cast<std::size_t>(row)].deviceIndex == previousDeviceIndex)
+                const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
+
+                // 状态里写清楚"走哪条直通"：ATA 与 SCSI 是两条完全不同的路，
+                // 只说"可用"会让人无法判断这块盘到底是怎么通的。
+                QString stateText;
+                if (entry.ataReady() && entry.scsiReady())
                 {
-                    m_diskTable->selectRow(row);
-                    break;
+                    stateText = QStringLiteral("可用（ATA 与 SCSI 均可）");
+                }
+                else if (entry.ataReady())
+                {
+                    stateText = QStringLiteral("可用（ATA 直通）");
+                }
+                else if (entry.scsiReady())
+                {
+                    stateText = QStringLiteral("可用（SCSI 直通，覆盖 NVMe）");
+                }
+                else if ((entry.diskFlags & KSWORD_ARK_DDMA_DISK_FLAG_PROBE_SKIPPED) != 0UL)
+                {
+                    stateText = QStringLiteral("未探测（需先填写暂存 LBA）");
+                }
+                else
+                {
+                    stateText = QStringLiteral("不可用（两条直通都被拒绝）");
+                }
+
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::Index),
+                    new QTableWidgetItem(QString::number(entry.deviceIndex)));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::DeviceName),
+                    new QTableWidgetItem(entry.deviceName.empty()
+                        ? QStringLiteral("(名称不可用)")
+                        : QString::fromStdWString(entry.deviceName)));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::State),
+                    new QTableWidgetItem(stateText));
+                // 两条探测各自的状态都要看得见：只显示一个会让"哪条不行"变成猜。
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::ProbeStatus),
+                    new QTableWidgetItem(QStringLiteral("ATA %1 / SCSI %2")
+                        .arg(formatNtStatus(entry.probeStatus))
+                        .arg(formatNtStatus(entry.scsiProbeStatus))));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::SectorSize),
+                    new QTableWidgetItem(QString::number(entry.sectorSize)));
+            }
+            m_diskTable->resizeColumnsToContents();
+
+            // 按 deviceIndex 还原选择，而不是按行号：枚举顺序在两次探测之间不保证不变。
+            if (hadSelection)
+            {
+                for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
+                {
+                    if (m_diskCache[static_cast<std::size_t>(row)].deviceIndex == previousDeviceIndex)
+                    {
+                        m_diskTable->selectRow(row);
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    QString capabilityText = QStringLiteral(
-        "枚举到 %1 块磁盘，其中 %2 块通过 DMA 探测。一次传输 %3 字节，占用 %4 个扇区。")
-        .arg(result.totalDisks)
-        .arg(result.readyDisks)
-        .arg(result.transferBytes)
-        .arg(result.scratchSectorCount);
-    if (!lbaValid)
-    {
-        capabilityText += QStringLiteral(" 本次未做传输探测：%1").arg(lbaError);
-    }
-    if (m_kernelDebuggerEnabled)
-    {
-        capabilityText += QStringLiteral(
-            " 本机启用了内核调试，DDMA 会命中 MiShowBadMapper 蓝屏，通道已被禁用。");
-    }
-    if (m_capabilityLabel != nullptr)
-    {
-        m_capabilityLabel->setText(capabilityText);
-    }
+        QString capabilityText = QStringLiteral(
+            "枚举到 %1 块磁盘，其中 %2 块通过 DMA 探测。一次传输 %3 字节，占用 %4 个扇区。")
+            .arg(result.totalDisks)
+            .arg(result.readyDisks)
+            .arg(result.transferBytes)
+            .arg(result.scratchSectorCount);
+        if (!lbaValid)
+        {
+            capabilityText += QStringLiteral(" 本次未做传输探测：%1").arg(lbaError);
+        }
+        if (m_kernelDebuggerEnabled)
+        {
+            capabilityText += QStringLiteral(
+                " 本机启用了内核调试，DDMA 会命中 MiShowBadMapper 蓝屏，通道已被禁用。");
+        }
+        if (m_capabilityLabel != nullptr)
+        {
+            m_capabilityLabel->setText(capabilityText);
+        }
 
-    refreshSessionState();
+#if KSWORD_PERF_TRACE_ENABLED
+        const auto perfDiskCount = static_cast<qint64>(m_diskCache.size());
+#endif
+        refreshSessionState();
+#if KSWORD_PERF_TRACE_ENABLED
+        // Full canonical disk snapshot, every table cell and selection, labels,
+        // session publication and its original callback have completed. This
+        // says nothing about paint or compositor presentation.
+        if (perfAlive) { ks::ui::RecordPerfAsyncTrace("ddma_probe_business_data_ready", traceContext, perfDiskCount); }
+#endif
+    }
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    );
 }
 
 bool DdmaPage::physicalDriveIndexFromDeviceName(
@@ -914,23 +1158,11 @@ DdmaPage::ScratchDetection DdmaPage::detectScratchByOwnedFile(
     return detection;
 }
 
-DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForSelectedDisk()
+DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForDisk(
+    const ksword::ark::DdmaDiskEntry& entry)
 {
     ScratchDetection detection;
 
-    if (m_diskTable == nullptr)
-    {
-        detection.summaryText = QStringLiteral("界面尚未初始化。");
-        return detection;
-    }
-    const int row = m_diskTable->currentRow();
-    if (row < 0 || row >= static_cast<int>(m_diskCache.size()))
-    {
-        detection.summaryText = QStringLiteral("请先在上表里选中一块磁盘。");
-        return detection;
-    }
-
-    const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
     std::uint32_t driveIndex = 0U;
     if (entry.deviceName.empty() ||
         !physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex))
@@ -955,8 +1187,6 @@ DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForSelectedDisk()
         }
         // 失败原因要带到下一条路线的结论里，否则用户只会看到"用了间隙"，
         // 不知道更安全的那条为什么没走成。
-        m_scratchFilePath.clear();
-    if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
         const QString ownedFailure = owned.summaryText;
         ScratchDetection fallback = detectScratchCandidatesByGap(driveIndex, entry);
         fallback.summaryText = QStringLiteral("未能使用专属暂存文件（%1）改用未分配间隙：%2")
@@ -1318,92 +1548,136 @@ DdmaPage::ScratchContext DdmaPage::buildScratchContext(
 
 void DdmaPage::detectScratchFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_scratchDetectLabel != nullptr)
     {
         m_scratchDetectLabel->setText(QStringLiteral("正在侦测候选扇区..."));
     }
 
-    const ScratchDetection detection = detectScratchCandidatesForSelectedDisk();
-
-    if (!detection.ok)
+    const int row = m_diskTable != nullptr ? m_diskTable->currentRow() : -1;
+    if (row < 0 || row >= static_cast<int>(m_diskCache.size()))
     {
+        m_scratchDetectLabel->setText(QStringLiteral("请先在上表里选中一块磁盘。"));
+        return;
+    }
+    const auto entry = m_diskCache[static_cast<std::size_t>(row)];
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto inputContext = ks::ui::CapturePerfTraceContext();
+    const ks::ui::PerfTraceContextScope inputScope(inputContext);
+    const auto traceContext = ks::ui::BeginPerfAsyncTrace();
+    ks::ui::RecordPerfAsyncTrace("ddma_scratch_ui_accepted", traceContext);
+#endif
+    struct ScratchResult
+    {
+        ScratchDetection detection;
+        ScratchContext context;
+        bool allZero = false;
+    };
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<ScratchResult>(this,
+        [entry]() {
+        ScratchResult result;
+        result.detection = detectScratchCandidatesForDisk(entry);
+        if (!result.detection.ok)
+        {
+            return result;
+        }
+        std::uint32_t driveIndex = 0U;
+        physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex);
+        const auto sectorSize = entry.sectorSize != 0U ? entry.sectorSize : 512U;
+        // Re-read context after discovery, in this same serialized transaction.
+        result.context = buildScratchContext(driveIndex,
+            result.detection.suggestedLba, sectorSize, result.allZero);
+        ks::ui::FieldNode sourceField;
+        sourceField.kind = ks::ui::FieldNode::Kind::Field;
+        sourceField.name = QStringLiteral("来源");
+        sourceField.value = !result.detection.scratchFilePath.isEmpty()
+            ? QStringLiteral("专属暂存文件 %1").arg(result.detection.scratchFilePath)
+            : result.detection.sourceText;
+        sourceField.translateValue = true;
+        result.context.fields.nodes.first().children.prepend(sourceField);
+        return result;
+    }, [this
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    ](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        const auto& detection = completed.value.detection;
+        if (!completed.failure.isEmpty() || !detection.ok)
+        {
+            m_scratchDetectLabel->setText(!completed.failure.isEmpty()
+                ? completed.failure : detection.summaryText);
+            m_scratchDetectLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            if (m_scratchContextView != nullptr)
+            {
+                m_scratchContextView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("侦测未得出候选。")));
+            }
+            if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace("ddma_scratch_failed", traceContext);
+#endif
+            return;
+        }
+        const auto& context = completed.value.context;
+        const bool allZero = completed.value.allZero;
+
+        if (m_scratchBytesView != nullptr)
+        {
+            m_scratchBytesView->setPlainText(context.bytePreview);
+            m_scratchBytesView->setVisible(!context.bytePreview.isEmpty());
+        }
+        m_scratchFilePath = detection.scratchFilePath;
+        if (m_scratchContextView != nullptr)
+        {
+            m_scratchContextView->setDocument(context.fields);
+        }
         if (m_scratchDetectLabel != nullptr)
         {
             m_scratchDetectLabel->setText(detection.summaryText);
             m_scratchDetectLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+                QStringLiteral("color:%1;")
+                    .arg(allZero ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
         }
-        if (m_scratchContextView != nullptr)
+
+        // 只填 LBA。确认框保持不动——自动算出候选是为了省掉手算，
+        // 不是替用户承担"这块扇区可以被覆盖"这个判断。
+        if (m_scratchLbaEdit != nullptr)
         {
-            m_scratchContextView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("侦测未得出候选。")));
-            if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
+            m_scratchLbaEdit->setText(QString::number(detection.suggestedLba));
         }
-        return;
-    }
+#if KSWORD_PERF_TRACE_ENABLED
+        // Only the candidate's complete canonical document/preview/LBA are
+        // published here. The required automatic channel probe is still pending
+        // and receives a child request ID from this apply context below.
+        ks::ui::RecordPerfAsyncTrace("ddma_scratch_candidate_snapshot_ready", traceContext);
+        ks::ui::RecordPerfAsyncTrace("ddma_scratch_followup_probe", traceContext);
+#endif
 
-    // 上下文一律现读现算，不复用侦测过程中的中间值：这一段是给用户"再确认一次"
-    // 用的，必须反映点下按钮那一刻磁盘上的真实状态。
-    std::uint32_t driveIndex = 0U;
-    std::uint32_t sectorSize = 512U;
-    if (m_diskTable != nullptr)
-    {
-        const int row = m_diskTable->currentRow();
-        if (row >= 0 && row < static_cast<int>(m_diskCache.size()))
-        {
-            const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
-            physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex);
-            if (entry.sectorSize != 0U)
-            {
-                sectorSize = entry.sectorSize;
-            }
-        }
+        // 填完 LBA 立刻重探一次。没有这一步，磁盘表里留着的还是"未探测（需先填写
+        // 暂存 LBA）"的旧结果，用户接着点"启用选中磁盘"就会撞上一句
+        // "这块磁盘没有通过 DMA 探测"——而他刚刚才把 LBA 填好，那句话只会让人困惑。
+        // probeChannels 内部会还原选中行，并在末尾刷新会话状态。
+        probeChannels();
     }
-
-    bool allZero = false;
-    ScratchContext context =
-        buildScratchContext(driveIndex, detection.suggestedLba, sectorSize, allZero);
-    ks::ui::FieldNode sourceField;
-    sourceField.kind = ks::ui::FieldNode::Kind::Field;
-    sourceField.name = QStringLiteral("来源");
-    sourceField.value = !detection.scratchFilePath.isEmpty()
-        ? QStringLiteral("专属暂存文件 %1").arg(detection.scratchFilePath) : detection.sourceText;
-    sourceField.translateValue = true;
-    context.fields.nodes.first().children.prepend(sourceField);
-
-    if (m_scratchBytesView != nullptr)
-    {
-        m_scratchBytesView->setPlainText(context.bytePreview);
-        m_scratchBytesView->setVisible(!context.bytePreview.isEmpty());
-    }
-    m_scratchFilePath = detection.scratchFilePath;
-    if (m_scratchContextView != nullptr)
-    {
-        m_scratchContextView->setDocument(context.fields);
-    }
-    if (m_scratchDetectLabel != nullptr)
-    {
-        m_scratchDetectLabel->setText(detection.summaryText);
-        m_scratchDetectLabel->setStyleSheet(
-            QStringLiteral("color:%1;")
-                .arg(allZero ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
-    }
-
-    // 只填 LBA。确认框保持不动——自动算出候选是为了省掉手算，
-    // 不是替用户承担"这块扇区可以被覆盖"这个判断。
-    if (m_scratchLbaEdit != nullptr)
-    {
-        m_scratchLbaEdit->setText(QString::number(detection.suggestedLba));
-    }
-
-    // 填完 LBA 立刻重探一次。没有这一步，磁盘表里留着的还是"未探测（需先填写
-    // 暂存 LBA）"的旧结果，用户接着点"启用选中磁盘"就会撞上一句
-    // "这块磁盘没有通过 DMA 探测"——而他刚刚才把 LBA 填好，那句话只会让人困惑。
-    // probeChannels 内部会还原选中行，并在末尾刷新会话状态。
-    probeChannels();
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    );
 }
 
 void DdmaPage::activateSelectedDisk()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_diskTable == nullptr)
     {
         return;
@@ -1456,39 +1730,37 @@ void DdmaPage::activateSelectedDisk()
 
 void DdmaPage::clearSession()
 {
-    // 侦测会在磁盘上留下一个专属暂存文件。既然那是本页造成的副作用，就必须有
-    // 一条撤销路径——否则用户只能自己去 D 盘找一个隐藏文件。删除放在"清除通道
-    // 配置"里是因为这正是这个文件生命周期的终点：通道都不用了，它也没必要留着。
-    if (!m_scratchFilePath.isEmpty() && QFile::exists(m_scratchFilePath))
+    if (m_operationBusy)
     {
-        const QMessageBox::StandardButton answer = QMessageBox::question(
-            this,
-            QStringLiteral("DDMA"),
-            QStringLiteral("是否同时删除本页创建的专属暂存文件？\n%1\n\n删除后这些簇会交还系统。如果还有别处正在用这个 LBA，请选择“否”。")
-                .arg(m_scratchFilePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-        if (answer == QMessageBox::Yes)
-        {
-            if (QFile::remove(m_scratchFilePath))
-            {
-                if (m_scratchDetectLabel != nullptr)
-                {
-                    m_scratchDetectLabel->setText(
-                        QStringLiteral("已删除专属暂存文件 %1。").arg(m_scratchFilePath));
-                    m_scratchDetectLabel->setStyleSheet(
-                        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-                }
-            }
-            else if (m_scratchDetectLabel != nullptr)
-            {
-                m_scratchDetectLabel->setText(
-                    QStringLiteral("删除专属暂存文件失败：%1。").arg(m_scratchFilePath));
-                m_scratchDetectLabel->setStyleSheet(
-                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-            }
-        }
+        return;
     }
+    // Freeze the owned path and decision on GUI; do not ask the filesystem here.
+    // Deletion is queued after earlier accepted DDMA transactions have restored
+    // their scratch. Clearing configuration itself never waits for that queue.
+    const QString scratchFilePath = m_scratchFilePath;
+    const auto sessionAtPrompt = m_session;
+    const auto generationAtPrompt = ksword::memory_backend::ddmaSessionGeneration();
+    m_operationBusy = true;
+    refreshOperationState();
+    bool deleteScratchFile = false;
+    if (!scratchFilePath.isEmpty())
+    {
+        const QPointer<DdmaPage> alive(this);
+        const auto answer = QMessageBox::question(this, QStringLiteral("DDMA"),
+            QStringLiteral("是否同时删除本页创建的专属暂存文件？\n%1\n\n删除后这些簇会交还系统。如果还有别处正在用这个 LBA，请选择“否”。")
+                .arg(scratchFilePath),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (!alive) { return; }
+        if (generationAtPrompt != ksword::memory_backend::ddmaSessionGeneration()
+            || !sameDdmaSession(sessionAtPrompt, m_session) || m_scratchFilePath != scratchFilePath)
+        {
+            m_operationBusy = false;
+            refreshOperationState();
+            return;
+        }
+        deleteScratchFile = answer == QMessageBox::Yes;
+    }
+    m_operationBusy = deleteScratchFile;
     m_scratchFilePath.clear();
     if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
     if (m_scratchContextView != nullptr)
@@ -1503,6 +1775,27 @@ void DdmaPage::clearSession()
     m_session.transferBytes = m_transferBytes;
     m_session.scratchSectorCount = m_scratchSectorCount;
     refreshSessionState();
+    if (deleteScratchFile)
+    {
+        submitPageTransaction<bool>(this,
+            [scratchFilePath]() {
+                const bool removed = !QFile::exists(scratchFilePath) || QFile::remove(scratchFilePath);
+                if (removed) { info << "DDMA scratch-file cleanup: path=" << scratchFilePath << " removed=1" << eol; }
+                else { warn << "DDMA scratch-file cleanup: path=" << scratchFilePath << " removed=0" << eol; }
+                return removed;
+            }, [this, scratchFilePath](const auto& completed) {
+            m_operationBusy = false;
+            refreshOperationState();
+            if (m_scratchDetectLabel == nullptr) { return; }
+            const bool removed = completed.failure.isEmpty() && completed.value;
+            m_scratchDetectLabel->setText(removed
+                ? QStringLiteral("已删除专属暂存文件 %1。").arg(scratchFilePath)
+                : QStringLiteral("删除专属暂存文件失败：%1。").arg(scratchFilePath));
+            m_scratchDetectLabel->setStyleSheet(QStringLiteral("color:%1;")
+                .arg(removed ? KswordTheme::TextSecondaryHex() : KswordTheme::WarningHex()));
+        });
+    }
+
 }
 
 void DdmaPage::refreshSessionState()
@@ -1594,20 +1887,29 @@ void DdmaPage::refreshSessionState()
         }
     }
 
-    if (m_accessReadButton != nullptr)
-    {
-        m_accessReadButton->setEnabled(usable);
-    }
-    refreshAccessEditorState();
-    if (m_compareButton != nullptr)
-    {
-        m_compareButton->setEnabled(usable);
-    }
+    refreshOperationState();
 
     if (m_sessionChangedCallback)
     {
         m_sessionChangedCallback();
     }
+}
+
+void DdmaPage::refreshOperationState()
+{
+    const bool usable = ksword::memory_backend::isDdmaUsable(m_session, nullptr);
+    const bool idle = !m_operationBusy;
+    const bool selected = m_diskTable != nullptr && m_diskTable->currentRow() >= 0;
+    if (m_diskTable != nullptr) { m_diskTable->setEnabled(idle); }
+    if (m_probeButton != nullptr) { m_probeButton->setEnabled(idle); }
+    if (m_detectScratchButton != nullptr) { m_detectScratchButton->setEnabled(idle && selected); }
+    if (m_activateButton != nullptr) { m_activateButton->setEnabled(idle && selected); }
+    if (m_clearButton != nullptr) { m_clearButton->setEnabled(idle); }
+    if (m_scratchLbaEdit != nullptr) { m_scratchLbaEdit->setEnabled(idle); }
+    if (m_scratchAckCheck != nullptr) { m_scratchAckCheck->setEnabled(idle); }
+    if (m_accessReadButton != nullptr) { m_accessReadButton->setEnabled(idle && usable); }
+    if (m_compareButton != nullptr) { m_compareButton->setEnabled(idle && usable); }
+    refreshAccessEditorState();
 }
 
 void DdmaPage::resetAccessSnapshot()
@@ -1624,7 +1926,7 @@ void DdmaPage::resetAccessSnapshot()
 
 void DdmaPage::refreshAccessEditorState()
 {
-    const bool editable = m_hasSnapshot && sameDdmaSession(m_snapshotSession, m_session)
+    const bool editable = !m_operationBusy && m_hasSnapshot && sameDdmaSession(m_snapshotSession, m_session)
         && m_snapshotSessionGeneration == ksword::memory_backend::ddmaSessionGeneration()
         && ksword::memory_backend::isDdmaUsable(m_session, nullptr);
     if (m_accessMemoryEditor != nullptr)
@@ -1639,6 +1941,10 @@ void DdmaPage::refreshAccessEditorState()
 
 void DdmaPage::readPhysicalFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_accessAddressEdit == nullptr || m_accessLengthSpin == nullptr)
     {
         return;
@@ -1651,29 +1957,91 @@ void DdmaPage::readPhysicalFromUi()
             this, QStringLiteral("DDMA"), QStringLiteral("物理地址解析失败，请填写 0x 十六进制地址。"));
         return;
     }
-    if (m_accessMemoryEditor->hasChanges()
-        && QMessageBox::question(this, QStringLiteral("DDMA"),
-            QStringLiteral("当前缓存存在未应用的改动。是否丢弃改动并读取新快照？"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
-    {
-        return;
-    }
-
+    // Freeze the complete request and pending edit witness before entering a
+    // modal loop. Busy is acquired now so reentrant actions cannot start I/O.
     const std::uint64_t lengthBytes = static_cast<std::uint64_t>(m_accessLengthSpin->value());
     const auto readSession = m_session;
     const auto generation = ksword::memory_backend::ddmaSessionGeneration();
-    m_accessStatusLabel->setText(QStringLiteral("正在通过 DDMA 读取物理内存..."));
-    const auto outcome = ksword::memory_backend::readPhysical(
-        ksword::memory_backend::MemoryAccessBackend::Ddma,
-        readSession, physicalAddress, lengthBytes);
-
-    if (!outcome.ok || outcome.partial || outcome.data.size() != static_cast<qsizetype>(lengthBytes))
+    const auto pendingAtPrompt = m_accessMemoryEditor->data();
+    const auto baselineAtPrompt = m_accessMemoryEditor->originalBytes();
+    const bool needsDiscardDecision = m_accessMemoryEditor->hasChanges();
+    m_operationBusy = true;
+    refreshOperationState();
+    const QPointer<DdmaPage> alive(this);
+    const bool discardAllowed = !needsDiscardDecision
+        || QMessageBox::question(this, QStringLiteral("DDMA"),
+            QStringLiteral("当前缓存存在未应用的改动。是否丢弃改动并读取新快照？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+    if (!alive) { return; }
+    if (!discardAllowed)
     {
-        resetAccessSnapshot();
-        const QString failure = !outcome.failureText.isEmpty() ? outcome.failureText
-            : QStringLiteral("DDMA 读取长度不足：%1/%2 字节。")
-                .arg(outcome.data.size()).arg(lengthBytes);
-        QString statusText = QStringLiteral("DDMA 读取失败：%1").arg(failure);
+        m_operationBusy = false;
+        refreshOperationState();
+        return;
+    }
+    if (generation != ksword::memory_backend::ddmaSessionGeneration()
+        || !sameDdmaSession(readSession, m_session)
+        || m_accessMemoryEditor->data() != pendingAtPrompt
+        || m_accessMemoryEditor->originalBytes() != baselineAtPrompt)
+    {
+        m_operationBusy = false;
+        refreshOperationState();
+        m_accessStatusLabel->setText(QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。"));
+        return;
+    }
+    m_accessStatusLabel->setText(QStringLiteral("正在通过 DDMA 读取物理内存..."));
+    submitPageTransaction<ksword::memory_backend::AccessOutcome>(this,
+        [readSession, generation, physicalAddress, lengthBytes]() {
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            ksword::memory_backend::AccessOutcome stale;
+            stale.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            return stale;
+        }
+        return ksword::memory_backend::readPhysical(
+            ksword::memory_backend::MemoryAccessBackend::Ddma,
+            readSession, physicalAddress, lengthBytes);
+    }, [this, readSession, generation, physicalAddress, lengthBytes](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            m_accessStatusLabel->setText(QStringLiteral("DDMA session changed; read a new snapshot before retrying."));
+            return;
+        }
+        auto outcome = completed.value;
+        if (!completed.failure.isEmpty()) { outcome.failureText = completed.failure; }
+
+        if (!outcome.ok || outcome.partial || outcome.data.size() != static_cast<qsizetype>(lengthBytes))
+        {
+            resetAccessSnapshot();
+            const QString failure = !outcome.failureText.isEmpty() ? outcome.failureText
+                : QStringLiteral("DDMA 读取长度不足：%1/%2 字节。")
+                    .arg(outcome.data.size()).arg(lengthBytes);
+            QString statusText = QStringLiteral("DDMA 读取失败：%1").arg(failure);
+            if (outcome.scratchDirty)
+            {
+                statusText += QStringLiteral(
+                    " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
+                    .arg(readSession.scratchLba);
+            }
+            m_accessStatusLabel->setText(statusText);
+            if (canPresentOperationPopup()) { QMessageBox::warning(this, QStringLiteral("DDMA"), failure); }
+            return;
+        }
+
+        m_snapshotAddress = physicalAddress;
+        m_snapshotSession = readSession;
+        m_snapshotSessionGeneration = generation;
+        m_originalBytes = outcome.data;
+        m_editedBytes = m_originalBytes;
+        m_hasSnapshot = true;
+        const auto architecture = m_accessMemoryEditor->currentArchitecture();
+        m_accessMemoryEditor->setSnapshot(m_originalBytes, m_snapshotAddress,
+            architecture, m_snapshotAddress, ddmaSnapshotIdentity(generation, readSession));
+        refreshAccessEditorState();
+
+        QString statusText = QStringLiteral("DDMA 读取成功，共 %1 字节。").arg(m_originalBytes.size());
         if (outcome.scratchDirty)
         {
             statusText += QStringLiteral(
@@ -1681,68 +2049,56 @@ void DdmaPage::readPhysicalFromUi()
                 .arg(readSession.scratchLba);
         }
         m_accessStatusLabel->setText(statusText);
-        QMessageBox::warning(this, QStringLiteral("DDMA"), failure);
-        return;
-    }
+    });
+}
 
-    m_snapshotAddress = physicalAddress;
-    m_snapshotSession = readSession;
-    m_snapshotSessionGeneration = generation;
-    m_originalBytes = outcome.data;
-    m_editedBytes = m_originalBytes;
-    m_hasSnapshot = true;
-    const auto architecture = m_accessMemoryEditor->currentArchitecture();
-    m_accessMemoryEditor->setSnapshot(m_originalBytes, m_snapshotAddress,
-        architecture, m_snapshotAddress, ddmaSnapshotIdentity(generation, readSession));
-    refreshAccessEditorState();
-
-    QString statusText = QStringLiteral("DDMA 读取成功，共 %1 字节。").arg(m_originalBytes.size());
-    if (outcome.scratchDirty)
-    {
-        statusText += QStringLiteral(
-            " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
-            .arg(readSession.scratchLba);
-    }
-    m_accessStatusLabel->setText(statusText);
+bool DdmaPage::accessWriteContextMatches(const PhysicalWriteState& state) const
+{
+    const auto& request = state.request;
+    return m_hasSnapshot && m_snapshotAddress == request.snapshotAddress
+        && m_snapshotSessionGeneration == request.generation
+        && ksword::memory_backend::ddmaSessionGeneration() == request.generation
+        && m_originalBytes == request.original && m_editedBytes == request.edited
+        && m_accessMemoryEditor->baseAddress() == request.snapshotAddress
+        && m_accessMemoryEditor->originalBytes() == request.original
+        && m_accessMemoryEditor->data() == request.edited
+        && sameDdmaSession(m_session, request.session)
+        && ksword::memory_backend::isDdmaUsable(m_session, nullptr);
 }
 
 void DdmaPage::writePhysicalFromUi()
 {
-    if (!m_hasSnapshot || m_editedBytes == m_originalBytes)
+    if (m_operationBusy || !m_hasSnapshot || m_editedBytes == m_originalBytes) { return; }
+    auto state = std::make_shared<PhysicalWriteState>();
+    auto& request = state->request;
+    request.session = m_snapshotSession;
+    request.generation = m_snapshotSessionGeneration;
+    request.snapshotAddress = m_snapshotAddress;
+    request.original = m_originalBytes;
+    request.edited = m_editedBytes;
+    state->architecture = m_accessMemoryEditor->currentArchitecture();
+    state->currentAddress = m_accessHexEditor->bufferSize() == 0
+        ? m_accessHexEditor->baseAddress() : m_accessHexEditor->caretAddress();
+    if (!accessWriteContextMatches(*state))
     {
+        m_accessStatusLabel->setText(QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。"));
         return;
     }
-    const auto snapshotSession = m_snapshotSession;
-    const auto snapshotGeneration = m_snapshotSessionGeneration;
-    const auto snapshotAddress = m_snapshotAddress;
-    const QByteArray original = m_originalBytes;
-    const QByteArray edited = m_editedBytes;
-    const auto architecture = m_accessMemoryEditor->currentArchitecture();
-    // 空快照保留当前逻辑基址；有数据时使用新画布的插入点。
-    const auto currentAddress = m_accessHexEditor->bufferSize() == 0
-        ? m_accessHexEditor->baseAddress()
-        : m_accessHexEditor->caretAddress();
-    const auto contextMatches = [this, &snapshotSession, snapshotGeneration, snapshotAddress, &original, &edited]() {
-        return m_hasSnapshot && m_snapshotAddress == snapshotAddress
-            && m_snapshotSessionGeneration == snapshotGeneration
-            && ksword::memory_backend::ddmaSessionGeneration() == snapshotGeneration
-            && m_originalBytes == original && m_editedBytes == edited
-            && m_accessMemoryEditor->baseAddress() == snapshotAddress
-            && m_accessMemoryEditor->originalBytes() == original
-            && m_accessMemoryEditor->data() == edited
-            && sameDdmaSession(m_session, snapshotSession)
-            && ksword::memory_backend::isDdmaUsable(m_session, nullptr);
-    };
-    const auto rejectChangedContext = [this]() {
-        m_accessStatusLabel->setText(
-            QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。"));
-    };
-    if (!contextMatches())
+    while (request.firstDiff < request.edited.size()
+        && request.edited[request.firstDiff] == request.original[request.firstDiff])
     {
-        rejectChangedContext();
-        return;
+        ++request.firstDiff;
     }
+    qsizetype lastDiff = request.edited.size() - 1;
+    while (lastDiff > request.firstDiff && request.edited[lastDiff] == request.original[lastDiff]) { --lastDiff; }
+    request.payload = request.edited.mid(request.firstDiff, lastDiff - request.firstDiff + 1);
+    request.targetAddress = request.snapshotAddress + static_cast<std::uint64_t>(request.firstDiff);
 
+    // Block reentrant actions before the modal decision, while keeping GUI free
+    // for other pages. No worker waits for this dialog or holds the I/O gate.
+    m_operationBusy = true;
+    refreshOperationState();
+    const QPointer<DdmaPage> alive(this);
     const auto confirm = QMessageBox::warning(this, QStringLiteral("DDMA 写入确认"),
         QStringLiteral(
             "即将用磁盘 DMA 直接写入物理内存。\n"
@@ -1750,150 +2106,174 @@ void DdmaPage::writePhysicalFromUi()
             "长度: %2 字节\n\n"
             "这条路径没有事务与回滚，非整页写入还会触发读-改-写，"
             "同页其它字节存在覆盖窗口。确认继续？")
-            .arg(formatAddress(snapshotAddress)).arg(edited.size()),
+            .arg(formatAddress(request.snapshotAddress)).arg(request.edited.size()),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (confirm != QMessageBox::Yes)
+    if (!alive) { return; }
+    if (confirm != QMessageBox::Yes || !accessWriteContextMatches(*state))
     {
+        m_operationBusy = false;
+        refreshOperationState();
         return;
     }
-    if (!contextMatches())
-    {
-        rejectChangedContext();
-        return;
-    }
+    m_accessStatusLabel->setText(QStringLiteral("正在执行 DDMA 写入与读回校验..."));
+    submitPhysicalWrite(std::move(state));
+}
 
-    qsizetype firstDiff = 0;
-    while (firstDiff < edited.size() && edited[firstDiff] == original[firstDiff])
-    {
-        ++firstDiff;
-    }
-    qsizetype lastDiff = edited.size() - 1;
-    while (lastDiff > firstDiff && edited[lastDiff] == original[lastDiff])
-    {
-        --lastDiff;
-    }
-    const QByteArray payload = edited.mid(firstDiff, lastDiff - firstDiff + 1);
-    const auto targetAddress = snapshotAddress + static_cast<std::uint64_t>(firstDiff);
-    bool scratchDirty = false;
-    const auto refreshActual = [&](const ksword::memory_backend::AccessOutcome& actual) {
-        scratchDirty = scratchDirty || actual.scratchDirty;
-        if (!actual.ok || actual.partial || actual.data.size() != original.size())
+void DdmaPage::submitPhysicalWrite(std::shared_ptr<PhysicalWriteState> state)
+{
+    state->phaseStarted = false;
+    submitPageTransaction<std::shared_ptr<PhysicalWriteState>>(this,
+        [state]() {
+        state->phaseStarted = true;
+        // Intentional process lifetime: static destruction cannot erase backups
+        // before the process queue finishes its accepted work during shutdown.
+        static auto* const receipts = new std::vector<std::shared_ptr<PhysicalWriteState>>;
+        if (!state->retained) { receipts->push_back(state); state->retained = true; }
+        const auto& request = state->request;
+        ksword::memory_backend::DdmaPhysicalWritePort port;
+        port.isCurrent = [&request]() {
+            return request.generation == ksword::memory_backend::ddmaSessionGeneration();
+        };
+        port.readActual = [&request]() {
+            return ksword::memory_backend::readPhysical(
+                ksword::memory_backend::MemoryAccessBackend::Ddma, request.session,
+                request.snapshotAddress, static_cast<std::uint64_t>(request.original.size()));
+        };
+        port.write = [&request](const bool force) {
+            return ksword::memory_backend::writePhysical(
+                ksword::memory_backend::MemoryAccessBackend::Ddma, request.session,
+                request.targetAddress, request.payload, force);
+        };
+        state->result = ksword::memory_backend::RunDdmaPhysicalWritePhase(
+            request, port, state->forceApproved, state->cancelled);
+        info << "DDMA physical write receipt: generation=" << request.generation
+             << " disk=" << request.session.diskIndex << " lba=" << request.session.scratchLba
+             << " physical=" << request.targetAddress << " bytes=" << request.payload.size()
+             << " stage=" << static_cast<int>(state->result.stage)
+             << " cancelled=" << state->result.cancelled << " writeAttempted=" << state->result.writeAttempted
+             << " bytesDone=" << state->result.write.bytesDone << " scratchDirty=" << state->result.scratchDirty
+             << " actualBytes=" << state->result.actual.data.size()
+             << " failure=" << state->result.write.failureText << " exception=" << state->result.failureText << eol;
+        return state;
+    }, [this, state](const auto& completed) {
+        auto& result = state->result;
+        const auto& request = state->request;
+        if (!completed.failure.isEmpty() && !state->phaseStarted)
         {
-            resetAccessSnapshot();
-            return false;
-        }
-        m_originalBytes = actual.data;
-        m_editedBytes = actual.data;
-        m_accessMemoryEditor->setSnapshot(actual.data, snapshotAddress, architecture,
-            currentAddress, ddmaSnapshotIdentity(snapshotGeneration, snapshotSession));
-        refreshAccessEditorState();
-        return true;
-    };
-    const auto readActual = [&]() {
-        return ksword::memory_backend::readPhysical(
-            ksword::memory_backend::MemoryAccessBackend::Ddma, snapshotSession,
-            snapshotAddress, static_cast<std::uint64_t>(original.size()));
-    };
-    const auto beforeWrite = readActual();
-    scratchDirty = beforeWrite.scratchDirty;
-    if (!beforeWrite.ok || beforeWrite.partial || beforeWrite.data.size() != original.size()
-        || beforeWrite.data != original)
-    {
-        const bool loaded = refreshActual(beforeWrite);
-        QString statusText = loaded
-            ? QStringLiteral("目标内存已变化，已刷新实际字节；请重新编辑后再写入。")
-            : QStringLiteral("DDMA 回读校验失败：%1").arg(beforeWrite.failureText);
-        if (scratchDirty)
-        {
-            statusText += QStringLiteral(
-                " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
-                .arg(snapshotSession.scratchLba);
-        }
-        m_accessStatusLabel->setText(statusText);
-        return;
-    }
-
-    auto outcome = ksword::memory_backend::writePhysical(
-        ksword::memory_backend::MemoryAccessBackend::Ddma,
-        snapshotSession, targetAddress, payload, false);
-    scratchDirty = scratchDirty || outcome.scratchDirty;
-    bool cancelled = false;
-    if (outcome.forceRequired)
-    {
-        const auto forceConfirm = QMessageBox::warning(this, QStringLiteral("DDMA 强制写入"),
-            QStringLiteral("驱动要求对本次 DDMA 写入附加强制标志。确认继续？"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (!contextMatches())
-        {
-            rejectChangedContext();
+            // Queue rejection accepts no work and must not discard staged edits.
+            m_operationBusy = false;
+            refreshOperationState();
+            m_accessStatusLabel->setText(QStringLiteral("DDMA 写入失败：%1").arg(completed.failure));
             return;
         }
-        if (forceConfirm != QMessageBox::Yes)
+        if (!completed.failure.isEmpty()) { result.failureText = completed.failure; }
+        if (result.stage == ksword::memory_backend::DdmaPhysicalWriteStage::NeedForce
+            && completed.failure.isEmpty())
         {
-            cancelled = true;
+            confirmPhysicalWriteForce(state);
+            return;
+        }
+
+        m_operationBusy = false;
+        refreshOperationState();
+        if (!accessWriteContextMatches(*state))
+        {
+            m_accessStatusLabel->setText(QStringLiteral("DDMA 写入事务已结束，但当前会话已变化。原事务结果保留在日志中；请重新读取。"));
+            return;
+        }
+        const auto& actual = result.actual;
+        const auto refreshActual = [&]() {
+            if (!actual.ok || actual.partial || actual.data.size() != request.original.size())
+            {
+                resetAccessSnapshot();
+                return false;
+            }
+            m_originalBytes = actual.data;
+            m_editedBytes = actual.data;
+            m_accessMemoryEditor->setSnapshot(actual.data, request.snapshotAddress, state->architecture,
+                state->currentAddress, ddmaSnapshotIdentity(request.generation, request.session));
+            refreshAccessEditorState();
+            return true;
+        };
+        QString statusText;
+        if (result.stage == ksword::memory_backend::DdmaPhysicalWriteStage::Stale)
+        {
+            statusText = QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。");
+        }
+        else if (result.stage == ksword::memory_backend::DdmaPhysicalWriteStage::BeforeChanged)
+        {
+            const bool loaded = refreshActual();
+            statusText = loaded && !result.scratchDirty
+                ? QStringLiteral("目标内存已变化，已刷新实际字节；请重新编辑后再写入。")
+                : QStringLiteral("DDMA 回读校验失败：%1").arg(result.before.failureText);
         }
         else
         {
-            const auto beforeForce = readActual();
-            scratchDirty = scratchDirty || beforeForce.scratchDirty;
-            if (!beforeForce.ok || beforeForce.partial || beforeForce.data != original)
+            const bool cancelledWithoutWrite = result.cancelled && actual.ok && !actual.partial
+                && actual.data == request.original;
+            const bool loaded = cancelledWithoutWrite ? true : refreshActual();
+            const bool verified = loaded && actual.data.mid(request.firstDiff, request.payload.size()) == request.payload;
+            const bool written = result.write.ok && !result.write.partial
+                && result.write.bytesDone == static_cast<std::uint64_t>(request.payload.size());
+            if (result.cancelled)
             {
-                outcome.ok = false;
-                outcome.forceRequired = false;
-                outcome.failureText = QStringLiteral("目标内存已变化，已刷新实际字节；请重新编辑后再写入。");
+                statusText = QStringLiteral("已取消 DDMA 强制写入。");
+            }
+            else if (written && verified && result.failureText.isEmpty())
+            {
+                statusText = QStringLiteral("DDMA 写入成功，共 %1 字节。").arg(result.write.bytesDone);
             }
             else
             {
-                outcome = ksword::memory_backend::writePhysical(
-                    ksword::memory_backend::MemoryAccessBackend::Ddma,
-                    snapshotSession, targetAddress, payload, true);
-                scratchDirty = scratchDirty || outcome.scratchDirty;
+                const QString failure = !result.failureText.isEmpty() ? result.failureText
+                    : (!result.write.ok && !result.write.failureText.isEmpty() ? result.write.failureText
+                        : (!written ? QStringLiteral("写入未完成。")
+                            : (!loaded ? QStringLiteral("DDMA 回读校验失败：%1").arg(actual.failureText)
+                                : QStringLiteral("DDMA 回读字节与写入内容不一致。"))));
+                statusText = QStringLiteral("DDMA 写入失败：%1").arg(failure);
             }
         }
-    }
+        if (result.write.lostUpdateWindow)
+        {
+            statusText += QStringLiteral(" 本次为非整页写入，驱动做了读-改-写，同页其它字节存在覆盖窗口。");
+        }
+        if (result.scratchDirty)
+        {
+            statusText += QStringLiteral(" 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
+                .arg(request.session.scratchLba);
+        }
+        m_accessStatusLabel->setText(statusText);
+    });
+}
 
-    // 即使原写入失败，也读回实际状态；回读成功不能替原写入宣告成功。
-    const auto actual = readActual();
-    scratchDirty = scratchDirty || actual.scratchDirty;
-    const bool cancelledWithoutWrite = cancelled && actual.ok && !actual.partial
-        && actual.data == original;
-    const bool loaded = cancelledWithoutWrite ? true : refreshActual(actual);
-    const bool verified = loaded && actual.data.mid(firstDiff, payload.size()) == payload;
-    const bool written = outcome.ok && !outcome.partial && outcome.bytesDone == static_cast<std::uint64_t>(payload.size());
-    QString statusText;
-    if (cancelled)
+void DdmaPage::confirmPhysicalWriteForce(std::shared_ptr<PhysicalWriteState> state)
+{
+    // Hiding defers only the visual decision. No implicit approval/cancellation,
+    // and no worker or transaction gate waits while the page is hidden.
+    if (!canPresentOperationPopup()) { m_pendingForceWrite = std::move(state); return; }
+    const QPointer<DdmaPage> alive(this);
+    const auto forceConfirm = QMessageBox::warning(this, QStringLiteral("DDMA 强制写入"),
+        QStringLiteral("驱动要求对本次 DDMA 写入附加强制标志。确认继续？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!alive) { return; }
+    if (!accessWriteContextMatches(*state))
     {
-        statusText = QStringLiteral("已取消 DDMA 强制写入。");
+        m_operationBusy = false;
+        refreshOperationState();
+        m_accessStatusLabel->setText(QStringLiteral("DDMA 会话或内存快照已变化，请重新读取后再写入。"));
+        return;
     }
-    else if (written && verified)
-    {
-        statusText = QStringLiteral("DDMA 写入成功，共 %1 字节。").arg(outcome.bytesDone);
-    }
-    else
-    {
-        const QString failure = !outcome.ok && !outcome.failureText.isEmpty()
-            ? outcome.failureText
-            : (!written ? QStringLiteral("写入未完成。")
-                : (!loaded ? QStringLiteral("DDMA 回读校验失败：%1").arg(actual.failureText)
-                           : QStringLiteral("DDMA 回读字节与写入内容不一致。")));
-        statusText = QStringLiteral("DDMA 写入失败：%1").arg(failure);
-    }
-    if (outcome.lostUpdateWindow)
-    {
-        statusText += QStringLiteral(
-            " 本次为非整页写入，驱动做了读-改-写，同页其它字节存在覆盖窗口。");
-    }
-    if (scratchDirty)
-    {
-        statusText += QStringLiteral(
-            " 严重告警：暂存扇区未能还原，磁盘上留下了脏扇区，请立即检查 LBA %1 起的内容。")
-            .arg(snapshotSession.scratchLba);
-    }
-    m_accessStatusLabel->setText(statusText);
+    state->forceApproved = forceConfirm == QMessageBox::Yes;
+    state->cancelled = !state->forceApproved;
+    submitPhysicalWrite(std::move(state));
 }
 
 void DdmaPage::compareBackendsFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_compareAddressEdit == nullptr || m_compareTable == nullptr)
     {
         return;
@@ -1916,114 +2296,142 @@ void DdmaPage::compareBackendsFromUi()
         m_compareResultLabel->setText(QStringLiteral("正在复核..."));
     }
 
-    const ksword::memory_backend::AccessOutcome standardOutcome =
-        ksword::memory_backend::readPhysical(
+    const auto session = m_session;
+    const auto generation = ksword::memory_backend::ddmaSessionGeneration();
+    struct CompareResult
+    {
+        ksword::memory_backend::AccessOutcome standard;
+        ksword::memory_backend::AccessOutcome ddma;
+    };
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<CompareResult>(this,
+        [session, generation, pageBase]() {
+        CompareResult result;
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            result.standard.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            return result;
+        }
+        result.standard = ksword::memory_backend::readPhysical(
             ksword::memory_backend::MemoryAccessBackend::StandardDriver,
-            m_session,
-            pageBase,
-            KSWORD_ARK_DDMA_TRANSFER_BYTES);
-    const ksword::memory_backend::AccessOutcome ddmaOutcome =
-        ksword::memory_backend::readPhysical(
+            session, pageBase, KSWORD_ARK_DDMA_TRANSFER_BYTES);
+        result.ddma = ksword::memory_backend::readPhysical(
             ksword::memory_backend::MemoryAccessBackend::Ddma,
-            m_session,
-            pageBase,
-            KSWORD_ARK_DDMA_TRANSFER_BYTES);
-
-    if (!standardOutcome.ok || !ddmaOutcome.ok)
-    {
-        // 一侧失败时不能下"两者一致"或"两者不一致"的结论，只能如实说哪一侧没读到。
-        const QString detail = !standardOutcome.ok
-            ? QStringLiteral("标准通道读取失败：%1").arg(standardOutcome.failureText)
-            : QStringLiteral("DDMA 读取失败：%1").arg(ddmaOutcome.failureText);
-        if (m_compareResultLabel != nullptr)
+            session, pageBase, KSWORD_ARK_DDMA_TRANSFER_BYTES);
+        return result;
+    }, [this, generation, pageBase](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
         {
-            m_compareResultLabel->setText(
-                QStringLiteral("无法比对，%1").arg(detail));
-            m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            m_compareResultLabel->setText(QStringLiteral("DDMA session changed; read a new snapshot before retrying."));
+            return;
         }
-        return;
-    }
+        auto standardOutcome = completed.value.standard;
+        const auto& ddmaOutcome = completed.value.ddma;
+        if (!completed.failure.isEmpty()) { standardOutcome.failureText = completed.failure; }
 
-    const qsizetype compareLength =
-        std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
-    qsizetype diffCount = 0;
-    int shownRows = 0;
-    for (qsizetype index = 0; index < compareLength; ++index)
-    {
-        if (standardOutcome.data[index] == ddmaOutcome.data[index])
+        if (!standardOutcome.ok || !ddmaOutcome.ok || standardOutcome.partial || ddmaOutcome.partial
+            || standardOutcome.data.size() != static_cast<qsizetype>(KSWORD_ARK_DDMA_TRANSFER_BYTES)
+            || ddmaOutcome.data.size() != static_cast<qsizetype>(KSWORD_ARK_DDMA_TRANSFER_BYTES) || ddmaOutcome.scratchDirty)
         {
-            continue;
-        }
-        ++diffCount;
-        if (shownRows >= kCompareSampleRows)
-        {
-            continue;
-        }
-        const int row = m_compareTable->rowCount();
-        m_compareTable->insertRow(row);
-        m_compareTable->setItem(row, 0,
-            new QTableWidgetItem(formatAddress(pageBase + static_cast<std::uint64_t>(index))));
-        m_compareTable->setItem(row, 1, new QTableWidgetItem(
-            QStringLiteral("%1").arg(
-                static_cast<std::uint8_t>(standardOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
-        m_compareTable->setItem(row, 2, new QTableWidgetItem(
-            QStringLiteral("%1").arg(
-                static_cast<std::uint8_t>(ddmaOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
-        ++shownRows;
-    }
-    m_compareTable->resizeColumnsToContents();
-
-    if (m_compareResultLabel == nullptr)
-    {
-        return;
-    }
-    if (diffCount == 0)
-    {
-        // "一致"在一张退化页上什么都不证明：整页只有同一个字节时，一条彻底
-        // 坏掉的 DDMA（比如什么都没搬、缓冲区留着全零）同样会与标准通道逐字节
-        // 相等，于是这里报绿。而这条判据本身正是用来判断 DDMA 通路成不成立
-        // 的——拿它当证据之前，必须先排除"两边都没读到有意义的内容"。
-        bool uniformPage = true;
-        for (qsizetype index = 1; index < compareLength; ++index)
-        {
-            if (standardOutcome.data[index] != standardOutcome.data[0])
+            // 一侧失败时不能下"两者一致"或"两者不一致"的结论，只能如实说哪一侧没读到。
+            const QString detail = ddmaOutcome.scratchDirty
+                ? QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe.")
+                : (!standardOutcome.ok ? QStringLiteral("标准通道读取失败：%1").arg(standardOutcome.failureText)
+                    : QStringLiteral("DDMA 读取失败：%1").arg(ddmaOutcome.failureText.isEmpty()
+                        ? QStringLiteral("DDMA transaction returned incomplete data.") : ddmaOutcome.failureText));
+            if (m_compareResultLabel != nullptr)
             {
-                uniformPage = false;
-                break;
+                m_compareResultLabel->setText(
+                    QStringLiteral("无法比对，%1").arg(detail));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
             }
+            return;
         }
-        if (compareLength > 0 && uniformPage)
+
+        const qsizetype compareLength =
+            std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
+        qsizetype diffCount = 0;
+        int shownRows = 0;
+        for (qsizetype index = 0; index < compareLength; ++index)
         {
-            m_compareResultLabel->setText(QStringLiteral("物理页 %1：整页 %2 字节都是同一个值 0x%3，两个后端一致不构成 DDMA 通路成立的证据——什么都没搬过来的实现也会得到同样的结果。请换一张内容有区分度的页再比对，例如某个已加载模块 PE 头所在的物理页。")
-                .arg(formatAddress(pageBase))
-                .arg(compareLength)
-                .arg(static_cast<std::uint8_t>(standardOutcome.data[0]), 2, 16, QChar('0')));
-            m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            if (standardOutcome.data[index] == ddmaOutcome.data[index])
+            {
+                continue;
+            }
+            ++diffCount;
+            if (shownRows >= kCompareSampleRows)
+            {
+                continue;
+            }
+            const int row = m_compareTable->rowCount();
+            m_compareTable->insertRow(row);
+            m_compareTable->setItem(row, 0,
+                new QTableWidgetItem(formatAddress(pageBase + static_cast<std::uint64_t>(index))));
+            m_compareTable->setItem(row, 1, new QTableWidgetItem(
+                QStringLiteral("%1").arg(
+                    static_cast<std::uint8_t>(standardOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
+            m_compareTable->setItem(row, 2, new QTableWidgetItem(
+                QStringLiteral("%1").arg(
+                    static_cast<std::uint8_t>(ddmaOutcome.data[index]), 2, 16, QChar('0')).toUpper()));
+            ++shownRows;
+        }
+        m_compareTable->resizeColumnsToContents();
+
+        if (m_compareResultLabel == nullptr)
+        {
+            return;
+        }
+        if (diffCount == 0)
+        {
+            // "一致"在一张退化页上什么都不证明：整页只有同一个字节时，一条彻底
+            // 坏掉的 DDMA（比如什么都没搬、缓冲区留着全零）同样会与标准通道逐字节
+            // 相等，于是这里报绿。而这条判据本身正是用来判断 DDMA 通路成不成立
+            // 的——拿它当证据之前，必须先排除"两边都没读到有意义的内容"。
+            bool uniformPage = true;
+            for (qsizetype index = 1; index < compareLength; ++index)
+            {
+                if (standardOutcome.data[index] != standardOutcome.data[0])
+                {
+                    uniformPage = false;
+                    break;
+                }
+            }
+            if (compareLength > 0 && uniformPage)
+            {
+                m_compareResultLabel->setText(QStringLiteral("物理页 %1：整页 %2 字节都是同一个值 0x%3，两个后端一致不构成 DDMA 通路成立的证据——什么都没搬过来的实现也会得到同样的结果。请换一张内容有区分度的页再比对，例如某个已加载模块 PE 头所在的物理页。")
+                    .arg(formatAddress(pageBase))
+                    .arg(compareLength)
+                    .arg(static_cast<std::uint8_t>(standardOutcome.data[0]), 2, 16, QChar('0')));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            }
+            else
+            {
+                m_compareResultLabel->setText(QStringLiteral(
+                    "物理页 %1：两个后端读到的 %2 字节完全一致，没有观察到重定向迹象。")
+                    .arg(formatAddress(pageBase))
+                    .arg(compareLength));
+                m_compareResultLabel->setStyleSheet(
+                    QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+            }
         }
         else
         {
             m_compareResultLabel->setText(QStringLiteral(
-                "物理页 %1：两个后端读到的 %2 字节完全一致，没有观察到重定向迹象。")
+                "物理页 %1：共 %2 字节中有 %3 字节不一致（表中最多展示 %4 条）。"
+                "标准通道受 SLAT 约束，DDMA 不受约束，这种差异通常意味着该页被上层虚拟化重定向或隐藏。")
                 .arg(formatAddress(pageBase))
-                .arg(compareLength));
+                .arg(compareLength)
+                .arg(diffCount)
+                .arg(kCompareSampleRows));
             m_compareResultLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
         }
-    }
-    else
-    {
-        m_compareResultLabel->setText(QStringLiteral(
-            "物理页 %1：共 %2 字节中有 %3 字节不一致（表中最多展示 %4 条）。"
-            "标准通道受 SLAT 约束，DDMA 不受约束，这种差异通常意味着该页被上层虚拟化重定向或隐藏。")
-            .arg(formatAddress(pageBase))
-            .arg(compareLength)
-            .arg(diffCount)
-            .arg(kCompareSampleRows));
-        m_compareResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-    }
+    });
 }
 
 bool DdmaPage::parseAddressText(const QString& text, std::uint64_t& valueOut)

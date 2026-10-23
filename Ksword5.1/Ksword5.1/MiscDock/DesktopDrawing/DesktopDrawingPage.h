@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DesktopDrawingRenderer.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QAbstractNativeEventFilter>
 #include <QColor>
@@ -20,9 +21,15 @@ namespace ks::misc
         explicit DesktopDrawingPage(QWidget* parent = nullptr);
         ~DesktopDrawingPage() override;
 
+        // Complete only with the actual fresh initial display enumeration.
+        // No native query, drawing, timer or widget is created by this projection.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody(
+            const std::vector<desktop_drawing::Display>& initialDisplays);
+
         bool nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) override;
 
     private:
+        static QColor initialDrawingColor();
         void initializeUi();
         void refreshDisplays();
         void updateCoordinates();
@@ -36,7 +43,7 @@ namespace ks::misc
 
         desktop_drawing::Renderer m_renderer;
         std::vector<desktop_drawing::Display> m_displays;
-        QColor m_color{ 255, 80, 80 };
+        QColor m_color = initialDrawingColor();
         QTimer* m_timer = nullptr;
         QWidget* m_settings = nullptr;
         QComboBox* m_displayCombo = nullptr;

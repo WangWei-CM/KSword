@@ -19,6 +19,7 @@ QPixmap tintPixmapPreservingAlpha(const QPixmap& source, const QColor& color)
     }
 
     QPixmap tinted(source.size());
+    tinted.setDevicePixelRatio(source.devicePixelRatio());
     tinted.fill(Qt::transparent);
     QPainter painter(&tinted);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
@@ -31,10 +32,17 @@ QPixmap tintPixmapPreservingAlpha(const QPixmap& source, const QColor& color)
 
 void Taskbar::applyTaskbarTheme(bool earthquakeAlert, const QColor& backgroundColor)
 {
+    updateTaskbarBackground(backgroundColor);
+    refreshTaskbarLogo(earthquakeAlert);
+    if (m_taskbarForegroundInitialized && m_taskbarAlertForeground == earthquakeAlert)
+    {
+        return;
+    }
+    m_taskbarForegroundInitialized = true;
+    m_taskbarAlertForeground = earthquakeAlert;
     // 警报态整条 Taskbar 使用白色前景，确保红色或暗红色背景上的地震信息清晰可读。
     const QColor foreground = earthquakeAlert ? QColor(Qt::white) : QColor(QStringLiteral("#00FFFF"));
     const QString foregroundName = foreground.name();
-    centralWidget->setStyleSheet(QStringLiteral("background-color: %1;").arg(backgroundColor.name()));
     contentLabel->setStyleSheet(QStringLiteral("border: none; background: transparent; padding: 5px 0; color: %1; font-size: 12px;")
         .arg(foregroundName));
     timeLabel->setStyleSheet(QStringLiteral("border: none; background: transparent; color: %1; font-size: 12px;")
@@ -58,14 +66,6 @@ void Taskbar::applyTaskbarTheme(bool earthquakeAlert, const QColor& backgroundCo
     }
     m_leftSpectrum->setBarColor(foreground);
     m_rightSpectrum->setBarColor(foreground);
-    if (logoLabel != nullptr && !logoPixmap.isNull())
-    {
-        const QPixmap displayPixmap = earthquakeAlert
-            ? tintPixmapPreservingAlpha(logoPixmap, foreground)
-            : logoPixmap;
-        logoLabel->setPixmap(displayPixmap.scaled(QSize(QWIDGETSIZE_MAX, logoLabel->height()),
-            Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    }
     for (GlowIconButton* button : { lockBtn, toolBtn, settingsBtn, overviewBtn, userBtn })
     {
         if (button != nullptr)
@@ -79,6 +79,49 @@ void Taskbar::applyTaskbarTheme(bool earthquakeAlert, const QColor& backgroundCo
     }
 }
 
+void Taskbar::updateTaskbarBackground(const QColor& color)
+{
+    if (centralWidget != nullptr)
+    {
+        static_cast<TaskbarColorSurface*>(centralWidget)->setSurfaceColor(color);
+    }
+}
+
+void Taskbar::refreshTaskbarLogo(const bool earthquakeAlert)
+{
+    if (logoLabel == nullptr || logoPixmap.isNull())
+    {
+        return;
+    }
+    const int height = logoLabel->height();
+    const qreal dpr = logoLabel->devicePixelRatioF();
+    if (m_taskbarLogoHeight != height || m_taskbarLogoDpr != dpr
+        || m_taskbarLogoSourceKey != logoPixmap.cacheKey())
+    {
+        m_taskbarLogoHeight = height;
+        m_taskbarLogoDpr = dpr;
+        m_taskbarLogoSourceKey = logoPixmap.cacheKey();
+        m_taskbarNormalLogo = logoPixmap.scaledToHeight(qMax(1, qRound(height * dpr)), Qt::SmoothTransformation);
+        m_taskbarNormalLogo.setDevicePixelRatio(dpr);
+        m_taskbarAlertLogo = tintPixmapPreservingAlpha(m_taskbarNormalLogo, QColor(Qt::white));
+    }
+    const QPixmap& display = earthquakeAlert ? m_taskbarAlertLogo : m_taskbarNormalLogo;
+    if (logoLabel->pixmap().cacheKey() != display.cacheKey())
+    {
+        logoLabel->setPixmap(display);
+    }
+}
+
+bool Taskbar::event(QEvent* event)
+{
+    const bool result = QMainWindow::event(event);
+    if (event != nullptr && event->type() == QEvent::DevicePixelRatioChange)
+    {
+        refreshTaskbarLogo(earthquakePresentation);
+    }
+    return result;
+}
+
 void Taskbar::startAlertFlashCycle()
 {
     // 亮红到暗红使用 500ms 线性渐变，动画结束后立即跳回亮红并开启下一周期。
@@ -88,6 +131,12 @@ void Taskbar::startAlertFlashCycle()
     }
 
     alertFlashAnimation->stop();
+    BOOL animationsEnabled = TRUE;
+    if (::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0) && !animationsEnabled)
+    {
+        updateTaskbarBackground(QColor(QStringLiteral("#D90000")));
+        return;
+    }
     alertFlashAnimation->setStartValue(QColor(QStringLiteral("#D90000")));
     alertFlashAnimation->setEndValue(QColor(QStringLiteral("#480000")));
     alertFlashAnimation->start();
@@ -114,6 +163,7 @@ void Taskbar::resizeEvent(QResizeEvent* event)
 {
     // 先让 QMainWindow 更新 centralWidget 几何，再同步整条提亮层的覆盖范围。
     QMainWindow::resizeEvent(event);
+    refreshTaskbarLogo(earthquakePresentation);
     if (notificationFlashWidget != nullptr && centralWidget != nullptr)
     {
         notificationFlashWidget->setGeometry(centralWidget->rect());

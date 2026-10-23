@@ -24,6 +24,7 @@
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QThreadPool>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -31,17 +32,18 @@
 
 namespace
 {
-    // 专用角色避开页面普遍使用的 Qt::UserRole 缓存索引。
-    constexpr int OriginalDecorationRole = Qt::UserRole + 411;
-    constexpr int OriginalDecorationCapturedRole = Qt::UserRole + 412;
-
-    QIcon embeddedIndicatorIcon(const bool expanded)
+    int visibleTreeColumn(QTreeWidget* tree)
     {
-        return QIcon(expanded
-            ? QStringLiteral(":/Icon/detail_node_expanded.svg")
-            : QStringLiteral(":/Icon/detail_node_collapsed.svg"));
+        const auto* header = tree->header();
+        for (int visual = 0; visual < header->count(); ++visual)
+        {
+            const int column = header->logicalIndex(visual);
+            const int left = header->sectionViewportPosition(column);
+            if (!header->isSectionHidden(column) && left < tree->viewport()->width()
+                && left + header->sectionSize(column) > 0) return column;
+        }
+        return -1;
     }
-
     // This branch serves actual text documents and logs only.
     void setMirrorText(CodeEditorWidget* target, CodeEditorWidget*, const QString& text)
     {
@@ -299,14 +301,18 @@ void ks::ui::DetailLayoutHost::handleDetailChanged(const QString& detailText)
         rawCurrentIndex.isValid()
             ? rawCurrentIndex.sibling(rawCurrentIndex.row(), 0)
             : QModelIndex());
-    for (EmbeddedEntry& entry : m_embeddedEntries)
+    const auto entry = m_embeddedEntries.value(currentIndex);
+    if (!entry) return;
+    if (entry->detailText != detailText)
     {
-        if (!entry.textEditor.isNull() && entry.sourceIndex.isValid() &&
-            currentIndex.isValid() && entry.sourceIndex == currentIndex)
-        {
-            setMirrorText(entry.textEditor.data(), m_detailEditor.data(), detailText);
-        }
+        auto retired = std::move(entry->detailText);
+        auto reading = std::move(entry->textState);
+        entry->detailText = detailText;
+        QThreadPool::globalInstance()->start([retired = std::move(retired), reading = std::move(reading)]() mutable
+            { retired.clear(); reading.reset(); });
     }
+    if (!entry->textEditor.isNull())
+        setMirrorText(entry->textEditor.data(), m_detailEditor.data(), detailText);
 }
 
 void ks::ui::DetailLayoutHost::handleFieldDocumentChanged()
@@ -321,9 +327,14 @@ void ks::ui::DetailLayoutHost::handleFieldDocumentChanged()
     if (m_scheme != ks::settings::DetailDisplayScheme::Embedded || m_tableView.isNull()) return;
     const QModelIndex current = m_tableView->currentIndex();
     const QPersistentModelIndex row(current.isValid() ? current.sibling(current.row(), 0) : QModelIndex());
-    for (auto& entry : m_embeddedEntries)
-        if (!entry.fieldView.isNull() && entry.sourceIndex.isValid() && entry.sourceIndex == row)
-            entry.fieldView->setDocument(document);
+    const auto entry = m_embeddedEntries.value(row);
+    if (!entry) return;
+    auto retired = std::move(entry->document);
+    auto reading = std::move(entry->fieldState);
+    entry->document = document;
+    QThreadPool::globalInstance()->start([retired = std::move(retired), reading = std::move(reading)]() mutable
+        { retired = {}; reading.reset(); });
+    if (!entry->fieldView.isNull()) entry->fieldView->setDocument(document);
 }
 
 void ks::ui::DetailLayoutHost::toggleEmbeddedDetail(
@@ -367,33 +378,24 @@ void ks::ui::DetailLayoutHost::insertTableEmbeddedDetail(
     const int originalHeight = std::max(1, tableWidget->rowHeight(sourceRow));
     constexpr int inlineDetailHeight = 128;
 
-    // 先安装包装 delegate 并登记原始高度，再增大行高，避免一次重绘中把源文本画入详情区。
     installEmbeddedRowDelegate();
-    EmbeddedEntry entry;
-    QWidget* textEditor = nullptr;
-    if (!m_structuredView.isNull())
+    auto entry = std::make_shared<EmbeddedEntry>();
+    entry->sourceIndex = sourceIndex;
+    entry->originalRowHeight = originalHeight;
+    entry->detailHeight = inlineDetailHeight;
+    entry->structured = !m_structuredView.isNull();
+    entry->detailText = detailText;
+    if (entry->structured)
     {
-        auto* fields = new StructuredFieldView(tableWidget->viewport());
-        fields->setPresentation(m_structuredView->presentation());
-        fields->setDocument(m_structuredView->document());
-        entry.fieldView = fields;
-        textEditor = fields;
+        entry->document = m_structuredView->document();
+        entry->presentation = m_structuredView->presentation();
     }
-    else
-    {
-        auto* editor = createReadOnlyInlineEditor(tableWidget->viewport(), m_detailEditor.data(), detailText);
-        entry.textEditor = editor;
-        textEditor = editor;
-    }
-    entry.sourceIndex = sourceIndex;
-    entry.editorWidget = textEditor;
-    entry.originalRowHeight = originalHeight;
-    entry.detailHeight = inlineDetailHeight;
-    m_embeddedEntries.append(entry);
+    m_embeddedEntries.insert(sourceIndex, entry);
+    ++m_embeddedRevision;
+    const QPointer<DetailLayoutHost> alive(this);
     tableWidget->setRowHeight(sourceRow, originalHeight + inlineDetailHeight);
-    textEditor->show();
+    if (!alive) return;
     updateEmbeddedEditorGeometries();
-    QTimer::singleShot(0, this, [this]() { updateEmbeddedEditorGeometries(); });
     setSourceExpandedIndicator(sourceIndex, true);
 }
 
@@ -411,112 +413,102 @@ void ks::ui::DetailLayoutHost::insertTreeEmbeddedDetail(
     }
 
     const QSize originalSizeHint = sourceItem->sizeHint(0);
-    const int originalHeight = std::max(1, treeWidget->visualRect(sourceIndex).height());
+    const int visibleColumn = visibleTreeColumn(treeWidget);
+    const int originalHeight = std::max(1, treeWidget->visualRect(
+        QModelIndex(sourceIndex).siblingAtColumn(std::max(0, visibleColumn))).height());
     constexpr int inlineDetailHeight = 128;
 
-    // 树节点同样先登记裁剪高度，再改变 size hint，保证首次重绘也使用原始行高。
     installEmbeddedRowDelegate();
-    EmbeddedEntry entry;
-    QWidget* textEditor = nullptr;
-    if (!m_structuredView.isNull())
+    auto entry = std::make_shared<EmbeddedEntry>();
+    entry->sourceIndex = sourceIndex;
+    entry->originalRowHeight = originalHeight;
+    entry->detailHeight = inlineDetailHeight;
+    entry->structured = !m_structuredView.isNull();
+    entry->detailText = detailText;
+    if (entry->structured)
     {
-        auto* fields = new StructuredFieldView(treeWidget->viewport());
-        fields->setPresentation(m_structuredView->presentation());
-        fields->setDocument(m_structuredView->document());
-        entry.fieldView = fields;
-        textEditor = fields;
+        entry->document = m_structuredView->document();
+        entry->presentation = m_structuredView->presentation();
     }
-    else
+    entry->treeSourceItem = sourceItem;
+    entry->originalSizeHint = originalSizeHint;
+    m_embeddedEntries.insert(sourceIndex, entry);
+    ++m_embeddedRevision;
+    const QPointer<DetailLayoutHost> alive(this);
+    if (!m_embeddedTreeUniformRowsCaptured)
     {
-        auto* editor = createReadOnlyInlineEditor(treeWidget->viewport(), m_detailEditor.data(), detailText);
-        entry.textEditor = editor;
-        textEditor = editor;
+        m_embeddedTreeUniformRows = treeWidget->uniformRowHeights();
+        m_embeddedTreeUniformRowsCaptured = true;
+        treeWidget->setUniformRowHeights(false); // expanded rows have distinct logical heights
+        if (!alive) return;
     }
-    entry.sourceIndex = sourceIndex;
-    entry.editorWidget = textEditor;
-    entry.treeSourceItem = sourceItem;
-    entry.originalRowHeight = originalHeight;
-    entry.detailHeight = inlineDetailHeight;
-    entry.originalSizeHint = originalSizeHint;
-    m_embeddedEntries.append(entry);
     sourceItem->setSizeHint(0, QSize(-1, originalHeight + inlineDetailHeight));
-    textEditor->show();
+    if (!alive) return;
     updateEmbeddedEditorGeometries();
-    QTimer::singleShot(0, this, [this]() { updateEmbeddedEditorGeometries(); });
     setSourceExpandedIndicator(sourceIndex, true);
 }
 
 bool ks::ui::DetailLayoutHost::removeEmbeddedEntry(
     const QPersistentModelIndex& sourceIndex)
 {
-    for (int entryIndex = 0; entryIndex < m_embeddedEntries.size(); ++entryIndex)
+    const auto found = m_embeddedEntries.find(sourceIndex);
+    if (found == m_embeddedEntries.end()) return false;
+    const auto entry = found.value();
+    m_embeddedEntries.erase(found);
+    m_activeEmbeddedRows.remove(sourceIndex);
+    ++m_embeddedRevision;
+    const QPointer<DetailLayoutHost> alive(this);
+    restoreEmbeddedEntryLayout(*entry);
+    if (!alive) return true;
+    if (entry->editorWidget) delete entry->editorWidget.data();
+    if (!alive) return true;
+    if (m_embeddedEntries.isEmpty() && m_embeddedTreeUniformRowsCaptured)
     {
-        EmbeddedEntry& entry = m_embeddedEntries[entryIndex];
-        if (!entry.sourceIndex.isValid() || entry.sourceIndex != sourceIndex)
-        {
-            continue;
-        }
-
-        restoreEmbeddedEntryLayout(entry);
-        if (!entry.editorWidget.isNull())
-        {
-            delete entry.editorWidget.data();
-        }
-        m_embeddedEntries.removeAt(entryIndex);
-        if (m_embeddedEntries.isEmpty())
-        {
-            restoreEmbeddedRowDelegate();
-        }
-        updateEmbeddedEditorGeometries();
-        return true;
+        m_embeddedTreeUniformRowsCaptured = false;
+        if (auto* tree = qobject_cast<QTreeWidget*>(m_tableView.data()))
+            tree->setUniformRowHeights(m_embeddedTreeUniformRows);
+        if (!alive) return true;
     }
-    return false;
+    // Canonical snapshots can be large; release their values away from the GUI.
+    QThreadPool::globalInstance()->start([document = std::move(entry->document),
+        text = std::move(entry->detailText), fields = std::move(entry->fieldState),
+        reading = std::move(entry->textState)]() mutable
+    { document = {}; text.clear(); fields.reset(); reading.reset(); });
+    updateEmbeddedEditorGeometries();
+    return true;
 }
 
 void ks::ui::DetailLayoutHost::clearEmbeddedDetails()
 {
     const QPointer<DetailLayoutHost> self(this);
-    if (m_tableView.isNull())
+    auto entries = std::move(m_embeddedEntries);
+    m_embeddedEntries.clear(); m_activeEmbeddedRows.clear();
+    auto textPool = std::move(m_textEditorPool); m_textEditorPool.clear();
+    auto fieldPool = std::move(m_fieldEditorPool); m_fieldEditorPool.clear();
+    ++m_embeddedRevision;
+    m_embeddedIndicatorsDirty = true;
+    for (const auto& entry : entries)
     {
-        m_embeddedEntries.clear();
-        restoreEmbeddedRowDelegate();
-        return;
+        restoreEmbeddedEntryLayout(*entry);
+        if (!self) return;
+        if (entry->editorWidget) delete entry->editorWidget.data();
+        if (!self) return;
+        QThreadPool::globalInstance()->start([document = std::move(entry->document),
+            text = std::move(entry->detailText), fields = std::move(entry->fieldState),
+            reading = std::move(entry->textState)]() mutable
+        { document = {}; text.clear(); fields.reset(); reading.reset(); });
     }
-
-    m_indicatorRefreshScheduled = false;
-    // 先分离本轮记录，行高/编辑器清理同步触发的回调不能重复遍历同一容器。
-    const auto entries = std::move(m_embeddedEntries);
-    m_embeddedEntries.clear();
-    for (const EmbeddedEntry& entry : entries)
+    for (const auto& editor : textPool) { if (editor) delete editor.data(); if (!self) return; }
+    for (const auto& editor : fieldPool) { if (editor) delete editor.data(); if (!self) return; }
+    if (m_embeddedTreeUniformRowsCaptured)
     {
-        restoreEmbeddedEntryLayout(entry);
-        if (self.isNull())
-        {
-            return;
-        }
-        if (!entry.editorWidget.isNull())
-        {
-            delete entry.editorWidget.data();
-        }
-        if (self.isNull())
-        {
-            return;
-        }
+        m_embeddedTreeUniformRowsCaptured = false;
+        if (auto* tree = qobject_cast<QTreeWidget*>(m_tableView.data()))
+            tree->setUniformRowHeights(m_embeddedTreeUniformRows);
+        if (!self) return;
     }
-    m_embeddedEntries.clear();
     restoreEmbeddedRowDelegate();
-    if (self.isNull())
-    {
-        return;
-    }
-    m_pendingIndicatorIndexes.clear();
-    ++m_indicatorGeneration;
-    restoreEmbeddedIndicators();
-    if (self.isNull())
-    {
-        return;
-    }
-    updateEmbeddedEditorGeometries();
+    if (self) updateEmbeddedEditorGeometries();
 }
 
 void ks::ui::DetailLayoutHost::prepareDataRebuild()
@@ -529,62 +521,60 @@ void ks::ui::DetailLayoutHost::prepareDataRebuild()
 
 void ks::ui::DetailLayoutHost::installEmbeddedRowDelegate()
 {
-    if (m_tableView.isNull() ||
-        (!m_embeddedRowDelegate.isNull() &&
-         m_tableView->itemDelegate() == m_embeddedRowDelegate.data()))
+    if (m_tableView.isNull() || m_tableView->model() == nullptr) return;
+    if (!m_embeddedRowDelegate.isNull()
+        && m_tableView->itemDelegate() != m_embeddedRowDelegate.data())
+        restoreEmbeddedRowDelegate(); // an external replacement remains authoritative
+    if (m_embeddedRowDelegate.isNull())
     {
-        return;
+        QAbstractItemDelegate* source = m_tableView->itemDelegate();
+        if (!source) return;
+        m_embeddedSourceDelegate = source;
+        m_embeddedRowDelegate = new EmbeddedRowDelegate(source,
+            [this](const QModelIndex& index) { return embeddedOriginalRowHeight(index); }, this);
+        m_tableView->setItemDelegate(m_embeddedRowDelegate.data());
     }
-
-    // 当前视图未设置 delegate 时由 Qt 保证回退默认绘制；无需安装无源包装器。
-    QAbstractItemDelegate* sourceDelegate = m_tableView->itemDelegate();
-    if (sourceDelegate == nullptr)
+    // Per-column delegates override the default in Qt. Wrap only explicitly
+    // registered columns, preserving their paint/editor/help implementations.
+    const int columns = m_tableView->model()->columnCount(m_tableView->rootIndex());
+    for (int column = 0; column < columns; ++column)
     {
-        return;
-    }
-
-    // 源 delegate 仅借用，所有权仍由页面视图保持；包装器随详情宿主销毁。
-    m_embeddedSourceDelegate = sourceDelegate;
-    m_embeddedRowDelegate = new EmbeddedRowDelegate(
-        sourceDelegate,
-        [this](const QModelIndex& modelIndex)
+        QAbstractItemDelegate* source = m_tableView->itemDelegateForColumn(column);
+        auto found = m_embeddedColumnDelegates.find(column);
+        if (found != m_embeddedColumnDelegates.end() && source == found->wrapper) continue;
+        if (found != m_embeddedColumnDelegates.end())
         {
-            return embeddedOriginalRowHeight(modelIndex);
-        },
-        this);
-    m_tableView->setItemDelegate(m_embeddedRowDelegate.data());
-    if (m_tableView->viewport() != nullptr)
-    {
-        m_tableView->viewport()->update();
+            if (found->wrapper) found->wrapper->deleteLater();
+            m_embeddedColumnDelegates.erase(found);
+        }
+        if (!source) continue;
+        auto* wrapper = new EmbeddedRowDelegate(source,
+            [this](const QModelIndex& index) { return embeddedOriginalRowHeight(index); }, this);
+        m_embeddedColumnDelegates.insert(column, {source,wrapper});
+        m_tableView->setItemDelegateForColumn(column, wrapper);
     }
 }
 
 void ks::ui::DetailLayoutHost::restoreEmbeddedRowDelegate()
 {
     const QPointer<DetailLayoutHost> self(this);
-    if (!m_tableView.isNull() && !m_embeddedRowDelegate.isNull() &&
-        m_tableView->itemDelegate() == m_embeddedRowDelegate.data() &&
-        !m_embeddedSourceDelegate.isNull())
+    const auto columns = std::move(m_embeddedColumnDelegates);
+    m_embeddedColumnDelegates.clear();
+    for (auto it = columns.cbegin(); it != columns.cend(); ++it)
     {
-        // 只在当前 delegate 仍是本包装器时恢复，避免覆盖页面运行期替换的 delegate。
+        if (m_tableView && it->wrapper && m_tableView->itemDelegateForColumn(it.key()) == it->wrapper)
+            m_tableView->setItemDelegateForColumn(it.key(), it->source.data());
+        if (!self) return;
+        if (it->wrapper) it->wrapper->deleteLater();
+    }
+    if (m_tableView && m_embeddedRowDelegate && m_embeddedSourceDelegate
+        && m_tableView->itemDelegate() == m_embeddedRowDelegate)
         m_tableView->setItemDelegate(m_embeddedSourceDelegate.data());
-        if (self.isNull())
-        {
-            return;
-        }
-        if (m_tableView->viewport() != nullptr)
-        {
-            m_tableView->viewport()->update();
-        }
-    }
-
-    // deleteLater 保证 Qt 不会在当前绘制调用栈内销毁仍可能被访问的 delegate。
-    if (!m_embeddedRowDelegate.isNull())
-    {
-        m_embeddedRowDelegate->deleteLater();
-    }
+    if (!self) return;
+    if (m_embeddedRowDelegate) m_embeddedRowDelegate->deleteLater();
     m_embeddedRowDelegate.clear();
     m_embeddedSourceDelegate.clear();
+    if (m_tableView && m_tableView->viewport()) m_tableView->viewport()->update();
 }
 
 int ks::ui::DetailLayoutHost::embeddedOriginalRowHeight(const QModelIndex& modelIndex) const
@@ -594,16 +584,9 @@ int ks::ui::DetailLayoutHost::embeddedOriginalRowHeight(const QModelIndex& model
         return -1;
     }
 
-    // 每列都会分别调用 delegate；统一比较第 0 列的稳定源索引以匹配同一逻辑行。
-    const QModelIndex sourceIndex = modelIndex.sibling(modelIndex.row(), 0);
-    for (const EmbeddedEntry& entry : m_embeddedEntries)
-    {
-        if (entry.sourceIndex.isValid() && entry.sourceIndex == sourceIndex)
-        {
-            return entry.originalRowHeight;
-        }
-    }
-    return -1;
+    const auto source = modelIndex.sibling(modelIndex.row(), 0);
+    const auto entry = m_embeddedEntries.value(QPersistentModelIndex(source));
+    return entry ? entry->originalRowHeight : -1;
 }
 
 void ks::ui::DetailLayoutHost::restoreEmbeddedEntryLayout(const EmbeddedEntry& entry)
@@ -627,268 +610,213 @@ void ks::ui::DetailLayoutHost::restoreEmbeddedEntryLayout(const EmbeddedEntry& e
 
 void ks::ui::DetailLayoutHost::updateEmbeddedEditorGeometries()
 {
-    if (m_tableView.isNull())
+    if (m_embeddedGeometryScheduled) return;
+    m_embeddedGeometryScheduled = true;
+    QTimer::singleShot(0, this, [this]
     {
-        return;
+        m_embeddedGeometryScheduled = false;
+        flushEmbeddedEditorGeometries();
+    });
+}
+
+QList<QPersistentModelIndex> ks::ui::DetailLayoutHost::visibleEmbeddedRows() const
+{
+    QList<QPersistentModelIndex> rows;
+    if (!m_tableView || !m_tableView->isVisible() || !m_tableView->model()
+        || !m_tableView->viewport() || m_embeddedEntries.isEmpty()) return rows;
+    const int bottom = m_tableView->viewport()->height();
+    if (auto* table = qobject_cast<QTableView*>(m_tableView.data()))
+    {
+        for (int y = 0; y < bottom;)
+        {
+            const int row = table->rowAt(y);
+            if (row < 0) break;
+            const QPersistentModelIndex id(table->model()->index(row, 0, table->rootIndex()));
+            if (m_embeddedEntries.contains(id)) rows.append(id);
+            y = std::max(y + 1, table->rowViewportPosition(row) + table->rowHeight(row));
+        }
     }
-    const QPointer<DetailLayoutHost> self(this);
-    const quint64 generation = m_bindingGeneration;
+    else if (auto* tree = qobject_cast<QTreeWidget*>(m_tableView.data()))
+    {
+        // Probe the visible viewport, never traverse all expanded identities or
+        // all model descendants. indexBelow skips hidden/collapsed tree rows.
+        const int column = visibleTreeColumn(tree);
+        if (column < 0) return rows;
+        const int x = std::clamp(tree->header()->sectionViewportPosition(column)
+            + tree->header()->sectionSize(column) / 2, 0, std::max(0, tree->viewport()->width() - 1));
+        QModelIndex row;
+        for (int y = 0; y < bottom && !row.isValid(); ++y) row = tree->indexAt(QPoint(x, y));
+        while (row.isValid())
+        {
+            row = row.siblingAtColumn(column);
+            const QRect rect = tree->visualRect(row);
+            if (rect.top() >= bottom) break;
+            const QPersistentModelIndex id(row.sibling(row.row(), 0));
+            if (rect.bottom() >= 0 && m_embeddedEntries.contains(id)) rows.append(id);
+            row = tree->indexBelow(row);
+        }
+    }
+    return rows;
+}
+
+void ks::ui::DetailLayoutHost::releaseEmbeddedEditor(const std::shared_ptr<EmbeddedEntry>& entry)
+{
+    if (!entry || !entry->editorWidget) return;
+    if (entry->fieldView) entry->fieldState = entry->fieldView->captureViewState();
+    if (entry->textEditor) entry->textState = entry->textEditor->captureReadOnlyViewState();
+    const QPointer<QWidget> editor = entry->editorWidget;
+    if (entry->fieldView) m_fieldEditorPool.append(entry->fieldView);
+    if (entry->textEditor) m_textEditorPool.append(entry->textEditor);
+    entry->fieldView.clear(); entry->textEditor.clear(); entry->editorWidget.clear();
+    m_activeEmbeddedRows.remove(entry->sourceIndex);
+    editor->hide(); // caller checks the host/revision after synchronous events
+}
+
+bool ks::ui::DetailLayoutHost::realizeEmbeddedEntry(const std::shared_ptr<EmbeddedEntry>& entry)
+{
+    if (entry->editorWidget) return true;
+    const QPointer<DetailLayoutHost> alive(this);
+    const quint64 revision = m_embeddedRevision, binding = m_bindingGeneration;
+    const auto current = [&] { return alive && m_embeddedRevision == revision
+        && m_bindingGeneration == binding && m_tableView && m_tableView->viewport(); };
+    if (entry->structured)
+    {
+        QPointer<StructuredFieldView> fields;
+        while (!m_fieldEditorPool.isEmpty() && !fields) fields = m_fieldEditorPool.takeLast();
+        if (!fields)
+        {
+            fields = new StructuredFieldView(m_tableView->viewport());
+            if (!current()) { if (fields) fields->deleteLater(); return false; }
+            entry->fieldView = fields; entry->editorWidget = fields;
+            m_activeEmbeddedRows.insert(entry->sourceIndex);
+            fields->setValueModelProjection();
+            if (!current()) return false;
+            fields->setMinimumSize(0, 0);
+        }
+        entry->fieldView = fields; entry->editorWidget = fields;
+        m_activeEmbeddedRows.insert(entry->sourceIndex);
+        fields->setDocument(entry->document);
+        if (!current() || !fields) return false;
+        const auto state = entry->fieldState;
+        fields->restoreViewState(state);
+        if (!current() || !fields) return false;
+        if (!state) fields->setPresentation(entry->presentation);
+    }
+    else
+    {
+        QPointer<CodeEditorWidget> editor;
+        while (!m_textEditorPool.isEmpty() && !editor) editor = m_textEditorPool.takeLast();
+        if (!editor)
+        {
+            editor = new CodeEditorWidget(m_tableView->viewport());
+            if (!current()) { if (editor) editor->deleteLater(); return false; }
+            entry->textEditor = editor; entry->editorWidget = editor;
+            m_activeEmbeddedRows.insert(entry->sourceIndex);
+            editor->setReadOnly(true);
+            if (!current() || !editor) return false;
+            editor->setMinimumSize(0, 0);
+        }
+        entry->textEditor = editor; entry->editorWidget = editor;
+        m_activeEmbeddedRows.insert(entry->sourceIndex);
+        editor->setRawText(entry->detailText);
+        if (!current() || !editor) return false;
+        // The caller restores reading state after final geometry/show, when
+        // the real text viewport and its scrollbar ranges are available.
+    }
+    return current() && entry->editorWidget;
+}
+
+void ks::ui::DetailLayoutHost::trimEmbeddedEditorPool()
+{
+    // One spare per kind avoids churn at a row boundary. Pool size follows the
+    // current viewport, never the number of rows the user has ever expanded.
+    const QPointer<DetailLayoutHost> alive(this);
+    while (m_textEditorPool.size() > 1)
+    { const auto editor = m_textEditorPool.takeLast(); if (editor) editor->deleteLater(); if (!alive) return; }
+    while (m_fieldEditorPool.size() > 1)
+    { const auto editor = m_fieldEditorPool.takeLast(); if (editor) editor->deleteLater(); if (!alive) return; }
+}
+
+void ks::ui::DetailLayoutHost::flushEmbeddedEditorGeometries()
+{
+    if (!m_tableView || !m_tableView->viewport()) return;
+    const QPointer<DetailLayoutHost> alive(this);
     const QPointer<QWidget> viewport(m_tableView->viewport());
-    if (viewport.isNull())
+    const quint64 binding = m_bindingGeneration, revision = m_embeddedRevision;
+    const auto current = [&] { return alive && viewport && binding == m_bindingGeneration
+        && revision == m_embeddedRevision && m_tableView; };
+    const auto rows = m_scheme == ks::settings::DetailDisplayScheme::Embedded
+        ? visibleEmbeddedRows() : QList<QPersistentModelIndex>();
+    const QSet<QPersistentModelIndex> visible(rows.cbegin(), rows.cend());
+    const auto active = m_activeEmbeddedRows; // bounded by the previous viewport
+    for (const auto& id : active)
     {
-        return;
+        if (!visible.contains(id)) releaseEmbeddedEditor(m_embeddedEntries.value(id));
+        if (!current()) return;
     }
-    // Move/Resize/Show 回调可同步切模式并清空 live 列表，只遍历本轮弱引用快照。
-    const auto entries = m_embeddedEntries;
-    const auto current = [&]()
+    for (const auto& id : rows)
     {
-        return !self.isNull() && self->m_bindingGeneration == generation && !viewport.isNull();
-    };
-    for (const EmbeddedEntry& entry : entries)
-    {
-        if (entry.editorWidget.isNull() || !entry.sourceIndex.isValid())
+        const auto entry = m_embeddedEntries.value(id);
+        if (!entry || !id.isValid()) continue;
+        QRect rect;
+        if (auto* table = qobject_cast<QTableView*>(m_tableView.data()))
+            rect = QRect(0, table->rowViewportPosition(id.row()), viewport->width(), table->rowHeight(id.row()));
+        else if (auto* tree = qobject_cast<QTreeWidget*>(m_tableView.data()))
         {
-            continue;
+            const int column = visibleTreeColumn(tree);
+            if (column >= 0) rect = tree->visualRect(QModelIndex(id).siblingAtColumn(column));
         }
-        QRect itemRect = m_tableView->visualRect(entry.sourceIndex);
-        if (!itemRect.isValid() || itemRect.height() <= 0 || !viewport->rect().intersects(itemRect))
+        rect.setTop(rect.top() + std::max(0, entry->originalRowHeight));
+        rect.setLeft(0); rect.setWidth(viewport->width());
+        rect.setHeight(std::min(rect.height(), std::max(1, entry->detailHeight)));
+        if (rect.isEmpty() || !viewport->rect().intersects(rect))
+        { releaseEmbeddedEditor(entry); if (!current()) return; continue; }
+        const bool restoreTextState = !entry->structured && !entry->editorWidget;
+        if (!realizeEmbeddedEntry(entry) || !current()) return;
+        const QPointer<QWidget> editor = entry->editorWidget;
+        if (!editor) continue;
+        if (editor->geometry() != rect) editor->setGeometry(rect);
+        if (!current()) return;
+        if (!editor) continue;
+        if (editor->isHidden()) { editor->show(); if (!current()) return; if (editor) editor->raise(); }
+        if (!current()) return;
+        if (restoreTextState && entry->textEditor)
         {
-            entry.editorWidget->setVisible(false);
-            if (!current())
-            {
-                return;
-            }
-            continue;
-        }
-        const int topPadding = qMax(0, entry.originalRowHeight);
-        const int detailHeight = qMax(1, entry.detailHeight);
-        QRect editorRect = itemRect;
-        editorRect.setTop(editorRect.top() + topPadding);
-        editorRect.setLeft(0);
-        editorRect.setWidth(viewport->width());
-        editorRect.setBottom(qMin(itemRect.bottom(), editorRect.top() + detailHeight - 1));
-        if (editorRect.height() <= 0)
-        {
-            entry.editorWidget->setVisible(false);
-            if (!current())
-            {
-                return;
-            }
-            continue;
-        }
-        entry.editorWidget->setGeometry(editorRect);
-        if (!current())
-        {
-            return;
-        }
-        if (entry.editorWidget.isNull())
-        {
-            continue;
-        }
-        entry.editorWidget->setVisible(true);
-        if (!current())
-        {
-            return;
-        }
-        if (entry.editorWidget.isNull())
-        {
-            continue;
-        }
-        entry.editorWidget->raise();
-        if (!current())
-        {
-            return;
+            const auto reading = entry->textState;
+            entry->textEditor->restoreReadOnlyViewState(reading);
+            if (!current()) return;
         }
     }
+    trimEmbeddedEditorPool();
 }
 
 void ks::ui::DetailLayoutHost::refreshEmbeddedIndicators()
 {
-    if (m_tableView.isNull() || m_scheme != ks::settings::DetailDisplayScheme::Embedded)
-    {
-        return;
-    }
-    const int rowCount = m_tableView->model() != nullptr
-        ? m_tableView->model()->rowCount()
-        : 0;
-    queueEmbeddedIndicatorRows(QModelIndex(), 0, rowCount - 1);
+    if (m_tableView.isNull() || m_scheme != ks::settings::DetailDisplayScheme::Embedded) return;
+    m_embeddedIndicatorsDirty = true;
+    if (!m_tableView->isVisible()) return;
+    installEmbeddedRowDelegate();
+    m_embeddedIndicatorsDirty = false;
+    if (m_tableView && m_tableView->viewport()) m_tableView->viewport()->update();
 }
 
 void ks::ui::DetailLayoutHost::scheduleEmbeddedIndicatorRefresh()
 {
-    if (m_indicatorRefreshScheduled)
-    {
-        return;
-    }
+    if (m_scheme != ks::settings::DetailDisplayScheme::Embedded || !m_tableView) return;
+    m_embeddedIndicatorsDirty = true;
+    if (m_indicatorRefreshScheduled || !m_tableView->isVisible()) return;
     m_indicatorRefreshScheduled = true;
-    QTimer::singleShot(0, this,
-        [this]()
-        {
-            m_indicatorRefreshScheduled = false;
-            refreshEmbeddedIndicators();
-        });
-}
-
-void ks::ui::DetailLayoutHost::queueEmbeddedIndicatorRows(
-    const QModelIndex& parentIndex,
-    const int firstRow,
-    const int lastRow)
-{
-    if (m_tableView.isNull() || m_tableView->model() == nullptr || firstRow > lastRow)
-    {
-        return;
-    }
-    ++m_indicatorGeneration;
-    m_pendingIndicatorIndexes.clear();
-    const int boundedFirst = qMax(0, firstRow);
-    const int boundedLast = qMin(lastRow, m_tableView->model()->rowCount(parentIndex) - 1);
-    for (int row = boundedFirst; row <= boundedLast; ++row)
-    {
-        const QModelIndex index = m_tableView->model()->index(row, 0, parentIndex);
-        if (index.isValid())
-        {
-            m_pendingIndicatorIndexes.append(QPersistentModelIndex(index));
-        }
-    }
-    if (!m_indicatorBatchScheduled)
-    {
-        m_indicatorBatchScheduled = true;
-        const quint64 generation = m_indicatorGeneration;
-        QTimer::singleShot(0, this, [this, generation]() { processEmbeddedIndicatorBatch(generation); });
-    }
-}
-
-void ks::ui::DetailLayoutHost::processEmbeddedIndicatorBatch(const quint64 generation)
-{
-    if (generation != m_indicatorGeneration || m_scheme != ks::settings::DetailDisplayScheme::Embedded ||
-        m_tableView.isNull() || m_tableView->model() == nullptr)
-    {
-        m_indicatorBatchScheduled = false;
-        if (generation != m_indicatorGeneration && !m_pendingIndicatorIndexes.isEmpty() &&
-            m_scheme == ks::settings::DetailDisplayScheme::Embedded)
-        {
-            m_indicatorBatchScheduled = true;
-            const quint64 currentGeneration = m_indicatorGeneration;
-            QTimer::singleShot(0, this,
-                [this, currentGeneration]() { processEmbeddedIndicatorBatch(currentGeneration); });
-        }
-        return;
-    }
-    int processed = 0;
-    while (!m_pendingIndicatorIndexes.isEmpty() && processed < 128)
-    {
-        const QPersistentModelIndex index = m_pendingIndicatorIndexes.takeLast();
-        if (!index.isValid())
-        {
-            continue;
-        }
-        installEmbeddedIndicator(index, false);
-        if (qobject_cast<QTreeWidget*>(m_tableView.data()) != nullptr)
-        {
-            const int childCount = m_tableView->model()->rowCount(index);
-            for (int child = 0; child < childCount; ++child)
-            {
-                const QModelIndex childIndex = m_tableView->model()->index(child, 0, index);
-                if (childIndex.isValid())
-                {
-                    m_pendingIndicatorIndexes.append(QPersistentModelIndex(childIndex));
-                }
-            }
-        }
-        ++processed;
-    }
-    if (!m_pendingIndicatorIndexes.isEmpty())
-    {
-        QTimer::singleShot(0, this, [this, generation]() { processEmbeddedIndicatorBatch(generation); });
-        return;
-    }
-    m_indicatorBatchScheduled = false;
-    for (const EmbeddedEntry& entry : std::as_const(m_embeddedEntries))
-    {
-        if (entry.sourceIndex.isValid())
-        {
-            setSourceExpandedIndicator(entry.sourceIndex, true);
-        }
-    }
-}
-
-void ks::ui::DetailLayoutHost::installEmbeddedIndicator(
-    const QPersistentModelIndex& sourceIndex,
-    const bool expanded)
-{
-    if (m_tableView.isNull() || !sourceIndex.isValid())
-    {
-        return;
-    }
-    if (QTableWidget* tableWidget = qobject_cast<QTableWidget*>(m_tableView.data()))
-    {
-        QTableWidgetItem* firstItem = tableWidget->item(sourceIndex.row(), 0);
-        if (firstItem == nullptr)
-        {
-            return;
-        }
-        if (!firstItem->data(OriginalDecorationCapturedRole).toBool())
-        {
-            firstItem->setData(OriginalDecorationRole, firstItem->data(Qt::DecorationRole));
-            firstItem->setData(OriginalDecorationCapturedRole, true);
-            m_indicatorIndexes.append(sourceIndex);
-        }
-        firstItem->setIcon(embeddedIndicatorIcon(expanded));
-    }
-    else if (QTreeWidget* treeWidget = qobject_cast<QTreeWidget*>(m_tableView.data()))
-    {
-        QTreeWidgetItem* item = treeWidget->itemFromIndex(sourceIndex);
-        if (item == nullptr)
-        {
-            return;
-        }
-        if (!item->data(0, OriginalDecorationCapturedRole).toBool())
-        {
-            item->setData(0, OriginalDecorationRole, item->data(0, Qt::DecorationRole));
-            item->setData(0, OriginalDecorationCapturedRole, true);
-            m_indicatorIndexes.append(sourceIndex);
-        }
-        item->setIcon(0, embeddedIndicatorIcon(expanded));
-    }
-}
-
-void ks::ui::DetailLayoutHost::restoreEmbeddedIndicators()
-{
-    for (const QPersistentModelIndex& sourceIndex : std::as_const(m_indicatorIndexes))
-    {
-        if (!sourceIndex.isValid())
-        {
-            continue;
-        }
-        if (QTableWidget* tableWidget = qobject_cast<QTableWidget*>(m_tableView.data()))
-        {
-            QTableWidgetItem* firstItem = tableWidget->item(sourceIndex.row(), 0);
-            if (firstItem != nullptr && firstItem->data(OriginalDecorationCapturedRole).toBool())
-            {
-                firstItem->setData(Qt::DecorationRole, firstItem->data(OriginalDecorationRole));
-                firstItem->setData(OriginalDecorationRole, QVariant());
-                firstItem->setData(OriginalDecorationCapturedRole, false);
-            }
-        }
-        else if (QTreeWidget* treeWidget = qobject_cast<QTreeWidget*>(m_tableView.data()))
-        {
-            QTreeWidgetItem* item = treeWidget->itemFromIndex(sourceIndex);
-            if (item != nullptr && item->data(0, OriginalDecorationCapturedRole).toBool())
-            {
-                item->setData(0, Qt::DecorationRole, item->data(0, OriginalDecorationRole));
-                item->setData(0, OriginalDecorationRole, QVariant());
-                item->setData(0, OriginalDecorationCapturedRole, false);
-            }
-        }
-    }
-    m_indicatorIndexes.clear();
+    QTimer::singleShot(0, this, [this]() {
+        m_indicatorRefreshScheduled = false;
+        if (m_embeddedIndicatorsDirty) refreshEmbeddedIndicators();
+    });
 }
 
 void ks::ui::DetailLayoutHost::setSourceExpandedIndicator(
-    const QPersistentModelIndex& sourceIndex,
-    const bool expanded)
+    const QPersistentModelIndex& sourceIndex, bool)
 {
-    installEmbeddedIndicator(sourceIndex, expanded);
+    if (m_tableView && m_tableView->viewport() && sourceIndex.isValid())
+        m_tableView->viewport()->update(m_tableView->visualRect(sourceIndex));
 }
 
 void ks::ui::DetailLayoutHost::showFloatingWindow()
@@ -1026,6 +954,8 @@ bool ks::ui::DetailLayoutHost::eventFilter(QObject* watchedObject, QEvent* event
             if (eventObject->type() == QEvent::Show || eventObject->type() == QEvent::LayoutRequest)
             {
                 observeModel();
+                if (!self.isNull() && m_scheme == ks::settings::DetailDisplayScheme::Embedded)
+                    refreshEmbeddedIndicators();
                 if (self.isNull())
                 {
                     return true;
@@ -1043,6 +973,8 @@ bool ks::ui::DetailLayoutHost::eventFilter(QObject* watchedObject, QEvent* event
     {
         switch (eventObject->type())
         {
+        case QEvent::Show:
+        case QEvent::Hide:
         case QEvent::Resize:
         case QEvent::Scroll:
         case QEvent::LayoutRequest:

@@ -1,4 +1,6 @@
 #pragma once
+#include "../UI/TableCompleteExport.h"
+#include "../UI/FlatTableModel.h"
 
 // ============================================================
 // ProcessDock.h
@@ -9,8 +11,13 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/AsyncOperation.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../ksword/process/process_cpu_core_etw_monitor.h"
+#include "ProcessEtwCaptureLifecycle.h"
+#include "ProcessActivityHistory.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QColor>
 #include <QHash>
@@ -54,6 +61,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QResizeEvent;
 class QShowEvent;
+class QHideEvent;
 class QSlider;
 class QSpinBox;
 class QSortFilterProxyModel;
@@ -61,6 +69,7 @@ class QTableWidget;
 class QTableView;
 class QTabWidget;
 class QTimer;
+class QTreeView;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -88,6 +97,7 @@ namespace ks::network
 namespace ks::ui
 {
     class StructuredFieldView;
+    class RetainedCleanupJob;
     template<typename RowT>
     class FlatTableModel;
 }
@@ -118,6 +128,9 @@ public:
     // 返回：无。
     void refreshThemeVisuals();
 
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ProcessDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // requestOpenProcessDetailByPid 作用：
     // - 外部模块按 PID 打开进程详情窗口；
     // - 若已存在对应窗口则复用，不重复创建。
@@ -141,6 +154,7 @@ signals:
     void requestFocusProcessProtectByCallback();
 
 protected:
+    void changeEvent(QEvent* event) override;
     // eventFilter 作用：
     // - 捕获进程页内的鼠标点击；
     // - 点击进程表外部或表格空白区时清空当前进程选择，让活动图回到整体视图。
@@ -152,6 +166,7 @@ protected:
     // - 在 Dock 首次真正显示时再启动首轮刷新与周期监视；
     // - 避免主窗口启动阶段被进程枚举拖慢。
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
     // resizeEvent 作用：
     // - 在 Dock 尺寸变化时请求一次进程表默认列宽自适应；
@@ -386,7 +401,8 @@ private:
         std::vector<std::string> actionIdentityKeys;   // actionIdentityKeys：应用聚合行批量动作的成员标识。
         QList<std::uint32_t> cpuCoreProcessIds;         // cpuCoreProcessIds：逐核心绘制参与汇总的真实 PID 集合。
         int depth = 0;                                // depth：树状显示时的缩进层级。
-        bool hasChildren = false;                     // hasChildren：供表示层绘制树状展开提示。
+        bool hasChildren = false;
+        bool expanded = false; // committed row expansion, independent of the next UI map update.                     // hasChildren：供表示层绘制树状展开提示。
         bool isNew = false;                           // isNew：新增行高亮标记。
         bool isExited = false;                        // isExited：退出保留行高亮标记。
         bool isKernelOnly = false;                    // isKernelOnly：仅内核可见进程高亮标记。
@@ -447,6 +463,9 @@ private:
     {
         std::unordered_map<std::string, CacheEntry> nextCache;                    // 下一轮缓存。
         std::unordered_map<std::string, ks::process::CounterSample> nextCounters; // 下一轮计数器样本。
+        std::uint64_t networkCaptureGeneration = 0;
+        bool networkSnapshotValid = false;
+        std::uint64_t cpuCoreCaptureGeneration = 0; // 丢弃暂停/重启前构造的旧矩阵。
         std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> cpuCoreUsageSnapshot; // 后台构造的共享逐核心快照，UI 只移动指针。
 
         // ======== 统计字段（用于 UI 状态提示 + 详细日志） ========
@@ -567,7 +586,23 @@ public:
     };
 
 private:
-    // ======== UI 初始化相关 ========
+    enum class NavigationPage : std::size_t { List, Threads, CrossView, CrossViewProcess, CrossViewThread, Create, Count };
+    struct NavigationDefinition
+    {
+        const char* id;
+        const char* parentId;
+        const char* translationKey;
+        const char* fallbackTitle;
+        QStringList searchTexts;
+        bool defaultCurrent;
+    };
+    using NavigationDefinitions = std::array<NavigationDefinition, static_cast<std::size_t>(NavigationPage::Count)>;
+    static const NavigationDefinitions& navigationDefinitions();
+    void registerNavigationTab(NavigationPage page, QTabWidget* tabs, QWidget* widget, const QIcon& icon = QIcon());
+    std::array<QPointer<QWidget>, static_cast<std::size_t>(NavigationPage::Count)> m_navigationPages;
+    std::array<QPointer<QTabWidget>, static_cast<std::size_t>(NavigationPage::Count)> m_navigationTabs;
+
+    // ======== UI 初始化相关 =======
     void initializeUi();
     void initializeTopControls();
     void initializeProcessActivityPanel();
@@ -582,6 +617,10 @@ private:
     void initializeCrossViewPage();
     void initializeConnections();
     void initializeThreadPageConnections();
+    void activateThreadPage();
+    void resetThreadCounterBaseline();
+    void cancelThreadProjection();
+    void shutdownThreadPage();
     // initializeCrossViewConnections 作用：
     // - 连接 Cross-View 刷新、过滤和表格选择事件；
     // - 所有 R0 查询都通过 ArkDriverClient；
@@ -623,6 +662,8 @@ private:
     // - 结果回填到 m_processCrossViewCache / m_threadCrossViewCache；
     // - 返回值：无。
     void refreshCrossViewAsync();
+    void invalidateCrossViewTables();
+    void scheduleCrossViewTableRebuild();
     // rebuildCrossViewTables 作用：
     // - 按当前搜索框和缓存重绘 PID/TID 来源矩阵；
     // - 只做 UI 投影，不再次查询驱动；
@@ -817,8 +858,11 @@ private:
     void synchronizeDetailWindowPerformanceHistory(
         ProcessDetailWindow* detailWindow,
         const std::string& identityKey) const;
-    void appendProcessActivitySampleToDetailWindows(const ProcessActivitySample& sample);
+    void appendCurrentPerformanceSamplesToDetailWindows();
     std::size_t trimProcessActivitySamples();
+    void scheduleProcessActivityHistoryRetirement();
+    void pumpProcessActivityHistoryRetirement();
+    void retireProcessActivityHistory(bool finalizing = false);
     void refreshProcessActivityTimeline(std::size_t removedSampleCount = 0);
     void refreshProcessActivityChart();
     void updateProcessActivityStatusLabel();
@@ -834,6 +878,7 @@ private:
     // 返回值：无，失败时通过提示框和日志反馈。
     void handleProcessWindowPickerRelease(const QPoint& globalPos);
     bool isProcessActivityTableSnapshotActive() const;
+    bool isProcessActivitySnapshotProjectionCurrent() const;
     void rebuildProcessActivityTableSnapshotRecords();
     QString buildProcessActivitySnapshotText(int sampleIndex) const;
     std::vector<std::string> currentProcessActivitySelectionKeys() const;
@@ -897,11 +942,25 @@ private:
     // - 把 R-1 安装的三条前提按顺序补齐（停常驻、释放资源、CR3 追踪、带 EPTP
     //   后端准备）；成功返回 true，失败时自己把原因报出来；
     // - 处置与注入共用。顺序是硬的，留两份副本早晚有一份会先改。
-    bool prepareHvmForArming(const QString& actionTitle, const kLogEvent& actionEvent);
+    struct HvmActionResult
+    {
+        bool ok = false;
+        std::string detail;
+        unsigned long status = 0;
+        QString advice;
+    };
+    static bool prepareHvmForArming(HvmActionResult& output, const ks::i18n::SourceTextSnapshot& translator);
+    void submitHvmAction(const QString& title, const ProcessActionTarget& target,
+        std::function<HvmActionResult()> work);
+    void continueHvmProcessDispositionAction(unsigned long operation, ProcessActionTarget target,
+        bool manualAddress, quint64 address);
+    void continueHvmInjectAction(ProcessActionTarget target, QString dllPath, quint64 address);
+    std::unique_ptr<ks::ui::AsyncOperation> m_hvmOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_hvmPreflightOperation;
     // stepFailedRestartResident 作用：
     // - 装完之后恢复常驻；这一步失败返回 true 并单独报——东西已经装上了，只是
     //   没人在执行它，与安装失败是两回事。
-    bool stepFailedRestartResident(const QString& actionTitle, const kLogEvent& actionEvent);
+    static bool stepFailedRestartResident(HvmActionResult& output, const ks::i18n::SourceTextSnapshot& translator);
     // hvmDispositionStatusAdvice 作用：
     // - 把处置状态码翻成"接下来该做什么"；
     // - 光摆一个数字等于没说：这些码大多是前提没满足，而每条前提要做的事不同，
@@ -999,11 +1058,14 @@ private:
         TableColumn column,
         double* valueOut);
     // processUsageHighlightRatio 作用：把单元格幅值按当前表格同列最大值归一化到 0~1。
-    bool processUsageHighlightRatio(
-        const ks::process::ProcessRecord& processRecord,
-        TableColumn column,
-        double* ratioOut) const;
+
     QVariant processTableData(const ProcessTableRow& tableRow, int column, int role);
+    std::vector<ProcessTableModel::ColumnChange> processTableChanges(const ProcessTableRow& before, const ProcessTableRow& after,
+        const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& previousMaximums, bool cpuSnapshotChanged, bool cpuSizeChanged) const;
+    QVariant processTableBrush(const ProcessTableRow& tableRow, TableColumn column, int role,
+        const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& maximums) const;
+    ks::ui::CompleteExportPublishedTable makeProcessCompleteExportTable();
+    std::uint64_t m_processCompleteExportVersion = 0;
     const ProcessTableRow* processTableRowForViewIndex(const QModelIndex& viewIndex) const;
     QModelIndex processTableViewIndexForIdentityKey(const std::string& identityKey, int column) const;
     std::vector<QModelIndex> selectedProcessTableRowIndexes(bool includeCurrentFallback) const;
@@ -1035,11 +1097,11 @@ private:
     const ks::process::SystemThreadRecord* selectedThreadRecord() const;
     void bindContextActionToIndex(const QModelIndex& clickedIndex);
     void clearContextActionBinding();
-    void bindThreadContextActionToItem(QTreeWidgetItem* clickedItem);
+    void bindThreadContextActionToIndex(const QModelIndex& clickedIndex);
     void clearThreadContextActionBinding();
     bool threadRecordMatchesSearch(const ks::process::SystemThreadRecord& threadRecord) const;
     bool threadRecordMatchesScope(const ks::process::SystemThreadRecord& threadRecord) const;
-    QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
+    static QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth);
     QString formatThreadColumnText(const ks::process::SystemThreadRecord& threadRecord, ThreadTableColumn column) const;
     QString threadStateText(std::uint32_t stateValue) const;
     QString threadWaitReasonText(std::uint32_t waitReasonValue) const;
@@ -1121,10 +1183,14 @@ private:
         std::uint32_t logicalCpuCount);
 
     // ======== 进程网络吞吐采样 ========
+    bool hasVisibleProcessDetailConsumer() const;
+    ks::process::ProcessEtwCaptureDemand currentEtwCaptureDemand() const;
+    void syncProcessEtwCaptureDemand();
     void ensureProcessNetworkTrafficCaptureStarted();
     void stopProcessNetworkTrafficCapture();
     void pruneProcessNetworkTrafficCounters();
-    std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters() const;
+    static std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters(
+        const std::shared_ptr<ks::network::ProcessNetworkEtwMonitor>& service);
 
     // ======== 进程/线程逐核心 CPU 采样 ========
     void ensureCpuCoreUsageCaptureStarted();
@@ -1141,6 +1207,7 @@ private:
     QTabWidget* m_sideTabWidget = nullptr;    // 顶部 tab 栏（North），包含四个进程功能页。
     QWidget* m_processListPage = nullptr;     // “进程列表”页容器。
     QVBoxLayout* m_processPageLayout = nullptr; // 进程页主布局。
+    bool m_createProcessInProgress = false; // GUI-owned accepted launch gate; completion only clears on GUI.
     QWidget* m_createProcessPage = nullptr;   // “创建进程”页容器。
     QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
     QWidget* m_threadPage = nullptr;          // “线程列表”页容器。
@@ -1190,12 +1257,30 @@ private:
     bool m_activityTimelinePinnedToLatest = true;   // 明确实时状态才跟随最新；图上点选最新样本也冻结。
     bool m_activityTimelineSliderUpdating = false;  // 程序更新滑块时屏蔽用户态判定。
     bool m_activityTableSnapshotActive = false;     // 下方进程表是否保持独立的历史快照；不随折线采样队列淘汰。
+    bool m_activityTableSnapshotProjectionValid = false; // 独立冻结记录是否对应当前样本版本。
+    std::uint64_t m_activityTableSnapshotSequence = 0;
+    std::uint64_t m_activityTableSnapshotRecordingTick = 0;
     int m_activityTableSnapshotIndex = -1;           // 下方进程表当前绑定的历史样本，-1 表示实时列表。
     std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。
     std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次记录开始 steady tick。
     double m_activityTotalPhysicalMemoryMB = 0.0;    // 物理内存总量，用于把内存指标转换为百分比。
-    std::deque<ProcessActivitySample> m_activitySamples; // 有界双端记录缓存，淘汰旧样本时不搬移整个序列。
+    ks::process::ProcessActivityHistory<ProcessActivitySample> m_activitySamples; // canonical仅暴露已接受策略的精确范围，旧所有权延后在worker释放。
+    std::shared_ptr<ks::process::ProcessActivityHistoryRetirementLane<ProcessActivitySample>> m_activityHistoryRetirementLane =
+        std::make_shared<ks::process::ProcessActivityHistoryRetirementLane<ProcessActivitySample>>();
+    QTimer* m_activityHistoryRetirementTimer = nullptr;
     std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
+
+    // Tooltip 与摘要共用同一完整文档缓存；数据/身份/指标/语言变化均失效。
+    mutable bool m_activitySnapshotTextCacheValid = false;
+    mutable std::uint64_t m_activitySnapshotTextSequence = 0;
+    mutable std::uint64_t m_activitySnapshotTextRecordingTick = 0;
+    mutable std::uint64_t m_activitySnapshotTextFirstSequence = 0;
+    mutable std::uint64_t m_activitySnapshotTextLastSequence = 0;
+    mutable std::uint32_t m_activitySnapshotTextMetricMask = 0;
+    mutable double m_activitySnapshotTextMemoryMB = 0.0;
+    mutable std::vector<std::string> m_activitySnapshotTextSelectionKeys;
+    mutable QString m_activitySnapshotTextLanguageId;
+    mutable QString m_activitySnapshotTextCache;
 
     // ======== 进程表格 ========
     QTableView* m_processTable = nullptr;     // 进程列表表格视图（支持列拖动/排序/右键）。
@@ -1224,7 +1309,7 @@ private:
     QPushButton* m_threadColumnPresetBButton = nullptr; // B：地址/诊断列。
     QComboBox* m_threadScopeCombo = nullptr; // 全部 / System / ActiveExWorker 分类筛选。
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
-    QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
+    QTreeView* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
     ThreadColumnLayout m_threadColumnLayout = ThreadColumnLayout::PresetA; // 当前高亮预设，默认 A。
     bool m_threadApplyingColumnLayout = false; // 程序应用预设时屏蔽 header 手动变化信号。
 
@@ -1310,6 +1395,7 @@ private:
     QPlainTextEdit* m_createResultOutput = nullptr;
 
     // ======== 刷新调度 ========
+    bool m_processTableProjectionPending = false; // 隐藏期间数据更新，重显只投影最后状态。
     QTimer* m_refreshTimer = nullptr;         // 周期刷新定时器。
     bool m_monitoringEnabled = true;          // 当前是否处于监视状态。
     bool m_refreshInProgress = false;         // 防止并发刷新的互斥标记。
@@ -1325,13 +1411,22 @@ private:
     std::unordered_set<std::string> m_affinityRestoreCompletedIdentityKeys; // 已成功恢复或明确无规则的进程实例。
     std::unordered_map<std::string, AffinityRestoreRetryState> m_affinityRestoreRetryByIdentity; // 暂时失败且等待重试的进程实例。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
-    std::unique_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
+    std::shared_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
+    bool m_processNetworkBaselineResetRequired = true;
     bool m_processNetworkTrafficCaptureStarted = false; // ETW 采集器是否已经尝试启动。
     std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> m_cpuCoreUsageService; // 单个系统级 CSwitch 会话；后台快照任务共享生命周期。
     bool m_cpuCoreUsageCaptureStarted = false; // UI 线程状态：本轮监视周期内是否已经投递启动。
-    bool m_cpuCoreUsageStopInProgress = false; // UI 线程状态：异步 Stop/join 完成前禁止第二个会话。
     std::shared_ptr<std::atomic_bool> m_cpuCoreUsageCaptureDesired =
         std::make_shared<std::atomic_bool>(false); // 后台 Start 返回后读取的期望状态，解决快速开始/暂停竞态。
+    bool m_etwDemandSyncScheduled = false; // 合并详情/主窗口生命周期事件。
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_processNetworkCaptureOwner;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_cpuCoreCaptureOwner;
+    std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_processNetworkCaptureLifecycle =
+        std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
+    std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_cpuCoreCaptureLifecycle =
+        std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
+    int m_presentedLogicalCpuCount = 0; // CpuCore SizeHintRole source for the committed rows.
+    std::weak_ptr<const ks::process::CpuCoreUsageSnapshot> m_presentedCpuCoreUsageSnapshot; // owner identity only; does not retain the old sample.
     std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> m_latestCpuCoreUsageSnapshot; // 最近区间快照；UI 只交换共享指针，避免复制全量矩阵。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
@@ -1343,8 +1438,8 @@ private:
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。
     std::vector<std::string> m_trackedSelectedIdentityKeys; // 多选进程 identityKey 集合；Ctrl 复选后用于刷新恢复。
     int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
-    std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
-    std::unordered_map<std::string, ks::process::ThreadCounterSample> m_threadCounterSampleByIdentity; // 线程 CPU 差分基准。
+    std::shared_ptr<const std::vector<ks::process::SystemThreadRecord>> m_threadRecordList; // 线程页最近一次刷新结果缓存。
+    std::shared_ptr<const std::unordered_map<std::string, ks::process::ThreadCounterSample>> m_threadCounterSampleByIdentity; // 线程 CPU 差分基准。
     std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
     std::unordered_set<std::uint32_t> m_hiddenProcessPidSet; // 本会话已通过 R0 标记隐藏的 PID 集合。
     std::vector<ksword::ark::ProcessCrossViewEntry> m_processCrossViewCache; // R0 进程 cross-view 缓存。
@@ -1352,6 +1447,13 @@ private:
     ksword::ark::ProcessCrossViewResult m_lastProcessCrossViewResult; // 最近一次进程 cross-view 元信息。
     ksword::ark::ThreadCrossViewResult m_lastThreadCrossViewResult; // 最近一次线程 cross-view 元信息。
     bool m_crossViewRefreshInProgress = false; // Cross-View 后台查询互斥标记。
+    QTimer* m_crossViewFilterTimer = nullptr; // 公共筛选输入合并。
+    bool m_processCrossViewProjectionDirty = true;
+    bool m_threadCrossViewProjectionDirty = true;
+    bool m_crossViewProjectionQueued = false;
+    std::uint64_t m_crossViewProjectionRevision = 0;
+    QPointer<QObject> m_processCrossViewProjectionJob;
+    QPointer<QObject> m_threadCrossViewProjectionJob;
     std::uint64_t m_crossViewRefreshTicket = 0; // Cross-View 查询序号。
 
     // ======== 右键菜单绑定状态 ========
@@ -1365,6 +1467,15 @@ private:
     bool m_threadContextMenuVisible = false;     // 线程菜单弹出期间冻结线程刷新。
 
     // ======== 线程刷新调度 ========
+    QTimer* m_threadProjectionTimer = nullptr; // 合并搜索/范围投影请求。
+    bool m_threadSnapshotReady = false; // 成功收到一轮完整查询（含空结果）。
+    bool m_threadProjectionDirty = false; // 隐藏/合并更新延后投影。
+    QObject* m_threadPageVisibilityFilter = nullptr; // 派生析构前移除Show/Hide观察。
+    std::uint64_t m_threadProjectionTicket = 0; // 丢弃过期投影。
+    std::shared_ptr<std::atomic<bool>> m_threadProjectionCancel; // 纯索引排序取消。
+    bool m_threadProjectionInProgress = false; // 隐藏时取消未完成投影。
+    std::uint64_t m_threadContextActionCreateTime = 0; // 显示快照线程稳定身份。
+    std::uint64_t m_threadCounterGeneration = 0; // 显式暂停后旧基准不可复活。
     bool m_threadRefreshInProgress = false;      // 线程页是否存在进行中的后台刷新任务。
     std::uint64_t m_threadRefreshTicket = 0;     // 线程页刷新序号（用于丢弃过期结果）。
     bool m_initialRefreshScheduled = false;      // 首次显示时是否已安排首轮刷新。

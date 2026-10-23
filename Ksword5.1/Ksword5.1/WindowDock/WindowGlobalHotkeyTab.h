@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../UI/ImmutableValueTable.h"
 #include <QStringList>
 #include <QVector>
 #include <QWidget>
@@ -20,7 +21,7 @@ class WindowGlobalHotkeyTab final : public QWidget
 {
 public:
     explicit WindowGlobalHotkeyTab(QWidget* parent = nullptr);
-    ~WindowGlobalHotkeyTab() override = default;
+    ~WindowGlobalHotkeyTab() override;
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -39,17 +40,20 @@ private:
         const QString& processName,
         std::uint32_t diagnosticProcessCount);
     void finishRefresh(std::uint64_t ticket, qint64 elapsedMs);
-    void appendVisibleRows(const QVector<QStringList>& rows);
+    struct RowChunk;
     void rebuildTable();
     void showCopyMenu(const QPoint& position);
-    static QString rowClipboardText(QTableWidget* table, int row, bool includeHeader);
+    static QString rowClipboardText(ks::ui::ImmutableValueTable* table, int row, bool includeHeader);
 
     QLineEdit* m_filterEdit = nullptr;
     QPushButton* m_refreshButton = nullptr;
     QLabel* m_statusLabel = nullptr;
-    QTableWidget* m_table = nullptr;
+    ks::ui::ImmutableValueTable* m_table = nullptr;
     QTimer* m_flushTimer = nullptr;
-    QVector<QStringList> m_rows;
+    std::shared_ptr<const RowChunk> m_rows;
+    qsizetype m_rowCount = 0;
+    int m_sortColumnBeforeRefresh = -1;
+    Qt::SortOrder m_sortOrderBeforeRefresh = Qt::AscendingOrder;
     std::shared_ptr<PendingRefreshState> m_refreshState;
     bool m_refreshing = false;
     bool m_firstRefreshStarted = false;

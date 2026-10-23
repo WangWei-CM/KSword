@@ -68,6 +68,7 @@ namespace apimon
         std::wstring stopFlagPath;              // stopFlagPath：停止标记文件路径。
         std::wstring sessionId;                 // sessionId：UI 为每次启动生成的唯一会话标识，用于捕获短暂 stop/start 的配置切换。
         std::wstring agentDllPath;              // agentDllPath：当前 APIMonitor_x64.dll 路径，供子进程自动注入复用。
+        std::wstring controllerSid;             // controllerSid：创建会话的控制端 SID，用于 DWM/服务账户管道 ACL。
         ks::winapi_monitor::InjectionEndpoint injectionEndpoint;
         bool enableFile = true;                 // enableFile：是否启用文件 API Hook。
         bool enableRegistry = true;             // enableRegistry：是否启用注册表 API Hook。

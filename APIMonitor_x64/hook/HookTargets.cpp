@@ -2007,8 +2007,12 @@ namespace apimon
                 return false;
             }
 
-            const std::wstring sessionDirectory = ks::winapi_monitor::buildSessionDirectory();
-            (void)::CreateDirectoryW(sessionDirectory.c_str(), nullptr);
+            std::wstring sessionError;
+            if (!ks::winapi_monitor::addSessionDirectoryReader(childPidValue, &sessionError))
+            {
+                if (errorTextOut != nullptr) *errorTextOut = sessionError;
+                return false;
+            }
 
             const std::wstring childConfigPath = ks::winapi_monitor::buildConfigPathForPid(childPidValue);
             const std::wstring childStopPath = ks::winapi_monitor::buildStopFlagPathForPid(childPidValue);
@@ -2037,6 +2041,7 @@ namespace apimon
                 L"stop_flag_path=" + childStopPath + L"\r\n"
                 L"root_stop_flag_path=" + (configValue.rootStopFlagPath.empty() ? configValue.stopFlagPath : configValue.rootStopFlagPath) + L"\r\n"
                 L"session_id=" + configValue.sessionId + L"_" + std::to_wstring(childPidValue) + L"_" + std::to_wstring(::GetTickCount64()) + L"\r\n"
+                L"controller_sid=" + configValue.controllerSid + L"\r\n"
                 L"agent_dll_path=" + configValue.agentDllPath + L"\r\n"
                 L"injection_broker_pipe=" + configValue.injectionEndpoint.pipeName + L"\r\n"
                 L"injection_broker_token=" + configValue.injectionEndpoint.token + L"\r\n"
@@ -2096,6 +2101,10 @@ namespace apimon
             {
                 if (errorTextOut) *errorTextOut = L"Atomic child config commit failed. error=" + std::to_wstring(::GetLastError());
                 (void)::DeleteFileW(temporaryPath.c_str());
+                return false;
+            }
+            if (!ks::winapi_monitor::grantSessionFileRead(childConfigPath, childPidValue, errorTextOut))
+            {
                 return false;
             }
             if (::GetFileAttributesW(childStopPath.c_str()) != INVALID_FILE_ATTRIBUTES && !::DeleteFileW(childStopPath.c_str()))
@@ -6671,16 +6680,20 @@ namespace apimon
 #include "ApiCoverageReporting.inc"
 
         // RetryPendingHooksUnlocked 作用：
-        // - 输入：无，使用全局绑定表；
+        // - 输入：detailTextOut 可选，用于接收本轮仍无法安装的 Hook 诊断；
         // - 处理：在调用者已经持有 g_hookOperationMutex 时补装尚未安装的可重试 Hook；
-        // - 返回：无返回值，失败细节在后续 InstallConfiguredHooks 诊断中体现。
-        void RetryPendingHooksUnlocked()
+        // - 返回：无返回值，调用方可用诊断文本判断本轮是否仍有待重试失败。
+        void RetryPendingHooksUnlocked(std::wstring* detailTextOut)
         {
+            if (detailTextOut != nullptr)
+            {
+                detailTextOut->clear();
+            }
             for (HookBinding& bindingValue : g_bindings)
             {
-                (void)TryInstallBinding(bindingValue, nullptr);
+                (void)TryInstallBinding(bindingValue, detailTextOut);
             }
-            (void)InstallFakeSuccessHooks(nullptr);
+            (void)InstallFakeSuccessHooks(detailTextOut);
             (void)InstallRawFallbackHooks();
             RetryExtensionHooks();
             PublishConfiguredCoverage();
@@ -6695,7 +6708,7 @@ namespace apimon
             if (g_hookOperationMutex.try_lock())
             {
                 ScopedInlineHookInternalBypass hookOperationBypassScope;
-                RetryPendingHooksUnlocked();
+                RetryPendingHooksUnlocked(nullptr);
                 g_hookOperationMutex.unlock();
             }
         }
@@ -6774,11 +6787,11 @@ namespace apimon
         PublishConfiguredCoverage();
         return removed;
     }
-    void RetryPendingHooks()
+    void RetryPendingHooks(std::wstring* detailTextOut)
     {
         const std::lock_guard<std::mutex> lock(g_hookOperationMutex);
         ScopedInlineHookInternalBypass hookOperationBypassScope;
-        RetryPendingHooksUnlocked();
+        RetryPendingHooksUnlocked(detailTextOut);
     }
 }
 

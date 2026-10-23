@@ -209,8 +209,24 @@ namespace ks::ui
     // 作用：同一轮事件循环内无论调用多少次，信号只发一次；信号发出之前先清标志，
     // 这样槽里再改内容会再排一次，不会被"已排队"吞掉也不会递归。
     // 调用方法：任何会让某地址显示值变化的路径在改动落地之后调用。传入传出：无。
-    void HexCanvas::scheduleContentChanged()
+    void HexCanvas::scheduleContentChanged(std::optional<HexFetchRange> changedPages)
     {
+        if (!changedPages) ++m_contentEpoch;
+        else
+        {
+            constexpr auto pageBytes = ksword::memwb::HexViewport::kPageBytes;
+            for (std::uint64_t index = 0; index < changedPages->pageCount; ++index)
+            {
+                if (index > (UINT64_MAX - changedPages->firstPageStart) / pageBytes) break;
+                const auto page = changedPages->firstPageStart + index * pageBytes;
+                if (m_viewport.IsPageCached(page)) m_pageContentVersions[page] = ++m_nextPageContentVersion;
+            }
+        }
+        // The signature book follows the existing bounded cache, not every address
+        // ever browsed. Presence flags below also detect eviction of an input page.
+        for (auto it = m_pageContentVersions.begin(); it != m_pageContentVersions.end();)
+            if (!m_viewport.IsPageCached(it->first)) it = m_pageContentVersions.erase(it);
+            else ++it;
         if (m_contentChangedQueued)
         {
             return;
@@ -359,7 +375,7 @@ namespace ks::ui
         {
             // 被接受的页：该页地址的值从"未加载"变成了真实字节（也可能淘汰了别的页），排队通知订阅者。
             viewport()->update();
-            scheduleContentChanged();
+            scheduleContentChanged(HexFetchRange{pageStart, 1, 0});
         }
         return result;
     }
@@ -375,7 +391,7 @@ namespace ks::ui
         if (result == PageResult::Accepted)
         {
             viewport()->update();
-            scheduleContentChanged();
+            scheduleContentChanged(range);
         }
         return result;
     }
@@ -541,6 +557,31 @@ namespace ks::ui
             }
         }
         return result;
+    }
+
+    std::optional<std::vector<std::uint64_t>> HexCanvas::contentStamp(
+        std::uint64_t address, std::uint64_t length) const
+    {
+        if (!m_hasSpace || !length || length - 1 > UINT64_MAX - address) return std::nullopt;
+        const auto last = address + length - 1;
+        if (address < m_viewport.FirstAddress() || last > m_viewport.LastAddress()) return std::nullopt;
+        constexpr auto pageBytes = ksword::memwb::HexViewport::kPageBytes;
+        const auto firstPage = ksword::memwb::HexViewport::PageStartOf(address);
+        const auto lastPage = ksword::memwb::HexViewport::PageStartOf(last);
+        const auto pages = (lastPage - firstPage) / pageBytes + 1;
+        if (pages > ksword::memwb::HexViewport::kMaxCachedPages) return std::nullopt;
+        std::vector<std::uint64_t> stamp{m_viewport.SourceRevision(), m_contentEpoch};
+        stamp.reserve(2 + static_cast<std::size_t>(pages) * 4);
+        for (std::uint64_t i = 0; i < pages; ++i)
+        {
+            const auto page = firstPage + i * pageBytes;
+            const auto found = m_pageContentVersions.find(page);
+            stamp.push_back(page);
+            stamp.push_back(found != m_pageContentVersions.end() ? found->second : 0);
+            stamp.push_back(m_viewport.IsPageCached(page));
+            stamp.push_back(m_viewport.IsPageInFlight(page));
+        }
+        return stamp;
     }
 
     // 换新代次、清缓存并重新请求可见页。

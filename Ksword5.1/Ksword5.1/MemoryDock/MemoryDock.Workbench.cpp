@@ -75,21 +75,62 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
-void MemoryDock::prepareNavigationPages()
+bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep, const bool useColdBodies)
 {
-    if (m_navigationPagesPrepared || m_tabWidget == nullptr)
+    if (currentPageOnly)
     {
-        return;
+        const QPointer<MemoryDock> owner(this);
+        ensureCurrentLazyPage();
+        if (!owner || !m_tabWidget) { return true; }
+        const QPointer<QWidget> current(m_tabWidget->currentWidget());
+        if (current && current == m_tabWorkbench) { ensureWorkbenchView(); }
+        if (!owner || !current || !m_tabWidget || m_tabWidget->currentWidget() != current) { return true; }
+        if (current == m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
+        return true;
+    }
+    if (m_navigationPagesPrepared || !m_tabWidget) { return true; }
+    if (m_navigationPagePreparing) { return false; }
+    if (!useColdBodies && m_navigationSkippedColdBodies)
+    {
+        m_navigationPrepareCursor = 0;
+        m_navigationSkippedColdBodies = false;
     }
 
-    // 目录/搜索请求是显式导航需求：准备真实工作台与调试页，确保嵌套 Tab 的控件
-    // 进入统一索引；不切换当前页、不枚举进程，首次展示仍由各页自己的 showEvent 负责。
-    ensureWorkbenchView();
-    if (m_memoryDebugPage != nullptr)
+    const QPointer<MemoryDock> owner(this);
+    // The registered roots, workbench and debug view keep their original order.
+    // The cursor survives a cancelled query; no factory is discarded or selected.
+    const int lazyCount = static_cast<int>(m_lazyPages.size());
+    const int total = lazyCount + 2;
+    if (m_navigationPrepareCursor >= total) { return true; }
+    do
     {
-        m_memoryDebugPage->prepareForNavigation();
-    }
-    m_navigationPagesPrepared = true;
+        const int index = m_navigationPrepareCursor;
+        m_navigationPagePreparing = true;
+        try
+        {
+            if (index < lazyCount)
+            {
+                const auto& page = m_lazyPages[index];
+                if (useColdBodies && !page.ready &&
+                    (page.id == QLatin1String("process_pte") || page.id == QLatin1String("search")))
+                    m_navigationSkippedColdBodies = true;
+                else { const QString id = page.id; ensureLazyPage(id); }
+            }
+            else if (index == lazyCount) { ensureWorkbenchView(); }
+            else if (m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
+        }
+        catch (...)
+        {
+            if (owner) { m_navigationPagePreparing = false; }
+            throw;
+        }
+        if (!owner) { return true; }
+        m_navigationPagePreparing = false;
+        ++m_navigationPrepareCursor;
+    } while (!singleStep && m_navigationPrepareCursor < total);
+    const bool complete = m_navigationPrepareCursor >= total;
+    m_navigationPagesPrepared = complete && !m_navigationSkippedColdBodies;
+    return complete;
 }
 
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。
@@ -97,12 +138,16 @@ void MemoryDock::prepareNavigationPages()
 // 再创建视图、注入服务、加载设置，最后连接信号并回放"创建之前已经发生的附加"。
 void MemoryDock::ensureWorkbenchView()
 {
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWorkbench); // 服务与接线完成后补可见主题。
-    // 已创建或容器页不存在时直接返回。
+    // 已创建分支只消费真实待刷新主题；普通往返不再登记构造首帧守卫。
     if (m_workbenchView != nullptr || m_tabWorkbench == nullptr)
     {
+        if (m_tabWorkbench != nullptr && m_tabWorkbench->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_tabWorkbench);
+        }
         return;
     }
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_tabWorkbench); // 服务与接线完成后补可见主题。
 
     // 1) 共享对象配置（幂等；被拒绝时它自己写 err 日志，不抛异常）。
     ks::ui::workbench_dock::ConfigureShared();
@@ -257,52 +302,78 @@ void MemoryDock::workbenchOnDetached()
 
 // workbenchAllowsProcessChange：附加/分离之前问一次工作台的离开守卫。
 // 视图尚未创建时没有任何东西要问；创建后守卫会按需弹暂存三选一与 int3 三选一。
-bool MemoryDock::workbenchAllowsProcessChange()
+ks::ui::LeaveEntryStatus MemoryDock::workbenchAllowsProcessChange(ks::ui::LeaveCompletion completion)
 {
     if (m_workbenchView == nullptr)
     {
-        return true;
+        return ks::ui::LeaveEntryStatus::Completed;
     }
     // 工作台钉在别的进程/内核/物理范围时，Dock 的附加或分离与它的会话无关，不该为此打扰用户：
     // 只有"跟随 Dock 且范围为进程"这类确实会改变会话的情形才问守卫。
     if (!m_workbenchView->target().wouldChangeOnDockAttach())
     {
-        return true;
+        return ks::ui::LeaveEntryStatus::Completed;
     }
-    return m_workbenchView->requestLeave(ks::ui::LeaveReason::DockAttachChange);
+    return m_workbenchView->requestLeave(ks::ui::LeaveReason::DockAttachChange, std::move(completion));
 }
 
 // confirmWorkbenchQuit：单详情窗兼容包装；全局退出直接使用下面两个阶段。
-bool MemoryDock::confirmWorkbenchQuit()
+ks::ui::LeaveEntryStatus MemoryDock::confirmWorkbenchQuit(ks::ui::LeaveCompletion completion)
 {
-    const QPointer<MemoryDock> self(this); // 许可及释放都可能进入嵌套事件循环。
-    const bool allowed = prepareWorkbenchQuit() && self && releaseWorkbenchExecutionForQuit();
-    if (self && !allowed)
+    const QPointer<MemoryDock> self(this);
+    const auto prepared = prepareWorkbenchQuit([self, completion = std::move(completion)](bool allowed) mutable {
+        if (!self) return;
+        const bool released = allowed && self->releaseWorkbenchExecutionForQuit();
+        if (!self) return;
+        if (!released) self->cancelWorkbenchQuit();
+        if (completion) completion(released);
+    });
+    if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+    if (prepared != ks::ui::LeaveEntryStatus::Completed)
     {
-        cancelWorkbenchQuit();
+        if (prepared != ks::ui::LeaveEntryStatus::Pending) cancelWorkbenchQuit();
+        return prepared;
     }
-    return self && allowed;
+    if (releaseWorkbenchExecutionForQuit() && self) return ks::ui::LeaveEntryStatus::Completed;
+    if (self) cancelWorkbenchQuit();
+    return ks::ui::LeaveEntryStatus::Rejected;
 }
 
-bool MemoryDock::prepareWorkbenchQuit()
+ks::ui::LeaveEntryStatus MemoryDock::prepareWorkbenchQuit(ks::ui::LeaveCompletion completion)
 {
-    const QPointer<MemoryDock> self(this); // 普通工作台确认后须先探活，再访问独立页。
-    if (m_workbenchView != nullptr && !m_workbenchView->confirmQuit())
+    const QPointer<MemoryDock> self(this);
+    if (m_workbenchView != nullptr)
     {
-        return false;
+        const auto status = m_workbenchView->confirmQuit([self, completion](bool allowed) mutable {
+            if (!self) return;
+            if (!allowed) { if (completion) completion(false); return; }
+            const auto debug = self->prepareMemoryDebugQuit(completion);
+            if (self && debug != ks::ui::LeaveEntryStatus::Pending && completion)
+                completion(debug == ks::ui::LeaveEntryStatus::Completed);
+        });
+        if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+        if (status != ks::ui::LeaveEntryStatus::Completed) return status;
     }
-    if (!self)
-    {
-        return false;
-    }
+    return prepareMemoryDebugQuit(std::move(completion));
+}
+
+ks::ui::LeaveEntryStatus MemoryDock::prepareMemoryDebugQuit(ks::ui::LeaveCompletion completion)
+{
     if (m_workbenchView != nullptr && !m_workbenchQuitPrepared)
     {
         m_workbenchEnabledBeforeQuit = m_workbenchView->isEnabledTo(this);
         m_workbenchQuitPrepared = true;
-        m_workbenchView->setEnabled(false); // 防止后续 Dock 模态确认期间新增未确认的暂存。
+        m_workbenchView->setEnabled(false);
     }
-    // 独立页可留有暂存补丁；主窗口停止驱动前必须同时通过这份会话的离开守卫。
-    return m_memoryDebugPage == nullptr || m_memoryDebugPage->confirmQuit();
+    return m_memoryDebugPage == nullptr ? ks::ui::LeaveEntryStatus::Completed
+        : m_memoryDebugPage->confirmQuit(std::move(completion));
+}
+
+bool MemoryDock::workbenchQuitPreparationCurrent()
+{
+    const QPointer<MemoryDock> self(this);
+    if (m_workbenchView && (!m_workbenchQuitPrepared || !m_workbenchView->quitPreparationCurrent())) return false;
+    return self && (!m_memoryDebugPage || m_memoryDebugPage->quitPreparationCurrent());
 }
 
 bool MemoryDock::releaseWorkbenchExecutionForQuit()
@@ -355,7 +426,8 @@ bool MemoryDock::navigateWorkbench(const ks::ui::NavRequest& request)
     }
     // 先切页签（会触发 currentChanged，但视图已存在，ensureWorkbenchView 是空操作）再跳转。
     m_tabWidget->setCurrentWidget(m_tabWorkbench);
-    return m_workbenchView->openAt(request) == ks::ui::NavStatus::Ok;
+    const auto status = m_workbenchView->openAt(request);
+    return status == ks::ui::NavStatus::Ok || status == ks::ui::NavStatus::Pending;
 }
 
 // jumpToAddress：统一的"跳到地址"分发器（本 Dock 附加进程的用户态地址）。

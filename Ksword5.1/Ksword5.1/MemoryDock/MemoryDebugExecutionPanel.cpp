@@ -82,6 +82,19 @@ namespace ks::ui
             return result;
         }
 
+        // 精确比较规范显示值，包含同一 stopId 下更新的寄存器，不依赖协议结构填充字节。
+        template<class Snapshot>
+        std::array<std::uint64_t, 28> RegisterDocumentKey(const std::uint64_t backend,
+            const std::uint64_t epoch, const std::uint64_t session, const std::uint64_t stop,
+            const std::uint64_t pid, const std::uint64_t creation, const std::uint64_t tid,
+            const std::uint64_t threadCreation, const std::uint64_t reason, const std::uint64_t cr3,
+            const Snapshot& s)
+        {
+            return {backend, epoch, session, stop, pid, creation, tid, threadCreation, reason, cr3,
+                s.rip, s.rsp, s.rflags, s.rax, s.rbx, s.rcx, s.rdx, s.rbp, s.rsi, s.rdi,
+                s.r8, s.r9, s.r10, s.r11, s.r12, s.r13, s.r14, s.r15};
+        }
+
         // 两种后端共用具名整数寄存器字段；DR/XSTATE 的能力不得被模板补零冒充。
         template<class Snapshot>
         void AddRegisters(FieldDocument& doc, const Snapshot& s)
@@ -254,6 +267,7 @@ namespace ks::ui
         threads_.clear();
         thread_->clear();
         document_ = {};
+        documentKeyValid_ = false;
         stopId_ = 0;
         ownsPause_ = false;
         stopped_ = false;
@@ -294,6 +308,7 @@ namespace ks::ui
         connected_ = false;
         stopped_ = false;
         stopId_ = 0;
+        documentKeyValid_ = false;
         fastPollBudget_ = 0;
         updateActions();
         return true;
@@ -610,6 +625,16 @@ namespace ks::ui
         fastPollBudget_ = 0;
         const bool newStop = stopId_ != result.stopId; // 轮询相同停点不能重复抢占地址。
         stopId_ = result.stopId;
+        const auto key = RegisterDocumentKey(1, epoch_, 0, stopId_, pid_, creation_,
+            result.snapshot.threadId, 0, 0, 0, result.snapshot);
+        const auto language = ks::i18n::LanguageManager::instance().currentLanguageId();
+        if (!newStop && documentKeyValid_ && documentKey_ == key && documentLanguage_ == language)
+        {
+            return;
+        }
+        documentKey_ = key;
+        documentLanguage_ = language;
+        documentKeyValid_ = true;
         document_ = {};
         document_.title = T("不附加寄存器现场");
         document_.section(T("现场身份"));
@@ -706,6 +731,17 @@ namespace ks::ui
         fastPollBudget_ = 0;
         const bool newStop = stopId_ != response.stopId; // 同一停点的状态轮询保持用户地址。
         stopId_ = response.stopId;
+        const auto key = RegisterDocumentKey(2, epoch_, response.sessionId, stopId_, response.processId,
+            response.processCreationTime, response.threadId, response.threadCreationTime,
+            response.stopReason, response.cr3, response);
+        const auto language = ks::i18n::LanguageManager::instance().currentLanguageId();
+        if (!newStop && documentKeyValid_ && documentKey_ == key && documentLanguage_ == language)
+        {
+            return;
+        }
+        documentKey_ = key;
+        documentLanguage_ = language;
+        documentKeyValid_ = true;
         document_ = {};
         document_.title = T("不附加寄存器现场");
         document_.section(T("现场身份"));

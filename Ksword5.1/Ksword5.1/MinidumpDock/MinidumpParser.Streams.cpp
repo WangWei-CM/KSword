@@ -772,10 +772,22 @@ namespace ks::minidump::detail
         }
     }
 
+    ThreadIdIndex BuildThreadIdIndex(const std::vector<ThreadEntry>& threads)
+    {
+        ThreadIdIndex result;
+        result.reserve(threads.size());
+        for (std::size_t index = 0; index < threads.size(); ++index)
+        {
+            result.emplace(threads[index].threadId, index);
+        }
+        return result;
+    }
+
     void ParseThreadInfoList(
         const DumpFileView& view,
         const MINIDUMP_LOCATION_DESCRIPTOR& location,
-        DumpParseResult& result)
+        DumpParseResult& result,
+        const ThreadIdIndex& threadIndex)
     {
         MINIDUMP_THREAD_INFO_LIST header{};
         if (!view.readStruct(location.Rva, &header) ||
@@ -796,12 +808,10 @@ namespace ks::minidump::detail
                 break;
             }
             // 命中已解析线程时补充起始地址与 CPU 时间（100ns → 毫秒）。
-            for (ThreadEntry& entry : result.threads)
+            const auto found = threadIndex.find(info.ThreadId);
+            if (found != threadIndex.end())
             {
-                if (entry.threadId != info.ThreadId)
-                {
-                    continue;
-                }
+                ThreadEntry& entry = result.threads[found->second];
                 entry.startAddress = info.StartAddress;
                 const double userMs = static_cast<double>(info.UserTime) / 10000.0;
                 const double kernelMs = static_cast<double>(info.KernelTime) / 10000.0;
@@ -811,7 +821,6 @@ namespace ks::minidump::detail
                         .arg(QString::number(userMs, 'f', 1))
                         .arg(QString::number(kernelMs, 'f', 1));
                 }
-                break;
             }
         }
     }
@@ -819,7 +828,8 @@ namespace ks::minidump::detail
     void ParseThreadNames(
         const DumpFileView& view,
         const MINIDUMP_LOCATION_DESCRIPTOR& location,
-        DumpParseResult& result)
+        DumpParseResult& result,
+        const ThreadIdIndex& threadIndex)
     {
         MinidumpThreadNameHeader header{};
         if (!view.readStruct(location.Rva, &header))
@@ -842,13 +852,10 @@ namespace ks::minidump::detail
             {
                 continue;
             }
-            for (ThreadEntry& thread : result.threads)
+            const auto found = threadIndex.find(entry.ThreadId);
+            if (found != threadIndex.end())
             {
-                if (thread.threadId == entry.ThreadId)
-                {
-                    thread.name = threadName;
-                    break;
-                }
+                result.threads[found->second].name = threadName;
             }
         }
     }

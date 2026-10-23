@@ -10,9 +10,12 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QStringList>
+#include <QHash>
+#include "../ksword/service/service.h"
 
 #include <atomic>   // std::atomic_bool：后台刷新状态标记。
 #include <cstdint>  // std::uint32_t：PID 等数值字段。
@@ -32,6 +35,7 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QShowEvent;
+class QHideEvent;
 class QSplitter;
 class QSpinBox;
 class QTableWidget;
@@ -39,12 +43,17 @@ class QToolButton;
 class QTabWidget;
 class QVBoxLayout;
 class CodeEditorWidget;
+class QTimer;
+namespace ks::ui { class AsyncOperation; }
 
 class ServiceDock final : public QWidget
 {
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ServiceDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：
     // - 初始化 ServiceDock UI；
     // - 绑定交互逻辑；
@@ -67,6 +76,7 @@ protected:
     // - 页面第一次显示时发起首轮服务刷新；
     // - 避免主窗口启动阶段被全量服务枚举阻塞。
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 public:
     // ServiceColumn：
@@ -129,6 +139,8 @@ public:
     static int toServiceColumn(ServiceColumn column);
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // ServiceRecoverySettings：
     // - 作用：缓存“恢复”页可编辑配置；
     // - 供读取 Win32 配置、回填 UI、保存回服务配置三处复用。
@@ -146,6 +158,54 @@ private:
         bool appendFailureCount = false;                    // appendFailureCount：是否追加 /fail=%1%。
     };
 
+    enum class DetailKind { Recovery, Dependency, Audit };
+    struct ServiceDetailResult
+    {
+        QString serviceName;
+        std::uint64_t revision = 0;
+        DetailKind kind = DetailKind::Recovery;
+        ServiceRecoverySettings recovery;
+        QString error;
+        bool queryOk = false;
+        bool stopped = false;
+        ks::ui::FieldDocument document;
+    };
+    void requestCurrentDetail();
+    void applyCurrentDetail(const ServiceDetailResult& result);
+    void reconcileDetailReceipt();
+    void setDetailUnavailable(DetailKind kind, const QString& text);
+
+    enum class ConfigWriteKind { General, Logon, Recovery, StartType };
+    struct ConfigWritePayload
+    {
+        ks::service::ServiceConfigUpdate update;
+        ~ConfigWritePayload();
+    };
+    struct ConfigWriteRequest
+    {
+        ServiceEntry entry;
+        ConfigWriteKind kind = ConfigWriteKind::General;
+        std::shared_ptr<ConfigWritePayload> payload;
+        ServiceRecoverySettings recovery;
+        QString description;
+        bool delayedAuto = false;
+        std::uint64_t detailRevision = 0;
+        QString failureText;
+        int progressPid = 0;
+    };
+    struct ConfigWriteResult
+    {
+        ServiceEntry readback;
+        ServiceRecoverySettings recovery;
+        QString writeError, descriptionError, delayedError, readbackError, recoveryReadbackError;
+        std::uint32_t errorCode = 0, delayedErrorCode = 0;
+        bool writeOk = false, snapshotOk = false, readbackOk = false, recoveryReadbackOk = false;
+    };
+    static ConfigWriteResult executeConfigWrite(const ConfigWriteRequest& request);
+    bool submitConfigWrite(ConfigWriteRequest request);
+    void reconcileConfigReceipt();
+    void updateConfigUiState();
+
     // ===================== 初始化 =====================
     void initializeUi();
     void initializeToolbar();
@@ -155,26 +215,36 @@ private:
 
     // ===================== 刷新与枚举 =====================
     void requestAsyncRefresh(bool forceRefresh);
-    void applyRefreshResult(std::vector<ServiceEntry> serviceList, const QString& errorText, bool success);
-    void enumerateServiceList(std::vector<ServiceEntry>* serviceListOut, QString* errorTextOut) const;
+    struct ServiceRefreshResult {
+        int progressPid = 0;
+        std::shared_ptr<std::vector<ServiceEntry>> rows;
+        QString errorText;
+        bool success = false;
+        bool stopped = false;
+    };
+    bool applyRefreshResult(const ServiceRefreshResult& result, std::uint64_t ticket);
+    void reconcileRefreshState();
+    static void enumerateServiceList(std::vector<ServiceEntry>* serviceListOut, QString* errorTextOut,
+        const std::function<bool()>& shouldStop);
     bool querySingleServiceByName(const QString& serviceNameText, ServiceEntry* entryOut, QString* errorTextOut) const;
 
     // ===================== 列表与详情 =====================
-    void rebuildServiceTable();
+    void rebuildServiceTable(bool preserveDetailEdits = false);
+    void applyServiceTableFilter();
     bool entryMatchesCurrentFilter(const ServiceEntry& entry) const;
     bool serviceLessThan(const ServiceEntry& left, const ServiceEntry& right) const;
     void updateSummaryText();
-    void syncToolbarStateWithSelection();
+    void syncToolbarStateWithSelection(bool preserveEdits = false);
     void onServiceSelectionChanged();
     void updateDetailViewsFromSelection();
-    ks::ui::FieldDocument buildAuditTabText(const ServiceEntry& entry) const;
+    static ks::ui::FieldDocument buildAuditTabText(const ServiceEntry& entry, int visibleCount, const std::function<bool()>& shouldStop);
     QString buildBasicInfoText(const ServiceEntry& entry) const;
     QString buildConfigInfoText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildDependencyDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildTriggerDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildSecurityDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildRiskDetailText(const ServiceEntry& entry) const;
-    ks::ui::FieldDocument buildExportDetailText(const ServiceEntry& entry) const;
+    static ks::ui::FieldDocument buildDependencyDetailText(const ServiceEntry& entry, const QHash<QString, DWORD>& states, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildTriggerDetailText(const ServiceEntry& entry, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildSecurityDetailText(const ServiceEntry& entry, const std::function<bool()>& shouldStop);
+    static ks::ui::FieldDocument buildRiskDetailText(const ServiceEntry& entry);
+    static ks::ui::FieldDocument buildExportDetailText(const ServiceEntry& entry, int visibleCount);
     void initializeGeneralTab();
     void initializeLogonTab();
     void initializeRecoveryTab();
@@ -215,6 +285,7 @@ private:
     void jumpToFileDockBinaryDetail();
     void jumpToFileDockServiceDllDetail();
     void exportCurrentListAsTsv();
+    void reconcileExportReceipt();
     void exportSelectedServiceAsJson();
     bool controlSelectedService(
         DWORD desiredAccess,
@@ -230,14 +301,15 @@ private:
     void applyServiceUpdateToCache(const ServiceEntry& updatedEntry);
     QString queryServiceDllPathByName(const QString& serviceNameText) const;
     bool isServiceFilePresent(const QString& filePathText) const;
-    bool queryServiceFailureSettings(
+    static bool queryServiceFailureSettings(
         const QString& serviceNameText,
         ServiceRecoverySettings* settingsOut,
-        QString* errorTextOut) const;
-    bool applyServiceFailureSettings(
+        QString* errorTextOut,
+        bool* completeOut = nullptr);
+    static bool applyServiceFailureSettings(
         const QString& serviceNameText,
         const ServiceRecoverySettings& settings,
-        QString* errorTextOut) const;
+        QString* errorTextOut);
 
 private:
     // ===================== 顶层布局 =====================
@@ -329,11 +401,29 @@ private:
     ks::ui::StructuredFieldView* m_dependencyEditor = nullptr;   // m_dependencyEditor：依存关系文本编辑器（只读）。
     ks::ui::StructuredFieldView* m_auditEditor = nullptr;        // m_auditEditor：审计文本编辑器（只读）。
 
+    std::unique_ptr<ks::ui::AsyncOperation> m_configOperation;
+    bool m_configPendingReceipt = false;
+    QLabel* m_recoveryStatusLabel = nullptr;
+    QWidget* m_recoveryFields = nullptr;
+    std::unique_ptr<ks::ui::AsyncOperation> m_detailOperation;
+    std::shared_ptr<const ServiceDetailResult> m_detailResults[3];
+    QHash<QString, DWORD> m_detailServiceStates;
+    std::uint64_t m_detailRevision = 0;
+    std::uint64_t m_detailPendingRevision = 0;
+    DetailKind m_detailPendingKind = DetailKind::Recovery;
+    bool m_detailPendingReceipt = false;
+
     // ===================== 数据与状态 =====================
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
+    QHash<QString, int> m_serviceIndexByName;
+    QTimer* m_filterDebounceTimer = nullptr;
+    bool m_serviceRowsDirty = false;
+    int m_visibleServiceCount = 0;
     std::vector<ServiceEntry> m_serviceList;          // m_serviceList：服务缓存列表。
     std::atomic_bool m_refreshInProgress{ false };    // m_refreshInProgress：后台刷新进行中标志。
     std::atomic_bool m_refreshQueued{ false };        // m_refreshQueued：刷新排队标志。
-    std::unique_ptr<std::thread> m_refreshThread;     // m_refreshThread：后台枚举线程句柄。
+    std::unique_ptr<ks::ui::AsyncOperation> m_refreshOperation;     // m_refreshThread：后台枚举线程句柄。
     bool m_initialRefreshDone = false;                // m_initialRefreshDone：首轮懒加载完成标志。
     int m_progressPid = 0;                            // m_progressPid：当前进度任务 PID。
     QString m_pendingFocusServiceName;                // m_pendingFocusServiceName：跨页跳转待定位服务名。

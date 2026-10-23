@@ -77,8 +77,14 @@ namespace
     bool parseGroupObject(
         const QJsonObject& groupObject,
         CallbackRuleGroupModel* groupOut,
-        QStringList* warningListOut)
+        QStringList* warningListOut,
+        const ks::i18n::SourceTextSnapshot* translator)
     {
+        const auto kernelText = [translator](const char* key, const QString& source) {
+            return translator ? translator->contextText(QString::fromLatin1(key), source)
+                : ksword::kernel_dock_internal::kernelText(key, source);
+        };
+
         if (groupOut == nullptr)
         {
             return false;
@@ -111,8 +117,14 @@ namespace
     bool parseRuleObject(
         const QJsonObject& ruleObject,
         CallbackRuleModel* ruleOut,
-        QStringList* warningListOut)
+        QStringList* warningListOut,
+        const ks::i18n::SourceTextSnapshot* translator)
     {
+        const auto kernelText = [translator](const char* key, const QString& source) {
+            return translator ? translator->contextText(QString::fromLatin1(key), source)
+                : ksword::kernel_dock_internal::kernelText(key, source);
+        };
+
         if (ruleOut == nullptr)
         {
             return false;
@@ -191,8 +203,13 @@ namespace
     }
 }
 
-QString callbackTypeToDisplayText(const quint32 callbackType)
+QString callbackTypeToDisplayText(const quint32 callbackType, const ks::i18n::SourceTextSnapshot* translator)
 {
+    const auto kernelText = [translator](const char* key, const QString& source) {
+        return translator ? translator->contextText(QString::fromLatin1(key), source)
+            : ksword::kernel_dock_internal::kernelText(key, source);
+    };
+
     switch (callbackType)
     {
     case KSWORD_ARK_CALLBACK_TYPE_REGISTRY: return kernelText("kernel.callback.rules.type.registry", QStringLiteral("注册表"));
@@ -205,8 +222,13 @@ QString callbackTypeToDisplayText(const quint32 callbackType)
     }
 }
 
-QString callbackActionToDisplayText(const quint32 actionType)
+QString callbackActionToDisplayText(const quint32 actionType, const ks::i18n::SourceTextSnapshot* translator)
 {
+    const auto kernelText = [translator](const char* key, const QString& source) {
+        return translator ? translator->contextText(QString::fromLatin1(key), source)
+            : ksword::kernel_dock_internal::kernelText(key, source);
+    };
+
     switch (actionType)
     {
     case KSWORD_ARK_RULE_ACTION_ALLOW: return kernelText("kernel.callback.rules.action.allow", QStringLiteral("允许"));
@@ -218,8 +240,13 @@ QString callbackActionToDisplayText(const quint32 actionType)
     }
 }
 
-QString callbackMatchModeToDisplayText(const quint32 matchMode)
+QString callbackMatchModeToDisplayText(const quint32 matchMode, const ks::i18n::SourceTextSnapshot* translator)
 {
+    const auto kernelText = [translator](const char* key, const QString& source) {
+        return translator ? translator->contextText(QString::fromLatin1(key), source)
+            : ksword::kernel_dock_internal::kernelText(key, source);
+    };
+
     switch (matchMode)
     {
     case KSWORD_ARK_MATCH_MODE_EXACT: return kernelText("kernel.callback.rules.match.exact", QStringLiteral("精确匹配"));
@@ -318,8 +345,14 @@ bool importCallbackConfigFromJson(
     const QByteArray& jsonBytes,
     CallbackConfigDocument* configOut,
     QStringList* warningListOut,
-    QString* errorTextOut)
+    QString* errorTextOut,
+    const ks::i18n::SourceTextSnapshot* translator)
 {
+    const auto kernelText = [translator](const char* key, const QString& source) {
+        return translator ? translator->contextText(QString::fromLatin1(key), source)
+            : ksword::kernel_dock_internal::kernelText(key, source);
+    };
+
     if (configOut == nullptr)
     {
         if (errorTextOut != nullptr)
@@ -407,7 +440,7 @@ bool importCallbackConfigFromJson(
             continue;
         }
         CallbackRuleGroupModel groupModel;
-        if (parseGroupObject(groupValue.toObject(), &groupModel, warningListOut))
+        if (parseGroupObject(groupValue.toObject(), &groupModel, warningListOut, translator))
         {
             importedDocument.groups.push_back(groupModel);
         }
@@ -420,7 +453,7 @@ bool importCallbackConfigFromJson(
             continue;
         }
         CallbackRuleModel ruleModel;
-        if (parseRuleObject(ruleValue.toObject(), &ruleModel, warningListOut))
+        if (parseRuleObject(ruleValue.toObject(), &ruleModel, warningListOut, translator))
         {
             importedDocument.rules.push_back(ruleModel);
         }

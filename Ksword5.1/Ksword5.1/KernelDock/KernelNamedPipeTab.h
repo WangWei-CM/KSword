@@ -11,6 +11,8 @@
 #include "KernelNamedPipeWorker.h"
 
 #include <QWidget>
+#include "../UI/FlatTableModel.h"
+#include <memory>
 
 #include <cstdint>
 #include <vector>
@@ -21,8 +23,10 @@ class QPoint;
 class QPushButton;
 #include "../UI/StructuredFieldView.h"
 class QResizeEvent;
-class QTreeWidget;
-class QTreeWidgetItem;
+class QTableView;
+class QTimer;
+class QShowEvent;
+
 class QVBoxLayout;
 class QHBoxLayout;
 
@@ -69,7 +73,7 @@ private:
     // - 输入 refreshTicket：刷新序号；snapshot：worker 返回结果；
     // - 处理逻辑：丢弃过期结果，重建表格和详情面板；
     // - 返回结果：无。
-    void applySnapshot(std::uint64_t refreshTicket, const KernelNamedPipeSnapshot& snapshot);
+    void applySnapshot(std::uint64_t refreshTicket, std::shared_ptr<KernelNamedPipeSnapshot> snapshot);
 
     // rebuildTable：
     // - 输入：无；
@@ -114,6 +118,9 @@ private:
     void applyAdaptiveColumnWidths();
 
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    using Model = ks::ui::FlatTableModel<KernelNamedPipeEntry>;
+    class PipeFilter;
 
 private:
     QVBoxLayout* m_rootLayout = nullptr;
@@ -123,10 +130,12 @@ private:
     QPushButton* m_detailButton = nullptr;
     QLineEdit* m_filterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
-    QTreeWidget* m_resultTable = nullptr;
+    QTableView* m_resultTable = nullptr;
+    Model* m_model = nullptr;
+    PipeFilter* m_proxy = nullptr;
+    QTimer* m_filterTimer = nullptr;
     ks::ui::StructuredFieldView* m_detailEdit = nullptr;
 
-    std::vector<KernelNamedPipeEntry> m_rows;
     KernelNamedPipeSnapshot m_lastSnapshot;
     bool m_refreshInProgress = false;
     bool m_refreshPending = false;

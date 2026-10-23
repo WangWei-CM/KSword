@@ -12,6 +12,7 @@
 // ============================================================
 
 #include <QString>
+#include <QVariant>
 #include <QtGlobal>
 
 class QTableWidget;
@@ -37,6 +38,9 @@ namespace ks::ui::integrity
     //   但 riskText 仍会写出来）；
     // - Clean：0。
     Tier tierOf(quint32 riskFlags);
+
+    // Shared model/item color and tooltip roles; reads current theme on the GUI thread.
+    QVariant riskRoleData(quint32 riskFlags, int role);
 
     // 整行高亮：对该行每一列设前景色+底色，tooltip 设成 detailText（空则用 riskText）。
     // Tier::Clean 必须把该行每个单元格的 Foreground/Background 清回 QBrush()，

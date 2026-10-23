@@ -21,6 +21,7 @@
 #include <cstdint>      // 固定宽度整数：PID/端口/长度等。
 #include <cstring>      // std::memcpy：网络字节解析。
 #include <functional>   // std::function：回调接口。
+#include <limits>
 #include <mutex>        // std::mutex：跨线程共享状态保护。
 #include <optional>     // std::optional：可选动作事件。
 #include <sstream>      // std::ostringstream：状态文本组装。
@@ -1541,6 +1542,8 @@ namespace ks::network
             }
 
             m_running.store(true, std::memory_order_relaxed);
+            m_stopAttempted.store(false);
+            m_resumeAtExitSucceeded.store(true);
             try
             {
                 m_captureThread = std::thread([this]() { runCaptureThread(); });
@@ -1557,13 +1560,22 @@ namespace ks::network
         // StopCapture：
         // - 请求线程退出；
         // - 阻塞等待线程收尾（包括恢复被限速挂起的进程）。
-        void StopCapture()
+        void RequestStopCapture() noexcept
         {
             m_running.store(false, std::memory_order_relaxed);
+        }
+
+        bool StopCapture()
+        {
+            RequestStopCapture();
             if (m_captureThread.joinable())
             {
                 m_captureThread.join();
             }
+            // The capture thread makes the initial restore attempt. A failed
+            // restore remains owned for an explicit retained-cleanup Retry.
+            if (!m_stopAttempted.exchange(true)) return m_resumeAtExitSucceeded.load();
+            return forceResumeAllSuspendedProcesses();
         }
 
         // IsRunning：查询抓包线程是否处于运行状态。
@@ -2040,7 +2052,7 @@ namespace ks::network
             }
 
             // 线程退出前恢复所有“仍被本模块挂起”的进程，避免残留影响。
-            forceResumeAllSuspendedProcesses();
+            m_resumeAtExitSucceeded.store(forceResumeAllSuspendedProcesses());
 
             detail::CloseCaptureSockets(captureSockets);
             ::WSACleanup();
@@ -2179,6 +2191,20 @@ namespace ks::network
                     limitRule.processCreationTime100ns,
                     &detailText);
 
+                if (!resumeOk)
+                {
+                    std::lock_guard<std::mutex> guard(m_rateLimitMutex);
+                    const auto found = m_rateLimitByPid.find(limitRule.processId);
+                    if (found != m_rateLimitByPid.end()
+                        && found->second.rule.processCreationTime100ns == limitRule.processCreationTime100ns)
+                    {
+                        // Preserve the unresolved recovery witness for STOP/Retry,
+                        // without adding automatic retries to normal sampling.
+                        found->second.currentlySuspended = true;
+                        found->second.resumeTickMs = (std::numeric_limits<std::uint64_t>::max)();
+                    }
+                }
+
                 RateLimitActionEvent event;
                 event.timestampMs = nowTickMs;
                 event.processId = limitRule.processId;
@@ -2195,8 +2221,9 @@ namespace ks::network
         // forceResumeAllSuspendedProcesses：
         // - 在线程退出阶段执行；
         // - 保证不会遗留“被限速挂起”的进程。
-        void forceResumeAllSuspendedProcesses()
+        bool forceResumeAllSuspendedProcesses()
         {
+            bool allResumed = true;
             std::vector<ProcessRateLimitRule> rulesToResume;
             {
                 std::lock_guard<std::mutex> guard(m_rateLimitMutex);
@@ -2207,8 +2234,6 @@ namespace ks::network
                     {
                         continue;
                     }
-                    runtime.currentlySuspended = false;
-                    runtime.resumeTickMs = 0;
                     rulesToResume.push_back(runtime.rule);
                 }
             }
@@ -2221,6 +2246,19 @@ namespace ks::network
                     limitRule.processCreationTime100ns,
                     &detailText);
 
+                allResumed = allResumed && resumeOk;
+                if (resumeOk)
+                {
+                    std::lock_guard<std::mutex> guard(m_rateLimitMutex);
+                    const auto found = m_rateLimitByPid.find(limitRule.processId);
+                    if (found != m_rateLimitByPid.end()
+                        && found->second.rule.processCreationTime100ns == limitRule.processCreationTime100ns)
+                    {
+                        found->second.currentlySuspended = false;
+                        found->second.resumeTickMs = 0;
+                    }
+                }
+
                 RateLimitActionEvent event;
                 event.timestampMs = detail::NowTickMs();
                 event.processId = limitRule.processId;
@@ -2232,6 +2270,7 @@ namespace ks::network
                     : ("监控停止：恢复进程失败: " + detailText);
                 emitRateLimitAction(event);
             }
+            return allResumed;
         }
 
         // emitPacket：触发报文回调（线程安全复制回调对象）。
@@ -2284,6 +2323,8 @@ namespace ks::network
 
         std::atomic<bool> m_running{ false }; // 抓包线程运行标记。
         std::thread m_captureThread;          // 后台抓包线程对象。
+        std::atomic_bool m_stopAttempted{false};
+        std::atomic_bool m_resumeAtExitSucceeded{true};
         std::atomic<std::uint64_t> m_packetSequence{ 0 }; // 报文序号生成器。
 
         mutable std::mutex m_rateLimitMutex; // 保护限速规则容器。

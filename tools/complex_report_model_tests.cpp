@@ -1,5 +1,6 @@
 // 生产报告模型与规范文档的 Qt Core 回归，不创建 QWidget、不接触驱动或系统剪贴板。
 #include "../Ksword5.1/Ksword5.1/UI/ComplexReportModel.h"
+#include "../Ksword5.1/Ksword5.1/UI/FieldTreeModel.h"
 #include "../Ksword5.1/Ksword5.1/Internationalization/LanguageManager.h"
 
 #include <QAbstractItemModelTester>
@@ -501,6 +502,218 @@ namespace
     }
 }
 
+namespace
+{
+    // 后台导出调用者冻结翻译值，不借用 LanguageManager 或 QWidget 生命周期。
+    void frozenDocumentTranslation()
+    {
+        FieldDocument document;
+        document.title = QStringLiteral("Report");
+        document.section(QStringLiteral("Catalog"));
+        document.field(QStringLiteral("Size"), QStringLiteral("Ready"), true);
+        FieldNode literal;
+        literal.name = QStringLiteral("Size");
+        literal.value = QStringLiteral("Ready");
+        literal.translateName = false;
+        FieldNode note;
+        note.kind = FieldNode::Kind::Note;
+        note.value = QStringLiteral("Ready");
+        literal.children.append(note);
+        document.nodes[0].children.append(literal);
+        const QHash<QString, QString> translations{
+            {QStringLiteral("Report"), QStringLiteral("报告")},
+            {QStringLiteral("Catalog"), QStringLiteral("目录")},
+            {QStringLiteral("Size"), QStringLiteral("大小")},
+            {QStringLiteral("Ready"), QStringLiteral("就绪")}};
+        const std::function<QString(const QString&)> frozen = [translations](const QString& source)
+        {
+            return translations.value(source, source);
+        };
+        const QString expected = QStringLiteral("报告\n[目录]\n大小: 就绪\nSize: Ready\n  就绪");
+        mockTranslation = true;
+        expect(document.toPlainText(frozen) == expected, "frozen callback preserves title, name/value flags, forced note localization and indentation");
+        expect(document.toPlainText(frozen) == document.toPlainText(true), "callback export bytes equal existing localized serialization");
+        mockTranslation = false;
+        expect(document.toPlainText(frozen) == expected, "later global language changes do not affect a frozen export callback");
+        expect(document.toPlainText(std::function<QString(const QString&)>()) == document.toPlainText(false),
+            "empty callback returns exact canonical source text");
+        expect(!document.toPlainText(frozen).endsWith(QLatin1Char('\n')), "frozen export retains the no-trailing-newline format");
+    }
+}
+
+namespace
+{
+    void pagedFieldProjectionContract()
+    {
+        const std::function<QString(const QString&)> literal = [](const QString& source) { return source; };
+        FieldDocument document;
+        for (int row = 0; row < 100000; ++row)
+        {
+            FieldNode node;
+            node.kind = FieldNode::Kind::Section;
+            node.name = QStringLiteral("Record %1").arg(row);
+            FieldNode value;
+            value.name = QStringLiteral("Value");
+            value.value = QString::number(row);
+            node.children.append(value);
+            document.nodes.append(node);
+        }
+        auto initial = ks::ui::PrepareFieldTreeProjection(document, literal, {});
+        ks::ui::FieldTreeModel model;
+        model.applySnapshot(initial);
+        expect(model.rowCount() == 128 && model.canFetchMore({}), "large canonical document initially exposes one bounded row page");
+        expect(initial->document.nodes.size() == 100000 && initial->entries.size() == 200000,
+            "paging preserves every canonical root and field instead of truncating the source");
+        QPersistentModelIndex identity(model.index(0, 1, model.index(0, 0)));
+        QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
+        FieldDocument updated = document;
+        updated.nodes[0].children[0].value = QStringLiteral("changed");
+        auto update = ks::ui::PrepareFieldTreeProjection(updated, literal, {}, initial);
+        expect(update->sameStructure && update->changes.size() == 1, "worker compares values without replacing stable topology");
+        model.applySnapshot(update);
+        expect(identity.isValid() && identity.data().toString() == QStringLiteral("changed") && changes.size() == 1,
+            "same-shape value update preserves persistent index and emits only the changed row");
+        const int beforeSignals = changes.size();
+        auto unchanged = ks::ui::PrepareFieldTreeProjection(updated, literal, {}, update);
+        model.applySnapshot(unchanged);
+        expect(changes.size() == beforeSignals, "identical prepared values emit no dataChanged signals");
+        while (model.canFetchMore({})) model.fetchMore({});
+        expect(model.rowCount() == 100000 && model.index(99999, 0).data().toString() == QStringLiteral("Record 99999"),
+            "all canonical rows remain reachable through fetchMore");
+        auto searched = ks::ui::PrepareFieldTreeProjection(updated, literal, QStringLiteral("99999"), unchanged);
+        model.applySnapshot(searched);
+        expect(model.rowCount() == 1 && model.index(0, 0).data().toString() == QStringLiteral("Record 99999"),
+            "search covers canonical roots that were never exposed by the presentation");
+        expect(model.rowCount(model.index(0, 0)) == 1,
+            "matching ancestor retains its complete child context");
+        auto absent = ks::ui::PrepareFieldTreeProjection(updated, literal, QStringLiteral("no-such-field"), searched);
+        model.applySnapshot(absent);
+        expect(model.rowCount() == 0 && absent->document.nodes.size() == 100000,
+            "no-match presentation does not remove canonical export data");
+        auto restored = ks::ui::PrepareFieldTreeProjection(updated, literal, {}, absent);
+        model.applySnapshot(restored);
+        expect(model.rowCount() == 100000, "clearing search restores the previously exposed source extent and reading position");
+        auto cancelled = std::make_shared<std::atomic_bool>(true);
+        expect(!ks::ui::PrepareFieldTreeProjection(updated, literal, {}, absent, cancelled),
+            "obsolete preparation cancels without publishing a partial projection");
+
+        FieldDocument small;
+        FieldNode section;
+        section.kind = FieldNode::Kind::Section;
+        section.name = QStringLiteral("Group");
+        FieldNode field;
+        field.name = QStringLiteral("Name");
+        field.value = QStringLiteral("literal");
+        field.translateName = false;
+        FieldNode note;
+        note.kind = FieldNode::Kind::Note;
+        note.value = QStringLiteral("note");
+        field.children.append(note);
+        section.children.append(field);
+        small.nodes.append(section);
+        small.nodes.append(section);
+        const std::function<QString(const QString&)> translate = [](const QString& source) { return QStringLiteral("T:") + source; };
+        auto nested = ks::ui::PrepareFieldTreeProjection(small, translate, QStringLiteral("T:note"));
+        model.applySnapshot(nested);
+        QAbstractItemModelTester tester(&model, QAbstractItemModelTester::FailureReportingMode::Fatal);
+        const QModelIndex first = model.index(0, 0);
+        const QModelIndex child = model.index(0, 0, first);
+        const QModelIndex noteIndex = model.index(0, 0, child);
+        expect(model.headerData(0, Qt::Horizontal).toString() == QStringLiteral("T:属性")
+            && model.headerData(1, Qt::Horizontal, Qt::AccessibleTextRole).toString() == QStringLiteral("T:值"),
+            "hidden field headers retain localized semantic accessibility labels");
+        expect(model.rowCount() == 2 && child.data().toString() == QStringLiteral("Name"),
+            "full canonical descendant search retains both duplicate-named ancestors and literal names");
+        expect(noteIndex.data().toString() == QStringLiteral("T:note")
+            && noteIndex.parent() == child && child.parent() == first,
+            "notes are translated unconditionally and lazy tree parents remain exact");
+        expect(first.data(ks::ui::FieldTreeKeyRole) != model.index(1, 0).data(ks::ui::FieldTreeKeyRole),
+            "duplicate canonical siblings have distinct stable keys");
+        const QString key = child.data(ks::ui::FieldTreeKeyRole).toString();
+        expect(model.indexForKey(key) == child, "stable keys resolve the same exposed field identity");
+    }
+}
+
+namespace
+{
+    void canonicalFieldSelectionContract()
+    {
+        const std::function<QString(const QString&)> literal = [](const QString& source) { return source; };
+        FieldDocument document;
+        for (int row = 0; row < 1024; ++row)
+        {
+            FieldNode field;
+            field.name = QStringLiteral("Row %1").arg(row);
+            field.value = QStringLiteral("value %1").arg(row);
+            document.nodes.append(field);
+        }
+        const auto full = ks::ui::PrepareFieldTreeProjection(document, literal, {});
+        const auto filtered = ks::ui::PrepareFieldTreeProjection(document, literal, QStringLiteral("Row 0:"), full);
+        const QString a = full->entries.at(0).key;
+        const QString b = full->entries.at(1023).key;
+        ks::ui::FieldTreeModel model;
+        model.applySnapshot(full);
+        expect(!model.indexForKey(b).isValid(), "selection fixture includes a canonical row not exposed by the model");
+
+        ks::ui::FieldTreeSelection selection;
+        selection.setSelected(a, true);
+        selection.setSelected(b, true);
+        selection.retain(*filtered);
+        expect(selection.contains(a) && selection.contains(b), "filtering never removes ordinary canonical selected identities");
+        expect(selection.text(*filtered) == QStringLiteral("Row 0: value 0\nRow 1023: value 1023"),
+            "A/B selected then search A copies both A and hidden unfetched B in canonical order");
+        selection.setSelected(a, false);
+        expect(selection.text(*filtered) == QStringLiteral("Row 1023: value 1023"),
+            "deselecting the visible match leaves the hidden selected row intact");
+        selection.retain(*full);
+        expect(!selection.contains(a) && selection.contains(b), "clearing search preserves actual selection edits instead of restoring an obsolete pre-search set");
+        const auto noMatch = ks::ui::PrepareFieldTreeProjection(document, literal, QStringLiteral("no-match"), filtered);
+        selection.selectAll(noMatch, {}, true);
+        expect(selection.contains(b), "Ctrl+A on an empty filtered view is a no-op and retains hidden selected identities");
+
+        ks::ui::FieldTreeSelection bulk;
+        bulk.selectAll(full, {}, false);
+        expect(bulk.contains(a) && bulk.contains(b), "logical Ctrl+A includes unfetched expanded canonical identities");
+        bulk.setSelected(a, false);
+        expect(!bulk.contains(a) && bulk.contains(b), "Ctrl-click deselect of one fetched row keeps every other unfetched bulk identity");
+        expect(bulk.text(*filtered).split(QLatin1Char('\n')).size() == 1023,
+            "copy selected after filtering and bulk exception retains the complete hidden selection");
+        bulk.setSelected(a, true);
+        expect(bulk.contains(a) && bulk.contains(b), "Ctrl-click select removes only the matching bulk exception");
+        auto independent = bulk;
+        independent.setSelected(b, false);
+        expect(bulk.contains(b) && !independent.contains(b), "worker selection copies detach their exception sets without mutating the UI state");
+        independent.clear();
+        independent.setSelected(a, true);
+        expect(independent.contains(a) && !independent.contains(b), "plain ClearAndSelect replaces the entire logical bulk selection");
+
+        FieldDocument changed = document;
+        changed.nodes[1023].value = QStringLiteral("new value");
+        auto updated = ks::ui::PrepareFieldTreeProjection(changed, literal, {}, full);
+        selection.retain(*updated);
+        expect(selection.text(*updated) == QStringLiteral("Row 1023: new value"),
+            "selected copy uses current canonical values rather than the bulk basis text or visible rows");
+        changed.nodes.removeLast();
+        const auto removed = ks::ui::PrepareFieldTreeProjection(changed, literal, {}, updated);
+        bulk.retain(*removed);
+        expect(!bulk.contains(b) && bulk.contains(a), "real source removal prunes only the removed bulk identity");
+        bulk.retain(*full);
+        expect(!bulk.contains(b), "a previously removed identity is not selected again when a later source recreates its key");
+
+        FieldDocument grouped;
+        FieldNode section;
+        section.kind = FieldNode::Kind::Section;
+        section.name = QStringLiteral("Group");
+        section.children.append(document.nodes.first());
+        grouped.nodes.append(section);
+        const auto groups = ks::ui::PrepareFieldTreeProjection(grouped, literal, {});
+        ks::ui::FieldTreeSelection collapsed;
+        collapsed.selectAll(groups, {{groups->entries.at(0).key, false}}, false);
+        expect(collapsed.contains(groups->entries.at(0).key) && !collapsed.contains(groups->entries.at(1).key),
+            "Ctrl+A follows Qt expanded view semantics and excludes collapsed descendants");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv); // 无 QApplication、窗口、离屏平台或 QWidget 对象。
@@ -511,6 +724,9 @@ int main(int argc, char** argv)
     longValueTransitions();
     canonicalCopy();
     compactBrowsingContract();
+    frozenDocumentTranslation();
+    pagedFieldProjectionContract();
+    canonicalFieldSelectionContract();
     recordScale(15000);
     recordScale(30000);
     std::printf("COMPLEX_REPORT_MODEL_RESULT checks=%d failures=%d\n", checks, failures);

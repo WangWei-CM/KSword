@@ -7,6 +7,8 @@
 #include "../Internationalization/LanguageManager.h"
 
 #include <QCheckBox>
+#include <QEvent>
+#include <QShowEvent>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -134,6 +136,8 @@ void HvmEventDialog::buildUi()
     });
     connect(m_clearButton, &QPushButton::clicked, this, [this]() {
         // 只清界面，不清驱动侧环：环里的历史对别的消费者仍然有意义。
+        m_events.clear();
+        m_presented.clear();
         m_eventTable->setRowCount(0);
         m_droppedTotal = 0;
     });
@@ -149,11 +153,54 @@ void HvmEventDialog::buildUi()
 
 void HvmEventDialog::trimRows()
 {
-    // 从头删而不是重建：保留用户当前的选中与滚动位置。
-    while (m_eventTable->rowCount() > kMaxTableRows)
+    while (m_events.size() > static_cast<std::size_t>(kMaxTableRows)) m_events.pop_front();
+}
+
+void HvmEventDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    presentEvents();
+}
+
+void HvmEventDialog::changeEvent(QEvent* event)
+{
+    QDialog::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) presentEvents();
+}
+
+void HvmEventDialog::presentEvents()
+{
+    if (!m_projectionDirty || !isVisible() || isMinimized()) return;
+    m_projectionDirty = false;
+    QTableWidget* const table = m_eventTable;
+    int removed = 0;
+    while (!m_presented.empty() && (m_events.empty() || m_presented.front() < m_events.front().sequence))
     {
-        m_eventTable->removeRow(0);
+        m_presented.pop_front();
+        ++removed;
     }
+    // Preserve the original table/model and surviving items/selections. One
+    // model notification removes the whole expired prefix, including catch-up.
+    if (removed) table->model()->removeRows(0, removed);
+    const int existing = static_cast<int>(m_presented.size());
+    const int added = static_cast<int>(m_events.size()) - existing;
+    if (added > 0) table->model()->insertRows(existing, added);
+    for (int row = existing; row < static_cast<int>(m_events.size()); ++row)
+    {
+        const auto& entry = m_events[static_cast<std::size_t>(row)];
+        table->setItem(row, 0, new QTableWidgetItem(QString::number(entry.sequence)));
+        table->setItem(row, 1, new QTableWidgetItem(describeEventType(entry.type)));
+        table->setItem(row, 2, new QTableWidgetItem(QString::number(entry.exitReason)));
+        table->setItem(row, 3, new QTableWidgetItem(describeAccess(entry.access)));
+        table->setItem(row, 4, new QTableWidgetItem(QStringLiteral("0x%1").arg(entry.guestPhysicalAddress, 0, 16)));
+        table->setItem(row, 5, new QTableWidgetItem(QStringLiteral("0x%1").arg(entry.guestRip, 0, 16)));
+        table->setItem(row, 6, new QTableWidgetItem(entry.ruleId ? QString::number(entry.ruleId) : QString()));
+        table->setItem(row, 7, new QTableWidgetItem(QStringLiteral("%1:%2").arg(entry.processorGroup).arg(entry.processorNumber)));
+        m_presented.push_back(entry.sequence);
+    }
+    // A state-only poll never drags a reader back to the tail.
+    if (added > 0 && m_followCheck->isChecked()) table->scrollToBottom();
+    if (m_statusLabel->text() != m_latestStatus) m_statusLabel->setText(m_latestStatus);
 }
 
 void HvmEventDialog::poll()
@@ -183,54 +230,26 @@ void HvmEventDialog::poll()
                 safeThis->m_pollInFlight = false;
                 if (!result.ok)
                 {
-                    safeThis->m_statusLabel->setText(result.message);
+                    safeThis->m_latestStatus = result.message;
+                    safeThis->m_projectionDirty = true;
+                    safeThis->presentEvents();
                     return;
                 }
-                QTableWidget* const table = safeThis->m_eventTable;
+                // Canonical bounded history and cursor advance even when the
+                // window is hidden/minimized. Presentation owns no collection.
                 for (const auto& entry : result.events)
                 {
-                    const int row = table->rowCount();
-                    table->insertRow(row);
-                    table->setItem(row, 0, new QTableWidgetItem(
-                        QString::number(entry.sequence)));
-                    table->setItem(row, 1, new QTableWidgetItem(
-                        describeEventType(entry.type)));
-                    table->setItem(row, 2, new QTableWidgetItem(
-                        QString::number(entry.exitReason)));
-                    table->setItem(row, 3, new QTableWidgetItem(
-                        describeAccess(entry.access)));
-                    table->setItem(row, 4, new QTableWidgetItem(
-                        QStringLiteral("0x%1")
-                            .arg(entry.guestPhysicalAddress, 0, 16)));
-                    table->setItem(row, 5, new QTableWidgetItem(
-                        QStringLiteral("0x%1")
-                            .arg(entry.guestRip, 0, 16)));
-                    table->setItem(row, 6, new QTableWidgetItem(
-                        entry.ruleId != 0
-                            ? QString::number(entry.ruleId)
-                            : QString()));
-                    table->setItem(row, 7, new QTableWidgetItem(
-                        QStringLiteral("%1:%2")
-                            .arg(entry.processorGroup)
-                            .arg(entry.processorNumber)));
-                    // 游标只向前推进，重复读取不会重复上屏。
-                    if (entry.sequence >= safeThis->m_afterSequence)
-                    {
-                        safeThis->m_afterSequence = entry.sequence;
-                    }
+                    if (entry.sequence <= safeThis->m_afterSequence) continue;
+                    safeThis->m_events.push_back(entry);
+                    safeThis->m_afterSequence = entry.sequence;
                 }
                 safeThis->m_droppedTotal += result.droppedRows;
                 safeThis->trimRows();
-                if (safeThis->m_followCheck->isChecked() &&
-                    table->rowCount() > 0)
-                {
-                    table->scrollToBottom();
-                }
-                safeThis->m_statusLabel->setText(
+                safeThis->m_latestStatus =
                     ks::i18n::sourceText(QStringLiteral("已显示 %1 行，环内待取 %2 行，累计丢弃 %3 行。"))
-                        .arg(table->rowCount())
-                        .arg(result.availableRows)
-                        .arg(safeThis->m_droppedTotal));
+                        .arg(safeThis->m_events.size()).arg(result.availableRows).arg(safeThis->m_droppedTotal);
+                safeThis->m_projectionDirty = true;
+                safeThis->presentEvents();
             },
             Qt::QueuedConnection);
     }).detach();

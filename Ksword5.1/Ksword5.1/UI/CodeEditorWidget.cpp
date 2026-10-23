@@ -5,6 +5,8 @@
 #include "ThemeAccentIcon.h"
 #include "CodeTextEdit.h"
 #include "CodeEditorFileSession.h"
+#include "AsyncOperation.h"
+#include "BudgetedPlainTextTransfer.h"
 
 // ============================================================
 // CodeEditorWidget.cpp
@@ -26,6 +28,7 @@
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QMenu>
+#include <QMetaMethod>
 #include <QAction>
 #include <QGridLayout>
 #include <QPointer>
@@ -496,9 +499,14 @@ CodeEditorWidget::CodeEditorWidget(QWidget* parent)
 {
     initializeUi();
     initializeConnections();
+    refreshUiText();
     applyThemeStyle();
     refreshReadOnlyUiState();
     updateStatusText();
+    // All ordinary editor UI below is produced explicitly. The professional
+    // text core owns its native context menu and never translates raw content.
+    ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(this);
+    ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(m_moreButton->menu());
 }
 
 CodeEditorWidget::~CodeEditorWidget()
@@ -508,6 +516,8 @@ CodeEditorWidget::~CodeEditorWidget()
     // - 处理：先标记销毁中，再断开编辑器发往本组件的状态刷新信号；
     // - 返回：无返回值，子控件仍由 Qt 父子机制回收。
     m_destroying = true;
+    if (m_initialFileRead) m_initialFileRead->close();
+    if (m_initialFileTransfer) m_initialFileTransfer->cancel();
     if (m_editor != nullptr)
     {
         QObject::disconnect(m_editor, nullptr, this, nullptr);
@@ -546,7 +556,9 @@ void CodeEditorWidget::setRawText(const QString& plainText)
 
 void CodeEditorWidget::setPlaceholderText(const QString& placeholder)
 {
-    m_editor->setPlaceholderText(placeholder);
+    const QString canonical = ks::i18n::LanguageManager::instance().sourceForRenderedText(placeholder);
+    m_placeholderSource = canonical.isEmpty() ? placeholder : canonical;
+    m_editor->setPlaceholderText(ks::i18n::sourceText(m_placeholderSource));
 }
 
 void CodeEditorWidget::appendRawText(const QString& rawText, const bool autoScroll)
@@ -618,7 +630,10 @@ void CodeEditorWidget::changeEvent(QEvent* event)
         }
     }
     if (!m_destroying && event != nullptr && event->type() == QEvent::LanguageChange)
-        updateStatusText(); // UI labels may translate; source content is never regenerated.
+    {
+        refreshUiText();
+        updateStatusText(); // Source content and document revision stay unchanged.
+    }
 }
 
 QString CodeEditorWidget::currentFilePath() const
@@ -681,7 +696,7 @@ bool CodeEditorWidget::reopenCurrentFileWithEncoding(const QStringConverter::Enc
 {
     if (m_currentFilePath.trimmed().isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("重开失败：当前无文件路径。"));
+        setOperationStatus(QStringLiteral("重开失败：当前无文件路径。"));
         return false;
     }
 
@@ -719,7 +734,7 @@ void CodeEditorWidget::initializeUi()
         button->installEventFilter(this);
         refreshIcon();
         KswordTheme::ApplyCompactIconButtonMetrics(button);
-        button->setToolTip(tip);
+        bindUiToolTip(button, tip);
         button->setAutoRaise(true);
         button->setFocusPolicy(Qt::NoFocus);
         return button;
@@ -751,50 +766,21 @@ void CodeEditorWidget::initializeUi()
     m_languageCombo->setObjectName(QStringLiteral("code_editor_language"));
     m_languageCombo->addItems({QStringLiteral("自动"), QStringLiteral("纯文本"), QStringLiteral("JSON"),
         QStringLiteral("XML"), QStringLiteral("C/C++"), QStringLiteral("INI"), QStringLiteral("Shell")});
-    m_languageCombo->setToolTip(QStringLiteral("语法高亮语言；切换不会改写正文。"));
+    bindUiToolTip(m_languageCombo, QStringLiteral("语法高亮语言；切换不会改写正文。"));
     m_languageCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_languageCombo->setMinimumContentsLength(5);
     m_toolbarLayout->addWidget(m_languageCombo);
     m_moreButton = new QToolButton(m_toolbarWidget);
     m_moreButton->setObjectName(QStringLiteral("code_editor_more"));
     m_moreButton->setText(QStringLiteral("⋯"));
-    m_moreButton->setToolTip(QStringLiteral("更多编辑操作"));
+    bindUiToolTip(m_moreButton, QStringLiteral("更多编辑操作"));
     KswordTheme::ApplyCompactIconButtonMetrics(m_moreButton);
     m_moreButton->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(m_moreButton);
-    for (auto* button : {m_newButton, m_openButton, m_saveButton, m_saveAsButton, m_undoButton, m_redoButton,
-        m_cutButton, m_copyButton, m_pasteButton, m_findButton, m_replaceButton, m_gotoButton, m_wrapButton}) {
-        auto* action = menu->addAction(button->toolTip());
-        action->setCheckable(button->isCheckable());
-        connect(action, &QAction::triggered, button, &QToolButton::click);
-        connect(menu, &QMenu::aboutToShow, action, [this, action, button]() {
-            action->setText(button->toolTip());
-            action->setIcon(button->icon());
-            action->setEnabled(button->isEnabled());
-            action->setChecked(button->isChecked());
-            action->setVisible(!m_readOnlyMode || button == m_copyButton || button == m_findButton
-                || button == m_gotoButton || button == m_wrapButton
-                || (button == m_saveAsButton && m_readOnlyExportEnabled));
-        });
-    }
-    menu->addSeparator();
-    auto* syntaxMenu = menu->addMenu(QStringLiteral("语法高亮"));
-    for (int index = 0; index < m_languageCombo->count(); ++index)
-    {
-        auto* action = syntaxMenu->addAction(m_languageCombo->itemText(index));
-        action->setCheckable(true);
-        connect(action, &QAction::triggered, this, [this, index]() { m_languageCombo->setCurrentIndex(index); });
-        connect(syntaxMenu, &QMenu::aboutToShow, action, [this, action, index]() {
-            action->setText(m_languageCombo->itemText(index));
-            action->setChecked(m_languageCombo->currentIndex() == index);
-        });
-    }
-    m_formatAction = menu->addAction(QStringLiteral("格式化 JSON / XML"));
-    connect(menu, &QMenu::aboutToShow, m_formatAction, [this]() { m_formatAction->setVisible(!m_readOnlyMode); });
-    connect(m_formatAction, &QAction::triggered, this, &CodeEditorWidget::formatDocument);
-    m_whitespaceAction = menu->addAction(QStringLiteral("显示空白字符"));
+    m_whitespaceAction = new QAction(QStringLiteral("显示空白字符"), menu);
     m_whitespaceAction->setCheckable(true);
     connect(m_whitespaceAction, &QAction::toggled, this, [this](bool visible) { m_editor->setWhitespaceVisible(visible); });
+    connect(menu, &QMenu::aboutToShow, this, &CodeEditorWidget::populateMoreMenu);
     m_moreButton->setMenu(menu);
     m_toolbarLayout->addWidget(m_moreButton);
     ks::ui::NormalizeToolbarRow(m_toolbarLayout);
@@ -818,22 +804,22 @@ void CodeEditorWidget::initializeUi()
     m_matchCaseButton = new QToolButton(m_findPanel);
     m_matchCaseButton->setObjectName(QStringLiteral("code_editor_match_case"));
     m_matchCaseButton->setText(QStringLiteral("Aa"));
-    m_matchCaseButton->setToolTip(QStringLiteral("区分大小写"));
+    bindUiToolTip(m_matchCaseButton, QStringLiteral("区分大小写"));
     m_matchCaseButton->setCheckable(true);
     m_wholeWordButton = new QToolButton(m_findPanel);
     m_wholeWordButton->setObjectName(QStringLiteral("code_editor_whole_word"));
     m_wholeWordButton->setText(QStringLiteral("W"));
-    m_wholeWordButton->setToolTip(QStringLiteral("全词匹配"));
+    bindUiToolTip(m_wholeWordButton, QStringLiteral("全词匹配"));
     m_wholeWordButton->setCheckable(true);
     m_findPrevButton = new QToolButton(m_findPanel);
     m_findPrevButton->setText(QStringLiteral("↑"));
-    m_findPrevButton->setToolTip(QStringLiteral("向上查找上一个匹配项"));
+    bindUiToolTip(m_findPrevButton, QStringLiteral("向上查找上一个匹配项"));
     m_findNextButton = new QToolButton(m_findPanel);
     m_findNextButton->setText(QStringLiteral("↓"));
-    m_findNextButton->setToolTip(QStringLiteral("向下查找下一个匹配项"));
+    bindUiToolTip(m_findNextButton, QStringLiteral("向下查找下一个匹配项"));
     m_findCloseButton = new QToolButton(m_findPanel);
     m_findCloseButton->setText(QStringLiteral("×"));
-    m_findCloseButton->setToolTip(QStringLiteral("关闭查找替换栏"));
+    bindUiToolTip(m_findCloseButton, QStringLiteral("关闭查找替换栏"));
     m_findResultLabel = new QLabel(m_findPanel);
     m_findResultLabel->setObjectName(QStringLiteral("code_editor_find_result"));
     m_findResultLabel->setTextFormat(Qt::PlainText);
@@ -852,11 +838,11 @@ void CodeEditorWidget::initializeUi()
     m_replaceEdit->setMinimumWidth(30);
     m_replaceOneButton = new QToolButton(m_replaceRow);
     m_replaceOneButton->setText(QStringLiteral("替换"));
-    m_replaceOneButton->setToolTip(QStringLiteral("替换当前这一处匹配，并跳到下一处"));
+    bindUiToolTip(m_replaceOneButton, QStringLiteral("替换当前这一处匹配，并跳到下一处"));
     m_replaceAllButton = new QToolButton(m_replaceRow);
     m_replaceAllButton->setObjectName(QStringLiteral("code_editor_replace_all"));
     m_replaceAllButton->setText(QStringLiteral("全部替换"));
-    m_replaceAllButton->setToolTip(QStringLiteral("一次性替换文中所有匹配项"));
+    bindUiToolTip(m_replaceAllButton, QStringLiteral("一次性替换文中所有匹配项"));
     replaceLayout->addWidget(m_replaceEdit, 1);
     replaceLayout->addWidget(m_replaceOneButton);
     replaceLayout->addWidget(m_replaceAllButton);
@@ -876,8 +862,9 @@ void CodeEditorWidget::initializeUi()
     m_gotoApplyButton->setText(QStringLiteral("执行"));
     m_gotoCloseButton = new QToolButton(m_gotoPanel);
     m_gotoCloseButton->setText(QStringLiteral("×"));
-    m_gotoCloseButton->setToolTip(QStringLiteral("关闭跳转行栏"));
-    m_gotoLayout->addWidget(new QLabel(QStringLiteral("跳转行:"), m_gotoPanel));
+    bindUiToolTip(m_gotoCloseButton, QStringLiteral("关闭跳转行栏"));
+    m_gotoLabel = new QLabel(m_gotoPanel);
+    m_gotoLayout->addWidget(m_gotoLabel);
     m_gotoLayout->addWidget(m_gotoLineEdit, 1);
     m_gotoLayout->addWidget(m_gotoApplyButton);
     m_gotoLayout->addWidget(m_gotoCloseButton);
@@ -887,7 +874,7 @@ void CodeEditorWidget::initializeUi()
     m_editor = new CodeTextEdit(this);
     m_editor->setObjectName(QStringLiteral("code_editor_text"));
     m_editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    m_editor->setPlaceholderText(QStringLiteral("输入文本或打开文件，支持语法高亮、查找替换与行跳转。"));
+    setPlaceholderText(QStringLiteral("输入文本或打开文件，支持语法高亮、查找替换与行跳转。"));
     m_editor->setMinimumSize(0, 0);
     m_editor->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     m_rootLayout->addWidget(m_editor, 1);
@@ -914,6 +901,124 @@ void CodeEditorWidget::initializeUi()
     for (auto* item : {m_positionLabel, m_documentLabel, m_modeLabel, m_encodingLabel}) statusLayout->addWidget(item);
     statusLayout->addWidget(m_statusLabel, 1);
     m_rootLayout->addWidget(m_statusWidget);
+}
+
+// 保留一个空的原菜单；仅首次展开才创建动作/语法子菜单。
+// 空白显示动作仍提前存在，原视图状态保存/恢复不依赖菜单是否打开。
+void CodeEditorWidget::populateMoreMenu()
+{
+    if (m_destroying || !m_moreButton || !m_toolActions.isEmpty()) return;
+    auto* menu = m_moreButton->menu();
+    if (!menu) return;
+    for (auto* button : {m_newButton, m_openButton, m_saveButton, m_saveAsButton, m_undoButton, m_redoButton,
+        m_cutButton, m_copyButton, m_pasteButton, m_findButton, m_replaceButton, m_gotoButton, m_wrapButton}) {
+        auto* action = menu->addAction(button->toolTip());
+        m_toolActions.append(qMakePair(QPointer<QAction>(action), QPointer<QToolButton>(button)));
+        action->setCheckable(button->isCheckable());
+        connect(action, &QAction::triggered, button, &QToolButton::click);
+        const auto updateAction = [this, action, button]() {
+            action->setText(button->toolTip());
+            action->setIcon(button->icon());
+            action->setEnabled(button->isEnabled());
+            action->setChecked(button->isChecked());
+            action->setVisible(!m_readOnlyMode || button == m_copyButton || button == m_findButton
+                || button == m_gotoButton || button == m_wrapButton
+                || (button == m_saveAsButton && m_readOnlyExportEnabled));
+        };
+        updateAction();
+        connect(menu, &QMenu::aboutToShow, action, updateAction);
+    }
+    menu->addSeparator();
+    m_syntaxMenu = menu->addMenu(ks::i18n::sourceText(QStringLiteral("语法高亮")));
+    ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(m_syntaxMenu);
+    auto* syntaxMenu = m_syntaxMenu;
+    for (int index = 0; index < m_languageCombo->count(); ++index)
+    {
+        auto* action = syntaxMenu->addAction(m_languageCombo->itemText(index));
+        m_syntaxActions.append(QPointer<QAction>(action));
+        action->setCheckable(true);
+        connect(action, &QAction::triggered, this, [this, index]() { m_languageCombo->setCurrentIndex(index); });
+        connect(syntaxMenu, &QMenu::aboutToShow, action, [this, action, index]() {
+            action->setText(m_languageCombo->itemText(index));
+            action->setChecked(m_languageCombo->currentIndex() == index);
+        });
+    }
+    m_formatAction = menu->addAction(ks::i18n::sourceText(QStringLiteral("格式化 JSON / XML")));
+    m_formatAction->setEnabled(!m_readOnlyMode);
+    m_formatAction->setVisible(!m_readOnlyMode);
+    connect(menu, &QMenu::aboutToShow, m_formatAction, [this]() { m_formatAction->setVisible(!m_readOnlyMode); });
+    connect(m_formatAction, &QAction::triggered, this, &CodeEditorWidget::formatDocument);
+    menu->addAction(m_whitespaceAction);
+}
+
+void CodeEditorWidget::bindUiToolTip(QWidget* widget, const QString& source)
+{
+    m_uiToolTips.append(qMakePair(QPointer<QWidget>(widget), source));
+    widget->setToolTip(ks::i18n::sourceText(source));
+}
+
+void CodeEditorWidget::refreshUiText()
+{
+    for (const auto& binding : m_uiToolTips)
+        if (binding.first) binding.first->setToolTip(ks::i18n::sourceText(binding.second));
+    const QStringList languages{QStringLiteral("自动"), QStringLiteral("纯文本"), QStringLiteral("JSON"),
+        QStringLiteral("XML"), QStringLiteral("C/C++"), QStringLiteral("INI"), QStringLiteral("Shell")};
+    for (int index = 0; index != languages.size(); ++index)
+        m_languageCombo->setItemText(index, ks::i18n::sourceText(languages[index]));
+    if (m_syntaxMenu) m_syntaxMenu->setTitle(ks::i18n::sourceText(QStringLiteral("语法高亮")));
+    if (m_formatAction) m_formatAction->setText(ks::i18n::sourceText(QStringLiteral("格式化 JSON / XML")));
+    m_whitespaceAction->setText(ks::i18n::sourceText(QStringLiteral("显示空白字符")));
+    m_findEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("查找")));
+    m_replaceEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("替换为")));
+    m_gotoLineEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("行号(从1开始)")));
+    m_replaceOneButton->setText(ks::i18n::sourceText(QStringLiteral("替换")));
+    m_replaceAllButton->setText(ks::i18n::sourceText(QStringLiteral("全部替换")));
+    m_gotoApplyButton->setText(ks::i18n::sourceText(QStringLiteral("执行")));
+    m_gotoLabel->setText(ks::i18n::sourceText(QStringLiteral("跳转行:")));
+    m_editor->setPlaceholderText(ks::i18n::sourceText(m_placeholderSource));
+    if (!m_findEdit->text().isEmpty() && m_editor->document()->characterCount() > 2 * 1024 * 1024)
+        m_findResultLabel->setText(ks::i18n::sourceText(QStringLiteral("按需查找")));
+    // The save-as tooltip is a semantic export/save binding, including its
+    // read-only eligibility; refresh it after the generic static tooltips.
+    refreshReadOnlyUiState();
+    for (const auto& binding : m_toolActions)
+        if (binding.first && binding.second) binding.first->setText(binding.second->toolTip());
+    for (qsizetype index = 0; index != m_syntaxActions.size(); ++index)
+        if (m_syntaxActions[index]) m_syntaxActions[index]->setText(m_languageCombo->itemText(static_cast<int>(index)));
+    refreshOperationStatus();
+}
+
+void CodeEditorWidget::setOperationStatus(const QString& sourceTemplate, const QStringList& arguments,
+    const quint32 translatedArgumentMask, const QString& semanticKey)
+{
+    m_statusSourceTemplate = sourceTemplate;
+    m_statusArguments = arguments;
+    m_statusTranslatedArgumentMask = translatedArgumentMask;
+    m_statusSemanticKey = semanticKey;
+    refreshOperationStatus();
+}
+
+void CodeEditorWidget::refreshOperationStatus()
+{
+    QString rendered = m_statusSemanticKey.isEmpty() ? ks::i18n::sourceText(m_statusSourceTemplate)
+        : ks::i18n::text(m_statusSemanticKey, m_statusSourceTemplate);
+    QStringList arguments = m_statusArguments;
+    for (qsizetype index = 0; index != arguments.size(); ++index)
+    {
+        const bool translate = index < 32 && (m_statusTranslatedArgumentMask & (1U << index)) != 0;
+        if (translate) arguments[index] = ks::i18n::sourceText(arguments[index]);
+    }
+    // Substitute together so a raw path/query containing %1 or %2 is never
+    // interpreted again as a placeholder for a later argument.
+    switch (arguments.size())
+    {
+    case 0: break;
+    case 1: rendered = rendered.arg(arguments[0]); break;
+    case 2: rendered = rendered.arg(arguments[0], arguments[1]); break;
+    case 3: rendered = rendered.arg(arguments[0], arguments[1], arguments[2]); break;
+    default: Q_UNREACHABLE(); // All editor status producers declare at most three arguments.
+    }
+    m_statusLabel->setText(rendered);
 }
 
 void CodeEditorWidget::initializeConnections()
@@ -1005,7 +1110,7 @@ void CodeEditorWidget::initializeConnections()
     connect(m_replaceAllButton, &QToolButton::clicked, this, [this]()
         {
             const int replacedCount = replaceAllMatches();
-            m_statusLabel->setText(QStringLiteral("替换完成：%1 处。").arg(replacedCount));
+            setOperationStatus(QStringLiteral("替换完成：%1 处。"), {QString::number(replacedCount)});
         });
 
     connect(m_findCloseButton, &QToolButton::clicked, this, [this]()
@@ -1056,6 +1161,10 @@ void CodeEditorWidget::initializeConnections()
                 m_contentNotificationPending = true;
                 QTimer::singleShot(0, this, [this]() {
                     m_contentNotificationPending = false;
+                    if (m_initialFileTransfer && m_initialFileTransfer->isBusy()) return;
+                    // Logs normally have no detail mirror. Keep the queued
+                    // lifetime boundary, but only serialize for live consumers.
+                    if (!isSignalConnected(QMetaMethod::fromSignal(&CodeEditorWidget::contentChanged))) return;
                     const QString contents = text();
                     emit contentChanged(contents);
                 });
@@ -1214,7 +1323,7 @@ void CodeEditorWidget::refreshReadOnlyUiState()
     // 只读页仍保留查找、选区复制和换行控制。
 
     updateToolbarLayout();
-    m_formatAction->setEnabled(!m_readOnlyMode);
+    if (m_formatAction) m_formatAction->setEnabled(!m_readOnlyMode);
     refreshActionButtonState();
 }
 
@@ -1345,7 +1454,7 @@ void CodeEditorWidget::updateToolbarLayout()
     m_encodingLabel->setVisible(!compact);
     m_replaceRow->setVisible(m_replaceEnabled && !m_readOnlyMode);
     const QString title = m_currentFilePath.isEmpty()
-        ? (m_readOnlyMode ? QStringLiteral("文本查看") : QStringLiteral("未命名"))
+        ? ks::i18n::sourceText(m_readOnlyMode ? QStringLiteral("文本查看") : QStringLiteral("未命名"))
         : QFileInfo(m_currentFilePath).fileName();
     const QString dirtyTitle = title + (m_editor->document()->isModified() && !m_readOnlyMode ? QStringLiteral(" *") : QString());
     m_fileLabel->setText(m_fileLabel->fontMetrics().elidedText(dirtyTitle, Qt::ElideMiddle, std::max(0, m_fileLabel->width())));
@@ -1425,7 +1534,7 @@ void CodeEditorWidget::updateFindHighlights()
     }
     m_editor->setExternalExtraSelections(selections);
     m_findResultLabel->setText(key.isEmpty() ? QString()
-        : !bounded ? QStringLiteral("按需查找")
+        : !bounded ? ks::i18n::sourceText(QStringLiteral("按需查找"))
         : selections.size() >= 500 ? QStringLiteral("500+") : QString::number(selections.size()));
 }
 
@@ -1441,7 +1550,7 @@ void CodeEditorWidget::updateStatusText()
         : ks::i18n::sourceText(QStringLiteral("%1 字符")).arg(chars));
     m_modeLabel->setText(ks::i18n::sourceText(m_readOnlyMode ? QStringLiteral("只读") : QStringLiteral("可编辑")));
     m_encodingLabel->setText(m_fileSessionAvailable
-        ? currentEncodingDisplayText() + QStringLiteral(" · ") + (m_fileLineEnding == QStringLiteral("\r\n") ? QStringLiteral("CRLF")
+        ? ks::i18n::sourceText(currentEncodingDisplayText()) + QStringLiteral(" · ") + (m_fileLineEnding == QStringLiteral("\r\n") ? QStringLiteral("CRLF")
             : m_fileLineEnding == QStringLiteral("\r") ? QStringLiteral("CR") : QStringLiteral("LF"))
         : QStringLiteral("Unicode"));
     updateToolbarLayout();
@@ -1453,7 +1562,7 @@ bool CodeEditorWidget::findByDirection(const bool forward)
     const QString keyText = m_findEdit->text();
     if (keyText.isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("查找失败：请输入查找内容。"));
+        setOperationStatus(QStringLiteral("查找失败：请输入查找内容。"));
         return false;
     }
 
@@ -1471,9 +1580,7 @@ bool CodeEditorWidget::findByDirection(const bool forward)
         found = m_editor->find(keyText, flags);
     }
 
-    m_statusLabel->setText(found
-        ? QStringLiteral("查找成功：%1").arg(keyText)
-        : QStringLiteral("查找结束：未找到 %1").arg(keyText));
+    setOperationStatus(found ? QStringLiteral("查找成功：%1") : QStringLiteral("查找结束：未找到 %1"), {keyText});
     return found;
 }
 
@@ -1487,7 +1594,7 @@ void CodeEditorWidget::replaceCurrentSelection()
     const QString findText = m_findEdit->text();
     if (findText.isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("替换失败：查找文本为空。"));
+        setOperationStatus(QStringLiteral("替换失败：查找文本为空。"));
         return;
     }
 
@@ -1510,7 +1617,7 @@ void CodeEditorWidget::replaceCurrentSelection()
 
     cursor.insertText(m_replaceEdit->text());
     m_editor->setTextCursor(cursor);
-    m_statusLabel->setText(QStringLiteral("已替换当前命中。"));
+    setOperationStatus(QStringLiteral("已替换当前命中。"));
     findByDirection(true);
 }
 
@@ -1556,18 +1663,18 @@ void CodeEditorWidget::jumpToInputLine()
     const int lineNumber = m_gotoLineEdit->text().trimmed().toInt(&parseOk, 10);
     if (!parseOk)
     {
-        m_statusLabel->setText(QStringLiteral("跳转失败：行号格式无效。"));
+        setOperationStatus(QStringLiteral("跳转失败：行号格式无效。"));
         return;
     }
 
     if (!m_editor->gotoLine(lineNumber))
     {
-        m_statusLabel->setText(QStringLiteral("跳转失败：行号越界。"));
+        setOperationStatus(QStringLiteral("跳转失败：行号越界。"));
         return;
     }
 
     m_gotoPanel->setVisible(false);
-    m_statusLabel->setText(QStringLiteral("已跳转到第 %1 行。").arg(lineNumber));
+    setOperationStatus(QStringLiteral("已跳转到第 %1 行。"), {QString::number(lineNumber)});
 }
 
 void CodeEditorWidget::openTextFile()
@@ -1580,7 +1687,7 @@ void CodeEditorWidget::openTextFile()
     const QPointer<CodeEditorWidget> self(this);
     const QString filePath = QFileDialog::getOpenFileName(
         this,
-        QStringLiteral("打开文本"),
+        ks::i18n::sourceText(QStringLiteral("打开文本")),
         QString(),
         QStringLiteral("Text Files (*.txt *.log *.ini *.json *.xml *.cpp *.h *.py);;All Files (*.*)"));
 
@@ -1592,6 +1699,86 @@ void CodeEditorWidget::openTextFile()
     openLocalFile(filePath);
 }
 
+bool CodeEditorWidget::openInitialLocalFileAsync(const QString& filePath, std::function<void(bool)> completed)
+{
+    if (m_destroying || !m_editor || m_editor->document()->characterCount() != 1
+        || m_editor->document()->isModified() || filePath.trimmed().isEmpty()
+        || (m_initialFileRead && m_initialFileRead->isBusy())
+        || (m_initialFileTransfer && m_initialFileTransfer->isBusy())) return false;
+    if (!m_initialFileRead) m_initialFileRead = new ks::ui::AsyncOperation(this);
+    if (!m_initialFileTransfer) m_initialFileTransfer = new ks::ui::BudgetedPlainTextTransfer(m_editor);
+    const QPointer<CodeEditorWidget> self(this);
+    const auto settled = std::make_shared<bool>(false); // UI-only completion, including dropped read receipt.
+    const auto finish = [self, settled, completed = std::move(completed)](bool success)
+    {
+        if (*settled || !self || self->m_destroying) return;
+        *settled = true;
+        self->m_settingRawText = false;
+        self->setEnabled(true);
+        if (!self) return;
+        if (!success) self->setOperationStatus(QStringLiteral("打开失败：无法读取文件。"));
+        if (self && completed) completed(success);
+    };
+    setEnabled(false); // No save/open/replace can accept a partial initial document.
+    if (!self) return false;
+    m_initialFileRead->setStateChangedCallback([self, finish]()
+    {
+        if (self && !self->m_initialFileRead->isBusy()
+            && !self->m_initialFileTransfer->isBusy()) finish(false);
+    });
+    struct Prepared { bool read = false; FileDecodeResult decoded; };
+    try
+    {
+        m_initialFileRead->submit<QString, Prepared>(filePath.trimmed(),
+            [](const QString& path, const ks::ui::AsyncOperationToken& token)
+            {
+                Prepared result;
+                QFile file(path);
+                if (token.isCanceled() || !file.open(QIODevice::ReadOnly)) return result;
+                const auto bytes = file.readAll();
+                if (file.error() != QFileDevice::NoError || token.isCanceled()) return result;
+                result.read = true;
+                result.decoded = decodeTextFileBytesAuto(bytes); // Existing codec/BOM/newline policy.
+                return result;
+            },
+            [self, path = filePath.trimmed(), finish](const Prepared& result, std::uint64_t)
+            {
+                if (!self) return true;
+                if (!result.read || !result.decoded.success) { finish(false); return true; }
+                const auto decoded = result.decoded;
+                self->m_settingRawText = true;
+                const bool accepted = self->m_initialFileTransfer->load(decoded.text,
+                    [self, path, decoded, finish](bool success, QStringList)
+                    {
+                        if (!self) return;
+                        if (success)
+                        {
+                            self->m_currentFilePath = path;
+                            self->m_fileEncoding = decoded.encoding;
+                            self->m_fileHasBom = decoded.hasBom;
+                            self->m_fileLineEnding = decoded.lineEndingText;
+                            self->m_fileSessionAvailable = true;
+                            self->m_originalRawText = decoded.text;
+                            self->m_originalRawTextActive = true; // Transfer has no block cap/truncation.
+                            self->m_editor->document()->setModified(false);
+                            if (!self) return;
+                            self->updateStatusText();
+                            if (!self) return;
+                            self->setOperationStatus(QStringLiteral("打开成功：%1（%2%3）"),
+                                {path, self->currentEncodingDisplayText(), QString()}, 1U << 1);
+                        }
+                        finish(success);
+                        if (self && success) emit self->contentChanged(self->text());
+                    });
+                if (!accepted) finish(false);
+                return true;
+            },
+            [finish](std::exception_ptr) { finish(false); });
+    }
+    catch (...) { finish(false); }
+    return true;
+}
+
 bool CodeEditorWidget::loadLocalFile(
     const QString& filePath,
     const bool forceEncoding,
@@ -1600,21 +1787,21 @@ bool CodeEditorWidget::loadLocalFile(
     const QString normalizedPath = filePath.trimmed();
     if (normalizedPath.isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("打开失败：文件路径为空。"));
+        setOperationStatus(QStringLiteral("打开失败：文件路径为空。"));
         return false;
     }
 
     QFile inputFile(normalizedPath);
     if (!inputFile.open(QIODevice::ReadOnly))
     {
-        m_statusLabel->setText(QStringLiteral("打开失败：无法读取文件。"));
+        setOperationStatus(QStringLiteral("打开失败：无法读取文件。"));
         return false;
     }
 
     const QByteArray fileBytes = inputFile.readAll();
     if (inputFile.error() != QFileDevice::NoError)
     {
-        m_statusLabel->setText(QStringLiteral("打开失败：无法读取文件。"));
+        setOperationStatus(QStringLiteral("打开失败：无法读取文件。"));
         return false;
     }
     inputFile.close();
@@ -1625,7 +1812,7 @@ bool CodeEditorWidget::loadLocalFile(
 
     if (!decodeResult.success)
     {
-        m_statusLabel->setText(QStringLiteral("打开失败：解码失败。"));
+        setOperationStatus(QStringLiteral("打开失败：解码失败。"));
         return false;
     }
 
@@ -1644,10 +1831,8 @@ bool CodeEditorWidget::loadLocalFile(
     const QString autoFormatHint;
     m_editor->document()->setModified(false);
     updateStatusText();
-    m_statusLabel->setText(QStringLiteral("打开成功：%1（%2%3）")
-        .arg(normalizedPath)
-        .arg(currentEncodingDisplayText())
-        .arg(autoFormatHint));
+    setOperationStatus(QStringLiteral("打开成功：%1（%2%3）"),
+        {normalizedPath, currentEncodingDisplayText(), autoFormatHint}, 1U << 1);
     return true;
 }
 
@@ -1669,7 +1854,7 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
         const QPointer<CodeEditorWidget> self(this);
         targetPath = QFileDialog::getSaveFileName(
             this,
-            QStringLiteral("保存文本"),
+            ks::i18n::sourceText(QStringLiteral("保存文本")),
             targetPath.trimmed().isEmpty() ? QStringLiteral("immediate.txt") : targetPath,
             QStringLiteral("Text Files (*.txt *.log *.ini *.json *.xml *.cpp *.h *.py);;All Files (*.*)"));
         if (!self || m_readOnlyMode) return;
@@ -1683,7 +1868,7 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
     QSaveFile outputFile(targetPath);
     if (!outputFile.open(QIODevice::WriteOnly))
     {
-        m_statusLabel->setText(QStringLiteral("保存失败：无法写入文件。"));
+        setOperationStatus(QStringLiteral("保存失败：无法写入文件。"));
         return;
     }
 
@@ -1703,7 +1888,7 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
     outputStream.flush();
     if (outputStream.status() != QTextStream::Ok || !outputFile.commit())
     {
-        m_statusLabel->setText(QStringLiteral("保存失败：无法写入文件。"));
+        setOperationStatus(QStringLiteral("保存失败：无法写入文件。"));
         return;
     }
     m_editor->document()->setModified(false);
@@ -1714,7 +1899,7 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
     m_fileLineEnding = targetLineEnding;
     m_fileSessionAvailable = true;
     updateStatusText();
-    m_statusLabel->setText(QStringLiteral("保存成功：%1（%2）").arg(targetPath, currentEncodingDisplayText()));
+    setOperationStatus(QStringLiteral("保存成功：%1（%2）"), {targetPath, currentEncodingDisplayText()}, 1U << 1);
 }
 
 void CodeEditorWidget::resetFileSessionMetadata()

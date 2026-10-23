@@ -58,6 +58,11 @@ namespace ks::ui
         // 只是从宿主已经持有的 MemoryDiffOverlay 读出来）。length 为 0 时返回 ok=true 的空窗口。
         virtual WorkbenchByteWindow FetchWindow(std::uint64_t address, std::uint64_t length) const = 0;
 
+        // Optional exact range version. nullopt requires existing full-byte validation;
+        // equal stamps promise unchanged bytes AND availability for the same provider.
+        virtual std::optional<std::vector<std::uint64_t>> ContentStamp(std::uint64_t, std::uint64_t) const
+        { return std::nullopt; }
+
         // AddressBits：当前会话位数（32 或 64），作为反汇编页默认架构分段的依据。
         virtual int AddressBits() const = 0;
 

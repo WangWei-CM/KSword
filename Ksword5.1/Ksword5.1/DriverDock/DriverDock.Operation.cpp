@@ -1,7 +1,12 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "DriverDock.Internal.h"
+
+#include <QScopedValueRollback>
+#include <QScrollBar>
 #include "DriverDock.ModuleDumpFile.h"
+#include "DriverDock.ServiceAction.h"
+#include "../UI/AsyncOperation.h"
 #include "../MemoryDock/MemoryAccessBackend.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -203,6 +208,9 @@ namespace
     // integrityClassText / integrityRiskText 已收口到 UI/IntegrityRiskPresentation（此处不再自带一份，
     // 调用点直接用 ks::ui::integrity::classText / riskText），避免新增风险位只补进别处时，
     // 本页的风险单元格显示为空。
+
+    constexpr int kFastIoEvidenceRiskRole = Qt::UserRole + 1;
+    constexpr int kDriverObjectEvidenceIdentityRole = Qt::UserRole + 2;
 
     // appendEvidenceRow：
     // - 输入：通用证据表、行号和字段内容；
@@ -1681,12 +1689,16 @@ namespace
         QPushButton* loadDriverButton,
         QPushButton* unloadDriverButton,
         QPushButton* deleteServiceButton,
-        const bool enabledState)
+        const bool enabledState,
+        QPushButton* registerOrUpdateButton,
+        QPushButton* refreshStateButton)
     {
         // setDriverServiceControlButtonsEnabled：
         // - 入参：挂载/卸载/删除三个按钮指针与目标可用状态；
         // - 处理：逐个判空后设置 enabled，让后台 SCM 操作期间的“进行中”状态对用户可见；
         // - 返回：无。
+        if (registerOrUpdateButton != nullptr) { registerOrUpdateButton->setEnabled(enabledState); }
+        if (refreshStateButton != nullptr) { refreshStateButton->setEnabled(enabledState); }
         if (loadDriverButton != nullptr)
         {
             loadDriverButton->setEnabled(enabledState);
@@ -1793,6 +1805,7 @@ void DriverDock::refreshDriverServiceRecords()
 
                     if (!collectSucceeded)
                     {
+                        guardThis->m_serviceEnumerationFailed = true;
                         guardThis->m_driverServiceCache.clear();
                         guardThis->rebuildDriverServiceTableByFilter();
                         guardThis->appendOperateLogLine(
@@ -1816,19 +1829,21 @@ void DriverDock::refreshDriverServiceRecords()
                         return;
                     }
 
+                    guardThis->m_serviceEnumerationFailed = false;
                     guardThis->m_driverServiceCache = std::move(collectedServiceRecords);
                     guardThis->rebuildDriverServiceTableByFilter();
 
-                    if (guardThis->m_overviewStatusLabel != nullptr)
+                    if (guardThis->m_overviewStatusLabel != nullptr &&
+                        !guardThis->m_serviceEnumerationFailed && !guardThis->m_moduleEnumerationFailed)
                     {
                         guardThis->m_overviewStatusLabel->setText(
                             driverText(
                                 "driver.overview.count.filtered",
                                 QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
                             .arg(guardThis->m_driverServiceCache.size())
-                            .arg(guardThis->m_serviceTable != nullptr ? guardThis->m_serviceTable->rowCount() : 0)
+                            .arg(guardThis->m_visibleServiceCount)
                             .arg(guardThis->m_loadedModuleCache.size())
-                            .arg(guardThis->m_moduleTable != nullptr ? guardThis->m_moduleTable->rowCount() : 0));
+                            .arg(guardThis->m_visibleModuleCount));
                     }
 
                     info << refreshEvent
@@ -1871,12 +1886,26 @@ void DriverDock::refreshLoadedKernelModuleRecords()
         << driverText("driver.log.refresh_modules_start", QStringLiteral("[DriverDock] 开始刷新已加载模块列表。"))
         << eol;
 
+    // 新模块请求立即取消旧证据的后续阶段；实际 worker 仍由控制器串行收尾。
+    cancelLoadedModuleEvidenceQuery();
+
     // 刷新票据：与服务列表同理，模块刷新按钮连点或操作后的连带刷新只保留最后一次结果。
     const quint64 requestTicket =
         allocateDriverDockRefreshTicket(this, kLoadedModuleRefreshTicketProperty);
 
+    const std::string progressCompleted = driverText(
+        "driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块列表已刷新。")).toStdString();
+    const std::string progressFailed = driverText(
+        "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")).toStdString();
+    // The same value owner travels through worker and delivery. A stale/dropped
+    // result retires its finite task even when the UI callback never executes.
+    const auto progress = std::shared_ptr<int>(new int(kPro.add(this,
+        driverText("driver.tab.kernel_modules", QStringLiteral("内核模块")).toStdString(),
+        driverText("driver.toolbar.refresh_modules.tooltip", QStringLiteral("刷新已加载内核模块")).toStdString())),
+        [](int* pid) { kPro.finish(*pid, kProgressState::Canceled, {}); delete pid; });
+
     QRunnable* collectModuleTask = QRunnable::create(
-        [guardThis, requestTicket, refreshEvent]()
+        [guardThis, requestTicket, refreshEvent, progress, progressCompleted, progressFailed]()
         {
             // 后台线程只做纯数据采集：queryLoadedKernelModuleRecords 是静态成员函数，
             // 只访问 psapi 并产出值类型记录，不触碰任何 QWidget。
@@ -1896,6 +1925,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                 [guardThis,
                  requestTicket,
                  refreshEvent,
+                 progress, progressCompleted, progressFailed,
                  collectSucceeded,
                  collectedModuleRecords = std::move(collectedModuleRecords),
                  collectErrorText]() mutable
@@ -1930,14 +1960,16 @@ void DriverDock::refreshLoadedKernelModuleRecords()
 
                     if (!collectSucceeded)
                     {
-                        ++guardThis->m_moduleEvidenceQueryTicket;
-                        guardThis->m_moduleEvidenceQuerying = false;
-                        if (guardThis->m_refreshModuleEvidenceButton != nullptr)
-                        {
-                            guardThis->m_refreshModuleEvidenceButton->setEnabled(true);
-                        }
+                        kPro.finish(*progress, kProgressState::Failure, progressFailed);
+                        guardThis->cancelLoadedModuleEvidenceQuery();
+                        guardThis->m_moduleEnumerationFailed = true;
                         guardThis->m_loadedModuleCache.clear();
                         guardThis->m_loadedModuleEvidenceCache.clear();
+                        if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
+                        {
+                            guardThis->m_moduleEvidenceStatusLabel->setText(driverText(
+                                "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
+                        }
                         guardThis->rebuildLoadedModuleTable();
                         guardThis->appendOperateLogLine(
                             driverText(
@@ -1960,13 +1992,9 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                         return;
                     }
 
-                    ++guardThis->m_moduleEvidenceQueryTicket;
-                    guardThis->m_moduleEvidenceQuerying = false;
-                    if (guardThis->m_refreshModuleEvidenceButton != nullptr)
-                    {
-                        guardThis->m_refreshModuleEvidenceButton->setEnabled(true);
-                    }
+                    guardThis->cancelLoadedModuleEvidenceQuery();
 
+                    guardThis->m_moduleEnumerationFailed = false;
                     guardThis->m_loadedModuleCache = std::move(collectedModuleRecords);
                     guardThis->m_loadedModuleEvidenceCache.clear();
                     guardThis->m_loadedModuleEvidenceCache.reserve(guardThis->m_loadedModuleCache.size());
@@ -1977,16 +2005,17 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                     }
                     guardThis->rebuildLoadedModuleTable();
 
-                    if (guardThis->m_overviewStatusLabel != nullptr)
+                    if (guardThis->m_overviewStatusLabel != nullptr &&
+                        !guardThis->m_serviceEnumerationFailed && !guardThis->m_moduleEnumerationFailed)
                     {
                         guardThis->m_overviewStatusLabel->setText(
                             driverText(
                                 "driver.overview.count.filtered",
                                 QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
                             .arg(guardThis->m_driverServiceCache.size())
-                            .arg(guardThis->m_serviceTable != nullptr ? guardThis->m_serviceTable->rowCount() : 0)
+                            .arg(guardThis->m_visibleServiceCount)
                             .arg(guardThis->m_loadedModuleCache.size())
-                            .arg(guardThis->m_moduleTable != nullptr ? guardThis->m_moduleTable->rowCount() : 0));
+                            .arg(guardThis->m_visibleModuleCount));
                     }
                     if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
                     {
@@ -2016,6 +2045,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                             "driver.log.refresh_modules_completed",
                             QStringLiteral("[DriverDock] 刷新模块完成, count="))
                         << guardThis->m_loadedModuleCache.size() << eol;
+                    kPro.finish(*progress, kProgressState::Success, progressCompleted);
                 },
                 Qt::QueuedConnection);
         });
@@ -3584,7 +3614,7 @@ void DriverDock::querySelectedDriverObjectInfo()
 
 void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQueryResult& result)
 {
-    // DriverObject 查询会一次重建对象、派遣、设备、扩展、Fast I/O 五张证据表。
+    // 保留五张对象表的菜单提交屏障；接受快照后由当前可见页消费新的投影代次。
     const QPointer<DriverDock> guardThis(this);
     const auto deferredResult =
         std::make_shared<ksword::ark::DriverObjectQueryResult>(result);
@@ -3620,7 +3650,20 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
         m_queryObjectInfoButton->setEnabled(true);
     }
 
-    if (m_objectInfoStatusLabel != nullptr)
+    ++m_driverObjectEvidenceRevision;
+    refreshDriverObjectQueryPresentation();
+    rebuildDriverObjectEvidenceViews();
+}
+
+void DriverDock::refreshDriverObjectQueryPresentation()
+{
+    if (!m_hasDriverObjectQueryResult)
+    {
+        return;
+    }
+    const auto& result = m_lastDriverObjectQueryResult;
+    // 语言变化不能把仍在执行的新查询状态改成上一次查询的状态。
+    if (!m_objectInfoQuerying && m_objectInfoStatusLabel != nullptr)
     {
         const QString readableIoText = describeDriverCollection(result.io);
         m_objectInfoStatusLabel->setText(
@@ -3655,40 +3698,101 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
         summary.field(QStringLiteral("TotalDeviceObjects"), QString::number(result.totalDeviceCount));
         m_objectInfoSummaryEdit->setDocument(summary);
     }
-    rebuildDriverObjectEvidenceViews();
 }
 
 void DriverDock::rebuildDriverObjectEvidenceViews()
 {
     // 输入：当前 DriverObject 缓存与完整性缓存。
     // 处理：仅在 UI 线程投影为只读表格，不重新访问驱动。
-    // 返回：无。
+    // 返回：无；无数据/语言变化的热切不触碰文档、表项、排序、选区或滚动位置。
+    if (m_driverObjectEvidenceProjecting || m_objectInfoPage == nullptr ||
+        !m_objectInfoPage->isVisible() || m_objectDetailTabWidget == nullptr)
+    {
+        return;
+    }
+    QWidget* const currentPage = m_objectDetailTabWidget->currentWidget();
+    const std::array<QWidget*, 5> pages = {
+        m_driverObjectPage, m_deviceObjectPage, m_driverExtensionPage, m_majorFunctionPage, m_fastIoPage
+    };
+    const auto page = std::find(pages.begin(), pages.end(), currentPage);
+    if (page == pages.end())
+    {
+        return;
+    }
+    const std::size_t pageIndex = static_cast<std::size_t>(page - pages.begin());
+    const DriverObjectProjectionRevision revision = {
+        m_driverObjectEvidenceRevision,
+        pageIndex == 4 ? m_driverIntegrityEvidenceRevision : 0,
+        m_driverObjectLanguageRevision
+    };
+    const auto& applied = m_driverObjectProjectionRevisions[pageIndex];
+    if (applied.object == revision.object && applied.integrity == revision.integrity &&
+        applied.language == revision.language)
+    {
+        if (pageIndex == 4)
+        {
+            refreshFastIoEvidenceTheme();
+        }
+        return;
+    }
+
+    const std::array<QTableWidget*, 5> tables = {
+        m_driverObjectEvidenceTable, m_deviceObjectTable, m_driverExtensionEvidenceTable,
+        m_majorFunctionTable, m_fastIoEvidenceTable
+    };
+    const QPointer<DriverDock> guardThis(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+        this, QStringLiteral("driver-object-evidence-projection"), { tables[pageIndex] },
+        [guardThis]()
+        {
+            if (guardThis != nullptr)
+            {
+                guardThis->rebuildDriverObjectEvidenceViews();
+            }
+        }))
+    {
+        return;
+    }
+    const QScopedValueRollback<bool> projecting(m_driverObjectEvidenceProjecting, true);
+    QTableWidget* const currentTable = tables[pageIndex];
+    const int previousColumn = currentTable != nullptr ? currentTable->currentColumn() : -1;
+    const bool previouslySorting = currentTable != nullptr && currentTable->isSortingEnabled();
+    const int previousSortColumn = currentTable != nullptr ? currentTable->horizontalHeader()->sortIndicatorSection() : -1;
+    const Qt::SortOrder previousSortOrder = currentTable != nullptr
+        ? currentTable->horizontalHeader()->sortIndicatorOrder() : Qt::AscendingOrder;
+    const QTableWidgetItem* const previousItem = currentTable != nullptr
+        ? currentTable->item(currentTable->currentRow(), 0) : nullptr;
+    const QVariant previousIdentity = previousItem != nullptr
+        ? previousItem->data(kDriverObjectEvidenceIdentityRole) : QVariant();
+    const int previousVerticalScroll = currentTable != nullptr ? currentTable->verticalScrollBar()->value() : 0;
+    const int previousHorizontalScroll = currentTable != nullptr ? currentTable->horizontalScrollBar()->value() : 0;
     if (!m_hasDriverObjectQueryResult)
     {
-        if (m_driverObjectPageSummaryEdit != nullptr)
+        if (pageIndex == 0 && m_driverObjectPageSummaryEdit != nullptr)
         {
             m_driverObjectPageSummaryEdit->setDocument(ks::ui::FieldDocument{}.note(
                 QStringLiteral("请先执行 DriverObject 查询。")));
         }
-        if (m_driverExtensionStatusLabel != nullptr)
+        if (pageIndex == 2 && m_driverExtensionStatusLabel != nullptr)
         {
             m_driverExtensionStatusLabel->setText(
                 driverText(
                     "driver.object.driver_extension.status.waiting",
                     QStringLiteral("状态：等待 DriverObject 查询。")));
         }
-        if (m_fastIoStatusLabel != nullptr)
+        if (pageIndex == 4 && m_fastIoStatusLabel != nullptr)
         {
             m_fastIoStatusLabel->setText(
                 driverText(
                     "driver.object.fast_io.status.waiting",
                     QStringLiteral("状态：等待 Driver Integrity 证据。")));
         }
+        m_driverObjectProjectionRevisions[pageIndex] = revision;
         return;
     }
 
     const ksword::ark::DriverObjectQueryResult& result = m_lastDriverObjectQueryResult;
-    if (m_driverObjectPageSummaryEdit != nullptr)
+    if (pageIndex == 0 && m_driverObjectPageSummaryEdit != nullptr)
     {
         ks::ui::FieldDocument summary;
         summary.field(QStringLiteral("DriverObject"), formatCompactAddress(result.driverObjectAddress));
@@ -3706,7 +3810,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_driverObjectPageSummaryEdit->setDocument(summary);
     }
 
-    if (m_driverObjectEvidenceTable != nullptr)
+    if (pageIndex == 0 && m_driverObjectEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_driverObjectEvidenceTable);
         m_driverObjectEvidenceTable->setSortingEnabled(false);
@@ -3756,11 +3860,13 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 index == startIoRowIndex
                     ? driverStartIoStateText(result.startIo, result.io.ok)
                     : readOnlySummaryText);
+            m_driverObjectEvidenceTable->item(index, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), rows[index] });
         }
         m_driverObjectEvidenceTable->setSortingEnabled(true);
     }
 
-    if (m_majorFunctionTable != nullptr)
+    if (pageIndex == 3 && m_majorFunctionTable != nullptr)
     {
         const QSignalBlocker blocker(m_majorFunctionTable);
         m_majorFunctionTable->setSortingEnabled(false);
@@ -3804,6 +3910,8 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
              */
             majorItem->setData(Qt::UserRole + 1,
                 static_cast<qulonglong>(majorEntry.slotAddress));
+            majorItem->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), majorEntry.majorFunction });
             m_majorFunctionTable->setItem(rowIndex, 0, majorItem);
             m_majorFunctionTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(majorEntry.dispatchAddress)));
             m_majorFunctionTable->setItem(rowIndex, 2, createReadOnlyItem(QString::fromStdWString(majorEntry.moduleName).isEmpty()
@@ -3836,6 +3944,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             m_majorFunctionTable->insertRow(rowIndex);
             QTableWidgetItem* const startIoItem = createReadOnlyItem(QStringLiteral("DriverStartIo"));
             startIoItem->setData(Qt::UserRole, static_cast<qulonglong>(startIo.address));
+            startIoItem->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)),
+                    std::numeric_limits<quint32>::max() });
             m_majorFunctionTable->setItem(rowIndex, 0, startIoItem);
             m_majorFunctionTable->setItem(rowIndex, 1, createReadOnlyItem(
                 present ? formatCompactAddress(startIo.address) : QStringLiteral("-")));
@@ -3850,7 +3961,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_majorFunctionTable->setSortingEnabled(true);
     }
 
-    if (m_deviceObjectTable != nullptr)
+    if (pageIndex == 1 && m_deviceObjectTable != nullptr)
     {
         const QSignalBlocker blocker(m_deviceObjectTable);
         m_deviceObjectTable->setSortingEnabled(false);
@@ -3862,6 +3973,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             m_deviceObjectTable->setItem(rowIndex, 0, createReadOnlyItem(deviceEntry.relationDepth == 0U
                 ? QStringLiteral("Root")
                 : QStringLiteral("Attached +%1").arg(deviceEntry.relationDepth)));
+            m_deviceObjectTable->item(rowIndex, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(deviceEntry.rootDeviceObjectAddress)),
+                    QVariant::fromValue(static_cast<qulonglong>(deviceEntry.deviceObjectAddress)), deviceEntry.relationDepth });
             m_deviceObjectTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(deviceEntry.deviceObjectAddress)));
             QTableWidgetItem* nameItem = createReadOnlyItem(QString::fromStdWString(deviceEntry.deviceName).isEmpty()
                 ? QStringLiteral("(unnamed)")
@@ -3879,14 +3993,14 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_deviceObjectTable->setSortingEnabled(true);
     }
 
-    if (m_driverExtensionStatusLabel != nullptr)
+    if (pageIndex == 2 && m_driverExtensionStatusLabel != nullptr)
     {
         m_driverExtensionStatusLabel->setText(
             driverText(
                 "driver.object.driver_extension.status.projected",
                 QStringLiteral("状态：DriverExtension 未直接暴露；当前仅展示 DriverObject / DeviceChain / FastIo 关联证据。")));
     }
-    if (m_driverExtensionEvidenceTable != nullptr)
+    if (pageIndex == 2 && m_driverExtensionEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_driverExtensionEvidenceTable);
         m_driverExtensionEvidenceTable->setSortingEnabled(false);
@@ -3923,11 +4037,13 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 driverText("driver.evidence.status.unknown", QStringLiteral("未知")),
                 QStringLiteral("0"),
                 detailTexts[index]);
+            m_driverExtensionEvidenceTable->item(index, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), evidenceNames[index] });
         }
         m_driverExtensionEvidenceTable->setSortingEnabled(true);
     }
 
-    if (m_fastIoStatusLabel != nullptr)
+    if (pageIndex == 4 && m_fastIoStatusLabel != nullptr)
     {
         m_fastIoStatusLabel->setText(
             driverText(
@@ -3935,7 +4051,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 QStringLiteral("状态：FastIo 关联证据由 Driver Integrity 页回填，当前记录数 %1。"))
             .arg(m_driverIntegrityCache.size()));
     }
-    if (m_fastIoEvidenceTable != nullptr)
+    if (pageIndex == 4 && m_fastIoEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_fastIoEvidenceTable);
         m_fastIoEvidenceTable->setSortingEnabled(false);
@@ -3979,6 +4095,10 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             {
                 classItem->setData(Qt::UserRole,
                     static_cast<qulonglong>(row.evidenceClass));
+                classItem->setData(kFastIoEvidenceRiskRole, static_cast<quint32>(row.riskFlags));
+                classItem->setData(kDriverObjectEvidenceIdentityRole,
+                    QVariantList{ row.evidenceClass,
+                        QVariant::fromValue(static_cast<qulonglong>(row.objectAddress)), row.ordinal });
             }
             if (QTableWidgetItem* const slotItem =
                     m_fastIoEvidenceTable->item(rowIndex, 1))
@@ -3992,9 +4112,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 targetItem->setData(Qt::UserRole,
                     static_cast<qulonglong>(row.targetAddress));
             }
-            // 整行高亮：FastIo/StartIo/DriverObject 证据里带 HIDDEN_HOOK 等位的行整行标红；
-            // 此时排序已关闭，改颜色不会触发重排。
-            ks::ui::integrity::applyRiskRowHighlight(m_fastIoEvidenceTable, rowIndex, row.riskFlags);
+            // 风险位随原表项保存；数据提交结束后统一着色，换主题时仅更新这些角色。
             ++visibleRows;
         }
         if (visibleRows == 0)
@@ -4012,8 +4130,68 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                     "driver.object.fast_io.empty",
                     QStringLiteral("当前 Driver Integrity 缓存未返回 FastIo 证据。")));
         }
+        refreshFastIoEvidenceTheme(true);
         m_fastIoEvidenceTable->setSortingEnabled(true);
     }
+    if (currentTable != nullptr && previouslySorting && previousSortColumn >= 0 &&
+        previousSortColumn < currentTable->columnCount())
+    {
+        currentTable->sortItems(previousSortColumn, previousSortOrder);
+    }
+    if (currentTable != nullptr && previousIdentity.isValid())
+    {
+        const QSignalBlocker blocker(currentTable);
+        for (int row = 0; row < currentTable->rowCount(); ++row)
+        {
+            const QTableWidgetItem* const item = currentTable->item(row, 0);
+            if (item != nullptr && item->data(kDriverObjectEvidenceIdentityRole) == previousIdentity)
+            {
+                currentTable->setCurrentCell(row, std::clamp(previousColumn, 0, currentTable->columnCount() - 1));
+                break;
+            }
+        }
+        currentTable->verticalScrollBar()->setValue(previousVerticalScroll);
+        currentTable->horizontalScrollBar()->setValue(previousHorizontalScroll);
+    }
+    m_driverObjectProjectionRevisions[pageIndex] = revision;
+}
+
+void DriverDock::refreshFastIoEvidenceTheme(const bool freshlyProjected)
+{
+    if (m_fastIoEvidenceTable == nullptr || m_fastIoPage == nullptr ||
+        (!freshlyProjected && !m_fastIoPage->isVisible()))
+    {
+        return;
+    }
+    const std::array<std::uint32_t, 4> colors = {
+        KswordTheme::ErrorColor().rgba(), KswordTheme::ErrorBackgroundColor().rgba(),
+        KswordTheme::WarningColor().rgba(), KswordTheme::WarningBackgroundColor().rgba()
+    };
+    const bool darkMode = KswordTheme::IsDarkModeEnabled();
+    if (!freshlyProjected && m_hasFastIoRiskTheme &&
+        m_fastIoRiskThemeColors == colors && m_fastIoRiskThemeDarkMode == darkMode)
+    {
+        return;
+    }
+    const QSignalBlocker blocker(m_fastIoEvidenceTable);
+    const bool sortingEnabled = m_fastIoEvidenceTable->isSortingEnabled();
+    m_fastIoEvidenceTable->setSortingEnabled(false);
+    for (int row = 0; row < m_fastIoEvidenceTable->rowCount(); ++row)
+    {
+        const QTableWidgetItem* const classItem = m_fastIoEvidenceTable->item(row, 0);
+        if (classItem != nullptr)
+        {
+            const QVariant riskFlags = classItem->data(kFastIoEvidenceRiskRole);
+            if (riskFlags.isValid())
+            {
+                ks::ui::integrity::applyRiskRowHighlight(m_fastIoEvidenceTable, row, riskFlags.toUInt());
+            }
+        }
+    }
+    m_fastIoEvidenceTable->setSortingEnabled(sortingEnabled);
+    m_fastIoRiskThemeColors = colors;
+    m_fastIoRiskThemeDarkMode = darkMode;
+    m_hasFastIoRiskTheme = true;
 }
 
 void DriverDock::rebuildDriverServiceTableByFilter()
@@ -4022,68 +4200,48 @@ void DriverDock::rebuildDriverServiceTableByFilter()
     {
         return;
     }
-
-    const QString filterText = m_serviceFilterEdit != nullptr
-        ? m_serviceFilterEdit->text().trimmed()
-        : QString();
-
+    const QSignalBlocker blocker(m_serviceTable);
+    const bool sortingEnabled = m_serviceTable->isSortingEnabled();
+    m_serviceTable->setSortingEnabled(false);
     m_serviceTable->setRowCount(0);
-    int visibleCount = 0;
-    for (const DriverServiceRecord& serviceRecord : m_driverServiceCache)
+    auto filterRows = std::make_shared<TableFilterRows>();
+    filterRows->reserve(m_driverServiceCache.size());
+    for (std::size_t sourceIndex = 0; sourceIndex < m_driverServiceCache.size(); ++sourceIndex)
     {
-        const bool matchFilter =
-            filterText.isEmpty() ||
-            serviceRecord.serviceName.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.displayName.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.binaryPath.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.description.contains(filterText, Qt::CaseInsensitive);
-        if (!matchFilter)
-        {
-            continue;
-        }
-
+        const DriverServiceRecord& serviceRecord = m_driverServiceCache[sourceIndex];
+        filterRows->push_back({ serviceRecord.serviceName, serviceRecord.displayName,
+            serviceRecord.binaryPath, serviceRecord.description });
         const int rowIndex = m_serviceTable->rowCount();
         m_serviceTable->insertRow(rowIndex);
-
         QTableWidgetItem* serviceNameItem = createReadOnlyItem(serviceRecord.serviceName);
         serviceNameItem->setData(Qt::UserRole, serviceRecord.serviceName);
+        serviceNameItem->setData(Qt::UserRole + 42,
+            QVariant::fromValue<qulonglong>(static_cast<qulonglong>(sourceIndex)));
         m_serviceTable->setItem(rowIndex, 0, serviceNameItem);
         m_serviceTable->setItem(rowIndex, 1, createReadOnlyItem(serviceRecord.displayName));
         m_serviceTable->setItem(rowIndex, 2, createReadOnlyItem(serviceStateToText(serviceRecord.currentState)));
         m_serviceTable->setItem(rowIndex, 3, createReadOnlyItem(startTypeToText(serviceRecord.startType)));
         m_serviceTable->setItem(rowIndex, 4, createReadOnlyItem(errorControlToText(serviceRecord.errorControl)));
-
         QTableWidgetItem* pathItem = createReadOnlyItem(serviceRecord.binaryPath);
         pathItem->setToolTip(serviceRecord.binaryPath);
         m_serviceTable->setItem(rowIndex, 5, pathItem);
-
         QTableWidgetItem* descriptionItem = createReadOnlyItem(serviceRecord.description);
         descriptionItem->setToolTip(serviceRecord.description);
         m_serviceTable->setItem(rowIndex, 6, descriptionItem);
-
         if (serviceRecord.currentState == SERVICE_RUNNING)
         {
             for (int columnIndex = 0; columnIndex < m_serviceTable->columnCount(); ++columnIndex)
             {
-                QTableWidgetItem* cellItem = m_serviceTable->item(rowIndex, columnIndex);
-                if (cellItem != nullptr)
+                if (QTableWidgetItem* item = m_serviceTable->item(rowIndex, columnIndex))
                 {
-                    cellItem->setBackground(KswordTheme::NewRowBackgroundColor());
+                    item->setBackground(KswordTheme::NewRowBackgroundColor());
                 }
             }
         }
-        ++visibleCount;
     }
-
-    if (m_overviewStatusLabel != nullptr)
-    {
-        m_overviewStatusLabel->setText(
-            driverText(
-                "driver.service.count.filtered",
-                QStringLiteral("状态：驱动服务 %1 条（显示 %2 条）"))
-            .arg(m_driverServiceCache.size())
-            .arg(visibleCount));
-    }
+    m_serviceFilterRows = std::move(filterRows);
+    m_serviceTable->setSortingEnabled(sortingEnabled);
+    queueDriverTableFilter(TableFilterTarget::Services, false);
 }
 
 void DriverDock::rebuildLoadedModuleTable()
@@ -4092,82 +4250,67 @@ void DriverDock::rebuildLoadedModuleTable()
     {
         return;
     }
-
-    // filterText 用途：仅筛选内核模块页，不再与驱动服务页共用搜索条件。
-    const QString filterText = m_moduleFilterEdit != nullptr
-        ? m_moduleFilterEdit->text().trimmed()
-        : QString();
+    QString selectedName;
+    std::uint64_t selectedBase = 0;
+    if (QTableWidgetItem* selectedItem = m_moduleTable->item(m_moduleTable->currentRow(), ModuleNameColumn))
+    {
+        selectedName = selectedItem->text();
+        if (QTableWidgetItem* baseItem = m_moduleTable->item(selectedItem->row(), ModuleBaseColumn))
+        {
+            selectedBase = baseItem->data(Qt::UserRole).toULongLong();
+        }
+    }
+    const QSignalBlocker blocker(m_moduleTable);
+    const bool sortingEnabled = m_moduleTable->isSortingEnabled();
+    m_moduleTable->setSortingEnabled(false);
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_moduleEvidenceDetailEditor);
     m_moduleTable->setRowCount(0);
+    auto filterRows = std::make_shared<TableFilterRows>();
+    filterRows->reserve(m_loadedModuleCache.size());
+    QTableWidgetItem* restoreItem = nullptr;
     for (std::size_t sourceIndex = 0U; sourceIndex < m_loadedModuleCache.size(); ++sourceIndex)
     {
         const LoadedKernelModuleRecord& moduleRecord = m_loadedModuleCache[sourceIndex];
-        // evidencePointer 用途：签名后台扫描完成后让搜索立即覆盖签名状态文本。
-        const LoadedModuleEvidenceRecord* evidencePointer =
-            sourceIndex < m_loadedModuleEvidenceCache.size()
-            ? &m_loadedModuleEvidenceCache[sourceIndex]
-            : nullptr;
+        const LoadedModuleEvidenceRecord* evidencePointer = sourceIndex < m_loadedModuleEvidenceCache.size()
+            ? &m_loadedModuleEvidenceCache[sourceIndex] : nullptr;
         const QString signatureStatusText = evidencePointer != nullptr
             ? moduleSignatureStatusText(*evidencePointer)
             : driverText("driver.evidence.pending", QStringLiteral("待扫描"));
-        const bool matchesFilter =
-            filterText.isEmpty() ||
-            moduleRecord.moduleName.contains(filterText, Qt::CaseInsensitive) ||
-            moduleRecord.imagePath.contains(filterText, Qt::CaseInsensitive) ||
-            signatureStatusText.contains(filterText, Qt::CaseInsensitive);
-        if (!matchesFilter)
-        {
-            continue;
-        }
-
+        filterRows->push_back({ moduleRecord.moduleName, moduleRecord.imagePath, signatureStatusText });
         const int rowIndex = m_moduleTable->rowCount();
         m_moduleTable->insertRow(rowIndex);
         QTableWidgetItem* moduleNameItem = createReadOnlyItem(moduleRecord.moduleName);
-        moduleNameItem->setData(
-            ModuleRecordIndexRole,
+        moduleNameItem->setData(ModuleRecordIndexRole,
             QVariant::fromValue<qulonglong>(static_cast<qulonglong>(sourceIndex)));
         m_moduleTable->setItem(rowIndex, ModuleNameColumn, moduleNameItem);
         QTableWidgetItem* baseItem = createReadOnlyItem(formatAddress(moduleRecord.baseAddress));
-        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(
-            static_cast<qulonglong>(moduleRecord.baseAddress)));
+        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(moduleRecord.baseAddress)));
         m_moduleTable->setItem(rowIndex, ModuleBaseColumn, baseItem);
-        m_moduleTable->setItem(
-            rowIndex,
-            ModuleSignatureColumn,
-            createReadOnlyItem(signatureStatusText));
-        for (int evidenceColumn = ModuleEvidenceFirstColumn;
-            evidenceColumn <= ModuleEvidenceLastColumn;
-            ++evidenceColumn)
+        m_moduleTable->setItem(rowIndex, ModuleSignatureColumn, createReadOnlyItem(signatureStatusText));
+        for (int evidenceColumn = ModuleEvidenceFirstColumn; evidenceColumn <= ModuleEvidenceLastColumn; ++evidenceColumn)
         {
-            m_moduleTable->setItem(
-                rowIndex,
-                evidenceColumn,
+            m_moduleTable->setItem(rowIndex, evidenceColumn,
                 createReadOnlyItem(driverText("driver.evidence.pending", QStringLiteral("待扫描"))));
         }
         QTableWidgetItem* pathItem = createReadOnlyItem(moduleRecord.imagePath);
         pathItem->setToolTip(moduleRecord.imagePath);
         m_moduleTable->setItem(rowIndex, ModuleImagePathColumn, pathItem);
+        if (moduleRecord.moduleName == selectedName && moduleRecord.baseAddress == selectedBase)
+        {
+            restoreItem = moduleNameItem;
+        }
     }
-    if (m_moduleTable->rowCount() > 0)
-    {
-        m_moduleTable->setCurrentCell(0, 0);
-    }
+    m_moduleFilterRows = std::move(filterRows);
+    // 回填证据时禁止动态排序，避免回填列改变后其余单元格写入另一行。
     rebuildLoadedModuleEvidenceViews();
-    if (m_overviewStatusLabel != nullptr)
+    m_moduleTable->setSortingEnabled(sortingEnabled);
+    if (restoreItem != nullptr)
     {
-        // visibleServiceCount 用途：状态栏同步展示服务与模块两个表格的筛选数量。
-        const int visibleServiceCount = m_serviceTable != nullptr
-            ? m_serviceTable->rowCount()
-            : 0;
-        m_overviewStatusLabel->setText(
-            driverText(
-                "driver.overview.count.filtered",
-                QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
-            .arg(m_driverServiceCache.size())
-            .arg(visibleServiceCount)
-            .arg(m_loadedModuleCache.size())
-            .arg(m_moduleTable->rowCount()));
+        m_moduleTable->setCurrentItem(restoreItem);
     }
+    m_selectFirstFilteredModule = restoreItem == nullptr && selectedName.isEmpty();
+    queueDriverTableFilter(TableFilterTarget::Modules, false);
+    showSelectedModuleEvidenceDetail();
 }
 
 void DriverDock::syncOperateFormBySelectedService()
@@ -4238,157 +4381,262 @@ void DriverDock::syncOperateFormBySelectedService()
     }
 }
 
-void DriverDock::refreshSelectedServiceStateToForm()
+void DriverDock::recoverServiceFormDeliveryState()
 {
-    if (m_serviceNameEdit == nullptr)
+    // A Qt queue can discard a completed delivery while the owner remains alive.
+    // Observe only our two explicit controllers; never release another action's gate.
+    if (!m_serviceFormOwnsBusy)
     {
         return;
     }
+    if (m_serviceStatusOperation->isInFlight() || m_serviceRegistrationOperation->isInFlight())
+    {
+        return;
+    }
+    m_serviceFormOwnsBusy = false;
+    endDriverServiceControlOperation(this);
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.service.delivery_dropped",
+        QStringLiteral("服务 %1 的结果未能回投；请刷新核对实际状态或配置，再决定是否重试。"))
+        .arg(m_serviceFormSubmittedName));
+}
 
+void DriverDock::refreshSelectedServiceStateToForm()
+{
+    if (m_serviceNameEdit == nullptr || m_serviceStatusOperation == nullptr)
+    {
+        return;
+    }
     kLogEvent queryEvent;
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.query.empty_name", QStringLiteral("查询失败：服务名不能为空。")));
-        warn << queryEvent
-            << driverText("driver.log.query.empty_name", QStringLiteral("[DriverDock] 查询状态失败：服务名为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.query.empty_name", QStringLiteral("查询失败：服务名不能为空。")));
+        warn << queryEvent << driverText("driver.log.query.empty_name", QStringLiteral("[DriverDock] 查询状态失败：服务名为空。")) << eol;
         return;
     }
-
-    // UI adapter only: the reusable service layer owns SCM open/query/close details.
-    ks::service::ServiceStatus statusInfo;
-    std::string errorText;
-    std::uint32_t errorCode = 0;
-    if (!ks::service::QueryServiceStatus(
-        toWideString(serviceNameText),
-        &statusInfo,
-        &errorText,
-        &errorCode))
+    if (m_serviceStatusOperation->isInFlight() ||
+        !tryBeginDriverServiceControlOperation(this))
     {
-        appendOperateLogLine(
-            driverText("driver.operation.query.failed", QStringLiteral("查询失败：%1"))
-            .arg(QString::fromUtf8(errorText.c_str())));
-        warn << queryEvent
-            << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
-            << serviceNameText.toStdString()
-            << ", error=" << errorCode
-            << ", detail=" << errorText
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
         return;
     }
+    m_serviceFormOwnsBusy = true;
+    m_serviceFormSubmittedName = serviceNameText;
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, false, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.query.running", QStringLiteral("正在查询服务 %1 的状态。"))
+        .arg(serviceNameText));
 
-    appendOperateLogLine(
-        driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
-        .arg(serviceNameText)
-        .arg(serviceStateToText(statusInfo.currentState)));
-
-    info << queryEvent
-        << driverText("driver.log.query.succeeded", QStringLiteral("[DriverDock] 查询状态成功, service="))
-        << serviceNameText.toStdString()
-        << ", state=" << statusInfo.currentState
-        << eol;
+    using namespace ksword::driver_service_action;
+    const StatusRequest request{ toWideString(serviceNameText), m_serviceFormRevision };
+    const auto finishBusy = [this]()
+    {
+        m_serviceFormOwnsBusy = false;
+        endDriverServiceControlOperation(this);
+        setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+            m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    };
+    const std::uint64_t ticket = m_serviceStatusOperation->submit<StatusRequest, StatusReceipt>(
+        request,
+        [](const StatusRequest& value, const ks::ui::AsyncOperationToken&)
+        {
+            StatusReceipt receipt;
+            receipt.request = value;
+            receipt.succeeded = ks::service::QueryServiceStatus(value.serviceName,
+                &receipt.status, &receipt.errorText, &receipt.errorCode);
+            return receipt;
+        },
+        [this, queryEvent, finishBusy](const StatusReceipt& receipt, std::uint64_t)
+        {
+            finishBusy();
+            const QString name = QString::fromStdWString(receipt.request.serviceName);
+            if (receipt.request.formRevision != m_serviceFormRevision)
+            {
+                appendOperateLogLine(driverText("driver.operation.service.form_changed",
+                    QStringLiteral("当前表单已更改；以下结果仅对应已提交的服务 %1，未回填当前输入。")) .arg(name));
+            }
+            if (!receipt.succeeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.query.failed_target",
+                    QStringLiteral("服务 %1 状态查询失败：%2（错误码 %3）。"))
+                    .arg(name, QString::fromUtf8(receipt.errorText.c_str())).arg(receipt.errorCode));
+                warn << queryEvent << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
+                    << name.toStdString() << ", error=" << receipt.errorCode
+                    << ", detail=" << receipt.errorText << eol;
+            }
+            else
+            {
+                appendOperateLogLine(driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
+                    .arg(name, serviceStateToText(receipt.status.currentState)));
+                info << queryEvent << driverText("driver.log.query.succeeded", QStringLiteral("[DriverDock] 查询状态成功, service="))
+                    << name.toStdString() << ", state=" << receipt.status.currentState << eol;
+            }
+            return true;
+        },
+        [this, queryEvent, finishBusy, serviceNameText](std::exception_ptr failure)
+        {
+            finishBusy();
+            QString detail;
+            try { if (failure) { std::rethrow_exception(failure); } }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) { detail = QStringLiteral("unknown exception"); }
+            appendOperateLogLine(driverText("driver.operation.query.failed_target",
+                QStringLiteral("服务 %1 状态查询失败：%2（错误码 %3）。"))
+                .arg(serviceNameText, detail).arg(0));
+            err << queryEvent << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
+                << serviceNameText.toStdString() << ", detail=" << detail.toStdString() << eol;
+        });
+    if (ticket == 0)
+    {
+        finishBusy();
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
+    }
 }
-
 
 void DriverDock::registerOrUpdateDriverService()
 {
-    if (m_serviceNameEdit == nullptr ||
-        m_binaryPathEdit == nullptr ||
-        m_startTypeCombo == nullptr ||
-        m_errorControlCombo == nullptr)
+    if (m_serviceNameEdit == nullptr || m_binaryPathEdit == nullptr ||
+        m_startTypeCombo == nullptr || m_errorControlCombo == nullptr ||
+        m_serviceRegistrationOperation == nullptr)
     {
         return;
     }
-
     kLogEvent operationEvent;
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
-    const QString displayNameText = (m_displayNameEdit == nullptr)
-        ? QString()
-        : m_displayNameEdit->text().trimmed();
-    const QString descriptionText = (m_descriptionEdit == nullptr)
-        ? QString()
-        : m_descriptionEdit->text().trimmed();
     const QString binaryPathText = normalizeDriverBinaryPath(m_binaryPathEdit->text().trimmed());
-
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.register.empty_service", QStringLiteral("注册/更新失败：服务名不能为空。")));
-        warn << operationEvent
-            << driverText("driver.log.register.empty_service", QStringLiteral("[DriverDock] 注册/更新失败：服务名为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.register.empty_service", QStringLiteral("注册/更新失败：服务名不能为空。")));
+        warn << operationEvent << driverText("driver.log.register.empty_service", QStringLiteral("[DriverDock] 注册/更新失败：服务名为空。")) << eol;
         return;
     }
     if (binaryPathText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.register.empty_path", QStringLiteral("注册/更新失败：驱动路径不能为空。")));
-        warn << operationEvent
-            << driverText("driver.log.register.empty_path", QStringLiteral("[DriverDock] 注册/更新失败：路径为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.register.empty_path", QStringLiteral("注册/更新失败：驱动路径不能为空。")));
+        warn << operationEvent << driverText("driver.log.register.empty_path", QStringLiteral("[DriverDock] 注册/更新失败：路径为空。")) << eol;
+        return;
+    }
+    if (m_serviceRegistrationOperation->isInFlight() ||
+        !tryBeginDriverServiceControlOperation(this))
+    {
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
         return;
     }
 
+    using namespace ksword::driver_service_action;
+    RegistrationRequest request;
+    request.config.serviceName = toWideString(serviceNameText);
+    request.config.displayName = toWideString(m_displayNameEdit ? m_displayNameEdit->text().trimmed() : QString());
+    request.config.description = toWideString(m_descriptionEdit ? m_descriptionEdit->text().trimmed() : QString());
+    request.config.binaryPath = toWideString(binaryPathText);
+    request.config.startType = static_cast<std::uint32_t>(m_startTypeCombo->currentData().toInt());
+    request.config.errorControl = static_cast<std::uint32_t>(m_errorControlCombo->currentData().toInt());
     const QString unquotedPathText = trimQuotedText(binaryPathText);
-    if (!QFileInfo::exists(unquotedPathText) &&
-        !unquotedPathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive) &&
-        !unquotedPathText.startsWith(QStringLiteral("%SystemRoot%"), Qt::CaseInsensitive))
+    request.unquotedPath = toWideString(unquotedPathText);
+    request.systemRootPath =
+        unquotedPathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive) ||
+        unquotedPathText.startsWith(QStringLiteral("%SystemRoot%"), Qt::CaseInsensitive);
+    request.formRevision = m_serviceFormRevision;
+
+    m_serviceFormOwnsBusy = true;
+    m_serviceFormSubmittedName = serviceNameText;
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, false, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.register.running",
+        QStringLiteral("正在注册/更新服务 %1；提交参数已固定。")) .arg(serviceNameText));
+    const auto finishBusy = [this]()
     {
-        appendOperateLogLine(
-            driverText(
-                "driver.operation.register.path_unavailable",
-                QStringLiteral("警告：驱动路径当前不可访问，仍将尝试注册。")));
-    }
-
-    ks::service::KernelDriverServiceConfig serviceConfig;
-    serviceConfig.serviceName = toWideString(serviceNameText);
-    serviceConfig.displayName = toWideString(displayNameText);
-    serviceConfig.description = toWideString(descriptionText);
-    serviceConfig.binaryPath = toWideString(binaryPathText);
-    serviceConfig.startType = static_cast<std::uint32_t>(m_startTypeCombo->currentData().toInt());
-    serviceConfig.errorControl = static_cast<std::uint32_t>(m_errorControlCombo->currentData().toInt());
-
-    bool created = false;
-    std::string errorText;
-    std::uint32_t errorCode = 0;
-    if (!ks::service::CreateOrUpdateKernelDriverService(
-        serviceConfig,
-        &created,
-        &errorText,
-        &errorCode))
+        m_serviceFormOwnsBusy = false;
+        endDriverServiceControlOperation(this);
+        setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+            m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    };
+    // A dedicated transaction controller never uses latest-only submit/cancel.
+    // The shared API guarantees that an accepted worker runs even after close.
+    const std::uint64_t ticket = m_serviceRegistrationOperation->submitTransaction<RegistrationRequest, RegistrationReceipt>(
+        std::move(request),
+        [](const RegistrationRequest& value)
+        {
+            return RunRegistration(value,
+                [](const std::wstring& path) { return QFileInfo::exists(QString::fromStdWString(path)); },
+                [](const ks::service::KernelDriverServiceConfig& config, bool* created,
+                    std::string* error, std::uint32_t* code)
+                {
+                    // Preserve every backend allowScmMutation gate.
+                    return ks::service::CreateOrUpdateKernelDriverService(config, created, error, code);
+                },
+                [](const std::wstring& name, ks::service::ServiceStatus* status,
+                    std::string* error, std::uint32_t* code)
+                {
+                    return ks::service::QueryServiceStatus(name, status, error, code);
+                });
+        },
+        [this, operationEvent, finishBusy](const RegistrationReceipt& receipt, std::uint64_t)
+        {
+            finishBusy();
+            const QString name = QString::fromStdWString(receipt.request.config.serviceName);
+            if (receipt.request.formRevision != m_serviceFormRevision)
+            {
+                appendOperateLogLine(driverText("driver.operation.service.form_changed",
+                    QStringLiteral("当前表单已更改；以下结果仅对应已提交的服务 %1，未回填当前输入。")) .arg(name));
+            }
+            if (receipt.pathUnavailable)
+            {
+                appendOperateLogLine(driverText("driver.operation.register.path_unavailable_target",
+                    QStringLiteral("驱动路径检查时不可访问；已按提交参数尝试服务 %1 的注册/更新。")) .arg(name));
+            }
+            if (!receipt.succeeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.register.failed_target",
+                    QStringLiteral("服务 %1 注册/更新失败：%2（错误码 %3）；请刷新核对实际配置。"))
+                    .arg(name, QString::fromUtf8(receipt.errorText.c_str())).arg(receipt.errorCode));
+                err << operationEvent << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
+                    << name.toStdString() << ", error=" << receipt.errorCode
+                    << ", detail=" << receipt.errorText << eol;
+                (void)ks::ui::promptForPrivilegeFailure(this, QStringLiteral("注册或更新驱动服务"), receipt.errorCode);
+                return true;
+            }
+            appendOperateLogLine(driverText("driver.operation.register.succeeded", QStringLiteral("%1成功：service=%2"))
+                .arg(receipt.created
+                    ? driverText("driver.operation.register.created", QStringLiteral("注册"))
+                    : driverText("driver.operation.register.updated", QStringLiteral("更新")))
+                .arg(name));
+            info << operationEvent << driverText("driver.log.register.succeeded", QStringLiteral("[DriverDock] 注册/更新成功, created="))
+                << (receipt.created ? "true" : "false") << ", service=" << name.toStdString() << eol;
+            if (receipt.readbackSucceeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
+                    .arg(name, serviceStateToText(receipt.status.currentState)));
+            }
+            else
+            {
+                appendOperateLogLine(driverText("driver.operation.register.readback_failed",
+                    QStringLiteral("服务 %1 注册/更新已成功，但状态回读失败：%2（错误码 %3）；请刷新核对。"))
+                    .arg(name, QString::fromUtf8(receipt.readbackErrorText.c_str())).arg(receipt.readbackErrorCode));
+            }
+            refreshDriverServiceRecords();
+            return true;
+        },
+        [this, operationEvent, finishBusy, serviceNameText](std::exception_ptr failure)
+        {
+            finishBusy();
+            QString detail;
+            try { if (failure) { std::rethrow_exception(failure); } }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) { detail = QStringLiteral("unknown exception"); }
+            appendOperateLogLine(driverText("driver.operation.register.exception",
+                QStringLiteral("服务 %1 注册/更新发生异常，最终配置待核实：%2；请刷新后再决定是否重试。"))
+                .arg(serviceNameText, detail));
+            err << operationEvent << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
+                << serviceNameText.toStdString() << ", detail=" << detail.toStdString() << eol;
+        });
+    if (ticket == 0)
     {
-        (void)ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("注册或更新驱动服务"),
-            errorCode);
-        appendOperateLogLine(
-            driverText("driver.operation.register.failed", QStringLiteral("注册/更新失败：%1"))
-            .arg(QString::fromUtf8(errorText.c_str())));
-        err << operationEvent
-            << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
-            << serviceNameText.toStdString()
-            << ", error=" << errorCode
-            << ", detail=" << errorText
-            << eol;
-        return;
+        finishBusy();
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
     }
-
-    appendOperateLogLine(
-        driverText("driver.operation.register.succeeded", QStringLiteral("%1成功：service=%2"))
-        .arg(created
-            ? driverText("driver.operation.register.created", QStringLiteral("注册"))
-            : driverText("driver.operation.register.updated", QStringLiteral("更新")))
-        .arg(serviceNameText));
-
-    info << operationEvent
-        << driverText("driver.log.register.succeeded", QStringLiteral("[DriverDock] 注册/更新成功, created="))
-        << (created ? "true" : "false")
-        << ", service=" << serviceNameText.toStdString()
-        << eol;
-
-    refreshDriverServiceRecords();
 }
 
 
@@ -4425,7 +4673,7 @@ void DriverDock::loadSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const QString binaryPathText =
         (m_binaryPathEdit == nullptr) ? QString() : m_binaryPathEdit->text().trimmed();
@@ -4470,7 +4718,7 @@ void DriverDock::loadSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!startSucceeded)
                     {
@@ -4567,7 +4815,7 @@ void DriverDock::unloadSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const std::wstring serviceNameWide = toWideString(serviceNameText);
     const QPointer<DriverDock> guardThis(this);
@@ -4609,7 +4857,7 @@ void DriverDock::unloadSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!stopSucceeded)
                     {
@@ -4688,7 +4936,7 @@ void DriverDock::deleteSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const std::wstring serviceNameWide = toWideString(serviceNameText);
     const QPointer<DriverDock> guardThis(this);
@@ -4727,7 +4975,7 @@ void DriverDock::deleteSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!deleteSucceeded)
                     {

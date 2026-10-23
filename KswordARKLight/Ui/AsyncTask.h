@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Core/Win32Lean.h"
+#include "BackgroundWork.h"
 
 #include <atomic>
 #include <cstdint>
@@ -13,6 +14,11 @@
 #include <utility>
 
 namespace Ksword::Ui {
+
+// Same-thread shell-to-owned-page lifecycle protocol; no pointer payloads.
+inline constexpr UINT kBeginNativeRetirementMessage = WM_APP + 0x3D0;
+inline constexpr UINT kPollNativeRetirementMessage = WM_APP + 0x3D1;
+inline constexpr UINT kCancelNativeRetirementMessage = WM_APP + 0x3D2;
 
 namespace detail {
 // Shared by every Result specialization: recycled HWNDs can receive another
@@ -57,7 +63,12 @@ public:
             return;
         }
 
-        Work startWork;
+        // Include existing refresh/action callers in the same close admission
+        // and drain accounting. Only replaceable requests may be coalesced.
+        const auto lease = TryAcceptBackgroundWork();
+        if (!lease) return;
+        work = [lease, operation = std::move(work)]() mutable { return operation(); };
+        Work startWork,replacedWork;
         std::uint64_t generation = 0;
         bool startNow = false;
         {
@@ -66,20 +77,21 @@ public:
                 return;
             }
 
+            replacedWork=std::move(state->work);
             state->work = std::move(work);
             state->deliver = std::move(deliver);
             generation = ++state->latestGeneration;
             if (state->running) {
                 state->pending = true;
-                return;
+            } else {
+                state->running = true;
+                state->runningGeneration = generation;
+                startWork = state->work;
+                startNow = true;
             }
-
-            state->running = true;
-            state->runningGeneration = generation;
-            startWork = state->work;
-            startNow = true;
         }
 
+        if(replacedWork)RetireBackgroundValue(replacedWork);
         if (startNow) {
             startWorker(state, std::move(startWork), generation);
         }
@@ -110,7 +122,7 @@ public:
             completion = std::move(state->completion);
 
             deliverCurrent = completion->generation == state->latestGeneration;
-            deliver = state->deliver;
+            deliver = state->pending ? state->deliver : std::move(state->deliver);
             if (state->running && state->runningGeneration == completion->generation) {
                 state->running = false;
                 if (state->pending && state->alive.load(std::memory_order_acquire)) {
@@ -127,6 +139,7 @@ public:
         if (deliverCurrent && deliver) {
             deliver(completion->generation, std::move(completion->result), completion->error);
         }
+        if(completion)RetireBackgroundValue(completion);
         if (startNext) {
             startWorker(state, std::move(nextWork), nextGeneration);
         }
@@ -134,19 +147,17 @@ public:
     }
 
     void cancel() noexcept {
-        const std::shared_ptr<State> state = state_;
-        if (!state) {
-            return;
+        const std::shared_ptr<State> state=state_;if(!state)return;
+        Work releasedWork;std::unique_ptr<Completion> releasedCompletion;
+        {
+            std::scoped_lock lock(state->mutex);
+            state->alive.store(false,std::memory_order_release);state->owner=nullptr;state->pending=false;
+            releasedWork=std::move(state->work);state->deliver={};releasedCompletion=std::move(state->completion);
         }
-        std::scoped_lock lock(state->mutex);
-        state->alive.store(false, std::memory_order_release);
-        state->owner = nullptr;
-        state->pending = false;
-        state->work = {};
-        state->deliver = {};
-        // A queued message may be discarded when its window is destroyed.
-        // The task, rather than the message queue, owns the completed result.
-        state->completion.reset();
+        // Work and completions contain values only; never destroy a complete
+        // row/source graph under the task mutex or on a cancel/close callback.
+        if(releasedWork)RetireBackgroundValue(releasedWork);
+        if(releasedCompletion)RetireBackgroundValue(releasedCompletion);
     }
 
     bool running() const noexcept {
@@ -185,7 +196,7 @@ private:
     };
 
     static void startWorker(const std::shared_ptr<State>& state, Work work, const std::uint64_t generation) {
-        std::thread([state, work = std::move(work), generation]() mutable {
+        auto operation = [state, work = std::move(work), generation]() mutable {
             auto completion = std::make_unique<Completion>();
             completion->generation = generation;
             try {
@@ -194,22 +205,43 @@ private:
                 completion->error = std::current_exception();
             }
 
-            {
-                std::scoped_lock lock(state->mutex);
-                if (state->alive.load(std::memory_order_acquire) && state->owner) {
-                    state->completion = std::move(completion);
-                    // Serialize publishing with cancel() so a retiring worker
-                    // cannot post to a window after cancellation returns.
-                    if (::PostMessageW(state->owner, state->completionMessage,
-                        static_cast<WPARAM>(state->identity), static_cast<LPARAM>(generation))) {
-                        return;
-                    }
-                    state->completion.reset();
-                }
-            }
+            // Work may own an accepted-transaction lease or controller. Do not
+            // retain it until another request or window destruction.
+            work = {};
+            publish(state, generation, std::move(completion));
+        };
+        try {
+            std::thread(std::move(operation)).detach();
+        } catch (...) {
+            auto completion = std::make_unique<Completion>();
+            completion->generation = generation;
+            completion->error = std::current_exception();
+            publish(state, generation, std::move(completion));
+        }
+    }
 
-            finishWithoutDelivery(state, generation);
-        }).detach();
+    static void publish(const std::shared_ptr<State>& state, const std::uint64_t generation,
+        std::unique_ptr<Completion> completion) {
+        Work releasedWork;
+        {
+            std::scoped_lock lock(state->mutex);
+            if (generation == state->latestGeneration && !state->pending) {
+                releasedWork = std::move(state->work);
+            }
+        }
+        if(releasedWork)RetireBackgroundValue(releasedWork);
+        {
+            std::scoped_lock lock(state->mutex);
+            if (state->alive.load(std::memory_order_acquire) && state->owner) {
+                state->completion = std::move(completion);
+                // Serialize publishing with cancel so a retiring worker cannot
+                // post to a recycled owner after cancellation has returned.
+                if (::PostMessageW(state->owner, state->completionMessage,
+                    static_cast<WPARAM>(state->identity), static_cast<LPARAM>(generation))) return;
+                state->completion.reset();
+            }
+        }
+        finishWithoutDelivery(state, generation);
     }
 
     static void finishWithoutDelivery(const std::shared_ptr<State>& state, const std::uint64_t generation) {

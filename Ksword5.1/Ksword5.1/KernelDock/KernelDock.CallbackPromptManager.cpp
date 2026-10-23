@@ -2,16 +2,19 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "KernelDock.CallbackPromptManager.h"
+#include "../UI/AsyncOperation.h"
 
 #include "../theme.h"
 
 #include <Windows.h>
+#include <shellapi.h>
+#pragma comment(lib, "Shell32.lib")
 
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QEvent>
-#include <QFileIconProvider>
+#include <QImage>
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QGuiApplication>
@@ -60,64 +63,14 @@ namespace
             .toUpper();
     }
 
-    QString queryProcessImagePathByPid(const quint32 processId)
+    QImage readEventPathIcon(const QString& path)
     {
-        if (processId == 0)
-        {
-            return QString();
-        }
-
-        HANDLE processHandle = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-        if (processHandle == nullptr)
-        {
-            return QString();
-        }
-
-        wchar_t imagePathBuffer[MAX_PATH * 4] = {};
-        DWORD imagePathLength = static_cast<DWORD>(sizeof(imagePathBuffer) / sizeof(imagePathBuffer[0]));
-        const BOOL queryOk = ::QueryFullProcessImageNameW(
-            processHandle,
-            0,
-            imagePathBuffer,
-            &imagePathLength);
-        ::CloseHandle(processHandle);
-        if (queryOk == FALSE || imagePathLength == 0)
-        {
-            return QString();
-        }
-
-        return QString::fromWCharArray(imagePathBuffer, static_cast<int>(imagePathLength)).trimmed();
-    }
-
-    QIcon resolveInitiatorProcessIcon(const quint32 processId, const QString& fallbackPath)
-    {
-        static QFileIconProvider iconProvider;
-
-        const auto iconByPath = [](const QString& pathText) -> QIcon {
-            const QString normalizedPath = pathText.trimmed();
-            if (normalizedPath.isEmpty())
-            {
-                return QIcon();
-            }
-            const QFileInfo fileInfo(normalizedPath);
-            if (!fileInfo.exists())
-            {
-                return QIcon();
-            }
-            return iconProvider.icon(fileInfo);
-        };
-
-        const QString resolvedPath = queryProcessImagePathByPid(processId);
-        QIcon processIcon = iconByPath(resolvedPath);
-        if (processIcon.isNull())
-        {
-            processIcon = iconByPath(fallbackPath);
-        }
-        if (processIcon.isNull())
-        {
-            processIcon = QIcon(QStringLiteral(":/Icon/process_main.svg"));
-        }
-        return processIcon;
+        if (path.trimmed().isEmpty()) return {};
+        HICON icon = nullptr;
+        if (::ExtractIconExW(reinterpret_cast<LPCWSTR>(path.utf16()), 0, nullptr, &icon, 1) == 0 || icon == nullptr) return {};
+        const QImage image = QImage::fromHICON(icon);
+        ::DestroyIcon(icon);
+        return image;
     }
 
     QColor resolveCurrentAccentColor()
@@ -233,6 +186,7 @@ CallbackPromptManager::CallbackPromptManager(QWidget* hostWindow, QObject* paren
     : QObject(parent)
     , m_hostWindow(hostWindow)
 {
+    m_iconOperation = new ks::ui::AsyncOperation(this);
     initializePopupUi();
     initializePopupConnections();
     if (qApp != nullptr)
@@ -243,6 +197,10 @@ CallbackPromptManager::CallbackPromptManager(QWidget* hostWindow, QObject* paren
 
 CallbackPromptManager::~CallbackPromptManager()
 {
+    if (m_iconOperation != nullptr) m_iconOperation->close();
+    const auto replies = m_replyOperations;
+    m_replyOperations.clear();
+    for (auto* operation : replies) operation->close();
     if (qApp != nullptr)
     {
         qApp->removeEventFilter(this);
@@ -802,15 +760,23 @@ void CallbackPromptManager::onEventArrivedOnUiThread(const KSWORD_ARK_CALLBACK_E
         return;
     }
 
+    if (isEventExpired(eventPacket))
+    {
+        recordExpiredEvent(eventPacket);
+        return;
+    }
+
     if (shouldAutoAllowByRegex(eventPacket))
     {
-        const bool answerOk = sendAnswerToDriver(eventPacket.eventGuid, KSWORD_ARK_DECISION_ALLOW);
+        sendAnswerToDriver(eventPacket.eventGuid, KSWORD_ARK_DECISION_ALLOW,
+            [this, eventPacket](bool answerOk) {
         appendManagerLog(
             kernelText("kernel.callback.prompt.log.regex_auto_allow", QStringLiteral("事件 %1 触发 Regex 二次确认自动放行（%2）。"))
             .arg(callbackGuidToString(eventPacket.eventGuid))
             .arg(answerOk
                 ? kernelText("kernel.callback.prompt.result.reply_success", QStringLiteral("回传成功"))
                 : kernelText("kernel.callback.prompt.result.reply_failure", QStringLiteral("回传失败"))));
+            });
         return;
     }
 
@@ -886,6 +852,22 @@ bool CallbackPromptManager::shouldAutoAllowByRegex(const KSWORD_ARK_CALLBACK_EVE
     return false;
 }
 
+bool CallbackPromptManager::isEventExpired(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket) const
+{
+    return eventPacket.deadlineUtc100ns != 0ULL &&
+        eventPacket.deadlineUtc100ns <= currentUtc100ns();
+}
+
+void CallbackPromptManager::recordExpiredEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket)
+{
+    const quint32 defaultDecision = eventPacket.defaultDecision == KSWORD_ARK_DECISION_DENY
+        ? KSWORD_ARK_DECISION_DENY : KSWORD_ARK_DECISION_ALLOW;
+    appendManagerLog(
+        kernelText("kernel.callback.prompt.log.event_expired_before_display", QStringLiteral("事件 %1 已在显示前到期，由驱动采用默认决策“%2”；未显示或重复回传。"))
+        .arg(callbackGuidToString(eventPacket.eventGuid))
+        .arg(callbackDecisionToDisplayText(defaultDecision)));
+}
+
 void CallbackPromptManager::tryShowNextEvent()
 {
     if (!m_running.load())
@@ -918,6 +900,13 @@ void CallbackPromptManager::tryShowNextEvent()
         return;
     }
 
+    if (isEventExpired(nextEvent))
+    {
+        recordExpiredEvent(nextEvent);
+        QTimer::singleShot(0, this, [this]() { tryShowNextEvent(); });
+        return;
+    }
+
     m_currentEvent = nextEvent;
     m_hasCurrentEvent = true;
     m_remainingTimeoutMs = static_cast<qint64>(m_currentEvent.timeoutMs);
@@ -926,14 +915,24 @@ void CallbackPromptManager::tryShowNextEvent()
         m_remainingTimeoutMs = 5000;
     }
 
+    updatePopupContent(m_currentEvent);
     applyPopupTheme();
     movePopupToBottomRight();
+
+    if (isEventExpired(m_currentEvent))
+    {
+        const auto expiredEvent = m_currentEvent;
+        m_hasCurrentEvent = false;
+        m_remainingTimeoutMs = 0;
+        RtlZeroMemory(&m_currentEvent, sizeof(m_currentEvent));
+        recordExpiredEvent(expiredEvent);
+        QTimer::singleShot(0, this, [this]() { tryShowNextEvent(); });
+        return;
+    }
 
     m_popupDialog->show();
     m_popupDialog->raise();
     m_popupDialog->activateWindow();
-
-    updatePopupContent(m_currentEvent);
 
     if (m_countdownTimer != nullptr)
     {
@@ -992,10 +991,19 @@ void CallbackPromptManager::updatePopupContent(const KSWORD_ARK_CALLBACK_EVENT_P
     }
     if (m_initiatorIconLabel != nullptr)
     {
-        const QIcon processIcon = resolveInitiatorProcessIcon(
-            eventPacket.originatingPid,
-            initiatorPathText);
-        m_initiatorIconLabel->setPixmap(processIcon.pixmap(16, 16));
+        m_initiatorIconLabel->setPixmap(QIcon(QStringLiteral(":/Icon/process_main.svg")).pixmap(16, 16));
+        // Use the path recorded in this event, never an unverified reused PID.
+        // The event GUID is the delivery identity; no cross-process icon cache exists.
+        const auto eventGuid = eventPacket.eventGuid;
+        m_iconOperation->submit<QString, QImage>(initiatorPathText,
+            [](const QString& path, const ks::ui::AsyncOperationToken&) { return readEventPathIcon(path); },
+            [this, eventGuid](const QImage& image, std::uint64_t) {
+                if (m_hasCurrentEvent && !m_popupDialog.isNull() && m_initiatorIconLabel != nullptr
+                    && callbackGuidToString(eventGuid) == callbackGuidToString(m_currentEvent.eventGuid)
+                    && !isEventExpired(m_currentEvent) && !image.isNull())
+                    m_initiatorIconLabel->setPixmap(QPixmap::fromImage(image).scaled(16, 16, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                return true;
+            }, [](std::exception_ptr) {});
     }
 
     if (m_sessionIdValueLabel != nullptr)
@@ -1080,10 +1088,12 @@ void CallbackPromptManager::finishCurrentEventWithDecision(quint32 decision, boo
             : KSWORD_ARK_DECISION_ALLOW;
     }
 
-    const bool answerOk = sendAnswerToDriver(m_currentEvent.eventGuid, finalDecision);
+    const auto eventGuid = m_currentEvent.eventGuid;
+    sendAnswerToDriver(eventGuid, finalDecision,
+        [this, eventGuid, finalDecision, fromTimeoutOrClose](bool answerOk) {
     appendManagerLog(
         kernelText("kernel.callback.prompt.log.event_decided", QStringLiteral("事件 %1 已决策为“%2”（来源=%3，回传=%4）。"))
-        .arg(callbackGuidToString(m_currentEvent.eventGuid))
+        .arg(callbackGuidToString(eventGuid))
         .arg(callbackDecisionToDisplayText(finalDecision))
         .arg(fromTimeoutOrClose
             ? kernelText("kernel.callback.prompt.result.timeout_or_close", QStringLiteral("超时/关闭"))
@@ -1091,6 +1101,8 @@ void CallbackPromptManager::finishCurrentEventWithDecision(quint32 decision, boo
         .arg(answerOk
             ? kernelText("kernel.callback.prompt.result.success", QStringLiteral("成功"))
             : kernelText("kernel.callback.prompt.result.failure", QStringLiteral("失败"))));
+
+        });
 
     m_hasCurrentEvent = false;
     m_remainingTimeoutMs = 0;
@@ -1124,7 +1136,7 @@ void CallbackPromptManager::onPopupClosedByUser()
     finishCurrentEventWithDecision(fallbackDecision, true);
 }
 
-bool CallbackPromptManager::sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGuid, quint32 decision)
+void CallbackPromptManager::sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGuid, quint32 decision, std::function<void(bool)> completed)
 {
     KSWORD_ARK_CALLBACK_ANSWER_REQUEST answerRequest{};
     answerRequest.size = sizeof(answerRequest);
@@ -1137,9 +1149,30 @@ bool CallbackPromptManager::sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGu
     answerRequest.sourceSessionId = currentSessionId();
     answerRequest.answeredAtUtc100ns = currentUtc100ns();
 
-    const ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoResult result = driverClient.answerCallbackEvent(answerRequest);
-    return result.ok;
+    auto* operation = new ks::ui::AsyncOperation(this);
+    m_replyOperations.insert(operation);
+    const auto ticket = operation->submitTransaction<KSWORD_ARK_CALLBACK_ANSWER_REQUEST, ksword::ark::IoResult>(answerRequest,
+        [](const KSWORD_ARK_CALLBACK_ANSWER_REQUEST& request) {
+            const ksword::ark::DriverClient client;
+            return client.answerCallbackEvent(request);
+        },
+        [this, operation, completed](const ksword::ark::IoResult& result, std::uint64_t) {
+            m_replyOperations.remove(operation);
+            operation->deleteLater();
+            completed(result.ok);
+            return true;
+        },
+        [this, operation, completed](std::exception_ptr) {
+            m_replyOperations.remove(operation);
+            operation->deleteLater();
+            completed(false);
+        });
+    if (ticket == 0)
+    {
+        m_replyOperations.remove(operation);
+        operation->deleteLater();
+        completed(false);
+    }
 }
 
 void CallbackPromptManager::cancelAllPendingDecisionsBestEffort()

@@ -3,6 +3,7 @@
 #include "../../../../shared/evidence/memory_workbench/MemoryDiffOverlay.h"
 #include <QAbstractScrollArea>
 #include <QByteArray>
+#include <QHash>
 #include <QString>
 #include <QVector>
 #include <optional>
@@ -99,6 +100,9 @@ namespace ks::ui
         int firstVisibleRow() const;
         QColor tokenColor(MemoryTokenRole role) const;
         QVector<MemoryDisplayRow> rows_;
+        // Geometry-only caches rebuilt with rows, independent of theme/selection/scroll.
+        int maximumRowBytes_ = 1;
+        QHash<quint64, QVector<int>> rowsByAddress_;
         QVector<int> rowLineStarts_;
         QString contentTitle_;
         int selectedRow_ = -1;

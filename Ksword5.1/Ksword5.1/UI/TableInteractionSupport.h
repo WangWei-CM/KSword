@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TableRowFilterSupport.h"
+
 #include "./TableContextMenu.h"
 
 class QApplication;
@@ -12,6 +14,7 @@ class QTableView;
 #include <QTableWidgetItem>
 #include <QTreeWidget>
 #include <QVariant>
+#include <QVector>
 #include <QtGlobal>
 
 #include <functional>
@@ -19,6 +22,18 @@ class QTableView;
 namespace ks::ui
 {
     struct ResultTableCapabilities;
+    struct PageSearchBodyText;
+    // Initial Compact mode has exactly two visible action texts. Opt-in
+    // prefixes name the existing buttons; no action bar is created by this API.
+    QVector<PageSearchBodyText> ColdCompactTableActionBody(const QString& targetPrefix);
+    void SetCompactTableSearchTargetPrefix(QTableView* tableView, const QString& targetPrefix);
+
+    // Explicit producer preparation state, independent of QWidget enabled state.
+    // Only producers doing a cooperative partial presentation opt in. Controls
+    // and complete-value entry points must not capture that incomplete model.
+    inline constexpr char TablePresentationPreparingProperty[] = "ksword_table_presentation_preparing";
+    bool IsTablePresentationPreparing(const QTableView* tableView);
+
 
     // 由 ResultTableHost 复用现有排序、冻结、搜索和快照条实现；页面不直接调用。
     void ConfigureResultTableInteractions(
@@ -133,7 +148,8 @@ namespace ks::ui
     // DeferTableUiCommitIfContextMenuOpen 作用：
     // - 输入：提交任务所有者、稳定去重键、会被重建的表格集合和 UI 提交函数；
     // - 处理：任一表格右键菜单打开或左 Ctrl 多选进行中时只保留同 owner/key 的最新提交，
-    //   菜单关闭且左 Ctrl 松开后回投（Issue #149）；
+    //   菜单关闭且左 Ctrl 松开后按全局软预算回投（Issue #149）；
+    // - 排空重入和预算续轮期间也接管回调，避免新结果绕过全局预算。
     // - 返回：true 表示本次提交已延后，false 表示无需缓存，调用方应立即提交。
     // 调用方法：刷新函数在修改模型前调用；返回 true 时立即结束本轮刷新。
     bool DeferTableUiCommitIfContextMenuOpen(
@@ -142,8 +158,17 @@ namespace ks::ui
         const QList<QTableView*>& tableList,
         std::function<void()> commitAction);
 
+    // Pure presentation only: additionally wait for bounded complete-export
+    // value capture. Call after business cache/history/archive updates; never
+    // wrap an entire business result in this latest-wins queue.
+    bool DeferTablePresentationIfValueCaptureOpen(
+        QObject* owner,
+        const QString& commitKey,
+        const QList<QTableView*>& tableList,
+        std::function<void()> commitAction);
+
     // DeferItemViewUiCommitIfContextMenuOpen 作用：
-    // - 为 QTableView 与 QTreeView 提供同一菜单/左 Ctrl 屏障与 owner/key latest-wins 语义；
+    // - 为 QTableView 与 QTreeView 提供同一菜单/左 Ctrl 屏障、预算续轮与 owner/key latest-wins 语义；
     // - 刷新函数必须在清空缓存、模型或 item 前调用，返回 true 时立即结束。
     bool DeferItemViewUiCommitIfContextMenuOpen(
         QObject* owner,
@@ -154,7 +179,7 @@ namespace ks::ui
     // DeferUiCommitIfComboBoxPopupOpen 作用：
     // - 输入：提交任务所有者、稳定去重键和 UI 提交函数；
     // - 处理：任意 QComboBox 弹层展开时只保留同 owner/key 的最新提交，弹层收起后回投；
-    // - 返回：true 表示本次提交已延后，false 表示可以立即提交。
+    // - 排空重入或软预算续轮也会延后；true 表示已接管，false 表示可以立即提交。
     // 调用方法：不重建表格、只重建下拉框内容的异步回填入口在改动控件前调用。
     // Why：弹层是抓着鼠标键盘的独立顶层窗口，展开期间被清空重填后会继续抓着输入但内容失效，
     //      用户看到的就是“点开下拉框之后整个界面点不动”。

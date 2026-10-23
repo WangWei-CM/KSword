@@ -21,6 +21,7 @@ void HardwareDock::scheduleUtilizationThemeRefresh()
 
 void HardwareDock::refreshUtilizationThemeColors()
 {
+    ++m_utilizationMirrorThemeRevision;
     using Role = KswordTheme::PerformanceRole;
     // 所有性能卡按设备身份重算边框与单双曲线角色，不清空采样历史或改变选中状态。
     for (const UtilizationNavEntry& entry : m_utilizationNavEntries)
@@ -108,12 +109,14 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
     }
     refreshChart(m_diskUtilChartView, Role::Read, Role::Write);
     refreshChart(m_networkUtilChartView, Role::Read, Role::Write);
-    for (const DiskUtilizationDevice& device : m_diskUtilDevices)
+    for (const int deviceIndex : m_presentedDiskDevices)
     {
+        const auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
         refreshChart(device.chartView, Role::Read, Role::Write);
     }
-    for (const NetworkUtilizationDevice& device : m_networkUtilDevices)
+    for (const int deviceIndex : m_presentedNetworkDevices)
     {
+        const auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
         refreshChart(device.chartView, Role::Read, Role::Write);
     }
     for (const GpuEngineChartEntry& entry : m_gpuEngineCharts)
@@ -123,8 +126,9 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
     }
     refreshChart(m_gpuDedicatedMemoryChartView, Role::DedicatedMemory, Role::DedicatedMemory);
     refreshChart(m_gpuSharedMemoryChartView, Role::SharedMemory, Role::SharedMemory);
-    for (const GpuUtilizationDevice& device : m_gpuUtilDevices)
+    for (const int deviceIndex : m_presentedGpuDevices)
     {
+        const auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
         for (const GpuEngineChartEntry& entry : device.engineCharts)
         {
             const Role role = engineRole(entry.engineKeyText);
@@ -134,4 +138,31 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
         refreshChart(device.sharedMemoryChartView, Role::SharedMemory, Role::SharedMemory);
     }
 
+}
+
+// 新控件只准备自身；数据采样tick不再刷新全域图表主题。
+void HardwareDock::prepareNewUtilizationChartTheme(QChartView* const view,
+    const KswordTheme::PerformanceRole primaryRole, const KswordTheme::PerformanceRole secondaryRole)
+{
+    if (view != nullptr) ++m_utilizationMirrorStructureRevision;
+    QWidget* const page = m_utilizationFloatingPage.data();
+    QWidget* const window = m_utilizationFloatingWindow.data();
+    if (view == nullptr || page == nullptr || window == nullptr
+        || (view != page && !page->isAncestorOf(view)))
+    {
+        return;
+    }
+    const QPalette palette = window->palette();
+    const QPalette* const localPalette = m_utilizationFloatingThemeMode == QStringLiteral("follow_main")
+        ? nullptr : &palette;
+    ks::ui::RefreshPerformanceChartTheme(view->chart(), primaryRole, secondaryRole, localPalette);
+}
+
+void HardwareDock::prepareNewUtilizationEngineChartTheme(QChartView* const view, const QString& engineKey)
+{
+    using Role = KswordTheme::PerformanceRole;
+    const auto role = engineKey == QStringLiteral("copy") ? Role::Copy
+        : engineKey == QStringLiteral("video_encode") ? Role::VideoEncode
+        : engineKey == QStringLiteral("video_decode") ? Role::VideoDecode : Role::Gpu;
+    prepareNewUtilizationChartTheme(view, role, role);
 }

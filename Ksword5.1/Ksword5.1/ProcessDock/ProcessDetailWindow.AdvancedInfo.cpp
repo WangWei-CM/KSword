@@ -1,5 +1,6 @@
 #include "ProcessDetailWindow.InternalCommon.h"
 #include "../UI/DetailLayoutRegistry.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../Internationalization/LanguageManager.h"
 
@@ -3051,10 +3052,28 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
     kPro.set(m_threadInspectRefreshProgressPid, "扫描线程信息", 0, 20.0f);
 
     const std::uint32_t pidValue = m_baseRecord.pid;
+    const std::uint64_t creationTime = m_baseRecord.creationTime100ns;
     QPointer<ProcessDetailWindow> guardThis(this);
-    auto* refreshTask = QRunnable::create([guardThis, pidValue, ticketValue]()
+    auto* refreshTask = QRunnable::create([guardThis, pidValue, creationTime, ticketValue]()
         {
             ThreadInspectRefreshResult refreshResult{};
+            refreshResult.processId = pidValue;
+            refreshResult.creationTime100ns = creationTime;
+            auto rows = std::shared_ptr<std::vector<ThreadInspectItem>>(new std::vector<ThreadInspectItem>,
+                [](std::vector<ThreadInspectItem>* obsolete) noexcept
+                {
+                    // A stale/closed AsyncOperation result may die on the GUI thread.
+                    // Own the allocation in its queued disposer as well as on execution.
+                    try
+                    {
+                        auto retired = std::unique_ptr<std::vector<ThreadInspectItem>>(obsolete);
+                        auto task = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                        QThreadPool::globalInstance()->start(task.get());
+                        task.release();
+                    }
+                    catch (...) {} // Allocation failure retains ordinary RAII cleanup.
+                });
+
             const auto beginTime = std::chrono::steady_clock::now();
             std::unordered_map<std::uint32_t, const ksword::ark::ThreadEntry*> r0ThreadByTid;
             const ksword::ark::DriverClient driverClient;
@@ -3335,7 +3354,7 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                             rowItem.r0RuntimeDetailText = readableMessage;
                         }
 
-                        refreshResult.rows.push_back(std::move(rowItem));
+                        rows->push_back(std::move(rowItem));
                     }
 
                     hasThread = Thread32Next(snapshotHandle, &threadEntry);
@@ -3348,48 +3367,78 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
             }
 
             std::sort(
-                refreshResult.rows.begin(),
-                refreshResult.rows.end(),
+                rows->begin(),
+                rows->end(),
                 [](const ThreadInspectItem& left, const ThreadInspectItem& right)
                 {
                     return left.threadId < right.threadId;
                 });
 
+            refreshResult.rows = std::move(rows);
             refreshResult.elapsedMs = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - beginTime).count());
 
             QMetaObject::invokeMethod(
                 qApp,
-                [guardThis, refreshResult, ticketValue]()
+                [guardThis, refreshResult = std::move(refreshResult), ticketValue]()
                 {
                     if (guardThis == nullptr || guardThis->m_threadInspectRefreshTicket != ticketValue)
                     {
                         return;
                     }
-                    guardThis->applyThreadInspectResult(refreshResult);
+                    guardThis->applyThreadInspectResult(ticketValue, refreshResult);
                 },
                 Qt::QueuedConnection);
         });
     QThreadPool::globalInstance()->start(refreshTask);
 }
 
-void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult)
+void ProcessDetailWindow::applyThreadInspectResult(const std::uint64_t ticket,
+    const ThreadInspectRefreshResult& refreshResult)
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_threadRuntimeSampleOutput);
-    m_threadInspectRefreshing = false;
-    if (m_refreshThreadInspectButton != nullptr)
+    if (ticket != m_threadInspectRefreshTicket) return;
+    if (refreshResult.processId != m_baseRecord.pid || refreshResult.creationTime100ns != m_baseRecord.creationTime100ns)
     {
-        m_refreshThreadInspectButton->setEnabled(true);
+        m_threadInspectRefreshing = false;
+        if (m_refreshThreadInspectButton) m_refreshThreadInspectButton->setEnabled(true);
+        updateThreadInspectStatusLabel(QStringLiteral("线程缓存已过期，请先刷新线程列表。"), false);
+        return;
     }
-
+    const QPointer<ProcessDetailWindow> alive(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("process-detail-thread-snapshot"),
+        {m_threadInspectTable}, [alive, ticket, refreshResult] { if (alive) alive->applyThreadInspectResult(ticket, refreshResult); })) return;
+    if (!refreshResult.rows) return;
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_threadRuntimeSampleOutput);
     m_threadInspectRows = refreshResult.rows;
-
-    if (m_threadInspectTable != nullptr)
+    ThreadInspectRefreshResult summary = refreshResult;
+    summary.rows.reset();
+    const auto count = m_threadInspectRows->size();
+    m_threadInspectTable->sourceReady = [alive, ticket, rows = refreshResult.rows, summary = std::move(summary), count]
     {
-        // 栈边界列文本生成：
-        // - 在成员函数内部访问 ThreadInspectItem，保持类型仍为窗口私有实现细节；
-        // - 文本同时呈现 R3 用户栈和 R0 KTHREAD 边界。
+        if (!alive || ticket != alive->m_threadInspectRefreshTicket || !alive->m_threadInspectRefreshing) return;
+        alive->m_threadInspectPublishedRows = rows;
+        alive->m_threadInspectRefreshing = false;
+        if (alive->m_threadInspectTable->currentRowChanged) alive->m_threadInspectTable->currentRowChanged();
+        if (!alive) return;
+        if (alive->m_refreshThreadInspectButton) alive->m_refreshThreadInspectButton->setEnabled(true);
+        if (alive) alive->finishThreadInspectPresentation(summary, count);
+    };
+    m_threadInspectTable->preparationFailed = [alive, ticket](const QString& error)
+    {
+        if (!alive || ticket != alive->m_threadInspectRefreshTicket) return;
+        alive->m_threadInspectRefreshing = false;
+        if (alive->m_refreshThreadInspectButton) alive->m_refreshThreadInspectButton->setEnabled(true);
+        if (alive) alive->updateThreadInspectStatusLabel(error, false);
+    };
+    rebuildThreadInspectTable();
+}
+
+void ProcessDetailWindow::rebuildThreadInspectTable()
+{
+    const auto rows = m_threadInspectRows;
+    m_threadInspectTable->setSourceFactory([rows](const ks::i18n::SourceTextSnapshot& translator)
+    {
         const auto stackBoundaryText = [](const ThreadInspectItem& rowItem) -> QString
         {
             const QString userText =
@@ -3414,27 +3463,26 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
                 .arg(kernelText)
                 .arg(threadInspectR0StatusText(rowItem.r0ThreadStatus));
         };
-
-        m_threadInspectTable->setSortingEnabled(false);
-        m_threadInspectTable->setRowCount(0);
-        for (std::size_t cacheIndex = 0; cacheIndex < m_threadInspectRows.size(); ++cacheIndex)
+        QVector<ks::ui::ImmutableTableRow> values;
+        values.reserve(static_cast<qsizetype>(rows->size()));
+        for (std::size_t cacheIndex = 0; cacheIndex < rows->size(); ++cacheIndex)
         {
-            const ThreadInspectItem& rowItem = m_threadInspectRows[cacheIndex];
-            const int row = m_threadInspectTable->rowCount();
-            m_threadInspectTable->insertRow(row);
-            auto* threadIdItem = new QTableWidgetItem(QString::number(rowItem.threadId));
-            threadIdItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
-            threadIdItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(rowItem.threadId));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::ThreadId), threadIdItem);
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::State), new QTableWidgetItem(rowItem.stateText));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::Priority), new QTableWidgetItem(QString::number(rowItem.priorityValue)));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::SwitchCount), new QTableWidgetItem(QString::number(rowItem.switchCount)));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::StartAddress), new QTableWidgetItem(rowItem.startAddressText));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::TebAddress), new QTableWidgetItem(rowItem.tebAddressText));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::Affinity), new QTableWidgetItem(rowItem.affinityText));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::RegisterSummary), new QTableWidgetItem(rowItem.registerSummaryText));
-            auto* stackBoundaryItem = new QTableWidgetItem(stackBoundaryText(rowItem));
-            stackBoundaryItem->setToolTip(QStringLiteral("UserStackBase=%1\nUserStackLimit=%2\nR0KernelStack=%3\nR0StackBase=%4\nR0StackLimit=%5\nR0InitialStack=%6\nR0Status=%7\nCapability=0x%8")
+            const ThreadInspectItem& rowItem = (*rows)[cacheIndex];
+            ks::ui::ImmutableTableRow value;
+            value.key = QStringLiteral("%1:%2:%3").arg(rowItem.processId).arg(rowItem.threadId).arg(rowItem.createTime100ns);
+            value.cells.resize(toThreadColumnIndex(ThreadRowColumn::Count));
+            value.cells[toThreadColumnIndex(ThreadRowColumn::ThreadId)] = QString::number(rowItem.threadId);
+            value.roles.insert(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
+            value.roles.insert(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(rowItem.threadId));
+            value.cells[toThreadColumnIndex(ThreadRowColumn::State)] = rowItem.stateText;
+            value.cells[toThreadColumnIndex(ThreadRowColumn::Priority)] = QString::number(rowItem.priorityValue);
+            value.cells[toThreadColumnIndex(ThreadRowColumn::SwitchCount)] = QString::number(rowItem.switchCount);
+            value.cells[toThreadColumnIndex(ThreadRowColumn::StartAddress)] = rowItem.startAddressText;
+            value.cells[toThreadColumnIndex(ThreadRowColumn::TebAddress)] = rowItem.tebAddressText;
+            value.cells[toThreadColumnIndex(ThreadRowColumn::Affinity)] = rowItem.affinityText;
+            value.cells[toThreadColumnIndex(ThreadRowColumn::RegisterSummary)] = rowItem.registerSummaryText;
+            value.cells[toThreadColumnIndex(ThreadRowColumn::StackBoundary)] = stackBoundaryText(rowItem);
+            value.columnRoles[toThreadColumnIndex(ThreadRowColumn::StackBoundary)].insert(Qt::ToolTipRole, QStringLiteral("UserStackBase=%1\nUserStackLimit=%2\nR0KernelStack=%3\nR0StackBase=%4\nR0StackLimit=%5\nR0InitialStack=%6\nR0Status=%7\nCapability=0x%8")
                 .arg(uint64ToHex(rowItem.userStackBase))
                 .arg(uint64ToHex(rowItem.userStackLimit))
                 .arg(uint64ToHex(rowItem.r0KernelStack))
@@ -3443,13 +3491,12 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
                 .arg(uint64ToHex(rowItem.r0InitialStack))
                 .arg(threadInspectR0StatusText(rowItem.r0ThreadStatus))
                 .arg(static_cast<qulonglong>(rowItem.r0CapabilityMask), 0, 16));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::StackBoundary), stackBoundaryItem);
 
-            auto* runtimeDetailItem = new QTableWidgetItem(
+            value.cells[toThreadColumnIndex(ThreadRowColumn::RuntimeDetail)] = (
                 rowItem.r0RuntimeDetailText.trimmed().isEmpty()
-                ? ks::i18n::sourceText(QStringLiteral("线程 runtime detail 暂不可用。"))
+                ? translator.sourceText(QStringLiteral("线程 runtime detail 暂不可用。"))
                 : rowItem.r0RuntimeDetailText);
-            runtimeDetailItem->setToolTip(QStringLiteral(
+            value.columnRoles[toThreadColumnIndex(ThreadRowColumn::RuntimeDetail)].insert(Qt::ToolTipRole, QStringLiteral(
                 "DetailStatus=%1\n"
                 "已采集字段=%2\n"
                 "缺失能力=%3\n"
@@ -3467,15 +3514,23 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
                 .arg(static_cast<qulonglong>(rowItem.r0ReadTransferCount))
                 .arg(static_cast<qulonglong>(rowItem.r0WriteTransferCount))
                 .arg(static_cast<qulonglong>(rowItem.r0OtherTransferCount))
-                .arg(runtimeDetailItem->text()));
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::RuntimeDetail), runtimeDetailItem);
+                .arg(value.cells[toThreadColumnIndex(ThreadRowColumn::RuntimeDetail)]));
+            for (auto& cell : value.cells) cell = translator.displayText(cell);
+            for (auto column = value.columnRoles.begin(); column != value.columnRoles.end(); ++column)
+                for (auto role = column->begin(); role != column->end(); ++role)
+                    if (role.key() == Qt::ToolTipRole) role.value() = translator.displayText(role->toString());
+            values.push_back(std::move(value));
         }
-        m_threadInspectTable->setSortingEnabled(true);
-    }
+        return ks::ui::MakeImmutableTableSource(std::move(values));
+    });
+}
 
+void ProcessDetailWindow::finishThreadInspectPresentation(const ThreadInspectRefreshResult& refreshResult,
+    const std::size_t rowCount)
+{
     QString statusText = QString("● 刷新完成 %1 ms | 线程数 %2")
         .arg(refreshResult.elapsedMs)
-        .arg(refreshResult.rows.size());
+        .arg(rowCount);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
         statusText += QStringLiteral(
@@ -3483,7 +3538,7 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
         kLogEvent diagnosticEvent;
         warn << diagnosticEvent
             << "[ProcessDetailWindow] thread inspection completed with diagnostics, rowCount="
-            << refreshResult.rows.size()
+            << rowCount
             << ", diagnostic="
             << refreshResult.diagnosticText.toStdString()
             << eol;
@@ -3494,6 +3549,7 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
 
 void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
 {
+    if (!m_threadInspectPublishedRows || !m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
     // 当前线程 PDB deep runtime 采样：
     // - 输入来自线程表当前选中 TID 与窗口 PID；
     // - 后台只传 TID/PID/runtimeItemId/offset/size，不传 ETHREAD 地址；
@@ -3518,21 +3574,21 @@ void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
         return;
     }
 
-    const QTableWidgetItem* threadIdItem =
-        m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
-    const std::uint32_t threadId = threadIdItem != nullptr
-        ? static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toULongLong())
+    const QModelIndex threadIdItem =
+        m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+    const std::uint32_t threadId = threadIdItem.isValid()
+        ? static_cast<std::uint32_t>(threadIdItem.data(Qt::UserRole + 1).toULongLong())
         : 0U;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (threadId == 0U || cacheIndex >= m_threadInspectRows.size())
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (threadId == 0U || cacheIndex >= m_threadInspectPublishedRows->size())
     {
         m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("当前线程行缺少 TID 或缓存索引，请先刷新线程页。")));
         return;
     }
 
-    const ThreadInspectItem selectedRow = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedRow = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint32_t processId = selectedRow.processId != 0U
         ? selectedRow.processId
         : m_baseRecord.pid;
@@ -3649,15 +3705,15 @@ void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
                         guardThis->m_sampleThreadRuntimeButton->setEnabled(true);
                     }
                     bool sameThreadSelection = false;
-                    if (guardThis->m_threadInspectTable != nullptr)
+                    if (guardThis->m_threadInspectTable != nullptr && guardThis->m_threadInspectPublishedRows)
                     {
                         const int currentRow = guardThis->m_threadInspectTable->currentRow();
-                        const auto* item = guardThis->m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
-                        const std::size_t cacheIndex = item != nullptr
-                            ? static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) : guardThis->m_threadInspectRows.size();
-                        if (cacheIndex < guardThis->m_threadInspectRows.size())
+                        const auto item = guardThis->m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+                        const std::size_t cacheIndex = item.isValid()
+                            ? static_cast<std::size_t>(item.data(Qt::UserRole).toULongLong()) : guardThis->m_threadInspectPublishedRows->size();
+                        if (cacheIndex < guardThis->m_threadInspectPublishedRows->size())
                         {
-                            const ThreadInspectItem& current = guardThis->m_threadInspectRows[cacheIndex];
+                            const ThreadInspectItem& current = (*guardThis->m_threadInspectPublishedRows)[cacheIndex];
                             sameThreadSelection = current.threadId == threadId && current.processId == selectedRow.processId
                                 && current.createTime100ns == selectedRow.createTime100ns;
                         }

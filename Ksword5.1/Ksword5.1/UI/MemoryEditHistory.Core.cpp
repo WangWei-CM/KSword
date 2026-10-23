@@ -30,18 +30,27 @@ namespace ks::ui::detail
     MemoryEditHistory::RecordResult MemoryEditHistory::record(
         const std::uint8_t* before, const std::uint8_t* after, std::size_t length)
     {
-        if (length && (!before || !after)) return RecordResult::InvalidInput;
+        return recordRange(before, after, length, 0, length);
+    }
+
+    MemoryEditHistory::RecordResult MemoryEditHistory::recordRange(
+        const std::uint8_t* before, const std::uint8_t* after,
+        std::size_t length, std::size_t offset, std::size_t count)
+    {
+        if ((length && (!before || !after)) || offset > length || count > length - offset)
+            return RecordResult::InvalidInput;
+        const auto end = offset + count;
         Command command;
         command.length = length;
         command.cost = sizeof(Command);
         std::size_t payloadCapacity = 0;
         // Build a single transaction containing only contiguous differing runs.
         // Check the bound before allocating each payload, including sparse edits.
-        for (std::size_t offset = 0; offset < length;)
+        for (; offset < end;)
         {
             if (before[offset] == after[offset]) { ++offset; continue; }
             const auto start = offset;
-            while (offset < length && before[offset] != after[offset]) ++offset;
+            while (offset < end && before[offset] != after[offset]) ++offset;
             const auto runLength = offset - start;
             if (command.cost > m_maximumBytes || sizeof(Range) > m_maximumBytes - command.cost
                 || runLength > (m_maximumBytes - command.cost - sizeof(Range)) / 2)
@@ -88,6 +97,38 @@ namespace ks::ui::detail
         m_commands.push_back(std::move(command));
         m_cursor = m_commands.size();
         return RecordResult::Recorded;
+    }
+
+    std::optional<MemoryEditHistory::DifferenceSummary> MemoryEditHistory::updateDifferenceSummary(
+        DifferenceSummary current, const std::uint8_t* baseline, const std::uint8_t* before,
+        const std::uint8_t* after, std::size_t length, std::size_t offset, std::size_t count)
+    {
+        if ((length && (!baseline || !before || !after)) || offset > length || count > length - offset)
+            return std::nullopt;
+        if (!count) return current;
+        const auto end = offset + count;
+        // Editing the last byte of a run can create/remove a run start just to its right.
+        const auto limit = end < length ? end + 1 : end;
+        for (auto at = offset; at < limit; ++at)
+        {
+            const bool oldChanged = before[at] != baseline[at];
+            const bool newChanged = after[at] != baseline[at];
+            if (at < end && oldChanged != newChanged)
+            {
+                if (newChanged) ++current.bytes;
+                else if (current.bytes) --current.bytes;
+                else return std::nullopt;
+            }
+            const bool oldStart = oldChanged && (!at || before[at - 1] == baseline[at - 1]);
+            const bool newStart = newChanged && (!at || after[at - 1] == baseline[at - 1]);
+            if (oldStart != newStart)
+            {
+                if (newStart) ++current.runs;
+                else if (current.runs) --current.runs;
+                else return std::nullopt;
+            }
+        }
+        return current;
     }
 
     std::optional<MemoryEditHistory::Bytes> MemoryEditHistory::undo(const Bytes& current)

@@ -9,7 +9,7 @@ namespace ks::misc
 
 using namespace context_menu_cleaner_detail;
 
-QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateEntriesForArea(const MenuArea area) const
+QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateEntriesForArea(const MenuArea area)
 {
     // 关联/命名空间分区：
     // - 这三类需要枚举注册表值或执行第三方判定，使用独立实现文件；

@@ -9,6 +9,7 @@
 // - 与项目解耦后可作为独立工具库复用。
 // ============================================================
 
+#include <functional>
 #include <cstdint> // std::uint32_t/std::uint64_t：PID、计数器、时间戳。
 #include <string>  // std::string：跨层统一文本类型（UTF-8）。
 #include <vector>  // std::vector：进程列表容器。
@@ -812,7 +813,8 @@ namespace ks::process
     // - includeSignatureCheck=true 时会额外做模块签名校验（较慢）。
     ProcessModuleSnapshot EnumerateProcessModulesAndThreads(
         std::uint32_t pid,
-        bool includeSignatureCheck);
+        bool includeSignatureCheck,
+        const std::function<bool()>& cancelled = {});
 
     // EnumerateProcessModulesAndThreadsIfIdentityMatches 作用：
     // - 在整个枚举期间保持同一进程句柄，并核验 PID + 创建时间；
@@ -820,7 +822,8 @@ namespace ks::process
     ProcessModuleSnapshot EnumerateProcessModulesAndThreadsIfIdentityMatches(
         std::uint32_t pid,
         std::uint64_t expectedCreationTime100ns,
-        bool includeSignatureCheck);
+        bool includeSignatureCheck,
+        const std::function<bool()>& cancelled = {});
 
     // UnloadModuleByBaseAddressIfIdentityMatches 作用：
     // - 在同一进程句柄上校验 PID + 创建时间后，对远程进程调用 FreeLibrary 卸载指定基址模块。

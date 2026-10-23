@@ -1,4 +1,7 @@
 #include "WindowGlobalHotkeyTab.h"
+#include "WindowImmutableTableSupport.h"
+#include "WindowSnapshotSupport.h"
+#include "../UI/TableCompleteExport.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 
@@ -26,8 +29,6 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
-#include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -120,13 +121,6 @@ namespace
         return targets;
     }
 
-    QTableWidgetItem* readOnlyItem(const QString& text)
-    {
-        auto* item = new QTableWidgetItem(text);
-        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        item->setToolTip(text);
-        return item;
-    }
 }
 
 // PendingRefreshState：工作线程只写入该缓冲，UI 定时批量取走结果，避免逐进程事件淹没主线程。
@@ -155,6 +149,17 @@ struct WindowGlobalHotkeyTab::PendingRefreshState
     // elapsedMs：整轮后台扫描耗时，仅在 completed 为 true 时有效。
     qint64 elapsedMs = 0;
 };
+
+struct WindowGlobalHotkeyTab::RowChunk
+{
+    QVector<QStringList> rows;
+    std::shared_ptr<const RowChunk> previous;
+};
+
+WindowGlobalHotkeyTab::~WindowGlobalHotkeyTab()
+{
+    ks::window::retireSnapshotValues(std::move(m_refreshState), std::move(m_rows));
+}
 
 WindowGlobalHotkeyTab::WindowGlobalHotkeyTab(QWidget* parent)
     : QWidget(parent)
@@ -201,20 +206,18 @@ void WindowGlobalHotkeyTab::initializeUi()
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
     rootLayout->addWidget(m_statusLabel);
 
-    m_table = new ks::ui::VisibleTableWidget(this);
-    // 全部热键是可重复采集的主清单，保留快照和比较。
+    m_table = new ks::ui::ImmutableValueTable(this, {
+        {QStringLiteral("window.global_hotkey.header.hotkey"), QStringLiteral("热键")},
+        {QStringLiteral("window.global_hotkey.header.process"), QStringLiteral("进程")},
+        {QStringLiteral("window.global_hotkey.header.pid"), QStringLiteral("PID")},
+        {QStringLiteral("window.global_hotkey.header.tid"), QStringLiteral("TID")},
+        {QStringLiteral("window.global_hotkey.header.source"), QStringLiteral("来源")},
+        {QStringLiteral("window.global_hotkey.header.id"), QStringLiteral("热键 ID")},
+        {QStringLiteral("window.global_hotkey.header.vk_mod"), QStringLiteral("VK / Mod")},
+        {QStringLiteral("window.global_hotkey.header.object"), QStringLiteral("热键对象")},
+        {QStringLiteral("window.global_hotkey.header.detail"), QStringLiteral("详情")} });
+    m_table->setKeepPreviousProjectionInteractive(true);
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
-    m_table->setColumnCount(ColumnCount);
-    m_table->setHorizontalHeaderLabels({
-        allHotkeyText("window.global_hotkey.header.hotkey", QStringLiteral("热键")),
-        allHotkeyText("window.global_hotkey.header.process", QStringLiteral("进程")),
-        allHotkeyText("window.global_hotkey.header.pid", QStringLiteral("PID")),
-        allHotkeyText("window.global_hotkey.header.tid", QStringLiteral("TID")),
-        allHotkeyText("window.global_hotkey.header.source", QStringLiteral("来源")),
-        allHotkeyText("window.global_hotkey.header.id", QStringLiteral("热键 ID")),
-        allHotkeyText("window.global_hotkey.header.vk_mod", QStringLiteral("VK / Mod")),
-        allHotkeyText("window.global_hotkey.header.object", QStringLiteral("热键对象")),
-        allHotkeyText("window.global_hotkey.header.detail", QStringLiteral("详情")) });
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -235,7 +238,7 @@ void WindowGlobalHotkeyTab::initializeUi()
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { rebuildTable(); });
-    connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
+    connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
     connect(m_flushTimer, &QTimer::timeout, this, [this]() { flushPendingSnapshot(); });
 }
 
@@ -266,13 +269,18 @@ void WindowGlobalHotkeyTab::refreshAsync()
     m_refreshing = true;
     m_firstRefreshStarted = true;
     const std::uint64_t ticket = ++m_refreshTicket;
-    m_rows.clear();
+    m_rows.reset();
+    m_rowCount = 0;
+    m_table->clearRows();
     m_scannedProcessCount = 0U;
     m_totalProcessCount = 0U;
     m_diagnosticProcessCount = 0U;
     m_appliedRefreshRevision = 0U;
     // 扫描期间暂停自动排序，避免每批增量插入都触发一次全表重排。
     m_sortingEnabledBeforeRefresh = m_table->isSortingEnabled();
+    m_sortColumnBeforeRefresh = m_table->horizontalHeader()->sortIndicatorSection();
+    m_sortOrderBeforeRefresh = m_table->horizontalHeader()->sortIndicatorOrder();
+    m_table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
     m_table->setSortingEnabled(false);
     m_refreshButton->setEnabled(false);
     m_statusLabel->setText(allHotkeyText(
@@ -476,9 +484,23 @@ void WindowGlobalHotkeyTab::appendSnapshotRows(
 
     if (!rows.isEmpty())
     {
-        // 新数据只追加到当前视图；筛选变化时仍可依据 m_rows 重建完整结果。
-        appendVisibleRows(rows);
-        m_rows += std::move(rows);
+        auto chunk = std::make_shared<RowChunk>();
+        m_rowCount += rows.size();
+        chunk->rows = std::move(rows);
+        chunk->previous = m_rows;
+        const std::shared_ptr<const RowChunk> accepted = std::move(chunk);
+        // Complete accepted batches remain canonical; only replaceable projections coalesce.
+        m_rows = ks::ui::RetainCompleteExportSnapshot(accepted);
+        const auto complete = m_rows;
+        m_table->setSourceFactory([complete](const auto& translator) {
+            QVector<const RowChunk*> chunks;
+            for (auto chunk = complete; chunk; chunk = chunk->previous) chunks.push_back(chunk.get());
+            QVector<QStringList> all;
+            for (auto it = chunks.crbegin(); it != chunks.crend(); ++it)
+                for (const auto& row : (*it)->rows) all.push_back(row);
+            const auto source = ks::window::makeWindowTableSource(std::move(all), {ColumnPid, ColumnTid, ColumnSource, ColumnHotkeyId, ColumnVkModifiers, ColumnObject});
+            return ks::window::formatWindowTableSource(source, translator);
+        });
     }
 
     const QString currentProcessName = processName.trimmed().isEmpty()
@@ -489,7 +511,7 @@ void WindowGlobalHotkeyTab::appendSnapshotRows(
         QStringLiteral("状态：已扫描 %1 / %2 个进程，已发现 %3 条热键。"))
         .arg(m_scannedProcessCount)
         .arg(m_totalProcessCount)
-        .arg(m_rows.size()));
+        .arg(m_rowCount));
     if (m_progressTaskId != 0)
     {
         const float rawProgress = m_totalProcessCount == 0U
@@ -522,6 +544,7 @@ void WindowGlobalHotkeyTab::finishRefresh(const std::uint64_t ticket, const qint
     m_flushTimer->stop();
     m_refreshButton->setEnabled(true);
     // 扫描结束后恢复用户原有排序状态，仅触发这一次全表排序。
+    m_table->horizontalHeader()->setSortIndicator(m_sortColumnBeforeRefresh, m_sortOrderBeforeRefresh);
     m_table->setSortingEnabled(m_sortingEnabledBeforeRefresh);
     // 扫描期间不反复测量列宽；完成后仅基于有界样本调整一次。
     m_table->resizeColumnsToContents();
@@ -529,7 +552,7 @@ void WindowGlobalHotkeyTab::finishRefresh(const std::uint64_t ticket, const qint
         "window.global_hotkey.summary.completed",
         QStringLiteral("状态：已扫描 %1 个进程，发现 %2 条热键，耗时 %3 ms。%4"))
         .arg(m_scannedProcessCount)
-        .arg(m_rows.size())
+        .arg(m_rowCount)
         .arg(elapsedMs)
         .arg(m_diagnosticProcessCount == 0U
             ? QString()
@@ -552,65 +575,13 @@ void WindowGlobalHotkeyTab::finishRefresh(const std::uint64_t ticket, const qint
     m_refreshState.reset();
 }
 
-void WindowGlobalHotkeyTab::appendVisibleRows(const QVector<QStringList>& rows)
-{
-    // keyword：沿用当前筛选条件，只把匹配的新行增量插入表格。
-    const QString keyword = m_filterEdit->text().trimmed();
-    const bool sortingEnabled = m_table->isSortingEnabled();
-    m_table->setUpdatesEnabled(false);
-    m_table->setSortingEnabled(false);
-
-    for (const QStringList& sourceRow : rows)
-    {
-        if (sourceRow.size() < ColumnCount ||
-            (!keyword.isEmpty() && !sourceRow.join(QLatin1Char(' ')).contains(keyword, Qt::CaseInsensitive)))
-        {
-            continue;
-        }
-
-        const int tableRow = m_table->rowCount();
-        m_table->insertRow(tableRow);
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            m_table->setItem(tableRow, column, readOnlyItem(sourceRow.at(column)));
-        }
-    }
-
-    m_table->setSortingEnabled(sortingEnabled);
-    m_table->setUpdatesEnabled(true);
-    m_table->viewport()->update();
-}
-
 void WindowGlobalHotkeyTab::rebuildTable()
 {
-    const QString keyword = m_filterEdit->text().trimmed();
-    const bool sortingEnabled = m_table->isSortingEnabled();
-    m_table->setUpdatesEnabled(false);
-    m_table->setSortingEnabled(false);
-    m_table->setRowCount(0);
-    for (const QStringList& sourceRow : m_rows)
-    {
-        if (sourceRow.size() < ColumnCount ||
-            (!keyword.isEmpty() && !sourceRow.join(QLatin1Char(' ')).contains(keyword, Qt::CaseInsensitive)))
-        {
-            continue;
-        }
-
-        const int tableRow = m_table->rowCount();
-        m_table->insertRow(tableRow);
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            m_table->setItem(tableRow, column, readOnlyItem(sourceRow.at(column)));
-        }
-    }
-    m_table->setSortingEnabled(sortingEnabled);
-    m_table->resizeColumnsToContents();
-    m_table->setUpdatesEnabled(true);
-    m_table->viewport()->update();
+    m_table->setQuery(m_filterEdit->text().trimmed());
 }
 
 QString WindowGlobalHotkeyTab::rowClipboardText(
-    QTableWidget* table,
+    ks::ui::ImmutableValueTable* table,
     const int row,
     const bool includeHeader)
 {
@@ -623,11 +594,12 @@ QString WindowGlobalHotkeyTab::rowClipboardText(
     if (includeHeader)
     {
         QStringList headers;
+        const QAbstractItemModel* model = table->model();
         for (int column = 0; column < table->columnCount(); ++column)
         {
-            headers << (table->horizontalHeaderItem(column) == nullptr
+            headers << (model == nullptr
                 ? QString()
-                : table->horizontalHeaderItem(column)->text());
+                : model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
         }
         lines << headers.join(QLatin1Char('\t'));
     }
@@ -635,7 +607,7 @@ QString WindowGlobalHotkeyTab::rowClipboardText(
     QStringList values;
     for (int column = 0; column < table->columnCount(); ++column)
     {
-        values << (table->item(row, column) == nullptr ? QString() : table->item(row, column)->text());
+        values << table->cell(row, column).toString();
     }
     lines << values.join(QLatin1Char('\t'));
     return lines.join(QLatin1Char('\n'));
@@ -653,11 +625,8 @@ void WindowGlobalHotkeyTab::showCopyMenu(const QPoint& position)
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(allHotkeyText("window.global_hotkey.copy.all", QStringLiteral("复制全部行")));
-    const QTableWidgetItem* processIdItem = row >= 0 ? m_table->item(row, ColumnPid) : nullptr;
     bool processIdOk = false;
-    const quint32 processId = processIdItem != nullptr
-        ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-        : 0U;
+    const quint32 processId = row >= 0 ? m_table->cell(row, ColumnPid).toString().trimmed().toUInt(&processIdOk, 10) : 0U;
     QAction* openProcessAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         allHotkeyText("window.global_hotkey.open_process", QStringLiteral("转到进程详细信息")));
@@ -669,8 +638,7 @@ void WindowGlobalHotkeyTab::showCopyMenu(const QPoint& position)
     QAction* selected = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (selected == copyCell && index.isValid())
     {
-        const QTableWidgetItem* item = m_table->item(index.row(), index.column());
-        QApplication::clipboard()->setText(item == nullptr ? QString() : item->text());
+        QApplication::clipboard()->setText(m_table->cell(index.row(), index.column()).toString());
     }
     else if (selected == copyRow)
     {
@@ -678,12 +646,7 @@ void WindowGlobalHotkeyTab::showCopyMenu(const QPoint& position)
     }
     else if (selected == copyAll)
     {
-        QStringList lines;
-        for (int tableRow = 0; tableRow < m_table->rowCount(); ++tableRow)
-        {
-            lines << rowClipboardText(m_table, tableRow, tableRow == 0);
-        }
-        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+        ks::ui::CopyCompleteTableRows(m_table, ks::ui::CompleteTableScope::All, ks::ui::CompleteTableColumns::All);
     }
     else if (selected == openProcessAction)
     {

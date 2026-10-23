@@ -41,6 +41,7 @@ class QTimer;
 class QToolButton;
 class QVBoxLayout;
 struct _EVENT_RECORD;
+namespace ks::ui { class AsyncUiDispatcher; }
 
 // DiskMonitorPage 说明：
 // - 输入：Qt 父控件；
@@ -66,6 +67,7 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    struct SamplingState;
     // ProcessDiskSample：
     // - 作用：保存单进程本轮磁盘 IO 采样与相邻两轮差值；
     // - 处理：raw* 字段来自 GetProcessIoCounters，rate* 字段由历史样本换算；
@@ -74,6 +76,7 @@ private:
     struct ProcessDiskSample
     {
         std::uint32_t pid = 0;                 // pid：进程 ID。
+        std::uint64_t identityCreateTime100ns = 0; // 已有采样句柄读回的进程身份。
         QString processName;                   // processName：进程名。
         QString processImagePath;              // processImagePath：进程路径，权限不足时可为空。
         std::uint32_t threadCount = 0;          // threadCount：进程线程数。
@@ -131,7 +134,7 @@ private:
 
     // FileActivityAccumulator：
     // - 作用：在 ETW 回调线程内累计当前刷新窗口的文件活动；
-    // - 处理：UI 线程每秒交换并清空，换算成 FileActivitySample；
+    // - 处理：采样 worker 每秒交换并清空，换算成 FileActivitySample；
     // - 返回：结构体不返回数据。
     struct FileActivityAccumulator
     {
@@ -148,7 +151,7 @@ private:
     // FileActivityStateEntry：
     // - 作用：为同一 PID + 文件路径保存唯一且持续更新的活动行；
     // - 处理：每轮用最新窗口速率覆盖，空闲超过保留窗口或进程退出时删除；
-    // - 返回：结构体只参与 UI 线程内的活动状态维护，不直接返回系统资源。
+    // - 返回：结构体只参与采样 worker 活动状态维护，不直接返回系统资源。
     struct FileActivityStateEntry
     {
         std::uint64_t lastActivityMs = 0;        // lastActivityMs：最近一次读写开始或完成的单调时间。
@@ -182,12 +185,17 @@ private:
     void refreshNow();
     void applyProcessDiskSamples(
         std::vector<ProcessDiskSample> sampleList,
+        std::vector<FileActivitySample> fileSamples,
         DiskMonitorStorageBatch storageSampleBatch);
-    std::vector<ProcessDiskSample> collectProcessDiskSamples();
-    std::vector<FileActivitySample> consumeFileActivitySamples(const std::vector<ProcessDiskSample>& sampleList);
+    static std::vector<ProcessDiskSample> collectProcessDiskSamples(SamplingState& state);
+    static std::vector<FileActivitySample> consumeFileActivitySamples(
+        SamplingState& state, const std::vector<ProcessDiskSample>& sampleList);
     void pruneStaleSelection(const std::vector<ProcessDiskSample>& sampleList);
     void updateProcessTable(const std::vector<ProcessDiskSample>& sampleList);
     void updateActivityTable();
+    void applyPresentationFilters();
+    void refreshCheckStates();
+    void pruneProcessIcons();
     void updateSummaryLabels(const std::vector<ProcessDiskSample>& sampleList);
     // 仅在可见且允许提交时更新两张活动表，合并隐藏期间多轮 UI 重建。
     void refreshProcessPresentation();
@@ -203,7 +211,8 @@ private:
     void startFileActivityEtw();
     void stopFileActivityEtw();
     static void WINAPI fileActivityEtwCallback(struct _EVENT_RECORD* eventRecordPointer);
-    void handleFileActivityEtwEvent(const struct _EVENT_RECORD* eventRecordPointer);
+    static void handleFileActivityEtwEvent(
+        SamplingState& state, const struct _EVENT_RECORD* eventRecordPointer);
 
     // ===================== 表格工具 =====================
     QTableWidgetItem* createReadOnlyItem(const QString& text) const;
@@ -226,6 +235,8 @@ private:
     QString formatMilliseconds(double milliseconds) const;
 
 private:
+    std::shared_ptr<SamplingState> m_samplingState;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
     QVBoxLayout* m_rootLayout = nullptr;           // m_rootLayout：根布局。
     QLabel* m_titleLabel = nullptr;                // m_titleLabel：标题标签。
     QLabel* m_statusLabel = nullptr;               // m_statusLabel：刷新状态标签。
@@ -242,32 +253,22 @@ private:
     QTableWidget* m_processTable = nullptr;        // m_processTable：进程级磁盘速率表。
     QTableWidget* m_activityTable = nullptr;       // m_activityTable：全部或按勾选 PID 过滤的磁盘活动表。
     DiskMonitorStoragePanel* m_storagePanel = nullptr; // m_storagePanel：固定卷容量与性能区。
+    QTimer* m_filterTimer = nullptr;
+    int m_visibleActivityCount = 0;
     QTimer* m_refreshTimer = nullptr;              // m_refreshTimer：周期刷新定时器。
     bool m_initialSamplingStarted = false;         // m_initialSamplingStarted：是否已经启动 ETW 与首轮采样。
     bool m_processPresentationDirty = false;       // 最新采样已入缓存，但活动表尚未显示该轮内容。
     std::unique_ptr<std::thread> m_processSamplingThread; // m_processSamplingThread：后台进程 IO 采样线程。
-    std::atomic_bool m_processSamplingInProgress{ false }; // m_processSamplingInProgress：避免采样重叠。
-    std::atomic_bool m_processSamplingStopRequested{ false }; // m_processSamplingStopRequested：析构时协作取消同步采样。
 
-    std::unordered_map<std::uint32_t, ProcessDiskBaseline> m_baselineByPid; // m_baselineByPid：PID 到历史基线。
     std::unordered_set<std::uint32_t> m_selectedPidSet; // m_selectedPidSet：用户勾选 PID 集。
     std::vector<ProcessDiskSample> m_lastSampleList;    // m_lastSampleList：最近一次采样结果。
     std::vector<FileActivitySample> m_lastFileActivityList; // m_lastFileActivityList：最近活动窗口内的唯一 PID+路径状态行。
-    QHash<QString, FileActivityStateEntry> m_fileActivityStateByKey; // m_fileActivityStateByKey：PID+规范化路径到唯一持续活动行。
-    std::unordered_map<std::uint32_t, QString> m_recentProcessNameByPid; // 最近进程名缓存：补全短时 ETW 历史。
-    std::unordered_map<std::uint32_t, QString> m_recentProcessPathByPid; // 最近映像路径缓存：补全活动图标。
+    std::vector<ProcessDiskSample> m_presentedProcessSamples;
+    std::vector<FileActivitySample> m_presentedActivitySamples;
+    bool m_processRowsPresented = false;
+    bool m_activityRowsPresented = false;
     QHash<QString, QIcon> m_processIconByPath;      // 映像路径到 16px shell 图标的 UI 缓存。
     bool m_updatingProcessTable = false;                // m_updatingProcessTable：防止程序刷新触发递归勾选同步。
 
     std::unique_ptr<std::thread> m_fileActivityEtwThread; // m_fileActivityEtwThread：后台 ETW 会话线程。
-    std::atomic_bool m_fileActivityEtwStopRequested{ false }; // m_fileActivityEtwStopRequested：停止请求。
-    std::atomic_bool m_fileActivityEtwRunning{ false };       // m_fileActivityEtwRunning：ETW 是否正在接收事件。
-    std::atomic<std::uint64_t> m_fileActivityEtwSessionHandle{ 0 }; // m_fileActivityEtwSessionHandle：StartTrace 会话句柄。
-    std::atomic<std::uint64_t> m_fileActivityEtwTraceHandle{ 0 };   // m_fileActivityEtwTraceHandle：OpenTrace 读取句柄。
-    std::atomic<std::uint32_t> m_fileActivityEtwLastStatus{ 0 };    // m_fileActivityEtwLastStatus：最近一次 ETW 状态码。
-    std::mutex m_fileActivityMutex;                           // m_fileActivityMutex：保护以下 ETW 聚合缓存。
-    std::unordered_map<std::uint64_t, QString> m_filePathByObject; // m_filePathByObject：FileObject/FileKey 到文件路径映射。
-    std::unordered_map<std::uint64_t, PendingFileIoOperation> m_pendingFileIoByIrp; // m_pendingFileIoByIrp：IRP 到未完成 I/O。
-    QHash<QString, FileActivityAccumulator> m_fileActivityByKey;   // m_fileActivityByKey：PID+文件路径聚合表。
-    std::uint64_t m_lastFileActivityDrainMs = 0;              // m_lastFileActivityDrainMs：上次 UI 消费 ETW 聚合时间。
 };

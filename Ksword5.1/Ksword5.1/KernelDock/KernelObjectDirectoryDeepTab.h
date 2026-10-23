@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include <atomic>
+#include <memory>
 #include <vector>
 
 #include "../UI/StructuredFieldView.h"
@@ -20,8 +21,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
-class QTreeWidget;
-class QTreeWidgetItem;
+class QTreeView;
+
 
 // KernelObjectDirectoryDeepTab
 // - 输入：用户在 UI 中提供根路径和最大递归深度。
@@ -54,6 +55,9 @@ private:
     // - 作用：把 m_rows 重建为树形显示。
     // - 返回：无。
     void rebuildTree();
+    struct TreeSnapshot;
+    class DirectoryModel;
+    static std::shared_ptr<const TreeSnapshot> prepareTreeSnapshot(std::vector<KernelObjectDirectoryDeepEntry> rows);
 
     // showCurrentItemDetail：
     // - 作用：根据当前树节点的数据索引显示详细字段。
@@ -71,9 +75,10 @@ private:
     QPushButton* m_refreshButton = nullptr;    // m_refreshButton：启动后台递归刷新。
     QSpinBox* m_maxDepthSpinBox = nullptr;     // m_maxDepthSpinBox：最大递归深度输入。
     QLabel* m_statusLabel = nullptr;           // m_statusLabel：刷新状态摘要。
-    QTreeWidget* m_resultTree = nullptr;       // m_resultTree：递归结果树。
+    QTreeView* m_resultTree = nullptr;
+    DirectoryModel* m_model = nullptr;       // m_resultTree：递归结果树。
     ks::ui::StructuredFieldView* m_detailEditor = nullptr; // m_detailEditor：当前节点详情。
 
     std::atomic_bool m_refreshRunning{ false }; // m_refreshRunning：防止重复刷新。
-    std::vector<KernelObjectDirectoryDeepEntry> m_rows; // m_rows：最近一次 Worker 结果。
+    std::shared_ptr<const TreeSnapshot> m_treeSnapshot;
 };

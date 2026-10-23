@@ -70,9 +70,23 @@ struct DiskMonitorStorageBatch
     bool enumerationSucceeded = false;
 };
 
+// Independent value/resource owner. The caller serializes collect and retire;
+// DiskMonitorPage joins its sampling thread before retiring leases.
+class DiskMonitorStorageSamplingBackend final
+{
+public:
+    DiskMonitorStorageSamplingBackend();
+    ~DiskMonitorStorageSamplingBackend();
+    DiskMonitorStorageBatch collectSamples(const std::atomic_bool* stopRequested = nullptr);
+    void retirePerformanceCountersAsync(const QString& reason);
+
+private:
+    std::unique_ptr<DiskMonitorStoragePerformanceState> m_performanceState;
+};
+
 // DiskMonitorStoragePanel：
 // - 构造后显示固定卷存储表；
-// - collectSamples() 可在后台线程调用；
+// - samplingBackend() 仅在 GUI 线程取共享采集资源，后台不借用 QWidget；
 // - applySamples() 只能在 UI 线程调用，并维护跨轮计数器基线。
 class DiskMonitorStoragePanel final : public QWidget
 {
@@ -83,12 +97,8 @@ public:
     explicit DiskMonitorStoragePanel(QWidget* parent = nullptr);
     ~DiskMonitorStoragePanel() override;
 
-    // collectSamples：
-    // - 输入：可选的析构停止标志；
-    // - 处理：枚举本机固定卷并读取容量、卷标、文件系统和磁盘性能累计值；
-    // - 返回：可移动的纯数据列表，失败卷会保留可获得的字段并安全降级。
-    DiskMonitorStorageBatch collectSamples(
-        const std::atomic_bool* stopRequested = nullptr);
+    // 仅在 GUI 线程取拥有型采集资源；worker 使用 backend，不借用面板。
+    std::shared_ptr<DiskMonitorStorageSamplingBackend> samplingBackend() const;
 
     // retirePerformanceCountersAsync：
     // - 处理：把 active lease 移交给进程期唯一的后台退役协调器；
@@ -135,7 +145,7 @@ private:
     static QString formatRate(double bytesPerSecond);
 
     QTableWidget* m_table = nullptr;         // m_table：固定卷存储状态表。
-    std::unique_ptr<DiskMonitorStoragePerformanceState> m_performanceState;
+    std::shared_ptr<DiskMonitorStorageSamplingBackend> m_samplingBackend;
     QHash<QString, StorageBaseline> m_baselineByIdentity; // m_baselineByIdentity：稳定卷身份到历史基线。
     QString m_summaryText;                   // m_summaryText：最近一轮资源监视器式摘要。
 };

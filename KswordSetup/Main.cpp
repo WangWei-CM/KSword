@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <condition_variable>
+#include <mutex>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -105,9 +107,55 @@ struct InstallOptions {
 // line to logText, and the final page displays this text in the status control.
 struct InstallResult {
     bool ok = true;
-    bool rebootNow = false;
+    bool rebootSuggested = false;
     std::wstring logText;
 };
+
+// InstallTask owns one accepted deployment. Only its value state crosses threads.
+// UI close detaches observation; the process drains this accepted transaction.
+struct InstallTask {
+    std::mutex mutex;
+    std::condition_variable decision;
+    std::string pendingLog;
+    bool clearLog = true;
+    bool closed = false;
+    bool overwriteRequested = false;
+    bool overwriteShown = false;
+    bool overwriteAnswered = false;
+    bool overwrite = false;
+    InstallOptions options;
+    InstallResult result;
+    std::exception_ptr failure;
+    std::thread worker;
+
+    void closeObservation() {
+        { std::lock_guard<std::mutex> lock(mutex); closed = true; }
+        decision.notify_all();
+    }
+    bool askOverwrite() {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (closed) return false;
+        overwriteRequested = true;
+        lock.unlock();
+        Fl::awake(); // Wake the owner; this never accesses a widget.
+        lock.lock();
+        decision.wait(lock, [this] { return closed || overwriteAnswered; });
+        return !closed && overwrite;
+    }
+    void answerOverwrite(bool value) {
+        { std::lock_guard<std::mutex> lock(mutex); overwrite = value; overwriteAnswered = true; }
+        decision.notify_all();
+    }
+    bool appendProgress(std::string text) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const bool wake = pendingLog.empty();
+        pendingLog += text;
+        return wake;
+    }
+};
+thread_local InstallTask* g_workerInstallTask = nullptr;
+std::shared_ptr<InstallTask> g_installTask; // UI thread only; exactly one transaction.
+bool g_installStarting = false;
 
 // PageLayout groups the right-side safe content rectangle. The left gutter is
 // intentionally blank because the character art overlaps that part of the card.
@@ -157,6 +205,8 @@ void ApplyInstallerZOrder(Fl_Window* owner);
 void SetInstallerShellDialogMode(bool enabled);
 int TopMostMessageBox(const wchar_t* text, const wchar_t* caption, UINT type);
 void EnsureTaskbarAppWindow(Fl_Window* window);
+void PollInstallTask(void* = nullptr);
+void RequestInstallerClose(Fl_Window* window);
 
 // WideToUtf8 converts UTF-16 Win32 text to UTF-8 for FLTK widgets. Input is a
 // UTF-16 string, processing uses WideCharToMultiByte, and output is UTF-8 bytes.
@@ -363,11 +413,19 @@ bool FileExistsInDir(const std::wstring& dir, const std::wstring& rel) {
 // Input is mutable log text and one line; processing appends CRLF; no return.
 void AppendLog(std::wstring* log, const std::wstring& line) {
     if (!log) return;
-    *log += line;
-    *log += L"\r\n";
+    const bool firstLine = log->empty();
+    const std::wstring addition = line + L"\r\n";
+    *log += addition;
+    if (g_workerInstallTask) {
+        if (g_workerInstallTask->appendProgress(WideToUtf8(addition))) Fl::awake();
+        return;
+    }
     if (g_status) {
-        const std::string utf8 = WideToUtf8(*log);
-        g_status->set_text(utf8.c_str());
+        // A new transaction replaces the preparatory status once; subsequent
+        // lines only encode and insert the newly accepted diagnostic text.
+        if (firstLine) g_status->set_text("");
+        const std::string utf8 = WideToUtf8(addition);
+        g_status->append_text(utf8.c_str());
         Fl::check();
     }
 }
@@ -533,6 +591,7 @@ bool RelaunchElevated(const std::wstring& stateFile) {
 // ShowSetupPage activates the first settings page. Input is none; processing
 // flips FLTK group visibility and refreshes the window; no value is returned.
 void ShowSetupPage() {
+    if (g_installTask) return;
     if (g_setupPage) g_setupPage->show();
     if (g_installPage) g_installPage->hide();
     if (g_mainWindow) g_mainWindow->redraw();
@@ -544,7 +603,6 @@ void ShowInstallPage() {
     if (g_setupPage) g_setupPage->hide();
     if (g_installPage) g_installPage->show();
     if (g_mainWindow) g_mainWindow->redraw();
-    Fl::check();
 }
 
 // CollectOptions reads the current widget state. Input is global FLTK widgets;
@@ -727,12 +785,10 @@ bool ExtractPayload(const InstallOptions& o, std::wstring* log) {
 bool WriteSettings(const InstallOptions& o, std::wstring* log) {
     const std::wstring file = Join(o.installDir, kSettingsRel);
     if (ExistsFile(file)) {
-        SetInstallerShellDialogMode(true);
-        int choice = TopMostMessageBox(
-            L"检测到已有配置文件。\n\n选择“是”覆盖安装器生成配置；选择“否”保留原有一切配置。",
-            L"KswordSetup 覆盖安装", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
-        SetInstallerShellDialogMode(false);
-        if (choice != IDYES) {
+        // The deployment worker waits only on a value decision; UI dispatch
+        // remains free to show the prompt, move, scroll or close observation.
+        const bool overwrite = g_workerInstallTask && g_workerInstallTask->askOverwrite();
+        if (!overwrite) {
             AppendLog(log, L"保留已有配置: " + file);
             return true;
         }
@@ -1101,34 +1157,31 @@ bool LaunchKsword(const std::wstring& dir) {
 // PerformInstall executes the full install transaction. Input is options;
 // processing extracts payload, applies optional actions, prompts for reboot, and
 // output is the final result model for follow-up launch/reboot behavior.
-InstallResult PerformInstall(const InstallOptions& o) {
-    InstallResult r;
+void PerformInstall(const InstallOptions& o, InstallResult& r) {
     AppendLog(&r.logText, L"开始安装到: " + o.installDir);
     if (FileExistsInDir(o.installDir, kLauncherExe) || FileExistsInDir(o.installDir, kMainExe)) {
         AppendLog(&r.logText, L"检测到已有安装，按合并覆盖方式更新。");
     }
     r.ok = ExtractPayload(o, &r.logText) && r.ok;
-    if (!r.ok) return r;
+    if (!r.ok) return;
     r.ok = WriteSettings(o, &r.logText) && r.ok;
     r.ok = CreateShortcuts(o, &r.logText) && r.ok;
     if (o.replaceTaskmgr) r.ok = InstallTaskmgr(o, &r.logText) && r.ok;
     if (o.testMode) {
         const bool testOk = EnableTestMode(&r.logText);
         r.ok = testOk && r.ok;
-        if (testOk) {
-            SetInstallerShellDialogMode(true);
-            int choice = TopMostMessageBox(L"测试模式已写入，需要重启系统后生效。是否立即重启？", L"KswordSetup", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
-            SetInstallerShellDialogMode(false);
-            r.rebootNow = choice == IDYES;
-        }
+        r.rebootSuggested = testOk; // The owner asks after the worker completes.
     }
     AppendLog(&r.logText, r.ok ? L"安装完成。" : L"安装完成，但存在失败项，请查看日志。");
-    return r;
+    return;
 }
 
 // StartInstall handles the Install button and elevated continuation. Input is
 // current UI state; processing performs UAC handoff when needed; no return.
 void StartInstall() {
+    if (g_installTask || g_installStarting) return;
+    g_installStarting = true;
+    struct AdmissionExit { ~AdmissionExit() { g_installStarting = false; } } admissionExit;
     InstallOptions o = CollectOptions();
     ShowInstallPage();
     SetStatus(L"准备安装...");
@@ -1150,14 +1203,94 @@ void StartInstall() {
     }
     if (g_installButton) g_installButton->deactivate();
     if (g_browseButton) g_browseButton->deactivate();
-    InstallResult result = PerformInstall(o);
-    if (g_installButton) g_installButton->activate();
-    if (g_browseButton) g_browseButton->activate();
-    if (result.rebootNow) {
-        ::ShellExecuteW(nullptr, L"open", L"shutdown.exe", L"/r /t 0", nullptr, SW_HIDE);
+    auto task = std::make_shared<InstallTask>();
+    task->options = o;
+    task->worker = std::thread([task]() {
+        const HRESULT com = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        g_workerInstallTask = task.get();
+        try { PerformInstall(task->options, task->result); }
+        catch (...) {
+            task->failure = std::current_exception();
+            task->result.ok = false;
+            task->result.rebootSuggested = false;
+        }
+        g_workerInstallTask = nullptr;
+        if (SUCCEEDED(com)) ::CoUninitialize();
+        Fl::awake();
+    });
+    g_installTask = std::move(task);
+    Fl::add_timeout(0.03, PollInstallTask);
+}
+
+void RequestInstallerClose(Fl_Window* window) {
+    if (g_installTask) g_installTask->closeObservation();
+    g_characterWindow.destroy();
+    if (window) window->hide();
+}
+
+void PollInstallTask(void* timer) {
+    const auto task = g_installTask;
+    if (!task) return;
+    // The custom titlebar can hide the owner directly, bypassing its callback.
+    if (!g_mainWindow || !g_mainWindow->shown()) RequestInstallerClose(g_mainWindow);
+    std::string addition;
+    bool clear = false, ask = false, closed = false;
+    {
+        std::lock_guard<std::mutex> lock(task->mutex);
+        addition.swap(task->pendingLog);
+        clear = task->clearLog && !addition.empty();
+        if (clear) task->clearLog = false;
+        closed = task->closed;
+        ask = task->overwriteRequested && !task->overwriteShown && !closed;
+        if (ask) task->overwriteShown = true;
+    }
+    if (!closed && g_status && !addition.empty()) {
+        if (clear) g_status->set_text("");
+        g_status->append_text(addition.c_str());
+    }
+    if (ask) {
+        SetInstallerShellDialogMode(true);
+        const int choice = TopMostMessageBox(
+            L"检测到已有配置文件。\n\n选择“是”覆盖安装器生成配置；选择“否”保留原有一切配置。",
+            L"KswordSetup 覆盖安装", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+        SetInstallerShellDialogMode(false);
+        task->answerOverwrite(choice == IDYES);
+    }
+    if (WaitForSingleObject(task->worker.native_handle(), 0) != WAIT_OBJECT_0) {
+        if (timer == nullptr) Fl::repeat_timeout(0.03, PollInstallTask);
         return;
     }
-    if (result.ok && o.launchAfterInstall) LaunchKsword(o.installDir);
+    // Native completion includes worker value teardown; this join cannot wait
+    // for deployment/helper I/O. Finish on the same owner that accepted Start.
+    task->worker.join();
+    addition.clear();
+    {
+        std::lock_guard<std::mutex> lock(task->mutex);
+        addition.swap(task->pendingLog);
+        closed = task->closed;
+    }
+    if (!closed && g_status && !addition.empty()) g_status->append_text(addition.c_str());
+    g_installTask.reset();
+    if (g_installButton) g_installButton->activate();
+    if (g_browseButton) g_browseButton->activate();
+    if (task->failure) {
+        // The accepted result owns diagnostics from its first phase, including
+        // an exceptional early return. Complete through the normal failure UI.
+        const std::wstring failure = L"安装完成，但存在失败项，请查看日志。\r\n";
+        task->result.logText += failure;
+        if (!closed && g_status) g_status->append_text(WideToUtf8(failure).c_str());
+    }
+    if (closed) return;
+    if (task->result.rebootSuggested) {
+        SetInstallerShellDialogMode(true);
+        const int choice = TopMostMessageBox(L"测试模式已写入，需要重启系统后生效。是否立即重启？", L"KswordSetup", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+        SetInstallerShellDialogMode(false);
+        if (choice == IDYES) {
+            ::ShellExecuteW(nullptr, L"open", L"shutdown.exe", L"/r /t 0", nullptr, SW_HIDE);
+            return;
+        }
+    }
+    if (task->result.ok && task->options.launchAfterInstall) LaunchKsword(task->options.installDir);
 }
 
 // BrowseInstallDir opens the native folder picker. Input is current UI path;
@@ -1332,8 +1465,7 @@ void ConfigureRightContent(Fl_Window* window) {
     g_installButton->callback([](Fl_Widget*, void*) { StartInstall(); });
     KButton* closeButton = KCreateButton(layout.contentX + layout.contentW - 104, layout.cardY + layout.cardH - 48, 100, 34, "关闭", KBUTTON_LIGHT);
     closeButton->callback([](Fl_Widget*, void* data) {
-        g_characterWindow.destroy();
-        if (auto* owner = static_cast<Fl_Window*>(data)) owner->hide();
+        RequestInstallerClose(static_cast<Fl_Window*>(data));
     }, window);
     g_setupPage->end();
 
@@ -1355,8 +1487,7 @@ void ConfigureRightContent(Fl_Window* window) {
     backButton->callback([](Fl_Widget*, void*) { ShowSetupPage(); });
     KButton* finishButton = KCreateButton(layout.contentX + layout.contentW - 104, layout.cardY + layout.cardH - 48, 100, 34, "关闭", KBUTTON_LIGHT);
     finishButton->callback([](Fl_Widget*, void* data) {
-        g_characterWindow.destroy();
-        if (auto* owner = static_cast<Fl_Window*>(data)) owner->hide();
+        RequestInstallerClose(static_cast<Fl_Window*>(data));
     }, window);
     g_installPage->end();
     g_installPage->hide();
@@ -1369,6 +1500,9 @@ void GuiInitMain(const std::vector<std::string>& args, Fl_Window* MainWindow) {
     (void)args;
     if (!MainWindow) return;
     g_mainWindow = MainWindow;
+    MainWindow->callback([](Fl_Widget*, void* owner) {
+        RequestInstallerClose(static_cast<Fl_Window*>(owner));
+    }, MainWindow);
     MainWindow->label("KswordSetup");
     MainWindow->size(kWindowWidth, kWindowHeight);
     MainWindow->border(0);
@@ -1394,6 +1528,20 @@ void GuiAfterShowMain(Fl_Window* MainWindow) {
         ::DeleteFileW(state.c_str());
         SetStatus(L"已获得管理员权限，正在继续安装...");
         Fl::add_timeout(0.20, [](void*) { StartInstall(); });
+    }
+}
+
+// Called after Fl::run returns (including direct custom-titlebar hide). The UI
+// thread keeps dispatching until the accepted transaction and COM teardown end.
+void GuiDrainAcceptedInstallBeforeExit() {
+    if (g_installTask) RequestInstallerClose(g_mainWindow);
+    Fl::remove_timeout(PollInstallTask);
+    while (g_installTask) {
+        PollInstallTask(&g_installTask); // Explicit drain never schedules another timer.
+        if (g_installTask) {
+            Fl::wait(0.03);
+            ::Sleep(10); // FLTK may return immediately once all windows are hidden.
+        }
     }
 }
 

@@ -1,4 +1,8 @@
 #include "WindowGuiHandleTab.h"
+#include "WindowSnapshotSupport.h"
+#include "../UI/TableCompleteExport.h"
+#include "WindowImmutableTableSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 
@@ -25,8 +29,6 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
-#include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QVBoxLayout>
 #include <QVariant>
 
@@ -37,7 +39,6 @@
 #include <cstring>
 #include <limits>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -94,6 +95,7 @@ namespace
     {
         QVector<QStringList> rows;
         QString statusText;
+        ks::ui::ImmutableTableSource tableValues;
     };
 
     QString guiHandleText(const char* contextKey, const QString& sourceText)
@@ -152,7 +154,7 @@ namespace
         return value;
     }
 
-    QString guiObjectTypeText(const std::uint8_t type)
+    QString guiObjectTypeText(const std::uint8_t type, const ks::window::SnapshotTexts& texts)
     {
         switch (type)
         {
@@ -178,7 +180,7 @@ namespace
         case 20U: return QStringLiteral("Touch");
         case 21U: return QStringLiteral("Gesture");
         default:
-            return guiHandleText("window.gui_handle.type.unknown", QStringLiteral("未知类型 %1")).arg(type);
+            return texts.value(QStringLiteral("window.gui_handle.type.unknown"), QStringLiteral("未知类型 %1")).arg(type);
         }
     }
 
@@ -337,29 +339,23 @@ namespace
         return { QFileInfo(pathText).fileName(), pathText };
     }
 
-    GuiHandleSnapshot collectGuiHandles()
+    GuiHandleSnapshot collectGuiHandles(const ks::window::SnapshotTexts& texts)
     {
         GuiHandleSnapshot snapshot;
 #if !defined(_WIN64)
-        snapshot.statusText = guiHandleText(
-            "window.gui_handle.status.x64_only",
-            QStringLiteral("状态：当前 GUI Handle 枚举仅支持 x64 构建"));
+        snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.x64_only"), QStringLiteral("状态：当前 GUI Handle 枚举仅支持 x64 构建"));
         return snapshot;
 #else
         HMODULE user32Module = GetModuleHandleW(L"user32.dll");
         if (user32Module == nullptr)
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.user32_missing",
-                QStringLiteral("状态：user32.dll 未加载"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.user32_missing"), QStringLiteral("状态：user32.dll 未加载"));
             return snapshot;
         }
         const FARPROC sharedInfoExport = GetProcAddress(user32Module, "gSharedInfo");
         if (sharedInfoExport == nullptr)
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.export_missing",
-                QStringLiteral("状态：当前 user32.dll 未导出 gSharedInfo"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.export_missing"), QStringLiteral("状态：当前 user32.dll 未导出 gSharedInfo"));
             return snapshot;
         }
         SharedInfoPrefix sharedInfo{};
@@ -368,17 +364,13 @@ namespace
                 &sharedInfo,
                 sizeof(sharedInfo)))
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.shared_read_failed",
-                QStringLiteral("状态：读取 gSharedInfo 失败"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.shared_read_failed"), QStringLiteral("状态：读取 gSharedInfo 失败"));
             return snapshot;
         }
         if (sharedInfo.serverInfo == 0U || sharedInfo.handleEntries == 0U ||
             sharedInfo.handleEntrySize < 20U || sharedInfo.handleEntrySize > 0x100U)
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.shared_invalid",
-                QStringLiteral("状态：gSharedInfo 指针或 HandleEntrySize 无效"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.shared_invalid"), QStringLiteral("状态：gSharedInfo 指针或 HandleEntrySize 无效"));
             return snapshot;
         }
         std::array<std::uint32_t, 2U> serverInfoPrefix{};
@@ -387,18 +379,14 @@ namespace
                 serverInfoPrefix.data(),
                 sizeof(serverInfoPrefix)))
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.server_read_failed",
-                QStringLiteral("状态：读取 SERVERINFO 失败"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.server_read_failed"), QStringLiteral("状态：读取 SERVERINFO 失败"));
             return snapshot;
         }
         const std::vector<std::uint32_t> windowHandles = knownWindowHandles();
         const std::uint32_t handleCount = selectHandleCount(serverInfoPrefix, windowHandles);
         if (handleCount == 0U)
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.count_invalid",
-                QStringLiteral("状态：SERVERINFO Handle 数量无效"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.count_invalid"), QStringLiteral("状态：SERVERINFO Handle 数量无效"));
             return snapshot;
         }
         const std::size_t totalBytes = static_cast<std::size_t>(handleCount) * sharedInfo.handleEntrySize;
@@ -421,9 +409,7 @@ namespace
         }
         if (readableEntryCount == 0U)
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.table_read_failed",
-                QStringLiteral("状态：读取 USER Handle 共享表失败"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.table_read_failed"), QStringLiteral("状态：读取 USER Handle 共享表失败"));
             return snapshot;
         }
         const HandleEntryLayout layout = detectHandleEntryLayout(
@@ -433,9 +419,7 @@ namespace
             windowHandles);
         if (layout.name.isEmpty())
         {
-            snapshot.statusText = guiHandleText(
-                "window.gui_handle.status.layout_failed",
-                QStringLiteral("状态：无法识别 USER HandleEntry 布局"));
+            snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.layout_failed"), QStringLiteral("状态：无法识别 USER HandleEntry 布局"));
             return snapshot;
         }
 
@@ -462,9 +446,7 @@ namespace
             DWORD threadId = 0U;
             QString processName;
             QString processPath;
-            QString rowStatus = guiHandleText(
-                "window.gui_handle.status.shared_entry",
-                QStringLiteral("共享 USER Handle"));
+            QString rowStatus = texts.value(QStringLiteral("window.gui_handle.status.shared_entry"), QStringLiteral("共享 USER Handle"));
             if (type == 1U)
             {
                 const HWND windowHandle = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(handleValue));
@@ -478,26 +460,20 @@ namespace
                     }
                     processName = cacheIterator->second.first;
                     processPath = cacheIterator->second.second;
-                    rowStatus = guiHandleText(
-                        "window.gui_handle.status.hwnd_verified",
-                        QStringLiteral("HWND 已验证"));
+                    rowStatus = texts.value(QStringLiteral("window.gui_handle.status.hwnd_verified"), QStringLiteral("HWND 已验证"));
                 }
             }
             if (type > kMaximumKnownUserType)
             {
-                rowStatus = guiHandleText(
-                    "window.gui_handle.status.unknown_type",
-                    QStringLiteral("未知 USER 类型"));
+                rowStatus = texts.value(QStringLiteral("window.gui_handle.status.unknown_type"), QStringLiteral("未知 USER 类型"));
             }
             if (rawObject != 0U && mappedObject == 0U)
             {
-                rowStatus += guiHandleText(
-                    "window.gui_handle.status.raw_only",
-                    QStringLiteral("；对象仅有原始值"));
+                rowStatus += texts.value(QStringLiteral("window.gui_handle.status.raw_only"), QStringLiteral("；对象仅有原始值"));
             }
             snapshot.rows.push_back(QStringList{
                 hex32(handleValue),
-                guiObjectTypeText(type),
+                guiObjectTypeText(type, texts),
                 QString::number(type),
                 QStringLiteral("0x%1").arg(flags, 2, 16, QLatin1Char('0')).toUpper(),
                 QStringLiteral("0x%1").arg(unique, 4, 16, QLatin1Char('0')).toUpper(),
@@ -513,9 +489,7 @@ namespace
                 rowStatus });
             ++visibleCount;
         }
-        snapshot.statusText = guiHandleText(
-            "window.gui_handle.status.completed",
-            QStringLiteral("状态：USER Handle %1，非空对象 %2，EntrySize %3，布局 %4，gSharedInfo %5，aheList %6"))
+        snapshot.statusText = texts.value(QStringLiteral("window.gui_handle.status.completed"), QStringLiteral("状态：USER Handle %1，非空对象 %2，EntrySize %3，布局 %4，gSharedInfo %5，aheList %6"))
             .arg(handleCount)
             .arg(visibleCount)
             .arg(sharedInfo.handleEntrySize)
@@ -526,23 +500,50 @@ namespace
 #endif
     }
 
-    QTableWidgetItem* readOnlyItem(const QString& text)
+    ks::window::SnapshotTexts freezeSnapshotTexts()
     {
-        auto* item = new QTableWidgetItem(text);
-        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        return item;
+        return {
+            {QStringLiteral("window.gui_handle.type.unknown"), guiHandleText("window.gui_handle.type.unknown", QStringLiteral("未知类型 %1"))},
+            {QStringLiteral("window.gui_handle.status.x64_only"), guiHandleText("window.gui_handle.status.x64_only", QStringLiteral("状态：当前 GUI Handle 枚举仅支持 x64 构建"))},
+            {QStringLiteral("window.gui_handle.status.user32_missing"), guiHandleText("window.gui_handle.status.user32_missing", QStringLiteral("状态：user32.dll 未加载"))},
+            {QStringLiteral("window.gui_handle.status.export_missing"), guiHandleText("window.gui_handle.status.export_missing", QStringLiteral("状态：当前 user32.dll 未导出 gSharedInfo"))},
+            {QStringLiteral("window.gui_handle.status.shared_read_failed"), guiHandleText("window.gui_handle.status.shared_read_failed", QStringLiteral("状态：读取 gSharedInfo 失败"))},
+            {QStringLiteral("window.gui_handle.status.shared_invalid"), guiHandleText("window.gui_handle.status.shared_invalid", QStringLiteral("状态：gSharedInfo 指针或 HandleEntrySize 无效"))},
+            {QStringLiteral("window.gui_handle.status.server_read_failed"), guiHandleText("window.gui_handle.status.server_read_failed", QStringLiteral("状态：读取 SERVERINFO 失败"))},
+            {QStringLiteral("window.gui_handle.status.count_invalid"), guiHandleText("window.gui_handle.status.count_invalid", QStringLiteral("状态：SERVERINFO Handle 数量无效"))},
+            {QStringLiteral("window.gui_handle.status.table_read_failed"), guiHandleText("window.gui_handle.status.table_read_failed", QStringLiteral("状态：读取 USER Handle 共享表失败"))},
+            {QStringLiteral("window.gui_handle.status.layout_failed"), guiHandleText("window.gui_handle.status.layout_failed", QStringLiteral("状态：无法识别 USER HandleEntry 布局"))},
+            {QStringLiteral("window.gui_handle.status.shared_entry"), guiHandleText("window.gui_handle.status.shared_entry", QStringLiteral("共享 USER Handle"))},
+            {QStringLiteral("window.gui_handle.status.hwnd_verified"), guiHandleText("window.gui_handle.status.hwnd_verified", QStringLiteral("HWND 已验证"))},
+            {QStringLiteral("window.gui_handle.status.unknown_type"), guiHandleText("window.gui_handle.status.unknown_type", QStringLiteral("未知 USER 类型"))},
+            {QStringLiteral("window.gui_handle.status.raw_only"), guiHandleText("window.gui_handle.status.raw_only", QStringLiteral("；对象仅有原始值"))},
+            {QStringLiteral("window.gui_handle.status.completed"), guiHandleText("window.gui_handle.status.completed", QStringLiteral("状态：USER Handle %1，非空对象 %2，EntrySize %3，布局 %4，gSharedInfo %5，aheList %6"))} };
     }
+
+
 }
 
 WindowGuiHandleTab::WindowGuiHandleTab(QWidget* parent)
     : QWidget(parent)
 {
+    m_refreshOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
+    m_refreshOperation->setStateChangedCallback([this] { reconcileRefreshState(); });
+}
+
+WindowGuiHandleTab::~WindowGuiHandleTab()
+{
+    m_refreshOperation->close();
+    ks::window::retireSnapshotValues(std::move(m_rows));
 }
 
 void WindowGuiHandleTab::showEvent(QShowEvent* event)
 {
+    const QPointer<WindowGuiHandleTab> alive(this);
     QWidget::showEvent(event);
+    if (!alive) return;
+    reconcileRefreshState();
+    if (!alive) return;
     if (!m_firstRefreshStarted)
     {
         m_firstRefreshStarted = true;
@@ -591,26 +592,23 @@ void WindowGuiHandleTab::initializeUi()
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
     rootLayout->addWidget(m_statusLabel);
 
-    m_table = new ks::ui::VisibleTableWidget(this);
-    // USER 句柄主清单保留快照比较，避免隐藏现场变化能力。
-    ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
-    m_table->setColumnCount(ColumnCount);
-    m_table->setHorizontalHeaderLabels({
-        guiHandleText("window.gui_handle.header.handle", QStringLiteral("句柄")),
-        guiHandleText("window.gui_handle.header.type", QStringLiteral("类型")),
+    m_table = new ks::ui::ImmutableValueTable(this, {
+        {QStringLiteral("window.gui_handle.header.handle"), QStringLiteral("句柄")},
+        {QStringLiteral("window.gui_handle.header.type"), QStringLiteral("类型")},
         QStringLiteral("TypeId"),
         QStringLiteral("Flags"),
         QStringLiteral("Uniq"),
-        guiHandleText("window.gui_handle.header.object_raw", QStringLiteral("对象原始值")),
-        guiHandleText("window.gui_handle.header.object_mapped", QStringLiteral("对象共享映射")),
-        guiHandleText("window.gui_handle.header.owner_raw", QStringLiteral("所有者原始值")),
-        guiHandleText("window.gui_handle.header.owner_mapped", QStringLiteral("所有者共享映射")),
+        {QStringLiteral("window.gui_handle.header.object_raw"), QStringLiteral("对象原始值")},
+        {QStringLiteral("window.gui_handle.header.object_mapped"), QStringLiteral("对象共享映射")},
+        {QStringLiteral("window.gui_handle.header.owner_raw"), QStringLiteral("所有者原始值")},
+        {QStringLiteral("window.gui_handle.header.owner_mapped"), QStringLiteral("所有者共享映射")},
         QStringLiteral("PID"),
         QStringLiteral("TID"),
-        guiHandleText("window.gui_handle.header.process", QStringLiteral("进程")),
-        guiHandleText("window.gui_handle.header.path", QStringLiteral("路径")),
-        guiHandleText("window.gui_handle.header.layout", QStringLiteral("布局")),
-        guiHandleText("window.gui_handle.header.status", QStringLiteral("状态")) });
+        {QStringLiteral("window.gui_handle.header.process"), QStringLiteral("进程")},
+        {QStringLiteral("window.gui_handle.header.path"), QStringLiteral("路径")},
+        {QStringLiteral("window.gui_handle.header.layout"), QStringLiteral("布局")},
+        {QStringLiteral("window.gui_handle.header.status"), QStringLiteral("状态")} });
+    ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -620,99 +618,107 @@ void WindowGuiHandleTab::initializeUi()
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
+    // Measure a bounded visible-source sample only when canonical data changes, never per key.
+    m_table->horizontalHeader()->setResizeContentsPrecision(100);
+    m_table->sourceReady = [this] { m_table->resizeColumnsToContents(); };
     rootLayout->addWidget(m_table, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
-    connect(m_typeFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { rebuildTable(); });
+    connect(m_typeFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        const int selectedType = m_typeFilterCombo->currentData().toInt();
+        m_table->setRowPredicate([selectedType](const ks::ui::ImmutableTableRow& row) {
+            return row.cells.size() >= ColumnCount && (selectedType < 0 || row.cells.value(ColumnTypeId).toInt() == selectedType);
+        });
+    });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { rebuildTable(); });
-    connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
+    connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
+}
+
+void WindowGuiHandleTab::reconcileRefreshState()
+{
+    if (!m_refreshing || m_refreshOperation->isBusy() || m_refreshOperation->isInFlight()) return;
+    const QPointer<WindowGuiHandleTab> alive(this);
+    m_refreshing = false;
+    m_refreshButton->setEnabled(true);
+    if (alive && !m_refreshOperation->isBusy() && !m_refreshOperation->isInFlight()) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
 }
 
 void WindowGuiHandleTab::refreshAsync()
 {
+    const QPointer<WindowGuiHandleTab> refreshOwner(this);
+    reconcileRefreshState();
+    if (!refreshOwner) return;
     if (m_refreshing)
     {
         return;
     }
+    const QPointer<WindowGuiHandleTab> alive(this);
     m_refreshing = true;
     m_firstRefreshStarted = true;
     m_refreshButton->setEnabled(false);
+    if (!alive) return;
     m_statusLabel->setText(guiHandleText(
         "window.gui_handle.status.refreshing",
         QStringLiteral("状态：正在读取 gSharedInfo 与 USER Handle 共享表...")));
-    QPointer<WindowGuiHandleTab> safeThis(this);
-    std::thread([safeThis]() {
-        GuiHandleSnapshot snapshot = collectGuiHandles();
-        if (safeThis == nullptr)
-        {
-            return;
-        }
-        QMetaObject::invokeMethod(safeThis, [safeThis, snapshot = std::move(snapshot)]() mutable {
-            if (safeThis != nullptr)
-            {
-                safeThis->applySnapshot(std::move(snapshot.rows), snapshot.statusText);
-            }
-        }, Qt::QueuedConnection);
-    }).detach();
+    if (!alive) return;
+    m_refreshOperation->submit<ks::window::SnapshotTexts, std::shared_ptr<const GuiHandleSnapshot>>(
+        freezeSnapshotTexts(),
+        [](const ks::window::SnapshotTexts& texts, const ks::ui::AsyncOperationToken&) {
+            auto snapshot = collectGuiHandles(texts);
+            snapshot.tableValues = ks::window::makeWindowTableSource(std::move(snapshot.rows), {ColumnHandle, ColumnTypeId, ColumnUnique, ColumnObjectRaw});
+            return ks::window::makeSnapshotValue<GuiHandleSnapshot>(std::move(snapshot));
+        },
+        [this](const std::shared_ptr<const GuiHandleSnapshot>& snapshot, std::uint64_t ticket) {
+            return applySnapshot(snapshot->tableValues, snapshot->statusText, ticket);
+        },
+        [this](std::exception_ptr) {
+            const QPointer<WindowGuiHandleTab> alive(this);
+            const auto failedGeneration = m_refreshOperation->generation();
+            m_refreshing = false;
+            m_refreshButton->setEnabled(true);
+            if (alive && m_refreshOperation->isCurrent(failedGeneration)) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+        });
 }
 
-void WindowGuiHandleTab::applySnapshot(QVector<QStringList> rows, const QString& statusText)
+bool WindowGuiHandleTab::applySnapshot(ks::ui::ImmutableTableSource rows, const QString& statusText, std::uint64_t ticket)
 {
+    if (!m_refreshOperation->isCurrent(ticket)) return true;
     const QPointer<WindowGuiHandleTab> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
         QStringLiteral("window-gui-handle-snapshot-apply"),
         { m_table },
-        [safeThis, rows, statusText]() mutable
+        [safeThis, rows, statusText, ticket]() mutable
         {
-            if (!safeThis.isNull())
-            {
-                safeThis->applySnapshot(std::move(rows), statusText);
-            }
+            if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return;
+            if (safeThis->applySnapshot(std::move(rows), statusText, ticket) && safeThis)
+                safeThis->m_refreshOperation->completeDeferred(ticket);
         }))
     {
-        return;
+        return false;
     }
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
 
     m_refreshing = false;
     m_refreshButton->setEnabled(true);
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
+    ks::window::retireSnapshotValues(std::move(m_rows));
     m_rows = std::move(rows);
     m_statusLabel->setText(statusText);
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
+    const auto source = m_rows;
+    m_table->setSourceFactory([source](const auto& translator) { return ks::window::formatWindowTableSource(source, translator); });
+    if (!safeThis) return true;
     rebuildTable();
+    return true;
 }
 
 void WindowGuiHandleTab::rebuildTable()
 {
-    const int selectedType = m_typeFilterCombo->currentData().toInt();
-    const QString keyword = m_filterEdit->text().trimmed();
-    m_table->setSortingEnabled(false);
-    m_table->setRowCount(0);
-    for (const QStringList& sourceRow : m_rows)
-    {
-        if (sourceRow.size() < ColumnCount)
-        {
-            continue;
-        }
-        if (selectedType >= 0 && sourceRow.at(ColumnTypeId).toInt() != selectedType)
-        {
-            continue;
-        }
-        if (!keyword.isEmpty() && !sourceRow.join(QLatin1Char(' ')).contains(keyword, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const int tableRow = m_table->rowCount();
-        m_table->insertRow(tableRow);
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            m_table->setItem(tableRow, column, readOnlyItem(sourceRow.at(column)));
-        }
-    }
-    m_table->setSortingEnabled(true);
-    m_table->resizeColumnsToContents();
+    m_table->setQuery(m_filterEdit->text().trimmed());
 }
 
-QString WindowGuiHandleTab::rowClipboardText(QTableWidget* table, const int row, const bool includeHeader)
+QString WindowGuiHandleTab::rowClipboardText(ks::ui::ImmutableValueTable* table, const int row, const bool includeHeader)
 {
     if (table == nullptr || row < 0 || row >= table->rowCount())
     {
@@ -724,14 +730,14 @@ QString WindowGuiHandleTab::rowClipboardText(QTableWidget* table, const int row,
         QStringList headers;
         for (int column = 0; column < table->columnCount(); ++column)
         {
-            headers << (table->horizontalHeaderItem(column) == nullptr ? QString() : table->horizontalHeaderItem(column)->text());
+            headers << table->model()->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString();
         }
         lines << headers.join(QLatin1Char('\t'));
     }
     QStringList values;
     for (int column = 0; column < table->columnCount(); ++column)
     {
-        values << (table->item(row, column) == nullptr ? QString() : table->item(row, column)->text());
+        values << table->cell(row, column).toString();
     }
     lines << values.join(QLatin1Char('\t'));
     return lines.join(QLatin1Char('\n'));
@@ -749,11 +755,8 @@ void WindowGuiHandleTab::showCopyMenu(const QPoint& position)
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(guiHandleText("window.gui_handle.copy.all", QStringLiteral("复制全部行")));
-    const QTableWidgetItem* processIdItem = row >= 0 ? m_table->item(row, ColumnPid) : nullptr;
     bool processIdOk = false;
-    const quint32 processId = processIdItem != nullptr
-        ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-        : 0U;
+    const quint32 processId = row >= 0 ? m_table->cell(row, ColumnPid).toString().trimmed().toUInt(&processIdOk, 10) : 0U;
     QAction* openProcessAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("转到进程详细信息"));
@@ -764,8 +767,7 @@ void WindowGuiHandleTab::showCopyMenu(const QPoint& position)
     QAction* selected = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (selected == copyCell && index.isValid())
     {
-        const QTableWidgetItem* item = m_table->item(index.row(), index.column());
-        QApplication::clipboard()->setText(item == nullptr ? QString() : item->text());
+        QApplication::clipboard()->setText(m_table->cell(index.row(), index.column()).toString());
     }
     else if (selected == copyRow)
     {
@@ -773,12 +775,7 @@ void WindowGuiHandleTab::showCopyMenu(const QPoint& position)
     }
     else if (selected == copyAll)
     {
-        QStringList lines;
-        for (int tableRow = 0; tableRow < m_table->rowCount(); ++tableRow)
-        {
-            lines << rowClipboardText(m_table, tableRow, tableRow == 0);
-        }
-        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+        ks::ui::CopyCompleteTableRows(m_table, ks::ui::CompleteTableScope::All, ks::ui::CompleteTableColumns::All);
     }
     else if (selected == openProcessAction)
     {

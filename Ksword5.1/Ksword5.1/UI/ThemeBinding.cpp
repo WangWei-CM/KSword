@@ -1,5 +1,6 @@
 #include "ThemeBinding.h"
 #include "./MainSurfaceStyle.h"
+#include "./PrimaryPageStyle.h"
 #include "../theme.h"
 #include <QAbstractSpinBox>
 #include <QLineEdit>
@@ -7,6 +8,7 @@
 #include <QApplication>
 #include <QEvent>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPalette>
@@ -69,6 +71,7 @@ namespace
         void schedule(WidgetThemeBinding* binding);
         void scheduleAll();
         void applyPending(WidgetThemeBinding* binding); // 首帧入口消费同一登记项，不另建主题绑定。
+        void applyPendingForScope(QWidget* scope);
 
     protected:
         // 应用调色板更新只排队刷新；各控件的局部 palette 事件由自己的绑定观察。
@@ -88,6 +91,7 @@ namespace
         std::list<QPointer<WidgetThemeBinding>> m_bindings; // 稳定迭代器，登记/销毁无需扫描全部绑定。
         std::deque<QPointer<WidgetThemeBinding>> m_pending; // 常数时间取队首，保持登记顺序。
         QSet<WidgetThemeBinding*> m_pendingMembership; // 仅作常数时间去重；实际队列仍持弱引用。
+        QSet<WidgetThemeBinding*> m_dirtyBindings; // 实际未消费请求；FIFO可含已首帧消费的旧节点。
         bool m_scheduled = false; // 合并同一轮重复主题事件的调度门禁。
     };
 
@@ -112,19 +116,23 @@ namespace
     public:
         // widget 持有绑定；ownerRegistry 仅管理刷新调度，不改变 QWidget 父级或布局。
         WidgetThemeBinding(QWidget* widget, ThemeBindingRegistry* ownerRegistry,
-            std::function<void()> refresh, ks::ui::ThemePalettePolicy palettePolicy)
+            std::function<void()> refresh, ks::ui::ThemePalettePolicy palettePolicy,
+            bool ownsStandaloneInputGeometry)
             : QObject(widget), m_widget(widget), m_registry(ownerRegistry),
-              m_refresh(std::move(refresh)), m_palettePolicy(palettePolicy)
+              m_refresh(std::move(refresh)), m_palettePolicy(palettePolicy),
+              m_ownsStandaloneInputGeometry(ownsStandaloneInputGeometry)
         {
             widget->installEventFilter(this);
             widget->setProperty(kBindingProperty, QVariant::fromValue<QObject*>(this));
         }
 
         // replace 在同一控件上替换角色策略，不重复安装过滤器或增加登记项。
-        void replace(std::function<void()> refresh, ks::ui::ThemePalettePolicy palettePolicy)
+        void replace(std::function<void()> refresh, ks::ui::ThemePalettePolicy palettePolicy,
+            bool ownsStandaloneInputGeometry)
         {
             m_refresh = std::move(refresh);
             m_palettePolicy = palettePolicy;
+            m_ownsStandaloneInputGeometry = ownsStandaloneInputGeometry;
         }
 
         // 首显与普通分片共用待刷新标记；同步首显后，旧队列节点只负责释放 membership。
@@ -136,6 +144,9 @@ namespace
         {
             return std::exchange(m_refreshPending, false);
         }
+        QWidget* widget() const { return m_widget.data(); }
+        bool ownsStandaloneInputGeometry() const { return m_ownsStandaloneInputGeometry; }
+        bool hasApplied() const { return m_hasApplied; }
 
         // apply 只在 GUI 线程调用；先复制函数，再执行可能销毁自身的样式更新。
         void apply()
@@ -206,9 +217,16 @@ namespace
             if (m_registry != nullptr && event != nullptr &&
                 (event->type() == QEvent::ApplicationPaletteChange ||
                     event->type() == QEvent::LanguageChange ||
-                    (!m_applying && event->type() == QEvent::PaletteChange)))
+                    (!m_applying && (event->type() == QEvent::PaletteChange
+                        || (m_widget && m_widget->property("ksword_flat_button_shared_owner").toBool()
+                            && (event->type() == QEvent::StyleChange || event->type() == QEvent::ParentChange
+                                || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished))))))
             {
-                m_registry->schedule(this);
+                const QPointer<WidgetThemeBinding> lifetime(this);
+                if (!m_applying && m_widget && m_widget->property("ksword_flat_button_shared_owner").toBool())
+                    m_widget->setProperty("ksword_flat_button_shared_dirty", true);
+                if (!lifetime) return true;
+                if (m_registry) m_registry->schedule(this);
             }
             return QObject::eventFilter(watched, event);
         }
@@ -218,6 +236,7 @@ namespace
         QPointer<ThemeBindingRegistry> m_registry; // 应用销毁后停止调度。
         std::function<void()> m_refresh; // 根据稳定语义角色重新求值的完整刷新函数。
         ks::ui::ThemePalettePolicy m_palettePolicy; // 是否保留独立窗口的局部调色板。
+        bool m_ownsStandaloneInputGeometry = false;
         bool m_applying = false; // 禁止刷新过程中因自身样式事件递归调度。
         bool m_refreshRequested = false; // 嵌套循环消费的刷新在外层结束后重新排队。
         bool m_refreshPending = false; // 首显或分片尚未消费的同一刷新请求。
@@ -233,6 +252,7 @@ namespace
         {
             m_bindings.erase(registration);
             m_pendingMembership.remove(binding); // 防止释放后同址新对象被旧待刷新地址误判为已排队。
+            m_dirtyBindings.remove(binding);
         });
         schedule(binding);
     }
@@ -244,6 +264,7 @@ namespace
             return;
         }
         binding->requestRefresh();
+        m_dirtyBindings.insert(binding);
         // weakBinding 为当前对象的弱引用；重复事件只保留一次待刷新记录。
         const QPointer<WidgetThemeBinding> weakBinding(binding);
         if (!m_pendingMembership.contains(binding))
@@ -271,7 +292,13 @@ namespace
     // 节点仍留在 FIFO 中去重；若之后到达新主题请求，该节点可消费新请求而不丢更新。
     void ThemeBindingRegistry::applyPending(WidgetThemeBinding* binding)
     {
-        if (binding != nullptr && binding->takePendingRefresh())
+        if (binding == nullptr)
+        {
+            return;
+        }
+        // 先移除，回调中的真实新请求可以重新登记而不被本轮吞掉。
+        m_dirtyBindings.remove(binding);
+        if (binding->takePendingRefresh())
         {
             binding->apply();
         }
@@ -331,24 +358,105 @@ namespace
         return nullptr;
     }
 
-    // 只收当前可显示分支和现成控件，不提前创建其它 Tab、独立窗口或 Popup。
-    void collectShownBranch(QWidget* widget, QVector<QPointer<QWidget>>& branch)
+    // 只读取当前父级/可见性；不发事件、不运行样式回调。
+    QWidget* visibleThemeParent(QWidget* widget)
     {
-        if (widget == nullptr)
+        if (widget->isWindow()) return nullptr;
+        QWidget* parent = widget->parentWidget();
+        if (parent == nullptr || !widget->isVisibleTo(parent)) return nullptr;
+        if (auto* stack = qobject_cast<QStackedWidget*>(parent);
+            stack != nullptr && widget != stack->currentWidget()) return nullptr;
+        return parent;
+    }
+
+    // 回调前必须读取真实父链，不能复用收集阶段的结论。
+    int visibleDepthInScope(QWidget* widget, QWidget* scope)
+    {
+        int depth = 0;
+        while (widget != nullptr && widget != scope)
         {
-            return;
+            widget = visibleThemeParent(widget);
+            if (widget == nullptr) return -1;
+            ++depth;
         }
-        branch.append(widget);
-        const auto* stack = qobject_cast<QStackedWidget*>(widget); // 隐藏 Tab 不能进入首帧工作量。
-        for (QObject* object : widget->children())
+        return widget == scope ? depth : -1;
+    }
+
+    // 缓存只活在无回调的收集阶段。多个脏控件共享的祖先（包括无关宿主）
+    // 每次准备只检查一次；切页、重挂、销毁或下一次主题请求不保留旧结论。
+    int collectVisibleDepth(QWidget* widget, QWidget* scope,
+        QHash<QWidget*, int>& depths, QVector<QWidget*>& branch)
+    {
+        if (widget == scope) return 0;
+        if (widget == nullptr || scope == nullptr) return -1;
+        widget = visibleThemeParent(widget);
+        if (widget == nullptr) return -1;
+        if (widget == scope) return 1;
+        branch.clear(); // 只缓存共享祖先，不为每个叶绑定存一份哈希节点。
+        int depth = -1;
+        while (widget != nullptr && widget != scope)
         {
-            auto* child = qobject_cast<QWidget*>(object); // 布局/模型 QObject 无需参与颜色准备。
-            if (child == nullptr || child->isWindow() || !child->isVisibleTo(widget)
-                || (stack != nullptr && child != stack->currentWidget()))
+            const auto found = depths.constFind(widget);
+            if (found != depths.cend())
             {
-                continue;
+                depth = found.value();
+                break;
             }
-            collectShownBranch(child, branch);
+            branch.append(widget);
+            widget = visibleThemeParent(widget);
+        }
+        if (widget == scope) depth = 0;
+        for (qsizetype index = branch.size(); index > 0; --index)
+        {
+            if (depth >= 0) ++depth;
+            depths.insert(branch[index - 1], depth);
+        }
+        return depth >= 0 ? depth + 1 : -1;
+    }
+
+    void ThemeBindingRegistry::applyPendingForScope(QWidget* scope)
+    {
+        if (m_dirtyBindings.isEmpty())
+        {
+            return; // 干净热切为O(1)，旧FIFO节点不让页面重新遍历。
+        }
+        struct Pending
+        {
+            QPointer<WidgetThemeBinding> binding;
+            int depth;
+        };
+        QVector<Pending> pending;
+        pending.reserve(m_dirtyBindings.size());
+        {
+            QHash<QWidget*, int> depths;
+            QVector<QWidget*> branch; // 复用路径，缓存随收集结束释放。
+            for (WidgetThemeBinding* binding : m_dirtyBindings)
+            {
+                const int depth = collectVisibleDepth(binding->widget(), scope, depths, branch);
+                if (depth >= 0)
+                {
+                    pending.append({binding, depth});
+                }
+            }
+        }
+        std::stable_sort(pending.begin(), pending.end(), [](const Pending& left, const Pending& right)
+        {
+            return left.depth < right.depth; // 父样式先于子样式，沿用首帧准备顺序。
+        });
+        const QPointer<QWidget> owner(scope);
+        const QPointer<ThemeBindingRegistry> lifetime(this);
+        for (const Pending& request : pending)
+        {
+            if (owner == nullptr || lifetime == nullptr)
+            {
+                return;
+            }
+            // 前一个回调允许销毁、重挂、切页；此时不准备已经离开的分支。
+            if (request.binding != nullptr
+                && visibleDepthInScope(request.binding->widget(), owner.data()) >= 0)
+            {
+                lifetime->applyPending(request.binding.data());
+            }
         }
     }
 }
@@ -362,15 +470,7 @@ void ks::ui::PrepareWidgetThemeBindingsForShow(QWidget* scope)
     {
         return;
     }
-    QVector<QPointer<QWidget>> branch; // 回调可析构或重挂控件，收集后全部通过弱引用探活。
-    collectShownBranch(scope, branch);
-    for (const QPointer<QWidget>& widget : branch)
-    {
-        if (widget != nullptr && ownerRegistry != nullptr)
-        {
-            ownerRegistry->applyPending(bindingForWidget(widget.data()));
-        }
-    }
+    ownerRegistry->applyPendingForScope(scope);
 }
 
 ks::ui::ScopedWidgetThemePreparation::ScopedWidgetThemePreparation(QWidget* scope)
@@ -388,7 +488,7 @@ ks::ui::ScopedWidgetThemePreparation::~ScopedWidgetThemePreparation()
 }
 
 bool ks::ui::BindWidgetTheme(QWidget* widget, std::function<void()> refresh,
-    ThemePalettePolicy palettePolicy)
+    ThemePalettePolicy palettePolicy, bool ownsStandaloneInputGeometry)
 {
     ThemeBindingRegistry* ownerRegistry = registry(); // 同时校验 QApplication 和 GUI 线程。
     if (ownerRegistry == nullptr || widget == nullptr || !refresh ||
@@ -400,15 +500,55 @@ bool ks::ui::BindWidgetTheme(QWidget* widget, std::function<void()> refresh,
     auto* binding = bindingForWidget(widget); // 只使用现有直接子树中的存活绑定。
     if (binding != nullptr && binding->parent() == widget)
     {
-        binding->replace(std::move(refresh), palettePolicy);
+        if (binding->ownsStandaloneInputGeometry() && !binding->hasApplied()
+            && !ownsStandaloneInputGeometry && (widget->property("ksword_standalone_input").toBool()
+                || widget->property("ksword_parameter_input_padding").toBool()))
+        {
+            // A custom owner takes over before the first queued refresh. Keep
+            // the geometry that the old immediate path already supplied.
+            const QPointer<QWidget> target(widget);
+            const QPointer<WidgetThemeBinding> owner(binding);
+            const QString current = widget->styleSheet();
+            const QString style = InitialStandaloneInputThemeStyle(widget);
+            if (style != current) widget->setStyleSheet(style);
+            if (!target || !owner || bindingForWidget(widget) != binding) return false;
+        }
+        binding->replace(std::move(refresh), palettePolicy, ownsStandaloneInputGeometry);
         ownerRegistry->schedule(binding);
     }
     else
     {
-        binding = new WidgetThemeBinding(widget, ownerRegistry, std::move(refresh), palettePolicy);
+        binding = new WidgetThemeBinding(widget, ownerRegistry, std::move(refresh), palettePolicy,
+            ownsStandaloneInputGeometry);
         ownerRegistry->add(binding);
     }
     return true;
+}
+
+bool ks::ui::RequestStandaloneInputThemeGeometry(QWidget* widget)
+{
+    ThemeBindingRegistry* ownerRegistry = registry();
+    if (!ownerRegistry || !widget || widget->thread() != QThread::currentThread()) return false;
+    auto* binding = bindingForWidget(widget);
+    if (!binding || binding->parent() != widget || !binding->ownsStandaloneInputGeometry()
+        || binding->hasApplied()) return false;
+    ownerRegistry->schedule(binding);
+    return true;
+}
+
+QString ks::ui::InitialStandaloneInputThemeStyle(QWidget* widget)
+{
+    QString style = widget->styleSheet();
+    auto* binding = bindingForWidget(widget);
+    if (binding && binding->parent() == widget && binding->ownsStandaloneInputGeometry()
+        && !binding->hasApplied())
+    {
+        if (widget->property("ksword_parameter_input_padding").toBool())
+            style = WithParameterInputGeometry(std::move(style));
+        if (widget->property("ksword_standalone_input").toBool())
+            style = WithStandaloneInputGeometry(std::move(style));
+    }
+    return style;
 }
 
 // 数值与单位由原生编辑器维护；主题绑定只修复可见文字与实际底色的对比度。
@@ -440,16 +580,19 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
             "QAbstractSpinBox:hover{background-color:%3;border:none;}"
             "QAbstractSpinBox:focus{background-color:%4;border:none;}"
             "QAbstractSpinBox:disabled{background-color:%5;color:%6;border:none;}")
-            .arg(background.name(), foreground.name(), hoverBackground.name(), focusBackground.name(),
-                disabledBackground.name(), disabledForeground.name())
+            .arg(MainDataSurfaceStyleColor(background, UsesTransparentMainSurface(guardedSpin)), foreground.name(),
+                MainDataSurfaceStyleColor(hoverBackground, UsesTransparentMainSurface(guardedSpin)),
+                MainDataSurfaceStyleColor(focusBackground, UsesTransparentMainSurface(guardedSpin)),
+                MainDataSurfaceStyleColor(disabledBackground, UsesTransparentMainSurface(guardedSpin)), disabledForeground.name())
             + QString::fromLatin1(kSpinStyleEnd);
-        const QString style = replaceFieldStyle(guardedSpin->styleSheet(), block,
+        QString currentStyle = InitialStandaloneInputThemeStyle(guardedSpin);
+        const QString style = replaceFieldStyle(std::move(currentStyle), block,
             kSpinStyleBegin, kSpinStyleEnd); // 保留页面自己设置的宽度、padding 与步进几何。
         if (guardedSpin->styleSheet() != style)
         {
             guardedSpin->setStyleSheet(style);
         }
-    });
+    }, ThemePalettePolicy::FollowApplication, true);
 
     // 内部 QLineEdit 单独登记，旧色值补偿不会再次覆盖已经明确拥有的前景规则。
     QLineEdit* editor = spinBox->findChild<QLineEdit*>(QStringLiteral("qt_spinbox_lineedit"));
@@ -521,7 +664,7 @@ bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
             background = KswordTheme::SurfaceAltColor();
         }
         // 主页面固定采用编辑层，不从已变亮的父容器继续计算更亮的底面。
-        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField);
+        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField) || UsesTransparentMainSurface(guardedField);
         background = mainSurface ? MainWindowSurfaceColors().input
             : KswordTheme::ControlInputSurfaceColor(pageSurface, background);
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
@@ -557,10 +700,12 @@ bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
             "QLineEdit:hover{background-color:%4;border:none;}"
             "QLineEdit:focus{background-color:%5;border:none;}"
             "QLineEdit:disabled{background-color:%1;color:%3;placeholder-text-color:%7;border:none;}")
-            .arg(background.name(), foreground.name(), disabledForeground.name(),
-                hoverBackground.name(), focusBackground.name(), placeholder.name(), disabledPlaceholder.name())
+            .arg(MainDataSurfaceStyleColor(background, UsesTransparentMainSurface(guardedField)), foreground.name(), disabledForeground.name(),
+                MainDataSurfaceStyleColor(hoverBackground, UsesTransparentMainSurface(guardedField)),
+                MainDataSurfaceStyleColor(focusBackground, UsesTransparentMainSurface(guardedField)), placeholder.name(), disabledPlaceholder.name())
             + QString::fromLatin1(kSearchStyleEnd);
-        const QString style = replaceFieldStyle(guardedField->styleSheet(), block,
+        QString currentStyle = InitialStandaloneInputThemeStyle(guardedField);
+        const QString style = replaceFieldStyle(std::move(currentStyle), block,
             kSearchStyleBegin, kSearchStyleEnd);
         if (guardedField->styleSheet() != style)
         {
@@ -584,7 +729,7 @@ bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
         {
             guardedField->setPalette(fieldColors);
         }
-    });
+    }, ThemePalettePolicy::FollowApplication, true);
     if (bound && !guardedField.isNull())
     {
         guardedField->setProperty(kLineFieldProperty, true);

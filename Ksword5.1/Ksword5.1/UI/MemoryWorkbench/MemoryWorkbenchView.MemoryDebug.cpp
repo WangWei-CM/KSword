@@ -9,15 +9,15 @@
 
 namespace ks::ui
 {
-    bool MemoryWorkbenchView::setMemoryDebugMode(const bool enabled)
+    LeaveEntryStatus MemoryWorkbenchView::setMemoryDebugMode(const bool enabled, LeaveCompletion completion)
     {
         if (memoryDebugMode_ == enabled)
         {
-            return true;
+            return LeaveEntryStatus::Completed;
         }
         if (!target_ || (enabled && embedded_))
         {
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         const QPointer<MemoryWorkbenchView> self(this);
         if (enabled)
@@ -32,11 +32,21 @@ namespace ks::ui
                 request.pinPid = current.pid;
                 request.expectCreateTime = current.processCreateTime100ns;
             }
-            if (!target_->requestIdentity(request, LeaveReason::ScopeChange) || !self)
-            {
-                return false;
-            }
+            const auto status = target_->requestIdentity(request, LeaveReason::ScopeChange,
+                [self, enabled, completion = std::move(completion)](bool allowed) mutable {
+                    if (!self) return;
+                    if (allowed) self->finishMemoryDebugMode(enabled);
+                    if (self && completion) completion(allowed);
+                });
+            if (!self) return LeaveEntryStatus::Rejected;
+            if (status != LeaveEntryStatus::Completed) return status;
         }
+        finishMemoryDebugMode(enabled);
+        return LeaveEntryStatus::Completed;
+    }
+
+    void MemoryWorkbenchView::finishMemoryDebugMode(const bool enabled)
+    {
         memoryDebugMode_ = enabled;
         target_->setPolicy(WorkbenchTarget::Policy{
             /*lockToDock=*/embedded_,
@@ -52,7 +62,6 @@ namespace ks::ui
         }
         refreshTargetDisplays();
         refreshChannelGateDisplay();
-        return true;
     }
 
     bool MemoryWorkbenchView::isMemoryDebugMode() const noexcept
@@ -60,9 +69,9 @@ namespace ks::ui
         return memoryDebugMode_;
     }
 
-    bool MemoryWorkbenchView::clearMemoryDebugTarget()
+    LeaveEntryStatus MemoryWorkbenchView::clearMemoryDebugTarget(LeaveCompletion completion)
     {
-        return memoryDebugMode_ && target_ && target_->clearMemoryDebugTarget();
+        return memoryDebugMode_ && target_ ? target_->clearMemoryDebugTarget(std::move(completion)) : LeaveEntryStatus::Rejected;
     }
 
 }

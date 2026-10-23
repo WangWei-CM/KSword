@@ -5,6 +5,7 @@
 
 #include <cfgmgr32.h>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,7 @@ public:
     // devices returns the raw device rows. There is no input; output is a const
     // reference valid until the model is refreshed.
     const std::vector<HardwareDeviceNode>& devices() const;
+    std::shared_ptr<const std::vector<HardwareDeviceNode>> deviceSnapshot() const noexcept;
 
     // rootIndices returns indexes for top-level tree nodes. There is no input;
     // output is a const reference valid until the model is refreshed.
@@ -94,7 +96,8 @@ private:
     void rebuildRoots();
 
 private:
-    std::vector<HardwareDeviceNode> devices_;
+    std::shared_ptr<const std::vector<HardwareDeviceNode>> devices_ =
+        std::make_shared<const std::vector<HardwareDeviceNode>>();
     std::vector<int> rootIndices_;
 };
 

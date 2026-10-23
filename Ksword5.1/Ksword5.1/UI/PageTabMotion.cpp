@@ -1,5 +1,7 @@
 #include "../Framework.h"
 #include "./PageTabMotion.h"
+#include "./PerfTrace.h"
+#include "./UiAnimationGate.h"
 
 #include <QElapsedTimer>
 #include <QEasingCurve>
@@ -19,7 +21,9 @@ namespace
     bool clientAnimationsEnabled()
     {
         BOOL enabled = TRUE;
-        return !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled;
+        // 系统“减少动画”与设置页“界面动画”相互独立，任一关闭即不播放动画。
+        return (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled)
+            && ks::ui::AreUiAnimationsEnabled();
     }
 
     // 只绘制原栏背景层，不替换其 paintEvent、命中位置、键盘逻辑或 close/scroll 子控件。
@@ -105,6 +109,8 @@ namespace
             {
                 return;
             }
+            // 采集：页签切换的同步几何计算与动画启动耗时。
+            ks::ui::PerfScope motionPerf("perf_tab_motion", m_bar->objectName());
             const QRectF target = selectedRect();
             m_index = m_bar->currentIndex();
             if (animate && target == m_target)

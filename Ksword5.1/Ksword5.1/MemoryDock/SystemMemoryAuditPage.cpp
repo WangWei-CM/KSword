@@ -1,3 +1,4 @@
+#include "../UI/MemoryPageNavigationSchema.h"
 #include "../UI/StructuredFieldView.h"
 #include "SystemMemoryAuditPage.h"
 #include "../UI/CodeEditorWidget.h"
@@ -20,6 +21,13 @@
 #include "MemoryAccessBackend.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QThreadPool>
+#include <QShowEvent>
+#include <QScrollBar>
+#include <QItemSelectionModel>
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 #include <QHBoxLayout>
 #include <QCoreApplication>
 #include <QCheckBox>
@@ -29,6 +37,8 @@
 #include <QEvent>
 #include <QFile>
 #include <QFrame>
+#include <QFutureWatcher>
+#include <QPromise>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QIcon>
@@ -53,6 +63,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <exception>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -61,6 +72,40 @@
 #include <utility>
 
 #pragma comment(lib, "Psapi.lib")
+
+class AuditTableModel final : public QAbstractTableModel {
+public:
+    using Resolver = std::function<QVariant(std::size_t, int, int)>;
+    explicit AuditTableModel(QObject* parent) : QAbstractTableModel(parent) {}
+    std::function<void(int, Qt::SortOrder)> requestSort;
+    void setHeaders(QStringList value) { const bool changed = value.size() != headers.size(); const QPointer<AuditTableModel> alive(this); if (changed) { beginResetModel(); if (!alive) { return; } } headers = std::move(value); if (changed) { endResetModel(); } else if (!headers.isEmpty()) { emit headerDataChanged(Qt::Horizontal, 0, headers.size() - 1); } }
+    void publish(std::shared_ptr<const std::vector<std::size_t>> value, Resolver resolve) {
+        const QPointer<AuditTableModel> alive(this); beginResetModel(); if (!alive) { return; } rows = std::move(value); resolver = std::move(resolve); endResetModel();
+    }
+    int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() || !rows ? 0 : static_cast<int>(rows->size()); }
+    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : headers.size(); }
+    QVariant headerData(int section, Qt::Orientation orientation, int role) const override {
+        return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size() ? QVariant(headers[section]) : QVariant();
+    }
+    QVariant data(const QModelIndex& index, int role) const override {
+        if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 || index.column() >= columnCount() || !resolver) { return {}; }
+        return resolver((*rows)[static_cast<std::size_t>(index.row())], index.column(), role);
+    }
+    Qt::ItemFlags flags(const QModelIndex& index) const override { return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags; }
+    void sort(int column, Qt::SortOrder order) override { if (requestSort) { requestSort(column, order); } }
+    void refreshColors(int first, int last) { if (first >= 0 && last >= first && last < rowCount()) { emit dataChanged(index(first, 0), index(last, columnCount() - 1), {Qt::ForegroundRole}); } }
+private:
+    QStringList headers;
+    std::shared_ptr<const std::vector<std::size_t>> rows;
+    Resolver resolver;
+};
+class AuditTableView final : public ks::ui::TableActionTableView {
+public:
+    explicit AuditTableView(QWidget* parent) : TableActionTableView(parent) { auditModel = new AuditTableModel(this); setModel(auditModel); }
+    AuditTableModel* auditModel;
+    int rowCount() const { return auditModel->rowCount(); }
+    void setHorizontalHeaderLabels(QStringList headers) { auditModel->setHeaders(std::move(headers)); }
+};
 
 namespace
 {
@@ -648,9 +693,8 @@ namespace
         return observation;
     }
 
-    void configureTable(QTableWidget* table, const QStringList& headers)
+    void configureTable(AuditTableView* table, const QStringList& headers)
     {
-        table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
         table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -659,41 +703,60 @@ namespace
         table->setSortingEnabled(true);
         table->verticalHeader()->setVisible(false);
         table->horizontalHeader()->setStretchLastSection(true);
+        table->horizontalHeader()->setDefaultSectionSize(128);
+        ks::ui::SetTableColumnAutoFitEnabled(table, false);
+        // All four business filters live in immutable model indices; no direct row-hide writer remains.
+        ks::ui::SetTableRowFilterBusinessOwnership(table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     }
 
-    QTableWidgetItem* textItem(const QString& text)
-    {
-        return new QTableWidgetItem(text);
-    }
 
-    // numericItem 作用：
-    // - 生成一格“显示文本随便写、排序按真实数值”的单元格，供地址/大小/页数/计数列使用；
-    // - 入参 text 为界面文本（十六进制、KiB/MiB 均可），value 为参与排序的无符号真实值；
-    // - 返回新建的单元格，所有权随 setItem 交给表格。
-    QTableWidgetItem* numericItem(const QString& text, const qulonglong value)
-    {
-        return new ks::ui::NumericTableItem(text, value);
-    }
+}
 
-    // signedNumericItem 作用：
-    // - numericItem 的有符号版本，专供可正可负的增量列（Delta）使用；
-    // - 入参 text 为带正负号的显示文本，value 为参与排序的有符号真实值；
-    // - 返回新建的单元格；不能改用无符号重载，否则负增量会被排到最大端。
-    QTableWidgetItem* signedNumericItem(const QString& text, const qlonglong value)
-    {
-        return new ks::ui::NumericTableItem(text, value);
-    }
-
-    void applyDeltaColor(QTableWidgetItem* item, const std::int64_t delta)
-    {
-        if (item == nullptr || delta == 0)
-        {
-            return;
-        }
-        item->setForeground(delta > 0
-            ? KswordTheme::ErrorColor()
-            : KswordTheme::SuccessColor());
-    }
+struct SystemMemoryAuditPage::ProjectionData {
+    AuditKind kind;
+    Snapshot snapshot;
+    UserResidencyScan residency;
+    QHash<std::uint32_t, TagMetadata> metadata;
+    ks::i18n::SourceTextSnapshot language;
+    std::shared_ptr<std::vector<std::size_t>> rows = valueStorage<std::vector<std::size_t>>();
+    int selectedRow = -1;
+};
+struct SystemMemoryAuditPage::ProjectionJob {
+    std::atomic_bool done{false}, cancel{false};
+    AuditKind kind;
+    std::uint64_t version = 0;
+    int sortColumn = 0;
+    Qt::SortOrder sortOrder = Qt::DescendingOrder;
+    QString filter, selectedKey;
+    std::shared_ptr<ProjectionData> result;
+    bool failed = false;
+};
+struct SystemMemoryAuditPage::SnapshotJob {
+    std::atomic_bool done{false};
+    std::uint64_t ticket = 0;
+    std::shared_ptr<Snapshot> result;
+    bool failed = false;
+};
+struct SystemMemoryAuditPage::ResidencyJob {
+    std::atomic_bool done{false};
+    std::uint64_t ticket = 0;
+    std::shared_ptr<UserResidencyScan> result;
+    bool failed = false;
+};
+void SystemMemoryAuditPage::retireValue(std::function<void()> destroy)
+{
+    // Only immutable values enter this queue; GUI models and widgets stay on their owner.
+    try { QThreadPool::globalInstance()->start([destroy] { destroy(); }); }
+    catch (...) { if (destroy) { destroy(); } }
+}
+SystemMemoryAuditPage::~SystemMemoryAuditPage()
+{
+    if (m_projectionJob) { m_projectionJob->cancel.store(true); }
+}
+void SystemMemoryAuditPage::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    rebuildCurrentDetailView();
 }
 
 SystemMemoryAuditPage::SystemMemoryAuditPage(QWidget* parent)
@@ -727,10 +790,12 @@ void SystemMemoryAuditPage::changeEvent(QEvent* event)
         if (m_hasSnapshot)
         {
             m_overviewDirty = true;
-            m_userResidencyTableDirty = true;
-            m_processTableDirty = true;
-            m_poolTagTableDirty = true;
-            m_bigPoolTableDirty = true;
+            for (AuditTableView* table : {m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable}) {
+                if (!table || !table->isVisible()) { continue; }
+                const int first = qMax(0, table->rowAt(0));
+                const int last = table->rowAt(table->viewport()->height() - 1);
+                table->auditModel->refreshColors(first, last < 0 ? qMin(table->auditModel->rowCount() - 1, first + 256) : last);
+            }
             scheduleCurrentDetailViewRebuild();
         }
         return;
@@ -742,6 +807,7 @@ void SystemMemoryAuditPage::changeEvent(QEvent* event)
     }
 
     retranslateUi();
+    invalidateTableProjections();
     if (m_hasSnapshot)
     {
         m_overviewDirty = true;
@@ -912,7 +978,7 @@ void SystemMemoryAuditPage::initializeUi()
     QVBoxLayout* const userResidencyLayout = new QVBoxLayout(userResidencyPage);
     userResidencyLayout->setContentsMargins(0, 0, 0, 0);
     // 四张表统一改用 VisibleTableWidget：它在表头上方预留全局操作条，并支持冻结行列。
-    m_userResidencyTable = new ks::ui::VisibleTableWidget(userResidencyPage);
+    m_userResidencyTable = new AuditTableView(userResidencyPage);
     // 驻留、进程与内核池均为重复采集的主证据，保留可比较的快照栏。
     ks::ui::SetTableActionBarMode(m_userResidencyTable, ks::ui::TableActionBarMode::Full);
     configureTable(m_userResidencyTable, QStringList{
@@ -926,7 +992,7 @@ void SystemMemoryAuditPage::initializeUi()
     QWidget* const processPage = new QWidget(m_detailTabs);
     QVBoxLayout* const processLayout = new QVBoxLayout(processPage);
     processLayout->setContentsMargins(0, 0, 0, 0);
-    m_processTable = new ks::ui::VisibleTableWidget(processPage);
+    m_processTable = new AuditTableView(processPage);
     ks::ui::SetTableActionBarMode(m_processTable, ks::ui::TableActionBarMode::Full);
     configureTable(m_processTable, QStringList{
         localized("Process"), localized("PID"), localized("Session"),
@@ -939,7 +1005,7 @@ void SystemMemoryAuditPage::initializeUi()
     QWidget* const poolPage = new QWidget(m_detailTabs);
     QVBoxLayout* const poolLayout = new QVBoxLayout(poolPage);
     poolLayout->setContentsMargins(0, 0, 0, 0);
-    m_poolTagTable = new ks::ui::VisibleTableWidget(poolPage);
+    m_poolTagTable = new AuditTableView(poolPage);
     ks::ui::SetTableActionBarMode(m_poolTagTable, ks::ui::TableActionBarMode::Full);
     configureTable(m_poolTagTable, QStringList{
         localized("Tag"), localized("Paged bytes"), localized("Nonpaged bytes"),
@@ -951,7 +1017,7 @@ void SystemMemoryAuditPage::initializeUi()
     QWidget* const bigPoolPage = new QWidget(m_detailTabs);
     QVBoxLayout* const bigPoolLayout = new QVBoxLayout(bigPoolPage);
     bigPoolLayout->setContentsMargins(0, 0, 0, 0);
-    m_bigPoolTable = new ks::ui::VisibleTableWidget(bigPoolPage);
+    m_bigPoolTable = new AuditTableView(bigPoolPage);
     ks::ui::SetTableActionBarMode(m_bigPoolTable, ks::ui::TableActionBarMode::Full);
     configureTable(m_bigPoolTable, QStringList{
         localized("Tag"), localized("Virtual address"), localized("Size"),
@@ -959,19 +1025,19 @@ void SystemMemoryAuditPage::initializeUi()
     });
     bigPoolLayout->addWidget(m_bigPoolTable);
 
-    m_detailTabs->addTab(overviewPage, localized("Physical distribution"));
-    m_detailTabs->addTab(userResidencyPage, localized("User-mode residency"));
-    m_detailTabs->addTab(processPage, localized("Kernel process snapshot"));
-    m_detailTabs->addTab(poolPage, localized("Pool tags"));
-    m_detailTabs->addTab(bigPoolPage, localized("Big Pool allocations"));
+    m_detailTabs->addTab(overviewPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 0));
+    m_detailTabs->addTab(userResidencyPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 1));
+    m_detailTabs->addTab(processPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 2));
+    m_detailTabs->addTab(poolPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 3));
+    m_detailTabs->addTab(bigPoolPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 4));
     m_pfnPage = new PhysicalPageAttributionPage(m_detailTabs);
     m_pfnPage->openModuleDetails = [this](const QString& path) {
         const auto handler = openModuleDetails;
         if (handler) { handler(path); }
     };
-    m_detailTabs->addTab(m_pfnPage, localized("Physical page attribution"));
+    m_detailTabs->addTab(m_pfnPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 5));
     m_hyperVPage = new HyperVMemoryPage(m_detailTabs);
-    m_detailTabs->addTab(m_hyperVPage, localized("Hyper-V / host memory"));
+    m_detailTabs->addTab(m_hyperVPage, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 6));
     m_pfnPage->snapshotReady = [this](const std::shared_ptr<ksword::pfn::Scan>& scan) {
         m_hyperVPage->setPfnContext(scan);
         applyPfnOverview(scan);
@@ -1217,6 +1283,20 @@ void SystemMemoryAuditPage::updateSummaryTiles()
 
 void SystemMemoryAuditPage::initializeConnections()
 {
+    m_projectionDebounce = new QTimer(this); m_projectionDebounce->setSingleShot(true); m_projectionDebounce->setInterval(120);
+    connect(m_projectionDebounce, &QTimer::timeout, this, [this] { rebuildCurrentDetailView(); });
+    m_jobsTimer = new QTimer(this); m_jobsTimer->setInterval(30);
+    connect(m_jobsTimer, &QTimer::timeout, this, [this] { pollJobs(); });
+    const std::array<AuditTableView*, 4> tables{m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable};
+    for (int kind = 0; kind < 4; ++kind) {
+        tables[kind]->horizontalHeader()->setSortIndicator(m_sortColumns[kind], m_sortOrders[kind]);
+        tables[kind]->auditModel->requestSort = [this, kind](int column, Qt::SortOrder order) {
+            if (m_sortColumns[kind] == column && m_sortOrders[kind] == order) { return; }
+            m_sortColumns[kind] = column; m_sortOrders[kind] = order; ++m_projectionVersions[kind]; m_readyProjections[kind].reset();
+            if (m_projectionJob) { m_projectionJob->cancel.store(true); }
+            m_projectionDebounce->start();
+        };
+    }
     connect(m_overviewSource, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         m_overviewDirty = true;
         updateSummaryTiles();
@@ -1248,6 +1328,8 @@ void SystemMemoryAuditPage::initializeConnections()
         m_autoRefreshTimer->setInterval(seconds * 1000);
         });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() {
+        invalidateTableProjections();
+        m_projectionDebounce->start();
         m_userResidencyTableDirty = true;
         m_processTableDirty = true;
         m_poolTagTableDirty = true;
@@ -1256,11 +1338,9 @@ void SystemMemoryAuditPage::initializeConnections()
         updateStatus();
         });
     connect(m_autoRefreshTimer, &QTimer::timeout, this, [this]() {
-        if (isVisible() && m_detailTabs->currentWidget() != m_pfnPage && m_detailTabs->currentWidget() != m_hyperVPage)
-        {
-            refreshSnapshot();
-        }
-        });
+        // An explicitly enabled sampler continues when only its projection is hidden.
+        refreshSnapshot();
+    });
     connect(m_detailTabs, &QTabWidget::currentChanged, this, [this]() {
         const bool showSnapshot = m_detailTabs->currentWidget() != m_pfnPage && m_detailTabs->currentWidget() != m_hyperVPage;
         m_detailText->setVisible(showSnapshot);
@@ -1269,7 +1349,7 @@ void SystemMemoryAuditPage::initializeConnections()
         {
             value->parentWidget()->setVisible(showSnapshot);
         }
-        scheduleCurrentDetailViewRebuild();
+        rebuildCurrentDetailView();
         updateSummaryTiles();
         updateDetails();
     });
@@ -1304,7 +1384,7 @@ void SystemMemoryAuditPage::refreshDdmaCrossCheckState()
     QString reason;
     const bool usable =
         ksword::memory_backend::isDdmaUsable(m_ddmaSessionProvider(), &reason);
-    m_ddmaCrossCheckButton->setEnabled(usable);
+    m_ddmaCrossCheckButton->setEnabled(usable && !m_ddmaCrossCheckBusy);
     m_ddmaCrossCheckButton->setToolTip(usable
         ? localized("Read the same physical page through both backends and compare byte by byte.")
         : reason);
@@ -1312,7 +1392,7 @@ void SystemMemoryAuditPage::refreshDdmaCrossCheckState()
 
 void SystemMemoryAuditPage::runDdmaCrossCheck()
 {
-    if (m_ddmaCrossCheckResultLabel == nullptr || m_ddmaCrossCheckAddressEdit == nullptr)
+    if (m_ddmaCrossCheckBusy || m_ddmaCrossCheckResultLabel == nullptr || m_ddmaCrossCheckAddressEdit == nullptr)
     {
         return;
     }
@@ -1348,67 +1428,141 @@ void SystemMemoryAuditPage::runDdmaCrossCheck()
     const std::uint64_t transferBytes =
         static_cast<std::uint64_t>(ksword::memory_backend::ddmaTransferBytes());
     const std::uint64_t pageBase = physicalAddress & ~(transferBytes - 1ULL);
-    const ksword::memory_backend::DdmaSession& session = m_ddmaSessionProvider();
-
-    const ksword::memory_backend::AccessOutcome standardOutcome =
-        ksword::memory_backend::readPhysical(
-            ksword::memory_backend::MemoryAccessBackend::StandardDriver,
-            session,
-            pageBase,
-            transferBytes);
-    const ksword::memory_backend::AccessOutcome ddmaOutcome =
-        ksword::memory_backend::readPhysical(
-            ksword::memory_backend::MemoryAccessBackend::Ddma,
-            session,
-            pageBase,
-            transferBytes);
-
-    // 任何一侧读失败都不能下"一致/不一致"的结论，只能说没法比。
-    if (!standardOutcome.ok || !ddmaOutcome.ok)
+    const auto session = m_ddmaSessionProvider();
+    const auto generation = ksword::memory_backend::ddmaSessionGeneration();
+    const auto ticket = ++m_ddmaCrossCheckTicket;
+    struct CrossCheckResult
     {
-        const QString detail = !standardOutcome.ok
-            ? standardOutcome.failureText
-            : ddmaOutcome.failureText;
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("%1 %2").arg(localized("Cannot compare:")).arg(detail));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-        return;
-    }
-
-    const qsizetype compareLength =
-        std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
-    qsizetype diffCount = 0;
-    for (qsizetype index = 0; index < compareLength; ++index)
-    {
-        if (standardOutcome.data[index] != ddmaOutcome.data[index])
+        ksword::memory_backend::AccessOutcome standard;
+        ksword::memory_backend::AccessOutcome ddma;
+    };
+    auto promise = std::make_shared<QPromise<CrossCheckResult>>();
+    auto* const watcher = new QFutureWatcher<CrossCheckResult>(this);
+    watcher->setFuture(promise->future());
+    m_ddmaCrossCheckBusy = true;
+    refreshDdmaCrossCheckState();
+    m_ddmaCrossCheckResultLabel->clear();
+    connect(watcher, &QFutureWatcher<CrossCheckResult>::finished, this,
+        [this, watcher, ticket, generation, pageBase, transferBytes]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (ticket != m_ddmaCrossCheckTicket)
         {
-            ++diffCount;
+            return;
         }
+        m_ddmaCrossCheckBusy = false;
+        refreshDdmaCrossCheckState();
+        // A result belongs to the frozen disk/scratch session, never a new one.
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            return;
+        }
+        const auto& standardOutcome = result.standard;
+        const auto& ddmaOutcome = result.ddma;
+
+        // 任何一侧读失败都不能下"一致/不一致"的结论，只能说没法比。
+        if (!standardOutcome.ok || !ddmaOutcome.ok || standardOutcome.partial || ddmaOutcome.partial
+            || standardOutcome.data.size() != static_cast<qsizetype>(transferBytes)
+            || ddmaOutcome.data.size() != static_cast<qsizetype>(transferBytes) || ddmaOutcome.scratchDirty)
+        {
+            const QString detail = ddmaOutcome.scratchDirty
+                ? QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe.")
+                : ((!standardOutcome.ok || standardOutcome.partial || standardOutcome.data.size() != static_cast<qsizetype>(transferBytes))
+                    ? standardOutcome.failureText : ddmaOutcome.failureText);
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("%1 %2").arg(localized("Cannot compare:")).arg(detail.isEmpty()
+                ? localized("DDMA transaction returned incomplete data.") : detail));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            return;
+        }
+
+        const qsizetype compareLength =
+            std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
+        qsizetype diffCount = 0;
+        for (qsizetype index = 0; index < compareLength; ++index)
+        {
+            if (standardOutcome.data[index] != ddmaOutcome.data[index])
+            {
+                ++diffCount;
+            }
+        }
+
+        if (diffCount == 0)
+        {
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("0x%1: %2")
+                    .arg(pageBase, 0, 16)
+                    .arg(localized("both backends returned identical bytes; no redirection observed.")));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+        }
+        else
+        {
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("0x%1: %2/%3 %4")
+                    .arg(pageBase, 0, 16)
+                    .arg(diffCount)
+                    .arg(compareLength)
+                    .arg(localized(
+                        "bytes differ. The standard channel is subject to SLAT; DDMA is not. "
+                        "This usually means the page is redirected or hidden by a hypervisor.")));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+        }
+    });
+    promise->start();
+    CrossCheckResult rejected;
+    bool accepted = false;
+    try
+    {
+        accepted = ksword::memory_backend::submitDdmaTransaction(
+        [promise, session, generation, pageBase, transferBytes]() {
+        CrossCheckResult result;
+        // A queued request may become obsolete before it starts. Once started,
+        // the complete standard/DDMA pair runs to completion (including restore).
+        if (generation == ksword::memory_backend::ddmaSessionGeneration())
+        {
+            try
+            {
+                result.standard = ksword::memory_backend::readPhysical(
+                    ksword::memory_backend::MemoryAccessBackend::StandardDriver,
+                    session, pageBase, transferBytes);
+                result.ddma = ksword::memory_backend::readPhysical(
+                    ksword::memory_backend::MemoryAccessBackend::Ddma,
+                    session, pageBase, transferBytes);
+            }
+            catch (const std::exception& error)
+            {
+                result.standard.failureText = QString::fromUtf8(error.what());
+            }
+            catch (...)
+            {
+                result.standard.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+            }
+        }
+        promise->addResult(std::move(result));
+        promise->finish();
+    });
+    }
+    catch (const std::exception& error)
+    {
+        rejected.standard.failureText = QString::fromUtf8(error.what());
+    }
+    catch (...)
+    {
+        rejected.standard.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+    }
+    if (!accepted)
+    {
+        if (rejected.standard.failureText.isEmpty())
+        {
+            rejected.standard.failureText = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+        }
+        promise->addResult(std::move(rejected));
+        promise->finish();
     }
 
-    if (diffCount == 0)
-    {
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("0x%1: %2")
-                .arg(pageBase, 0, 16)
-                .arg(localized("both backends returned identical bytes; no redirection observed.")));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
-    }
-    else
-    {
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("0x%1: %2/%3 %4")
-                .arg(pageBase, 0, 16)
-                .arg(diffCount)
-                .arg(compareLength)
-                .arg(localized(
-                    "bytes differ. The standard channel is subject to SLAT; DDMA is not. "
-                    "This usually means the page is redirected or hidden by a hypervisor.")));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-    }
 }
 
 void SystemMemoryAuditPage::retranslateUi()
@@ -1451,13 +1605,13 @@ void SystemMemoryAuditPage::retranslateUi()
         localized("Pool type"), localized("Delta"), localized("Source"), localized("Description")
     });
 
-    m_detailTabs->setTabText(0, localized("Physical distribution"));
-    m_detailTabs->setTabText(1, localized("User-mode residency"));
-    m_detailTabs->setTabText(2, localized("Kernel process snapshot"));
-    m_detailTabs->setTabText(3, localized("Pool tags"));
-    m_detailTabs->setTabText(4, localized("Big Pool allocations"));
-    m_detailTabs->setTabText(5, localized("Physical page attribution"));
-    m_detailTabs->setTabText(6, localized("Hyper-V / host memory"));
+    m_detailTabs->setTabText(0, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 0));
+    m_detailTabs->setTabText(1, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 1));
+    m_detailTabs->setTabText(2, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 2));
+    m_detailTabs->setTabText(3, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 3));
+    m_detailTabs->setTabText(4, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 4));
+    m_detailTabs->setTabText(5, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 5));
+    m_detailTabs->setTabText(6, ks::ui::MemoryNavigationTabTitle(ks::ui::MemoryNavigationGroup::Audit, 6));
 
     // 摘要卡片的上行小标题是局部控件，按 objectName 回查后逐格重译。
     for (const SummaryTileTitle& titleEntry : kSummaryTileTitles)
@@ -1473,33 +1627,38 @@ void SystemMemoryAuditPage::retranslateUi()
 
 void SystemMemoryAuditPage::refreshSnapshot()
 {
-    if (m_refreshing)
-    {
-        return;
-    }
+    if (m_refreshing) { return; }
     m_refreshing = true;
-    const std::uint64_t ticket = m_snapshotRefreshTicket.fetch_add(1) + 1;
-    m_refreshButton->setEnabled(false);
-    m_statusLabel->setText(localized("Collecting system memory evidence..."));
-
-    const QPointer<SystemMemoryAuditPage> guardedPage(this);
-    std::thread([guardedPage, ticket]() mutable {
-        Snapshot snapshot = collectSnapshot();
-        if (guardedPage.isNull())
-        {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            guardedPage.data(),
-            [guardedPage, ticket, snapshot = std::move(snapshot)]() mutable {
-                if (!guardedPage.isNull())
-                {
-                    guardedPage->applySnapshot(std::move(snapshot), ticket);
-                }
-            },
-            Qt::QueuedConnection);
-    }).detach();
+    const auto job = std::make_shared<SnapshotJob>(); job->ticket = m_snapshotRefreshTicket.fetch_add(1) + 1;
+    m_snapshotJob = job; m_jobsTimer->start();
+    const auto previous = m_previousDelta; const bool hasPrevious = m_hasSnapshot;
+    m_refreshButton->setEnabled(false); m_statusLabel->setText(localized("Collecting system memory evidence..."));
+    try { std::thread([job, previous, hasPrevious] {
+        try {
+            auto result = valueStorage<Snapshot>(); *result = collectSnapshot();
+            prepareSnapshotDelta(*result, previous, hasPrevious); job->result = std::move(result);
+        } catch (...) { job->failed = true; }
+        job->done.store(true);
+    }).detach(); } catch (...) { job->failed = true; job->done.store(true); }
+}
+void SystemMemoryAuditPage::prepareSnapshotDelta(Snapshot& snapshot, const std::shared_ptr<DeltaIndex>& previous, const bool hasPrevious)
+{
+    for (ProcessRow& row : *snapshot.processes) {
+        const auto before = hasPrevious ? previous->process.value(row.identity, row.privateResidentBytes) : row.privateResidentBytes;
+        row.privateResidentDeltaBytes = static_cast<std::int64_t>(row.privateResidentBytes) - static_cast<std::int64_t>(before);
+        snapshot.deltaIndex->process.insert(row.identity, row.privateResidentBytes);
+    }
+    for (PoolTagRow& row : *snapshot.poolTags) {
+        const auto total = row.pagedBytes + row.nonPagedBytes;
+        const auto before = hasPrevious ? previous->pool.value(row.tag, total) : total;
+        row.totalDeltaBytes = static_cast<std::int64_t>(total) - static_cast<std::int64_t>(before);
+        snapshot.deltaIndex->pool.insert(row.tag, total);
+    }
+    for (BigPoolRow& row : *snapshot.bigPool) {
+        const auto before = hasPrevious ? previous->bigPool.value(row.identity, row.sizeBytes) : row.sizeBytes;
+        row.sizeDeltaBytes = static_cast<std::int64_t>(row.sizeBytes) - static_cast<std::int64_t>(before);
+        snapshot.deltaIndex->bigPool.insert(row.identity, row.sizeBytes);
+    }
 }
 
 void SystemMemoryAuditPage::applySnapshot(Snapshot snapshot, const std::uint64_t ticket)
@@ -1544,40 +1703,8 @@ void SystemMemoryAuditPage::applySnapshot(Snapshot snapshot, const std::uint64_t
     }
     m_previousSummaryBytes = currentSummary;
 
-    QHash<std::uint64_t, std::uint64_t> currentProcessBytes;
-    for (ProcessRow& row : snapshot.processes)
-    {
-        const std::uint64_t previous = m_hasSnapshot
-            ? m_previousProcessPrivateBytes.value(row.identity, row.privateResidentBytes)
-            : row.privateResidentBytes;
-        row.privateResidentDeltaBytes =
-            static_cast<std::int64_t>(row.privateResidentBytes) - static_cast<std::int64_t>(previous);
-        currentProcessBytes.insert(row.identity, row.privateResidentBytes);
-    }
-    m_previousProcessPrivateBytes = std::move(currentProcessBytes);
-
-    QHash<std::uint32_t, std::uint64_t> currentPoolBytes;
-    for (PoolTagRow& row : snapshot.poolTags)
-    {
-        const std::uint64_t total = row.pagedBytes + row.nonPagedBytes;
-        const std::uint64_t previous = m_hasSnapshot
-            ? m_previousPoolTagBytes.value(row.tag, total)
-            : total;
-        row.totalDeltaBytes = static_cast<std::int64_t>(total) - static_cast<std::int64_t>(previous);
-        currentPoolBytes.insert(row.tag, total);
-    }
-    m_previousPoolTagBytes = std::move(currentPoolBytes);
-
-    QHash<std::uint64_t, std::uint64_t> currentBigPoolBytes;
-    for (BigPoolRow& row : snapshot.bigPool)
-    {
-        const std::uint64_t previous = m_hasSnapshot
-            ? m_previousBigPoolBytes.value(row.identity, row.sizeBytes)
-            : row.sizeBytes;
-        row.sizeDeltaBytes = static_cast<std::int64_t>(row.sizeBytes) - static_cast<std::int64_t>(previous);
-        currentBigPoolBytes.insert(row.identity, row.sizeBytes);
-    }
-    m_previousBigPoolBytes = std::move(currentBigPoolBytes);
+    m_previousDelta = snapshot.deltaIndex;
+    invalidateTableProjections();
 
     m_snapshot = std::move(snapshot);
     m_hyperVPage->setSnapshotContext(m_snapshot.sampledAt, m_snapshot.unattributedResidentBytes);
@@ -1620,36 +1747,16 @@ void SystemMemoryAuditPage::applySnapshot(Snapshot snapshot, const std::uint64_t
 
 void SystemMemoryAuditPage::startUserResidencyScan()
 {
-    if (m_userResidencyScanInProgress.exchange(true))
-    {
-        return;
-    }
-
-    const std::uint64_t ticket = m_userResidencyScanTicket.fetch_add(1) + 1;
-    const std::vector<ProcessRow> processes = m_snapshot.processes;
-    const std::uint64_t pageSize = m_snapshot.pageSize;
-    m_userResidencyScanButton->setEnabled(false);
-    m_userResidencyScanButton->setText(localized("Scanning user-mode residency..."));
-    updateStatus();
-
-    const QPointer<SystemMemoryAuditPage> guardedPage(this);
-    std::thread([guardedPage, ticket, processes, pageSize]() mutable {
-        UserResidencyScan scan = collectUserResidency(processes, pageSize);
-        if (guardedPage.isNull())
-        {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            guardedPage.data(),
-            [guardedPage, ticket, scan = std::move(scan)]() mutable {
-                if (!guardedPage.isNull())
-                {
-                    guardedPage->applyUserResidencyScan(std::move(scan), ticket);
-                }
-            },
-            Qt::QueuedConnection);
-    }).detach();
+    if (m_userResidencyScanInProgress.exchange(true)) { return; }
+    const auto job = std::make_shared<ResidencyJob>(); job->ticket = m_userResidencyScanTicket.fetch_add(1) + 1;
+    m_residencyJob = job; m_jobsTimer->start();
+    const auto processes = m_snapshot.processes; const auto pageSize = m_snapshot.pageSize;
+    m_userResidencyScanButton->setEnabled(false); m_userResidencyScanButton->setText(localized("Scanning user-mode residency...")); updateStatus();
+    try { std::thread([job, processes, pageSize] {
+        try { auto result = valueStorage<UserResidencyScan>(); *result = collectUserResidency(*processes, pageSize); job->result = std::move(result); }
+        catch (...) { job->failed = true; }
+        job->done.store(true);
+    }).detach(); } catch (...) { job->failed = true; job->done.store(true); }
 }
 
 void SystemMemoryAuditPage::applyUserResidencyScan(UserResidencyScan scan, const std::uint64_t ticket)
@@ -1660,6 +1767,7 @@ void SystemMemoryAuditPage::applyUserResidencyScan(UserResidencyScan scan, const
     }
 
     m_userResidencyScan = std::move(scan);
+    invalidateTableProjections();
     if (!m_userResidencyScan.errors.isEmpty())
     {
         kLogEvent warningEvent;
@@ -1696,6 +1804,7 @@ void SystemMemoryAuditPage::scheduleCurrentDetailViewRebuild()
 
 void SystemMemoryAuditPage::rebuildCurrentDetailView()
 {
+    if (!isVisible()) { return; }
     switch (m_detailTabs->currentIndex())
     {
     case 0:
@@ -1706,32 +1815,16 @@ void SystemMemoryAuditPage::rebuildCurrentDetailView()
         }
         break;
     case 1:
-        if (m_userResidencyTableDirty)
-        {
-            rebuildUserResidencyTable();
-            m_userResidencyTableDirty = false;
-        }
+        rebuildUserResidencyTable();
         break;
     case 2:
-        if (m_processTableDirty)
-        {
-            rebuildProcessTable();
-            m_processTableDirty = false;
-        }
+        rebuildProcessTable();
         break;
     case 3:
-        if (m_poolTagTableDirty)
-        {
-            rebuildPoolTagTable();
-            m_poolTagTableDirty = false;
-        }
+        rebuildPoolTagTable();
         break;
     case 4:
-        if (m_bigPoolTableDirty)
-        {
-            rebuildBigPoolTable();
-            m_bigPoolTableDirty = false;
-        }
+        rebuildBigPoolTable();
         break;
     default:
         break;
@@ -1986,211 +2079,10 @@ void SystemMemoryAuditPage::rebuildOverview()
     m_overviewTree->setUpdatesEnabled(true);
 }
 
-void SystemMemoryAuditPage::rebuildUserResidencyTable()
-{
-    const QString filter = m_filterEdit->text().trimmed();
-    m_userResidencyTable->setSortingEnabled(false);
-    m_userResidencyTable->setRowCount(0);
-
-    const auto kindText = [](const UserMemoryKind kind) {
-        switch (kind)
-        {
-        case UserMemoryKind::Private:
-            return localized("Private anonymous");
-        case UserMemoryKind::PrivateMappedCopy:
-            return localized("Private mapped copy");
-        case UserMemoryKind::Image:
-            return localized("Mapped image");
-        case UserMemoryKind::MappedFile:
-            return localized("Mapped file");
-        case UserMemoryKind::PagefileSection:
-            return localized("Pagefile-backed section");
-        case UserMemoryKind::MappedBackingUnknown:
-            return localized("Mapped backing unresolved");
-        default:
-            return localized("Unknown mapping");
-        }
-    };
-
-    for (const UserResidencyRow& row : m_userResidencyScan.rows)
-    {
-        const QString category = kindText(row.kind);
-        QString backingEvidence = row.backingPath;
-        if (backingEvidence == QStringLiteral(":private"))
-        {
-            backingEvidence = localized("Private allocation owned by this process");
-        }
-        else if (backingEvidence == QStringLiteral(":mapped-unknown"))
-        {
-            backingEvidence = localized("Mapped backing unresolved; path query Win32 status: %1").arg(row.backingPathStatus);
-        }
-        else if (backingEvidence == QStringLiteral(":pagefile"))
-        {
-            backingEvidence = localized("Pagefile backing observed with MemoryRegionInfo.MappedPageFile");
-        }
-        else if (backingEvidence == QStringLiteral(":file-path-unavailable"))
-        {
-            backingEvidence = localized("Data-file backing observed; path query Win32 status: %1").arg(row.backingPathStatus);
-        }
-        else if (backingEvidence == QStringLiteral(":image"))
-        {
-            backingEvidence = localized("Mapped image path unavailable");
-        }
-        else if (backingEvidence == QStringLiteral(":unknown"))
-        {
-            backingEvidence = localized("Virtual region type unavailable");
-        }
-        const QString searchable = QStringLiteral("%1 %2 %3 %4")
-            .arg(row.processName)
-            .arg(row.pid)
-            .arg(category, backingEvidence);
-        if (!filter.isEmpty() && !searchable.contains(filter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-
-        const int rowIndex = m_userResidencyTable->rowCount();
-        m_userResidencyTable->insertRow(rowIndex);
-        m_userResidencyTable->setItem(rowIndex, 0, textItem(row.processName));
-        m_userResidencyTable->setItem(rowIndex, 1, numericItem(QString::number(row.pid), row.pid));
-        m_userResidencyTable->setItem(rowIndex, 2, textItem(category));
-        m_userResidencyTable->setItem(rowIndex, 3, textItem(backingEvidence));
-        if (row.backingPathQueryAttempted)
-        {
-            m_userResidencyTable->item(rowIndex, 3)->setToolTip(localized("GetMappedFileNameW Win32: %1 | MemoryRegionInfo Win32: %2 | region metadata available: %3")
-                .arg(row.backingPathStatus).arg(row.backingRegionStatus)
-                .arg(row.backingRegionKnown ? localized("Yes") : localized("No")));
-        }
-        m_userResidencyTable->setItem(rowIndex, 4, numericItem(
-            formatBytes(row.residentReferenceBytes), static_cast<qulonglong>(row.residentReferenceBytes)));
-        m_userResidencyTable->setItem(rowIndex, 5, numericItem(
-            formatBytes(row.privateResidentBytes), static_cast<qulonglong>(row.privateResidentBytes)));
-        m_userResidencyTable->setItem(rowIndex, 6, numericItem(
-            formatBytes(row.shareableResidentBytes), static_cast<qulonglong>(row.shareableResidentBytes)));
-        m_userResidencyTable->setItem(rowIndex, 7, numericItem(
-            formatBytes(row.sharedResidentReferenceBytes), static_cast<qulonglong>(row.sharedResidentReferenceBytes)));
-        m_userResidencyTable->setItem(rowIndex, 8, numericItem(
-            formatBytes(row.proportionalResidentBytes), static_cast<qulonglong>(row.proportionalResidentBytes)));
-    }
-
-    m_userResidencyTable->setSortingEnabled(true);
-    m_userResidencyTable->sortItems(4, Qt::DescendingOrder);
-    m_userResidencyTable->resizeColumnsToContents();
-    m_userResidencyTable->horizontalHeader()->setStretchLastSection(false);
-    m_userResidencyTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
-}
-
-void SystemMemoryAuditPage::rebuildProcessTable()
-{
-    const QString filter = m_filterEdit->text().trimmed();
-    m_processTable->setSortingEnabled(false);
-    m_processTable->setRowCount(0);
-    for (const ProcessRow& row : m_snapshot.processes)
-    {
-        const QString searchable = QStringLiteral("%1 %2 %3")
-            .arg(row.name)
-            .arg(row.pid)
-            .arg(row.sessionId);
-        if (!filter.isEmpty() && !searchable.contains(filter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const int rowIndex = m_processTable->rowCount();
-        m_processTable->insertRow(rowIndex);
-        m_processTable->setItem(rowIndex, 0, textItem(row.name));
-        m_processTable->setItem(rowIndex, 1, numericItem(QString::number(row.pid), row.pid));
-        m_processTable->setItem(rowIndex, 2, numericItem(QString::number(row.sessionId), row.sessionId));
-        m_processTable->setItem(rowIndex, 3, numericItem(formatBytes(row.privateResidentBytes), static_cast<qulonglong>(row.privateResidentBytes)));
-        m_processTable->setItem(rowIndex, 4, numericItem(formatBytes(row.workingSetBytes), static_cast<qulonglong>(row.workingSetBytes)));
-        m_processTable->setItem(rowIndex, 5, numericItem(formatBytes(row.sharedResidentReferenceBytes), static_cast<qulonglong>(row.sharedResidentReferenceBytes)));
-        m_processTable->setItem(rowIndex, 6, numericItem(formatBytes(row.privateCommitBytes), static_cast<qulonglong>(row.privateCommitBytes)));
-        m_processTable->setItem(rowIndex, 7, numericItem(formatBytes(row.pagedPoolQuotaBytes), static_cast<qulonglong>(row.pagedPoolQuotaBytes)));
-        m_processTable->setItem(rowIndex, 8, numericItem(formatBytes(row.nonPagedPoolQuotaBytes), static_cast<qulonglong>(row.nonPagedPoolQuotaBytes)));
-        m_processTable->setItem(rowIndex, 9, numericItem(QString::number(row.hardFaultCount), row.hardFaultCount));
-        QTableWidgetItem* const deltaItem = signedNumericItem(
-            formatDelta(row.privateResidentDeltaBytes),
-            static_cast<qlonglong>(row.privateResidentDeltaBytes));
-        applyDeltaColor(deltaItem, row.privateResidentDeltaBytes);
-        m_processTable->setItem(rowIndex, 10, deltaItem);
-    }
-    m_processTable->setSortingEnabled(true);
-    m_processTable->sortItems(3, Qt::DescendingOrder);
-    m_processTable->resizeColumnsToContents();
-    m_processTable->horizontalHeader()->setStretchLastSection(true);
-}
-
-void SystemMemoryAuditPage::rebuildPoolTagTable()
-{
-    const QString filter = m_filterEdit->text().trimmed();
-    m_poolTagTable->setSortingEnabled(false);
-    m_poolTagTable->setRowCount(0);
-    for (const PoolTagRow& row : m_snapshot.poolTags)
-    {
-        const TagMetadata metadata = m_poolTagMetadata.value(row.tag);
-        const QString searchable = QStringLiteral("%1 %2 %3")
-            .arg(row.tagText, metadata.source, metadata.description);
-        if (!filter.isEmpty() && !searchable.contains(filter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const std::uint64_t total = row.pagedBytes + row.nonPagedBytes;
-        const int rowIndex = m_poolTagTable->rowCount();
-        m_poolTagTable->insertRow(rowIndex);
-        m_poolTagTable->setItem(rowIndex, 0, textItem(row.tagText));
-        m_poolTagTable->setItem(rowIndex, 1, numericItem(formatBytes(row.pagedBytes), static_cast<qulonglong>(row.pagedBytes)));
-        m_poolTagTable->setItem(rowIndex, 2, numericItem(formatBytes(row.nonPagedBytes), static_cast<qulonglong>(row.nonPagedBytes)));
-        m_poolTagTable->setItem(rowIndex, 3, numericItem(formatBytes(total), static_cast<qulonglong>(total)));
-        QTableWidgetItem* const deltaItem = signedNumericItem(
-            formatDelta(row.totalDeltaBytes),
-            static_cast<qlonglong>(row.totalDeltaBytes));
-        applyDeltaColor(deltaItem, row.totalDeltaBytes);
-        m_poolTagTable->setItem(rowIndex, 4, deltaItem);
-        m_poolTagTable->setItem(rowIndex, 5, numericItem(QString::number(row.pagedOutstanding), static_cast<qulonglong>(row.pagedOutstanding)));
-        m_poolTagTable->setItem(rowIndex, 6, numericItem(QString::number(row.nonPagedOutstanding), static_cast<qulonglong>(row.nonPagedOutstanding)));
-        m_poolTagTable->setItem(rowIndex, 7, textItem(metadata.source));
-        m_poolTagTable->setItem(rowIndex, 8, textItem(metadata.description));
-    }
-    m_poolTagTable->setSortingEnabled(true);
-    m_poolTagTable->sortItems(3, Qt::DescendingOrder);
-    m_poolTagTable->resizeColumnsToContents();
-    m_poolTagTable->horizontalHeader()->setStretchLastSection(true);
-}
-
-void SystemMemoryAuditPage::rebuildBigPoolTable()
-{
-    const QString filter = m_filterEdit->text().trimmed();
-    m_bigPoolTable->setSortingEnabled(false);
-    m_bigPoolTable->setRowCount(0);
-    for (const BigPoolRow& row : m_snapshot.bigPool)
-    {
-        const TagMetadata metadata = m_poolTagMetadata.value(row.tag);
-        const QString addressText = QStringLiteral("0x%1").arg(row.virtualAddress, 16, 16, QLatin1Char('0')).toUpper();
-        const QString poolType = row.nonPaged ? localized("Nonpaged") : localized("Paged");
-        const QString searchable = QStringLiteral("%1 %2 %3 %4 %5")
-            .arg(row.tagText, addressText, poolType, metadata.source, metadata.description);
-        if (!filter.isEmpty() && !searchable.contains(filter, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const int rowIndex = m_bigPoolTable->rowCount();
-        m_bigPoolTable->insertRow(rowIndex);
-        m_bigPoolTable->setItem(rowIndex, 0, textItem(row.tagText));
-        m_bigPoolTable->setItem(rowIndex, 1, numericItem(addressText, static_cast<qulonglong>(row.virtualAddress)));
-        m_bigPoolTable->setItem(rowIndex, 2, numericItem(formatBytes(row.sizeBytes), static_cast<qulonglong>(row.sizeBytes)));
-        m_bigPoolTable->setItem(rowIndex, 3, textItem(poolType));
-        QTableWidgetItem* const deltaItem = signedNumericItem(
-            formatDelta(row.sizeDeltaBytes),
-            static_cast<qlonglong>(row.sizeDeltaBytes));
-        applyDeltaColor(deltaItem, row.sizeDeltaBytes);
-        m_bigPoolTable->setItem(rowIndex, 4, deltaItem);
-        m_bigPoolTable->setItem(rowIndex, 5, textItem(metadata.source));
-        m_bigPoolTable->setItem(rowIndex, 6, textItem(metadata.description));
-    }
-    m_bigPoolTable->setSortingEnabled(true);
-    m_bigPoolTable->sortItems(2, Qt::DescendingOrder);
-    m_bigPoolTable->resizeColumnsToContents();
-    m_bigPoolTable->horizontalHeader()->setStretchLastSection(true);
-}
+void SystemMemoryAuditPage::rebuildUserResidencyTable() { requestTableProjection(AuditKind::UserResidency); }
+void SystemMemoryAuditPage::rebuildProcessTable() { requestTableProjection(AuditKind::Processes); }
+void SystemMemoryAuditPage::rebuildPoolTagTable() { requestTableProjection(AuditKind::PoolTags); }
+void SystemMemoryAuditPage::rebuildBigPoolTable() { requestTableProjection(AuditKind::BigPool); }
 
 void SystemMemoryAuditPage::updateDetails()
 {
@@ -2240,11 +2132,11 @@ void SystemMemoryAuditPage::updateStatus()
     QString text = localized("Sample %1 | processes %2/%3 | pool tags %4/%5 | Big Pool %6/%7")
         .arg(m_snapshot.sampledAt)
         .arg(m_processTable->rowCount())
-        .arg(m_snapshot.processes.size())
+        .arg(m_snapshot.processes->size())
         .arg(m_poolTagTable->rowCount())
-        .arg(m_snapshot.poolTags.size())
+        .arg(m_snapshot.poolTags->size())
         .arg(m_bigPoolTable->rowCount())
-        .arg(m_snapshot.bigPool.size());
+        .arg(m_snapshot.bigPool->size());
     if (m_userResidencyScanInProgress.load())
     {
         text += localized(" | user residency: scanning");
@@ -2472,12 +2364,12 @@ SystemMemoryAuditPage::UserResidencyScan SystemMemoryAuditPage::collectUserResid
                 row.backingPathStatus = pathStatus;
                 row.backingRegionKnown = backingRegionKnown;
                 row.backingRegionStatus = backingRegionStatus;
-                scan.rows.push_back(std::move(row));
-                rowIndex = static_cast<int>(scan.rows.size() - 1);
+                scan.rows->push_back(std::move(row));
+                rowIndex = static_cast<int>(scan.rows->size() - 1);
                 rowIndexByKey.insert(aggregationKey, rowIndex);
             }
 
-            UserResidencyRow& row = scan.rows[static_cast<std::size_t>(rowIndex)];
+            UserResidencyRow& row = (*scan.rows)[static_cast<std::size_t>(rowIndex)];
             row.residentReferenceBytes += pageSize;
             scan.residentReferenceBytes += pageSize;
 
@@ -2506,8 +2398,8 @@ SystemMemoryAuditPage::UserResidencyScan SystemMemoryAuditPage::collectUserResid
     }
 
     std::sort(
-        scan.rows.begin(),
-        scan.rows.end(),
+        scan.rows->begin(),
+        scan.rows->end(),
         [](const UserResidencyRow& left, const UserResidencyRow& right) {
             if (left.residentReferenceBytes != right.residentReferenceBytes)
             {
@@ -2736,7 +2628,7 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
                 snapshot.processPrivateCommitBytes += row.privateCommitBytes;
                 snapshot.processPagedPoolQuotaBytes += row.pagedPoolQuotaBytes;
                 snapshot.processNonPagedPoolQuotaBytes += row.nonPagedPoolQuotaBytes;
-                snapshot.processes.push_back(std::move(row));
+                snapshot.processes->push_back(std::move(row));
 
                 if (process->NextEntryOffset == 0)
                 {
@@ -2750,7 +2642,7 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
                 }
                 offset += process->NextEntryOffset;
             }
-            std::sort(snapshot.processes.begin(), snapshot.processes.end(), [](const ProcessRow& left, const ProcessRow& right) {
+            std::sort(snapshot.processes->begin(), snapshot.processes->end(), [](const ProcessRow& left, const ProcessRow& right) {
                 return left.privateResidentBytes > right.privateResidentBytes;
                 });
         }
@@ -2768,7 +2660,7 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
             const std::size_t maximumCount =
                 (poolTagBuffer.size() - offsetof(NativeSystemPoolTagInformation, TagInfo)) / sizeof(NativeSystemPoolTag);
             const std::size_t count = std::min<std::size_t>(information->Count, maximumCount);
-            snapshot.poolTags.reserve(count);
+            snapshot.poolTags->reserve(count);
             for (std::size_t index = 0; index < count; ++index)
             {
                 const NativeSystemPoolTag& nativeRow = information->TagInfo[index];
@@ -2785,9 +2677,9 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
                     : 0;
                 snapshot.poolTagPagedBytes += row.pagedBytes;
                 snapshot.poolTagNonPagedBytes += row.nonPagedBytes;
-                snapshot.poolTags.push_back(std::move(row));
+                snapshot.poolTags->push_back(std::move(row));
             }
-            std::sort(snapshot.poolTags.begin(), snapshot.poolTags.end(), [](const PoolTagRow& left, const PoolTagRow& right) {
+            std::sort(snapshot.poolTags->begin(), snapshot.poolTags->end(), [](const PoolTagRow& left, const PoolTagRow& right) {
                 return left.pagedBytes + left.nonPagedBytes > right.pagedBytes + right.nonPagedBytes;
                 });
         }
@@ -2805,7 +2697,7 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
             const std::size_t maximumCount =
                 (bigPoolBuffer.size() - offsetof(NativeSystemBigPoolInformation, AllocatedInfo)) / sizeof(NativeSystemBigPoolEntry);
             const std::size_t count = std::min<std::size_t>(information->Count, maximumCount);
-            snapshot.bigPool.reserve(count);
+            snapshot.bigPool->reserve(count);
             for (std::size_t index = 0; index < count; ++index)
             {
                 const NativeSystemBigPoolEntry& nativeRow = information->AllocatedInfo[index];
@@ -2816,9 +2708,9 @@ SystemMemoryAuditPage::Snapshot SystemMemoryAuditPage::collectSnapshot()
                 row.tag = nativeRow.TagUlong;
                 row.tagText = printableTag(nativeRow.Tag);
                 row.identity = row.virtualAddress ^ (static_cast<std::uint64_t>(row.tag) << 32);
-                snapshot.bigPool.push_back(std::move(row));
+                snapshot.bigPool->push_back(std::move(row));
             }
-            std::sort(snapshot.bigPool.begin(), snapshot.bigPool.end(), [](const BigPoolRow& left, const BigPoolRow& right) {
+            std::sort(snapshot.bigPool->begin(), snapshot.bigPool->end(), [](const BigPoolRow& left, const BigPoolRow& right) {
                 return left.sizeBytes > right.sizeBytes;
                 });
         }
@@ -2910,4 +2802,272 @@ QString SystemMemoryAuditPage::formatPercent(const std::uint64_t bytes, const st
     }
     return QStringLiteral("%1%").arg(
         static_cast<double>(bytes) * 100.0 / static_cast<double>(totalBytes), 0, 'f', 2);
+}
+
+namespace {
+constexpr int AuditIdentityRole = Qt::UserRole + 1902;
+int compareAuditValues(const QVariant& left, const QVariant& right)
+{
+    if (left.metaType().id() == QMetaType::QString) { return QString::compare(left.toString(), right.toString(), Qt::CaseInsensitive); }
+    if (left.metaType().id() == QMetaType::LongLong) { const auto a = left.toLongLong(), b = right.toLongLong(); return a < b ? -1 : a > b ? 1 : 0; }
+    const auto a = left.toULongLong(), b = right.toULongLong(); return a < b ? -1 : a > b ? 1 : 0;
+}
+}
+
+QString SystemMemoryAuditPage::projectionRowKey(const ProjectionData& data, const std::size_t index)
+{
+    switch (data.kind) {
+    case AuditKind::Processes: return QString::number((*data.snapshot.processes)[index].identity);
+    case AuditKind::PoolTags: return QString::number((*data.snapshot.poolTags)[index].tag);
+    case AuditKind::BigPool: return QString::number((*data.snapshot.bigPool)[index].identity);
+    default: {
+        const auto& row = (*data.residency.rows)[index];
+        return QString::number(row.pid) + QLatin1Char(':') + QString::number(static_cast<int>(row.kind)) + QLatin1Char(':')
+            + QString::number(row.backingPath.size()) + QLatin1Char(':') + row.backingPath + QLatin1Char(':')
+            + QString::number(row.backingPathStatus) + QLatin1Char(':') + QString::number(row.backingRegionStatus)
+            + QLatin1Char(':') + QString::number(row.backingRegionKnown);
+    }
+    }
+}
+
+QVariant SystemMemoryAuditPage::projectionCell(const ProjectionData& data, const std::size_t index, const int column, const int role)
+{
+    if (role == AuditIdentityRole) { return projectionRowKey(data, index); }
+    const auto label = [&](const char* source) { return data.language.packedSourceText(QString::fromUtf8(source)); };
+    std::int64_t delta = 0;
+    const int deltaColumn = data.kind == AuditKind::Processes ? 10 : 4;
+    if (data.kind == AuditKind::Processes) { delta = (*data.snapshot.processes)[index].privateResidentDeltaBytes; }
+    else if (data.kind == AuditKind::PoolTags) { delta = (*data.snapshot.poolTags)[index].totalDeltaBytes; }
+    else if (data.kind == AuditKind::BigPool) { delta = (*data.snapshot.bigPool)[index].sizeDeltaBytes; }
+    if (role == Qt::ForegroundRole) {
+        if (data.kind != AuditKind::UserResidency && column == deltaColumn && delta) {
+            return QBrush(delta > 0 ? KswordTheme::ErrorColor() : KswordTheme::SuccessColor());
+        }
+        return {};
+    }
+    if (role != Qt::DisplayRole && role != Qt::ToolTipRole && role != ks::ui::NumericSortRole) { return {}; }
+    const bool numeric = role == ks::ui::NumericSortRole;
+    const auto bytes = [&](std::uint64_t value) -> QVariant { return numeric ? QVariant::fromValue<qulonglong>(value) : QVariant(formatBytes(value)); };
+    const auto count = [&](std::uint64_t value) -> QVariant { return numeric ? QVariant::fromValue<qulonglong>(value) : QVariant(QString::number(value)); };
+    const auto signedBytes = [&](std::int64_t value) -> QVariant { return numeric ? QVariant::fromValue<qlonglong>(value) : QVariant(formatDelta(value)); };
+    if (data.kind == AuditKind::Processes) {
+        const auto& row = (*data.snapshot.processes)[index];
+        switch (column) {
+        case 0: return row.name;
+        case 1: return count(row.pid);
+        case 2: return count(row.sessionId);
+        case 3: return bytes(row.privateResidentBytes);
+        case 4: return bytes(row.workingSetBytes);
+        case 5: return bytes(row.sharedResidentReferenceBytes);
+        case 6: return bytes(row.privateCommitBytes);
+        case 7: return bytes(row.pagedPoolQuotaBytes);
+        case 8: return bytes(row.nonPagedPoolQuotaBytes);
+        case 9: return count(row.hardFaultCount);
+        case 10: return signedBytes(row.privateResidentDeltaBytes);
+        default: return {};
+        }
+    }
+    if (data.kind == AuditKind::PoolTags) {
+        const auto& row = (*data.snapshot.poolTags)[index];
+        const auto metadata = data.metadata.value(row.tag);
+        switch (column) {
+        case 0: return row.tagText;
+        case 1: return bytes(row.pagedBytes);
+        case 2: return bytes(row.nonPagedBytes);
+        case 3: return bytes(row.pagedBytes + row.nonPagedBytes);
+        case 4: return signedBytes(row.totalDeltaBytes);
+        case 5: return count(row.pagedOutstanding);
+        case 6: return count(row.nonPagedOutstanding);
+        case 7: return metadata.source;
+        case 8: return metadata.description;
+        default: return {};
+        }
+    }
+    if (data.kind == AuditKind::BigPool) {
+        const auto& row = (*data.snapshot.bigPool)[index];
+        const auto metadata = data.metadata.value(row.tag);
+        switch (column) {
+        case 0: return row.tagText;
+        case 1: return numeric ? QVariant::fromValue<qulonglong>(row.virtualAddress) : QVariant(QStringLiteral("0x%1").arg(row.virtualAddress, 16, 16, QLatin1Char('0')).toUpper());
+        case 2: return bytes(row.sizeBytes);
+        case 3: return row.nonPaged ? label("Nonpaged") : label("Paged");
+        case 4: return signedBytes(row.sizeDeltaBytes);
+        case 5: return metadata.source;
+        case 6: return metadata.description;
+        default: return {};
+        }
+    }
+    const auto& row = (*data.residency.rows)[index];
+    const char* category = "Unknown mapping";
+    switch (row.kind) {
+    case UserMemoryKind::Private: category = "Private anonymous"; break;
+    case UserMemoryKind::PrivateMappedCopy: category = "Private mapped copy"; break;
+    case UserMemoryKind::Image: category = "Mapped image"; break;
+    case UserMemoryKind::MappedFile: category = "Mapped file"; break;
+    case UserMemoryKind::PagefileSection: category = "Pagefile-backed section"; break;
+    case UserMemoryKind::MappedBackingUnknown: category = "Mapped backing unresolved"; break;
+    default: break;
+    }
+    if (role == Qt::ToolTipRole && column == 3 && row.backingPathQueryAttempted) {
+        return label("GetMappedFileNameW Win32: %1 | MemoryRegionInfo Win32: %2 | region metadata available: %3")
+            .arg(row.backingPathStatus).arg(row.backingRegionStatus).arg(row.backingRegionKnown ? label("Yes") : label("No"));
+    }
+    switch (column) {
+    case 0: return row.processName;
+    case 1: return count(row.pid);
+    case 2: return label(category);
+    case 3:
+        if (row.backingPath == QStringLiteral(":private")) { return label("Private allocation owned by this process"); }
+        if (row.backingPath == QStringLiteral(":mapped-unknown")) { return label("Mapped backing unresolved; path query Win32 status: %1").arg(row.backingPathStatus); }
+        if (row.backingPath == QStringLiteral(":pagefile")) { return label("Pagefile backing observed with MemoryRegionInfo.MappedPageFile"); }
+        if (row.backingPath == QStringLiteral(":file-path-unavailable")) { return label("Data-file backing observed; path query Win32 status: %1").arg(row.backingPathStatus); }
+        if (row.backingPath == QStringLiteral(":image")) { return label("Mapped image path unavailable"); }
+        if (row.backingPath == QStringLiteral(":unknown")) { return label("Virtual region type unavailable"); }
+        return row.backingPath;
+    case 4: return bytes(row.residentReferenceBytes);
+    case 5: return bytes(row.privateResidentBytes);
+    case 6: return bytes(row.shareableResidentBytes);
+    case 7: return bytes(row.sharedResidentReferenceBytes);
+    case 8: return bytes(row.proportionalResidentBytes);
+    default: return {};
+    }
+}
+
+QString SystemMemoryAuditPage::projectionSearch(const ProjectionData& data, const std::size_t row)
+{
+    const auto text = [&](int column) { return projectionCell(data, row, column, Qt::DisplayRole).toString(); };
+    switch (data.kind) {
+    case AuditKind::Processes: return QStringLiteral("%1 %2 %3").arg(text(0), text(1), text(2));
+    case AuditKind::PoolTags: return QStringLiteral("%1 %2 %3").arg(text(0), text(7), text(8));
+    case AuditKind::BigPool: return QStringLiteral("%1 %2 %3 %4 %5").arg(text(0), text(1), text(3), text(5), text(6));
+    default: return QStringLiteral("%1 %2 %3 %4").arg(text(0), text(1), text(2), text(3));
+    }
+}
+
+void SystemMemoryAuditPage::buildProjection(const std::shared_ptr<ProjectionJob>& job)
+{
+    try {
+        auto& data = *job->result;
+        const auto count = data.kind == AuditKind::Processes ? data.snapshot.processes->size()
+            : data.kind == AuditKind::PoolTags ? data.snapshot.poolTags->size()
+            : data.kind == AuditKind::BigPool ? data.snapshot.bigPool->size() : data.residency.rows->size();
+        struct SortRow { std::size_t source; QVariant key; };
+        std::vector<SortRow> sorted;
+        sorted.reserve(count);
+        std::size_t selected = std::numeric_limits<std::size_t>::max();
+        for (std::size_t row = 0; row < count; ++row) {
+            if ((row & 63U) == 0 && job->cancel.load()) { job->done.store(true); return; }
+            if (!job->filter.isEmpty() && !projectionSearch(data, row).contains(job->filter, Qt::CaseInsensitive)) { continue; }
+            if (!job->selectedKey.isEmpty() && projectionRowKey(data, row) == job->selectedKey) { selected = row; }
+            sorted.push_back({row, projectionCell(data, row, job->sortColumn, ks::ui::NumericSortRole)});
+        }
+        std::stable_sort(sorted.begin(), sorted.end(), [&](const auto& left, const auto& right) {
+            const int comparison = compareAuditValues(left.key, right.key);
+            return comparison == 0 ? left.source < right.source : job->sortOrder == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
+        });
+        if (!job->cancel.load()) {
+            data.rows->reserve(sorted.size());
+            for (const auto& row : sorted) {
+                if (row.source == selected) { data.selectedRow = static_cast<int>(data.rows->size()); }
+                data.rows->push_back(row.source);
+            }
+        }
+    } catch (...) { job->failed = true; }
+    job->done.store(true);
+}
+
+void SystemMemoryAuditPage::invalidateTableProjections()
+{
+    for (auto& version : m_projectionVersions) { ++version; }
+    for (auto& ready : m_readyProjections) { ready.reset(); }
+    if (m_projectionJob) { m_projectionJob->cancel.store(true); }
+    const int index = m_detailTabs ? m_detailTabs->currentIndex() - 1 : -1;
+    if (index >= 0 && index < 4 && isVisible()) {
+        const std::array<AuditTableView*, 4> tables{m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable};
+        tables[index]->setEnabled(false);
+        m_statusLabel->setText(localized("Updating memory table..."));
+    }
+}
+
+void SystemMemoryAuditPage::requestTableProjection(const AuditKind kind)
+{
+    if (!isVisible() || (m_projectionDebounce && m_projectionDebounce->isActive())) { return; }
+    const auto index = static_cast<std::size_t>(kind);
+    const auto version = m_projectionVersions[index];
+    if (m_publishedVersions[index] == version || m_failedVersions[index] == version) { return; }
+    if (m_readyProjections[index]) {
+        auto ready = std::move(m_readyProjections[index]);
+        publishTableProjection(ready, version); return;
+    }
+    if (m_projectionJob) {
+        if (m_projectionJob->kind != kind || m_projectionJob->version != version) { m_projectionJob->cancel.store(true); }
+        return;
+    }
+    const std::array<AuditTableView*, 4> tables{m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable};
+    auto* table = tables[index];
+    const auto job = std::make_shared<ProjectionJob>(); job->kind = kind; job->version = version;
+    job->sortColumn = m_sortColumns[index]; job->sortOrder = m_sortOrders[index]; job->filter = m_filterEdit->text().trimmed();
+    job->selectedKey = table->currentIndex().data(AuditIdentityRole).toString();
+    job->result = valueStorage<ProjectionData>();
+    job->result->kind = kind; job->result->snapshot = m_snapshot; job->result->residency = m_userResidencyScan;
+    job->result->metadata = m_poolTagMetadata; job->result->language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    m_projectionJob = job; m_jobsTimer->start();
+    table->setEnabled(false); m_statusLabel->setText(localized("Updating memory table..."));
+    try { std::thread([job] { buildProjection(job); }).detach(); }
+    catch (...) { job->failed = true; job->done.store(true); }
+}
+
+void SystemMemoryAuditPage::publishTableProjection(const std::shared_ptr<ProjectionData>& data, const std::uint64_t version)
+{
+    const auto kind = static_cast<std::size_t>(data->kind);
+    if (!isVisible() || m_detailTabs->currentIndex() != static_cast<int>(kind) + 1 || m_projectionVersions[kind] != version) { return; }
+    const std::array<AuditTableView*, 4> tables{m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable};
+    const QPointer<SystemMemoryAuditPage> owner(this);
+    const QPointer<AuditTableView> table(tables[kind]);
+    const int scroll = table->verticalScrollBar()->value();
+    table->auditModel->publish(data->rows, [data](std::size_t row, int column, int role) { return projectionCell(*data, row, column, role); });
+    if (!owner || !table || m_projectionVersions[kind] != version || m_detailTabs->currentIndex() != static_cast<int>(kind) + 1) { return; }
+    m_publishedVersions[kind] = version;
+    table->setEnabled(true);
+    if (!owner || !table || m_projectionVersions[kind] != version) { return; }
+    if (data->selectedRow >= 0) { table->setCurrentIndex(table->auditModel->index(data->selectedRow, 0)); }
+    if (!owner || !table || m_projectionVersions[kind] != version) { return; }
+    table->verticalScrollBar()->setValue(scroll);
+    if (owner) { updateStatus(); }
+}
+
+void SystemMemoryAuditPage::pollJobs()
+{
+    const QPointer<SystemMemoryAuditPage> owner(this);
+    if (m_snapshotJob && m_snapshotJob->done.load()) {
+        const auto job = std::move(m_snapshotJob);
+        if (job->failed || !job->result) {
+            m_refreshing = false; m_refreshButton->setEnabled(true);
+            m_statusLabel->setText(localized("System memory evidence worker failed"));
+        } else { applySnapshot(std::move(*job->result), job->ticket); }
+        if (!owner) { return; }
+    }
+    if (m_residencyJob && m_residencyJob->done.load()) {
+        const auto job = std::move(m_residencyJob);
+        if (job->failed || !job->result) {
+            m_userResidencyScanInProgress.store(false); m_userResidencyScanButton->setEnabled(true);
+            m_userResidencyScanButton->setText(localized("Deep scan user-mode residency"));
+            m_statusLabel->setText(localized("User-mode residency worker failed"));
+        } else { applyUserResidencyScan(std::move(*job->result), job->ticket); }
+        if (!owner) { return; }
+    }
+    if (m_projectionJob && m_projectionJob->done.load()) {
+        const auto job = std::move(m_projectionJob);
+        const auto kind = static_cast<std::size_t>(job->kind);
+        if (!job->cancel.load() && job->version == m_projectionVersions[kind]) {
+            if (job->failed) {
+                m_failedVersions[kind] = job->version;
+                m_statusLabel->setText(localized("Memory table projection failed"));
+                const std::array<AuditTableView*, 4> tables{m_userResidencyTable, m_processTable, m_poolTagTable, m_bigPoolTable};
+                tables[kind]->setEnabled(true);
+            } else { m_readyProjections[kind] = job->result; }
+        }
+    }
+    if (owner && isVisible()) { rebuildCurrentDetailView(); }
+    if (owner && !m_snapshotJob && !m_residencyJob && !m_projectionJob) { m_jobsTimer->stop(); }
 }

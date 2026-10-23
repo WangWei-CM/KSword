@@ -1,5 +1,9 @@
 #include "ProcessDock.h"
+#include <map>
+#include <stdexcept>
+#include "ProcessActivitySeriesCache.h"
 #include "../UI/TableContextMenu.h"
+#include "../UI/RetainedCleanupJob.h"
 #include "../UI/FlatButtonTheme.h"
 #include "ProcessAffinityUtils.h"
 #include "ProcessAffinityPersistence.h"
@@ -11,6 +15,7 @@
 #include "../UI/TablePresentation.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
+#include <QEvent>
 #include <QDynamicPropertyChangeEvent>
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
@@ -58,11 +63,13 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFormLayout>
+#include <QFutureWatcher>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHelpEvent>
+#include <QHideEvent>
 #include <QHBoxLayout>
 #include <QItemSelection>
 #include <QItemSelectionModel>
@@ -89,6 +96,7 @@
 #include <QPersistentModelIndex>
 #include <QPointer>
 #include <QPushButton>
+#include <QPromise>
 #include <QPixmap>
 #include <QRectF>
 #include <QRunnable>
@@ -117,6 +125,7 @@
 #include <QToolTip>
 #include <QStringList>
 #include <QTreeWidget>
+#include <QTreeView>
 #include <QVBoxLayout>
 #include <QToolButton>
 #include <QWidgetAction>
@@ -133,6 +142,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 
 #ifndef NOMINMAX
@@ -157,6 +167,87 @@
 
 namespace
 {
+    template<typename Service>
+    bool stopProcessEtwCaptureService(Service& service)
+    {
+        if (!service.StopChecked() || service.SnapshotHealth().cleanupPending) return false;
+        if constexpr (std::is_same_v<Service, ks::network::ProcessNetworkEtwMonitor>) service.PruneCounters({});
+        else (void)service.SnapshotAndReset();
+        return true;
+    }
+
+    template<typename Service>
+    void releaseUnadmittedProcessEtwValue(std::shared_ptr<Service> service)
+    {
+        QThreadPool::globalInstance()->start(QRunnable::create([service = std::move(service)]() mutable {
+            service.reset();
+        }));
+    }
+
+    template<typename Service>
+    std::shared_ptr<ks::ui::RetainedCleanupJob> makeProcessEtwCleanupOwner(
+        const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
+        const std::shared_ptr<Service>& service)
+    {
+        return ks::ui::RetainedCleanupJob::create([lifecycle, service]() {
+            lifecycle->Close(); // state only; rejects a queued/new Start before taking the backend gate
+            const auto operationGuard = lifecycle->LockBackgroundOperation();
+            bool stopped = false;
+            try { stopped = stopProcessEtwCaptureService(*service); } catch (...) {}
+            lifecycle->CompleteStop(stopped);
+            return stopped; // false retains the value owner and shutdown lease for explicit Retry
+        }, 0, [lifecycle]() { lifecycle->Close(); }); // synchronous value-only stop signal
+    }
+
+    template<typename Service, typename StartedCallback>
+    void requestProcessEtwCapture(
+        const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
+        const std::shared_ptr<Service>& service,
+        const bool desired,
+        StartedCallback startedCallback)
+    {
+        if (service == nullptr || !lifecycle->Request(desired)) return;
+        QRunnable* task = QRunnable::create([lifecycle, service, startedCallback]()
+        {
+            using Operation = ks::process::ProcessEtwCaptureLifecycle::Operation;
+            for (;;)
+            {
+                // Choose the operation inside the backend gate. A retained close
+                // cannot finish and then be overtaken by a previously chosen Start.
+                const auto operationGuard = lifecycle->LockBackgroundOperation();
+                const auto operation = lifecycle->NextOperation();
+                switch (operation)
+                {
+                case Operation::Start:
+                {
+                    bool started = false;
+                    bool ownedResources = false;
+                    try
+                    {
+                        started = service->Start();
+                        ownedResources = service->SnapshotHealth().cleanupPending;
+                    }
+                    catch (...) { ownedResources = true; }
+                    lifecycle->CompleteStart(started, ownedResources);
+                    startedCallback(started, *service);
+                    break;
+                }
+                case Operation::Stop:
+                {
+                    bool stopped = false;
+                    try { stopped = stopProcessEtwCaptureService(*service); } catch (...) {}
+                    lifecycle->CompleteStop(stopped);
+                    break;
+                }
+                case Operation::None:
+                    return;
+                }
+            }
+        });
+        task->setAutoDelete(true);
+        QThreadPool::globalInstance()->start(task);
+    }
+
     /*
      * R-1 进程处置对话框里预填的地址：目标主模块的入口点。
      *
@@ -563,14 +654,29 @@ namespace
     constexpr std::size_t ProcessTableHeaderKeyCount =
         sizeof(ProcessTableHeaderKeys) / sizeof(ProcessTableHeaderKeys[0]);
 
+    thread_local const ks::i18n::SourceTextSnapshot* processExportTranslator = nullptr;
+    thread_local const QLocale* processExportLocale = nullptr;
+    struct ScopedProcessExportText final
+    {
+        const ks::i18n::SourceTextSnapshot* previousTranslator;
+        const QLocale* previousLocale;
+        ScopedProcessExportText(const ks::i18n::SourceTextSnapshot& translator, const QLocale& locale)
+            : previousTranslator(processExportTranslator), previousLocale(processExportLocale)
+        { processExportTranslator = &translator; processExportLocale = &locale; }
+        ~ScopedProcessExportText()
+        { processExportTranslator = previousTranslator; processExportLocale = previousLocale; }
+    };
+
     QString processContextText(const char* const key, const QString& sourceText)
     {
-        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+        return processExportTranslator ? processExportTranslator->contextText(QString::fromLatin1(key), sourceText)
+            : ks::i18n::contextText(QString::fromLatin1(key), sourceText);
     }
 
     QString processContextText(const QString& key, const QString& sourceText)
     {
-        return ks::i18n::contextText(key, sourceText);
+        return processExportTranslator ? processExportTranslator->contextText(key, sourceText)
+            : ks::i18n::contextText(key, sourceText);
     }
 
     // 注入面列的文本。硬规则：非 Screened 一律显示状态词，
@@ -633,7 +739,7 @@ namespace
     // processGroupedNumberText 作用：按当前区域设置给整数加千位分隔符。
     QString processGroupedNumberText(const std::uint64_t value)
     {
-        return QLocale::system().toString(static_cast<qulonglong>(value));
+        return (processExportLocale ? *processExportLocale : QLocale::system()).toString(static_cast<qulonglong>(value));
     }
 
     // processGroupedSignedNumberText 作用：
@@ -820,6 +926,18 @@ namespace
         }
         ScopedProcessActionHandle(const ScopedProcessActionHandle&) = delete;
         ScopedProcessActionHandle& operator=(const ScopedProcessActionHandle&) = delete;
+        ScopedProcessActionHandle(ScopedProcessActionHandle&& other) noexcept
+            : m_handle(std::exchange(other.m_handle, nullptr)) {}
+        ScopedProcessActionHandle& operator=(ScopedProcessActionHandle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (m_handle != nullptr) ::CloseHandle(m_handle);
+                m_handle = std::exchange(other.m_handle, nullptr);
+            }
+            return *this;
+        }
+        HANDLE get() const noexcept { return m_handle; }
         bool valid() const { return m_handle != nullptr; }
     private:
         HANDLE m_handle = nullptr;
@@ -894,6 +1012,30 @@ namespace
         }
 
         *processHandleOut = processHandle;
+        return true;
+    }
+    // The accepted Token source remains pinned through queueing and backend completion.
+    // Use the held object for liveness; do not reinterpret a numeric PID after a delay.
+    bool tokenSourceIdentityIsActive(const HANDLE processHandle,
+        const std::uint64_t expectedCreationTime100ns, std::string* detailText)
+    {
+        FILETIME creation{}, exited{}, kernel{}, user{};
+        const BOOL queried = processHandle != nullptr
+            ? ::GetProcessTimes(processHandle, &creation, &exited, &kernel, &user) : FALSE;
+        const DWORD error = queried != FALSE ? ERROR_SUCCESS : ::GetLastError();
+        const std::uint64_t actualCreationTime100ns =
+            (static_cast<std::uint64_t>(creation.dwHighDateTime) << 32U) | creation.dwLowDateTime;
+        if (queried == FALSE || actualCreationTime100ns != expectedCreationTime100ns ||
+            expectedCreationTime100ns == 0U || exited.dwHighDateTime != 0U || exited.dwLowDateTime != 0U)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = queried == FALSE
+                    ? formatProcessWin32Error("GetProcessTimes", error)
+                    : "process identity is unavailable; action skipped";
+            }
+            return false;
+        }
         return true;
     }
     // enableProcessContextPrivilege 作用：
@@ -1518,6 +1660,30 @@ namespace
 class ProcessActivityChartWidget final : public QWidget
 {
 public:
+    struct SnapshotMetrics
+    {
+        bool ready = false;
+        std::array<double, 5> values{};
+        std::array<double, 5> denominators{100.0, 1.0, 1.0, 1.0, 100.0};
+    };
+
+    SnapshotMetrics snapshotMetrics(const int sampleIndex, const std::vector<std::string>& selectionKeys)
+    {
+        const std::unordered_set<std::string> keys(selectionKeys.begin(), selectionKeys.end());
+        SnapshotMetrics result{};
+        if (!prepareAggregateCache(selectionKeys, keys)) return result;
+        if (m_ownerDock != nullptr && !m_ownerDock->m_activitySamples.empty() && !m_rawSamples.empty())
+        {
+            const auto& samples = m_ownerDock->m_activitySamples;
+            const auto sequence = samples[static_cast<std::size_t>(std::clamp(sampleIndex, 0,
+                static_cast<int>(samples.size()) - 1))].sequence;
+            result.values = m_rawSamples.at(sequence).values;
+            result.denominators = metricDenominators();
+            result.ready = true;
+        }
+        return result;
+    }
+
     // 构造函数：
     // - ownerDock：提供样本、选择和指标开关；
     // - parent：Qt 父控件；
@@ -1549,6 +1715,25 @@ public:
             }
             refreshHoveredSample();
         });
+    }
+
+    ~ProcessActivityChartWidget() override
+    {
+        // The worker owns only STL display data; widget close never waits or joins.
+        // QApplication/global thread-pool shutdown can still wait for accepted cleanup tasks.
+        retireAggregateCache();
+    }
+
+    // Explicitly notify hidden charts: their paint/preview empty branches may never execute.
+    void notifyHistoryReset()
+    {
+        retireAggregateCache();
+        m_retainedEdgeActive = false;
+        m_pendingPointActive = false;
+        m_rawRecordingTick = 0;
+        m_rawSelectionKeys.clear();
+        m_seriesDirty = true;
+        scheduleRetiredRelease();
     }
 
     // setFocusedSampleIndex：
@@ -1641,6 +1826,7 @@ protected:
 
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
+            notifyHistoryReset();
             painter.setPen(textColor);
             painter.drawText(
                 plotRect,
@@ -1666,7 +1852,15 @@ protected:
         const std::unordered_set<std::string> selectionKeySet(
             selectionKeys.cbegin(),
             selectionKeys.cend());
-        updateSeriesCache(enabledMetrics, selectionKeys, selectionKeySet);
+        if (!updateSeriesCache(enabledMetrics, selectionKeys, selectionKeySet))
+        {
+            drawGrid(painter, plotRect, borderColor, textColor);
+            painter.setPen(textColor);
+            painter.drawText(plotRect, Qt::AlignCenter,
+                processContextText("process.activity.preparing", QStringLiteral("正在准备活动历史数据...")));
+            drawFocusLine(painter, plotRect);
+            return;
+        }
 
         drawGrid(painter, plotRect, borderColor, textColor);
         drawLines(painter, plotRect);
@@ -1817,16 +2011,6 @@ private:
         return metricList;
     }
 
-    // MetricScale 作用：
-    // - 保存折线图百分比归一化分母；
-    // - 磁盘/网络使用当前历史窗口最大值作为 100%。
-    struct MetricScale
-    {
-        double memoryDenominatorMB = 1.0;     // memoryDenominatorMB：物理内存总量或历史最大内存。
-        double diskDenominatorMBps = 1.0;     // diskDenominatorMBps：历史最大磁盘吞吐。
-        double networkDenominatorKBps = 1.0;  // networkDenominatorKBps：历史最大网络吞吐。
-    };
-
     struct SeriesPoint
     {
         double timeMs = 0.0;      // 样本真实时间，屏幕位置随连续时钟变化。
@@ -1938,213 +2122,283 @@ private:
         }
     }
 
-    // 单调 Hermite 切线：峰谷处切线归零，同向区间取加权调和均值，平滑且不制造假峰值。
-    void calculateSeriesSlopes(std::vector<SeriesPoint>& points) const
+    struct RetiredAggregate
     {
-        if (points.size() < 2U)
+        ks::ui::activity::SeriesCache cache;
+        std::atomic<bool> complete{false};
+    };
+
+    void retireAggregateCache()
+    {
+        if (!m_rawSamples.storageEmpty())
         {
-            return;
+            // Never build a second display generation while a previous one is still being freed.
+            Q_ASSERT(!m_retiredAggregate || m_retiredAggregate->complete.load(std::memory_order_acquire));
+            auto retired = std::make_shared<RetiredAggregate>();
+            retired->cache.swap(m_rawSamples);
+            m_retiredAggregate = retired;
+            QThreadPool::globalInstance()->start(QRunnable::create([retired]() {
+                {
+                    ks::ui::activity::SeriesCache obsolete;
+                    obsolete.swap(retired->cache);
+                } // Deque nodes, spare blocks and maps are all deallocated on this worker.
+                retired->complete.store(true, std::memory_order_release);
+            }));
         }
-        const auto secant = [&points](std::size_t index)
-        {
-            return (points[index + 1U].percent - points[index].percent)
-                / std::max(1.0, points[index + 1U].timeMs - points[index].timeMs);
-        };
-        points.front().slope = secant(0);
-        points.back().slope = secant(points.size() - 2U);
-        for (std::size_t index = 1; index + 1U < points.size(); ++index)
-        {
-            const double previousSlope = secant(index - 1U);
-            const double nextSlope = secant(index);
-            points[index].slope = 0.0;
-            if (previousSlope * nextSlope > 0.0)
-            {
-                const double previousWidth = std::max(1.0, points[index].timeMs - points[index - 1U].timeMs);
-                const double nextWidth = std::max(1.0, points[index + 1U].timeMs - points[index].timeMs);
-                const double previousWeight = 2.0 * nextWidth + previousWidth;
-                const double nextWeight = nextWidth + 2.0 * previousWidth;
-                points[index].slope = (previousWeight + nextWeight)
-                    / (previousWeight / previousSlope + nextWeight / nextSlope);
-            }
-        }
+        m_cachedSeries.clear(); // At most two points per physical chart column/metric.
+        m_pendingPointActive = false;
+        m_seriesDirty = true;
     }
 
-    // 采样、指标开关或选区变化时刷新曲线缓存，60fps 移动不重新扫描每个进程的历史数值。
-    void updateSeriesCache(const std::vector<ProcessDock::ProcessActivityMetric>& metrics,
+    void scheduleRetiredRelease()
+    {
+        if (m_retiredReleaseQueued || !m_retiredAggregate) return;
+        m_retiredReleaseQueued = true;
+        QTimer::singleShot(16, this, [this]() {
+            m_retiredReleaseQueued = false;
+            if (m_retiredAggregate && !m_retiredAggregate->complete.load(std::memory_order_acquire))
+            {
+                scheduleRetiredRelease();
+                return;
+            }
+            m_retiredAggregate.reset(); // Its cache is empty after the worker's release-store.
+            if (isVisible()) scheduleAggregateContinuation();
+        });
+    }
+
+    void scheduleAggregatePublication()
+    {
+        if (m_aggregatePublicationQueued) return;
+        m_aggregatePublicationQueued = true;
+        QTimer::singleShot(0, this, [this]() {
+            m_aggregatePublicationQueued = false;
+            if (!isVisible() || m_ownerDock == nullptr)
+            {
+                m_aggregateWasPending = true;
+                return;
+            }
+            const auto keys = m_ownerDock->currentProcessActivitySelectionKeys();
+            const std::unordered_set<std::string> keySet(keys.begin(), keys.end());
+            if (!prepareAggregateCache(keys, keySet)) return;
+            m_seriesDirty = true;
+            update();
+            m_ownerDock->previewProcessActivitySnapshotForIndex(m_focusedSampleIndex);
+            if (m_hoverActive && QToolTip::isVisible())
+            {
+                showSnapshotToolTipAtPosition(m_hoverPosition, mapToGlobal(m_hoverPosition));
+            }
+        });
+    }
+
+    void scheduleAggregateContinuation()
+    {
+        if (m_aggregateWorkQueued || !isVisible()) return;
+        m_aggregateWorkQueued = true;
+        QTimer::singleShot(0, this, [this]() {
+            m_aggregateWorkQueued = false;
+            if (!isVisible() || m_ownerDock == nullptr) return;
+            // 始终消费当前选择，旧回调不能把用户新选区重新切回旧选区。
+            const auto keys = m_ownerDock->currentProcessActivitySelectionKeys();
+            const std::unordered_set<std::string> keySet(keys.begin(), keys.end());
+            if (prepareAggregateCache(keys, keySet)) update();
+        });
+    }
+
+    // 初次选区/隐藏后补齐按4ms软预算推进，连单个样本内的进程聚合也可让出。
+    // 规范历史与采集不暂停；未完成的选区不以旧选区曲线冒充新结果。
+    bool prepareAggregateCache(const std::vector<std::string>& selectionKeys,
+        const std::unordered_set<std::string>& selectionKeySet)
+    {
+        if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
+        {
+            notifyHistoryReset();
+            return true;
+        }
+        const auto& samples = m_ownerDock->m_activitySamples;
+        auto canonicalKeys = selectionKeys;
+        std::sort(canonicalKeys.begin(), canonicalKeys.end());
+        canonicalKeys.erase(std::unique(canonicalKeys.begin(), canonicalKeys.end()), canonicalKeys.end());
+        const bool replace = m_rawRecordingTick != m_ownerDock->m_activityRecordingStartTick100ns ||
+            canonicalKeys != m_rawSelectionKeys || (!m_rawSamples.empty() &&
+                (samples.back().sequence < m_rawSamples.back().sequence ||
+                    (samples.front().sequence > m_rawSamples.back().sequence &&
+                        samples.front().sequence - m_rawSamples.back().sequence > 1U)));
+        if (replace)
+        {
+            retireAggregateCache();
+            m_retainedEdgeActive = false;
+        }
+        m_rawRecordingTick = m_ownerDock->m_activityRecordingStartTick100ns;
+        m_rawSelectionKeys = std::move(canonicalKeys);
+        const auto firstSequence = samples.front().sequence;
+        const auto retainFrom = firstSequence > 0U ? firstSequence - 1U : 0U;
+        if (!m_rawSamples.empty() && retainFrom > m_rawSamples.front().sequence &&
+            retainFrom - m_rawSamples.front().sequence > 256U)
+        {
+            // Large history-window changes retire the whole allocation graph, rather than paying
+            // an O(history) trim or deferred MSVC deque spare-block destruction in an input handler.
+            const bool keepEdge = retainFrom <= m_rawSamples.back().sequence;
+            const auto edge = keepEdge ? m_rawSamples.at(retainFrom)
+                : ks::ui::activity::SeriesCache::Point{};
+            retireAggregateCache();
+            m_retainedEdgeActive = keepEdge;
+            m_retainedEdgePoint = edge;
+        }
+        if (m_retiredAggregate)
+        {
+            if (!m_retiredAggregate->complete.load(std::memory_order_acquire))
+            {
+                m_aggregateWasPending = true;
+                scheduleRetiredRelease();
+                return false;
+            }
+            m_retiredAggregate.reset();
+        }
+        if (m_retainedEdgeActive)
+        {
+            if (m_retainedEdgePoint.sequence == retainFrom && retainFrom < firstSequence)
+            {
+                const bool appended = m_rawSamples.append(m_retainedEdgePoint);
+                Q_ASSERT(appended);
+                (void)appended;
+            }
+            m_retainedEdgeActive = false;
+        }
+        auto first = samples.begin();
+        if (!m_rawSamples.empty())
+        {
+            first = std::upper_bound(samples.begin(), samples.end(), m_rawSamples.back().sequence,
+                [](const std::uint64_t sequence, const ProcessDock::ProcessActivitySample& sample) {
+                    return sequence < sample.sequence;
+                });
+        }
+        QElapsedTimer budget;
+        budget.start();
+        for (auto sample = first; sample != samples.end(); ++sample)
+        {
+            if (!m_pendingPointActive || m_pendingPoint.sequence != sample->sequence)
+            {
+                m_pendingPoint = {};
+                m_pendingPoint.sequence = sample->sequence;
+                m_pendingPoint.timeMs = static_cast<double>(sample->elapsedMs);
+                m_pendingProcessIndex = 0;
+                m_pendingPointActive = true;
+            }
+            if (selectionKeySet.empty())
+            {
+                m_pendingPoint.values = {sample->totalCpuPercent, sample->totalMemoryMB, sample->totalDiskMBps,
+                    sample->totalNetKBps, sample->totalGpuPercent};
+            }
+            else
+            {
+                for (; m_pendingProcessIndex < sample->processes.size(); ++m_pendingProcessIndex)
+                {
+                    const auto& process = sample->processes[m_pendingProcessIndex];
+                    if (selectionKeySet.find(process.identityKey) != selectionKeySet.end())
+                    {
+                        m_pendingPoint.values[0] += process.cpuPercent;
+                        m_pendingPoint.values[1] += process.workingSetMB;
+                        m_pendingPoint.values[2] += process.diskMBps;
+                        m_pendingPoint.values[3] += process.netKBps;
+                        m_pendingPoint.values[4] += process.gpuPercent;
+                    }
+                    if ((m_pendingProcessIndex & 63U) == 63U && budget.elapsed() >= 4)
+                    {
+                        ++m_pendingProcessIndex;
+                        m_aggregateWasPending = true;
+                        scheduleAggregateContinuation();
+                        return false;
+                    }
+                }
+            }
+            const bool appended = m_rawSamples.append(m_pendingPoint);
+            Q_ASSERT(appended);
+            (void)appended;
+            m_pendingPointActive = false;
+            if (std::next(sample) != samples.end() && budget.elapsed() >= 4)
+            {
+                m_aggregateWasPending = true;
+                scheduleAggregateContinuation();
+                return false;
+            }
+        }
+        // The large-drop path above detaches the generation; at most 256 rows can remain here.
+        m_rawSamples.trimBefore(retainFrom);
+        if (m_aggregateWasPending)
+        {
+            m_aggregateWasPending = false;
+            scheduleAggregatePublication();
+        }
+        return true;
+    }
+
+    std::array<double, 5> metricDenominators() const
+    {
+        std::array<double, 5> result{100.0, 1.0, 1.0, 1.0, 100.0};
+        if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty() || m_rawSamples.empty()) return result;
+        const auto& samples = m_ownerDock->m_activitySamples;
+        result[1] = std::max(1.0, m_ownerDock->m_activityTotalPhysicalMemoryMB);
+        for (const std::size_t metric : {std::size_t{1}, std::size_t{2}, std::size_t{3}})
+        {
+            if (metric == 1U && result[1] > 1.0) continue;
+            const auto peak = m_rawSamples.extrema(samples.front().sequence, samples.back().sequence, metric);
+            if (peak.valid) result[metric] = std::max(1.0, m_rawSamples.at(peak.maximum).values[metric]);
+        }
+        return result;
+    }
+
+    // 数据代次、轴或物理像素列变化才重新准备投影；paint 不扫描全部历史。
+    bool updateSeriesCache(const std::vector<ProcessDock::ProcessActivityMetric>& metrics,
         const std::vector<std::string>& selectionKeys,
         const std::unordered_set<std::string>& selectionKeySet)
     {
-        const auto& samples = m_ownerDock->m_activitySamples;
-        const bool sameSelection = selectionKeys == m_cachedSelectionKeys && metrics == m_cachedMetrics;
-        if (!m_seriesDirty && sameSelection && m_cachedFirstSequence == samples.front().sequence
-            && m_cachedLastSequence == samples.back().sequence && m_cachedSampleCount == samples.size())
+        if (!prepareAggregateCache(selectionKeys, selectionKeySet))
         {
-            return;
+            m_seriesDirty = true;
+            return false;
         }
-        const MetricScale scale = calculateMetricScale(metrics, selectionKeySet);
+        if (m_rawSamples.empty())
+        {
+            m_cachedSeries.clear();
+            return true;
+        }
+        const auto denominators = metricDenominators();
+        const double endTime = windowEndMs();
+        const double startTime = endTime - windowDurationMs();
+        const std::size_t columns = static_cast<std::size_t>(std::max(2.0,
+            std::ceil(chartRect().width() * devicePixelRatioF())));
+        if (!m_seriesDirty && m_projectionRevision == m_rawSamples.revision() &&
+            metrics == m_cachedMetrics && denominators == m_projectionDenominators &&
+            m_projectionStartMs == startTime && m_projectionEndMs == endTime && m_projectionColumns == columns)
+        {
+            return true;
+        }
         std::vector<CachedSeries> seriesList;
         seriesList.reserve(metrics.size());
         for (const auto metric : metrics)
         {
-            CachedSeries series;
+            const auto metricIndex = static_cast<std::size_t>(metric);
+            CachedSeries series{};
             series.metric = metric;
-            series.points.reserve(samples.size() + 2U);
-            // 保留刚淘汰的边缘采样直到它移出画布，避免历史满载时左缘突然截断。
-            if (sameSelection)
+            const auto sequences = m_rawSamples.project(metricIndex, startTime, endTime, columns);
+            series.points.reserve(sequences.size());
+            for (const auto sequence : sequences)
             {
-                for (const auto& previous : m_cachedSeries)
-                {
-                    if (previous.metric != metric)
-                    {
-                        continue;
-                    }
-                    const double earliest = windowEndMs() - windowDurationMs()
-                        - static_cast<double>(m_ownerDock->refreshIntervalMillisecondsFromInput());
-                    for (const auto& point : previous.points)
-                    {
-                        if (point.timeMs >= static_cast<double>(samples.front().elapsedMs))
-                        {
-                            break;
-                        }
-                        if (point.timeMs >= earliest)
-                        {
-                            series.points.push_back(point);
-                        }
-                    }
-                }
+                series.points.push_back({m_rawSamples.at(sequence).timeMs,
+                    m_rawSamples.normalizedValue(sequence, metricIndex, denominators[metricIndex]),
+                    m_rawSamples.slope(sequence, metricIndex, denominators[metricIndex])});
             }
-            for (const auto& sample : samples)
-            {
-                series.points.push_back({static_cast<double>(sample.elapsedMs),
-                    samplePercentMetricValue(sample, metric, selectionKeySet, scale), 0.0});
-            }
-            calculateSeriesSlopes(series.points);
             seriesList.push_back(std::move(series));
         }
         m_cachedSeries = std::move(seriesList);
         m_cachedMetrics = metrics;
-        m_cachedSelectionKeys = selectionKeys;
-        m_cachedFirstSequence = samples.front().sequence;
-        m_cachedLastSequence = samples.back().sequence;
-        m_cachedSampleCount = samples.size();
+        m_projectionRevision = m_rawSamples.revision();
+        m_projectionDenominators = denominators;
+        m_projectionStartMs = startTime;
+        m_projectionEndMs = endTime;
+        m_projectionColumns = columns;
         m_seriesDirty = false;
-    }
-
-    // sampleRawMetricValue：
-    // - 读取某个采样点的原始单项指标；
-    // - selectionKeySet 为空时返回总体聚合，否则通过哈希集合返回选中进程之和。
-    double sampleRawMetricValue(
-        const ProcessDock::ProcessActivitySample& sample,
-        const ProcessDock::ProcessActivityMetric metric,
-        const std::unordered_set<std::string>& selectionKeySet) const
-    {
-        if (selectionKeySet.empty())
-        {
-            switch (metric)
-            {
-            case ProcessDock::ProcessActivityMetric::Cpu:
-                return sample.totalCpuPercent;
-            case ProcessDock::ProcessActivityMetric::Memory:
-                return sample.totalMemoryMB;
-            case ProcessDock::ProcessActivityMetric::Disk:
-                return sample.totalDiskMBps;
-            case ProcessDock::ProcessActivityMetric::Network:
-                return sample.totalNetKBps;
-            case ProcessDock::ProcessActivityMetric::Gpu:
-                return sample.totalGpuPercent;
-            default:
-                return 0.0;
-            }
-        }
-
-        double value = 0.0;
-        for (const ProcessDock::ProcessActivityProcessPoint& processPoint : sample.processes)
-        {
-            if (selectionKeySet.find(processPoint.identityKey) == selectionKeySet.end())
-            {
-                continue;
-            }
-            switch (metric)
-            {
-            case ProcessDock::ProcessActivityMetric::Cpu:
-                value += processPoint.cpuPercent;
-                break;
-            case ProcessDock::ProcessActivityMetric::Memory:
-                value += processPoint.workingSetMB;
-                break;
-            case ProcessDock::ProcessActivityMetric::Disk:
-                value += processPoint.diskMBps;
-                break;
-            case ProcessDock::ProcessActivityMetric::Network:
-                value += processPoint.netKBps;
-                break;
-            case ProcessDock::ProcessActivityMetric::Gpu:
-                value += processPoint.gpuPercent;
-                break;
-            default:
-                break;
-            }
-        }
-        return value;
-    }
-
-    // calculateMetricScale：
-    // - 每次绘制都重新扫描历史最大值；
-    // - 当磁盘/网络出现新峰值时，本轮立刻重算百分比并重绘。
-    MetricScale calculateMetricScale(
-        const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
-        const std::unordered_set<std::string>& selectionKeySet) const
-    {
-        MetricScale scale{};
-        if (m_ownerDock == nullptr)
-        {
-            return scale;
-        }
-
-        scale.memoryDenominatorMB = std::max(1.0, m_ownerDock->m_activityTotalPhysicalMemoryMB);
-        double maxMemoryMB = 0.0;
-        double maxDiskMBps = 0.0;
-        double maxNetworkKBps = 0.0;
-        for (const ProcessDock::ProcessActivitySample& sample : m_ownerDock->m_activitySamples)
-        {
-            maxMemoryMB = std::max(maxMemoryMB, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Memory, selectionKeySet));
-            maxDiskMBps = std::max(maxDiskMBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Disk, selectionKeySet));
-            maxNetworkKBps = std::max(maxNetworkKBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Network, selectionKeySet));
-        }
-        if (scale.memoryDenominatorMB <= 1.0 && maxMemoryMB > 0.0)
-        {
-            scale.memoryDenominatorMB = maxMemoryMB;
-        }
-        scale.diskDenominatorMBps = std::max(1.0, maxDiskMBps);
-        scale.networkDenominatorKBps = std::max(1.0, maxNetworkKBps);
-        (void)metricList;
-        return scale;
-    }
-
-    // samplePercentMetricValue：
-    // - 把原始指标统一转换为百分比；
-    // - 磁盘/网络按历史最大值归一化，CPU/GPU 天然是百分比。
-    double samplePercentMetricValue(
-        const ProcessDock::ProcessActivitySample& sample,
-        const ProcessDock::ProcessActivityMetric metric,
-        const std::unordered_set<std::string>& selectionKeySet,
-        const MetricScale& scale) const
-    {
-        const double rawValue = sampleRawMetricValue(sample, metric, selectionKeySet);
-        switch (metric)
-        {
-        case ProcessDock::ProcessActivityMetric::Cpu:
-        case ProcessDock::ProcessActivityMetric::Gpu:
-            return clampPercentValue(rawValue);
-        case ProcessDock::ProcessActivityMetric::Memory:
-            return clampPercentValue((rawValue / std::max(1.0, scale.memoryDenominatorMB)) * 100.0);
-        case ProcessDock::ProcessActivityMetric::Disk:
-            return clampPercentValue((rawValue / std::max(1.0, scale.diskDenominatorMBps)) * 100.0);
-        case ProcessDock::ProcessActivityMetric::Network:
-            return clampPercentValue((rawValue / std::max(1.0, scale.networkDenominatorKBps)) * 100.0);
-        default:
-            return 0.0;
-        }
+        return true;
     }
 
     // sampleIndexAtX：
@@ -2283,9 +2537,7 @@ private:
             }
             const std::size_t firstIndex = static_cast<std::size_t>(std::distance(points.begin(), first));
             const std::size_t endIndex = static_cast<std::size_t>(std::distance(points.begin(), last));
-            const std::size_t visibleCount = endIndex - firstIndex;
-            const std::size_t maximumPoints = static_cast<std::size_t>(std::max(2.0, plotRect.width()));
-            const std::size_t stride = std::max<std::size_t>(1U, (visibleCount + maximumPoints - 1U) / maximumPoints);
+            if (firstIndex == endIndex) continue;
             QPainterPath path;
             path.moveTo(position(points[firstIndex]));
             std::size_t previousIndex = firstIndex;
@@ -2307,7 +2559,7 @@ private:
                         plotRect.bottom() - control2 / 100.0 * plotRect.height()), to);
                 previousIndex = index;
             };
-            for (std::size_t index = firstIndex + stride; index < endIndex; index += stride)
+            for (std::size_t index = firstIndex + 1U; index < endIndex; ++index)
             {
                 appendCurve(index);
             }
@@ -2327,30 +2579,35 @@ private:
         painter.restore();
     }
 
-    // 鼠标进入绘图区时显示所有可见真实采样点；提示和焦点线仍定位最近样本。
+    // 完整时间轴二分命中，只标出当前真实采样；历史密集点不逐帧重复绘制。
     void drawHoverPoints(QPainter& painter, const QRectF& plotRect) const
     {
-        if (!m_hoverActive)
+        if (!m_hoverActive || m_ownerDock == nullptr)
         {
             return;
         }
+        const int sampleIndex = sampleIndexAtX(m_hoverPosition.x());
+        if (sampleIndex < 0)
+        {
+            return;
+        }
+        const auto sequence = m_ownerDock->m_activitySamples[static_cast<std::size_t>(sampleIndex)].sequence;
+        if (m_rawSamples.empty() || sequence < m_rawSamples.front().sequence ||
+            sequence > m_rawSamples.back().sequence) return;
+        const double sampleTime = m_rawSamples.at(sequence).timeMs;
+        const auto denominators = metricDenominators();
         const double endTime = windowEndMs();
         const double duration = windowDurationMs();
-        const double startTime = endTime - duration;
         painter.save();
         painter.setClipRect(plotRect);
         for (const auto& series : m_cachedSeries)
         {
-            auto point = std::lower_bound(series.points.begin(), series.points.end(), startTime,
-                [](const SeriesPoint& value, double time) { return value.timeMs < time; });
             painter.setPen(QPen(KswordTheme::SurfaceColor(), 1.4));
             painter.setBrush(processActivityMetricColor(series.metric));
-            for (; point != series.points.end() && point->timeMs <= endTime; ++point)
-            {
-                const double x = plotRect.right() + (point->timeMs - endTime) / duration * plotRect.width();
-                const double y = plotRect.bottom() - point->percent / 100.0 * plotRect.height();
-                painter.drawEllipse(QPointF(x, y), 3.4, 3.4);
-            }
+            const double x = plotRect.right() + (sampleTime - endTime) / duration * plotRect.width();
+            const double y = plotRect.bottom() - m_rawSamples.normalizedValue(sequence, static_cast<std::size_t>(series.metric),
+                denominators[static_cast<std::size_t>(series.metric)]) / 100.0 * plotRect.height();
+            painter.drawEllipse(QPointF(x, y), 3.4, 3.4);
         }
         painter.restore();
     }
@@ -2423,12 +2680,27 @@ private:
     bool m_hoverActive = false; // 只在鼠标位于实际曲线画布内显示圆点。
     std::uint64_t m_hoveredSequence = 0; // 合并同一采样的 tooltip 更新。
     bool m_seriesDirty = true; // 新样本触发重建，逐帧移动只使用缓存。
-    std::uint64_t m_cachedFirstSequence = 0; // 缓存左端样本身份。
-    std::uint64_t m_cachedLastSequence = 0; // 缓存右端样本身份。
-    std::size_t m_cachedSampleCount = 0; // 检测清空和历史淘汰。
-    std::vector<CachedSeries> m_cachedSeries; // 已归一化的时间/数值/切线。
-    std::vector<ProcessDock::ProcessActivityMetric> m_cachedMetrics; // 当前指标组合。
-    std::vector<std::string> m_cachedSelectionKeys; // 当前进程选择，变更后重新聚合。
+    ks::ui::activity::SeriesCache m_rawSamples;
+    std::shared_ptr<RetiredAggregate> m_retiredAggregate;
+    bool m_retiredReleaseQueued = false;
+    ks::ui::activity::SeriesCache::Point m_retainedEdgePoint{};
+    bool m_retainedEdgeActive = false;
+    ks::ui::activity::SeriesCache::Point m_pendingPoint{};
+    std::size_t m_pendingProcessIndex = 0;
+    bool m_pendingPointActive = false;
+    bool m_aggregateWorkQueued = false;
+    bool m_aggregatePublicationQueued = false;
+    bool m_aggregateWasPending = false;
+    std::uint64_t m_rawRecordingTick = 0;
+    std::vector<std::string> m_rawSelectionKeys;
+    std::uint64_t m_projectionRevision = 0;
+    double m_projectionStartMs = 0.0;
+    double m_projectionEndMs = 0.0;
+    std::size_t m_projectionColumns = 0;
+    std::array<double, 5> m_projectionDenominators{};
+    std::vector<CachedSeries> m_cachedSeries; // 每物理像素列最多两个真实极值点。
+    std::vector<ProcessDock::ProcessActivityMetric> m_cachedMetrics;
+
 };
 
 class ProcessActivityTimelineSlider final : public QSlider
@@ -4418,24 +4690,51 @@ ProcessDock::ProcessDock(QWidget* parent)
 
 ProcessDock::~ProcessDock()
 {
+    if (m_hvmOperation) m_hvmOperation->close();
+    if (m_hvmPreflightOperation) m_hvmPreflightOperation->close();
+    shutdownThreadPage();
     // 使已运行任务的回传结果失效，并取消尚未开始的图标查询任务。
     // 线程池析构会等待已运行任务结束，任务只使用自己的路径副本，不再访问 Dock 成员。
     ++m_processIconExtractionGeneration;
     m_processIconExtractionPool.clear();
     m_processIconPathsInFlight.clear();
 
-    // 析构阶段先停止内部 ETW 消费线程：
-    // - 输入：无；
-    // - 处理：请求 ProcessNetworkEtwMonitor 退出并等待线程 join；
-    // - 返回：无，防止对象销毁后 ETW 回调继续访问成员。
-    stopProcessNetworkTrafficCapture();
-    stopCpuCoreUsageCapture();
+    // Only publish stop intent here. The worker owns Start/Stop/join and all late service references.
+    if (m_processNetworkCaptureOwner != nullptr)
+    {
+        m_processNetworkTrafficCaptureStarted = false;
+        m_processNetworkBaselineResetRequired = true;
+        m_processNetworkCaptureLifecycle->Close();
+        m_processNetworkCaptureOwner->requestCleanup();
+    }
+    else stopProcessNetworkTrafficCapture();
+    if (m_cpuCoreCaptureOwner != nullptr)
+    {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        m_cpuCoreCaptureLifecycle->Close();
+        m_cpuCoreCaptureOwner->requestCleanup();
+    }
+    else stopCpuCoreUsageCapture();
+    // Retained cleanup jobs keep failed STOP identities beyond the Dock. Even an already stopped monitor calls Stop in its destructor. Transfer the Dock's last
+    // references to a worker, so service destruction cannot acquire ETW lifecycle locks on GUI.
+    QRunnable* releaseCaptureOwners = QRunnable::create([
+        networkService = std::move(m_processNetworkTrafficService),
+        cpuService = std::move(m_cpuCoreUsageService)]() mutable
+    {
+        networkService.reset();
+        cpuService.reset();
+    });
+    releaseCaptureOwners->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(releaseCaptureOwners);
 
     // 析构阶段主动解除全局事件过滤器，避免 QApplication 后续点击事件访问已销毁 Dock。
     if (QApplication::instance() != nullptr)
     {
         QApplication::instance()->removeEventFilter(this);
     }
+    // Samples have no readers after the GUI-owned dock shuts down. Child chart caches retire separately.
+    retireProcessActivityHistory(true);
 }
 
 QObject* ProcessDock::mainWindowActionReceiver() const
@@ -4462,162 +4761,221 @@ bool ProcessDock::invokeMainWindowPidSlot(const char* methodName, const std::uin
         Q_ARG(quint32, static_cast<quint32>(pid)));
 }
 
+bool ProcessDock::hasVisibleProcessDetailConsumer() const
+{
+    return std::any_of(m_detailWindowByIdentity.cbegin(), m_detailWindowByIdentity.cend(),
+        [](const auto& pair)
+        {
+            return pair.second != nullptr && pair.second->isVisible() && !pair.second->isMinimized();
+        });
+}
+
+ks::process::ProcessEtwCaptureDemand ProcessDock::currentEtwCaptureDemand() const
+{
+    return {
+        m_monitoringEnabled,
+        isProcessListPageVisibleForRecording(),
+        m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked(),
+        hasVisibleProcessDetailConsumer(),
+        isProcessColumnVisible(TableColumn::CpuCore)
+    };
+}
+
+void ProcessDock::syncProcessEtwCaptureDemand()
+{
+    const auto demand = currentEtwCaptureDemand();
+    if (demand.RefreshAllowed())
+    {
+        ensureProcessNetworkTrafficCaptureStarted();
+    }
+    else if (m_processNetworkTrafficCaptureStarted)
+    {
+        stopProcessNetworkTrafficCapture();
+    }
+    if (demand.CpuCaptureAllowed())
+    {
+        ensureCpuCoreUsageCaptureStarted();
+    }
+    else if (m_cpuCoreUsageCaptureStarted)
+    {
+        stopCpuCoreUsageCapture();
+    }
+    if (m_refreshTimer != nullptr)
+    {
+        if (demand.RefreshAllowed())
+        {
+            if (!m_refreshTimer->isActive())
+            {
+                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+            }
+        }
+        else
+        {
+            m_refreshTimer->stop();
+        }
+    }
+}
+
 void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 {
-    // ensureProcessNetworkTrafficCaptureStarted：
-    // - 输入：无；
-    // - 处理：懒创建内部 ETW 累计器，后台仅按 PID 记录 TCP/UDP 收发字节；
-    // - 返回：无。失败时不回退到 Raw Socket 方案，进程表沿用现有差分结果。
-    if (m_processNetworkTrafficCaptureStarted)
+    if (m_processNetworkTrafficService == nullptr)
+        m_processNetworkTrafficService = std::make_shared<ks::network::ProcessNetworkEtwMonitor>();
+    if (m_processNetworkCaptureOwner == nullptr || m_processNetworkCaptureOwner->isComplete())
     {
+        m_processNetworkTrafficCaptureStarted = false;
+        // Reopen changes only value state. New Start still requires fresh admission.
+        if (!m_processNetworkCaptureLifecycle->Reopen()) return;
+        m_processNetworkCaptureOwner = makeProcessEtwCleanupOwner(m_processNetworkCaptureLifecycle, m_processNetworkTrafficService);
+        if (m_processNetworkCaptureOwner == nullptr)
+        {
+            m_processNetworkCaptureLifecycle->Close();
+            // create(null) may already retain a cleanup closure for this epoch.
+            // Its late Stop must never see a service reused by later admission.
+            const auto nextGeneration = m_processNetworkCaptureLifecycle->Generation() + 1;
+            releaseUnadmittedProcessEtwValue(std::move(m_processNetworkTrafficService));
+            m_processNetworkCaptureLifecycle = std::make_shared<ks::process::ProcessEtwCaptureLifecycle>(nextGeneration);
+            m_processNetworkBaselineResetRequired = true;
+            return;
+        }
+        m_processNetworkBaselineResetRequired = true;
+    }
+    if (m_processNetworkCaptureOwner->isCleanupRequested())
+    {
+        m_processNetworkTrafficCaptureStarted = false;
+        m_processNetworkBaselineResetRequired = true;
         return;
     }
+    if (m_processNetworkTrafficCaptureStarted && !m_processNetworkCaptureLifecycle->CleanupPending()) return;
     m_processNetworkTrafficCaptureStarted = true;
-
-    if (m_processNetworkTrafficService == nullptr)
-    {
-        m_processNetworkTrafficService = std::make_unique<ks::network::ProcessNetworkEtwMonitor>();
-    }
-
-    const bool started = m_processNetworkTrafficService->Start();
-
-    // 同上：整句单条源文本，失败分支用 %1 承载 detail。
-    kLogEvent logEvent;
-    if (started)
-    {
-        info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
-    }
-    else
-    {
-        warn << logEvent
-            << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
-                .arg(QString::fromStdString(m_processNetworkTrafficService->LastErrorText()))
-                .toStdString()
-            << eol;
-    }
+    requestProcessEtwCapture(
+        m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, true,
+        [](const bool started, const ks::network::ProcessNetworkEtwMonitor& service)
+        {
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::stopProcessNetworkTrafficCapture()
 {
-    // stopProcessNetworkTrafficCapture：
-    // - 输入：无；
-    // - 处理：停止内部 ETW 会话，避免暂停或析构后继续累计；
-    // - 返回：无。
-    if (m_processNetworkTrafficService != nullptr)
-    {
-        m_processNetworkTrafficService->Stop();
-    }
+    m_processNetworkBaselineResetRequired = true;
     m_processNetworkTrafficCaptureStarted = false;
+    requestProcessEtwCapture(
+        m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, false,
+        [](const bool started, const ks::network::ProcessNetworkEtwMonitor& service)
+        {
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::ensureCpuCoreUsageCaptureStarted()
 {
-    // 先记录期望状态：Stop 尚未完成时虽不能立刻启动，完成回调仍能据此恢复同一实例。
-    m_cpuCoreUsageCaptureDesired->store(true, std::memory_order_release);
-    // 同一个旧会话仍在异步 Stop/join 时禁止创建新实例，确保进程页始终最多一个 CSwitch 会话。
-    if (m_cpuCoreUsageCaptureStarted || m_cpuCoreUsageStopInProgress)
+    if (m_cpuCoreUsageService == nullptr)
+        m_cpuCoreUsageService = std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
+    if (m_cpuCoreCaptureOwner == nullptr || m_cpuCoreCaptureOwner->isComplete())
     {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        if (!m_cpuCoreCaptureLifecycle->Reopen()) return;
+        m_cpuCoreCaptureOwner = makeProcessEtwCleanupOwner(m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService);
+        if (m_cpuCoreCaptureOwner == nullptr)
+        {
+            m_cpuCoreCaptureLifecycle->Close();
+            const auto nextGeneration = m_cpuCoreCaptureLifecycle->Generation() + 1;
+            releaseUnadmittedProcessEtwValue(std::move(m_cpuCoreUsageService));
+            m_cpuCoreCaptureLifecycle = std::make_shared<ks::process::ProcessEtwCaptureLifecycle>(nextGeneration);
+            m_latestCpuCoreUsageSnapshot.reset();
+            m_lastCpuCoreUsageSnapshotTime = {};
+            return;
+        }
+        m_latestCpuCoreUsageSnapshot.reset();
+        m_lastCpuCoreUsageSnapshotTime = {};
+    }
+    if (m_cpuCoreCaptureOwner->isCleanupRequested())
+    {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        m_latestCpuCoreUsageSnapshot.reset();
+        m_lastCpuCoreUsageSnapshotTime = {};
         return;
     }
+    m_cpuCoreUsageCaptureDesired->store(true, std::memory_order_release);
+    if (m_cpuCoreUsageCaptureStarted && !m_cpuCoreCaptureLifecycle->CleanupPending()) return;
     m_cpuCoreUsageCaptureStarted = true;
-    if (m_cpuCoreUsageService == nullptr)
-    {
-        m_cpuCoreUsageService =
-            std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
-    }
-
-    // StartTrace/OpenTrace 只执行一次，但仍移到全局工作线程，避免 ETW 服务响应慢时阻塞 GUI。
-    const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreService =
-        m_cpuCoreUsageService;
-    const std::shared_ptr<std::atomic_bool> captureDesired =
-        m_cpuCoreUsageCaptureDesired;
-    QRunnable* startTask = QRunnable::create([cpuCoreService, captureDesired]()
-    {
-        const bool started = cpuCoreService->Start();
-        if (started && !captureDesired->load(std::memory_order_acquire))
+    requestProcessEtwCapture(
+        m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService, true,
+        [](const bool started, const ks::process::ProcessCpuCoreEtwMonitor& service)
         {
-            // 用户在启动完成前已暂停时立即后台回收，避免短暂遗留无人消费的高频会话。
-            cpuCoreService->Stop();
-        }
-        // 整句写成单条源文本（失败分支带 %1）：
-        // - 通知卡片与日志面板按整行查 source_translations，分段拼接的内容永远配不上词条；
-        // - %1 交给模板匹配捕获，detail 原样带出，不参与翻译。
-        kLogEvent logEvent;
-        if (started)
-        {
-            info << logEvent
-                << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功"
-                << eol;
-        }
-        else
-        {
-            warn << logEvent
-                << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
-                    .arg(QString::fromStdString(cpuCoreService->LastErrorText()))
-                    .toStdString()
-                << eol;
-        }
-    });
-    startTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(startTask);
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent
+                    << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::stopCpuCoreUsageCapture()
 {
-    // UI 立即释放最新矩阵；StopTrace + consumer join 交给后台执行，暂停按钮不会卡住界面。
     m_latestCpuCoreUsageSnapshot.reset();
     m_lastCpuCoreUsageSnapshotTime = {};
     m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
     if (m_processTable != nullptr && m_processTable->viewport() != nullptr)
     {
-        // 暂停后立即清掉 CPU 列上一帧扇形，不等待滚动、曝光或下一次整表刷新。
         const int cpuColumn = toColumnIndex(TableColumn::CpuCore);
         const QRect cpuViewportRect(
-            m_processTable->columnViewportPosition(cpuColumn),
-            0,
-            m_processTable->columnWidth(cpuColumn),
-            m_processTable->viewport()->height());
+            m_processTable->columnViewportPosition(cpuColumn), 0,
+            m_processTable->columnWidth(cpuColumn), m_processTable->viewport()->height());
         m_processTable->viewport()->update(
             cpuViewportRect.intersected(m_processTable->viewport()->rect()));
     }
     m_cpuCoreUsageCaptureStarted = false;
-    if (m_cpuCoreUsageService == nullptr || m_cpuCoreUsageStopInProgress)
-    {
-        return;
-    }
-
-    m_cpuCoreUsageStopInProgress = true;
-    // 始终保留并复用同一个 service 对象；Stop 完成后的恢复仍调用同一实例，绝不创建第二个会话。
-    const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreService =
-        m_cpuCoreUsageService;
-    const QPointer<ProcessDock> safeThis(this);
-    QRunnable* stopTask = QRunnable::create([safeThis, cpuCoreService]()
-    {
-        cpuCoreService->Stop();
-        if (safeThis.isNull())
+    requestProcessEtwCapture(
+        m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService, false,
+        [](const bool started, const ks::process::ProcessCpuCoreEtwMonitor& service)
         {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            safeThis,
-            [safeThis]()
+            kLogEvent logEvent;
+            if (started)
             {
-                if (safeThis.isNull())
-                {
-                    return;
-                }
-                safeThis->m_cpuCoreUsageStopInProgress = false;
-                if (safeThis->m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire))
-                {
-                    // 用户在 Stop 完成前已重新进入允许刷新状态时，此处恢复唯一系统级会话。
-                    safeThis->ensureCpuCoreUsageCaptureStarted();
-                }
-            },
-            Qt::QueuedConnection);
-    });
-    stopTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(stopTask);
+                info << logEvent
+                    << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::syncCpuCoreUsageToDetailWindow(
@@ -4763,19 +5121,20 @@ void ProcessDock::pruneProcessNetworkTrafficCounters()
 }
 
 std::unordered_map<std::uint32_t, ProcessDock::NetworkTrafficCounters>
-ProcessDock::snapshotProcessNetworkTrafficCounters() const
+ProcessDock::snapshotProcessNetworkTrafficCounters(
+    const std::shared_ptr<ks::network::ProcessNetworkEtwMonitor>& service)
 {
     // snapshotProcessNetworkTrafficCounters：
     // - 输入：无；
     // - 处理：向 ETW 累计器请求当前 PID 网络累计字节快照；
     // - 返回：刷新线程可安全读取的独立快照。
     std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshot;
-    if (m_processNetworkTrafficService == nullptr)
+    if (service == nullptr)
     {
         return snapshot;
     }
 
-    const auto etwSnapshot = m_processNetworkTrafficService->SnapshotCounters();
+    const auto etwSnapshot = service->SnapshotCounters();
     snapshot.reserve(etwSnapshot.size());
     for (const auto& [processId, counters] : etwSnapshot)
     {
@@ -4789,6 +5148,26 @@ bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
     if (event == nullptr)
     {
         return QWidget::eventFilter(watched, event);
+    }
+
+    // The existing application filter already observes lifecycle events. Only explicit
+    // top-level consumers trigger demand reconciliation; child paint/move events do not.
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+        event->type() == QEvent::WindowStateChange)
+    {
+        const bool detailEvent = qobject_cast<ProcessDetailWindow*>(watched) != nullptr &&
+            std::any_of(m_detailWindowByIdentity.cbegin(), m_detailWindowByIdentity.cend(),
+                [watched](const auto& pair) { return pair.second.data() == watched; });
+        if ((watched == window() || detailEvent) && !m_etwDemandSyncScheduled)
+        {
+            m_etwDemandSyncScheduled = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_etwDemandSyncScheduled = false;
+                syncProcessEtwCaptureDemand();
+                updateProcessActivityStatusLabel();
+            });
+        }
     }
 
     // 后端状态变化由表格发布；不轮询，也不在每帧重新设置状态文字。
@@ -4881,6 +5260,18 @@ void ProcessDock::showEvent(QShowEvent* event)
 
     if (m_initialRefreshScheduled)
     {
+        syncProcessEtwCaptureDemand();
+        if (isProcessActivityRefreshAllowedNow())
+        {
+            requestAsyncRefresh(true);
+        }
+        // Show 内部的可见性尚未稳定；只消费隐藏期间积累的展示，不额外枚举。
+        QTimer::singleShot(0, this, [this]() {
+            if (m_processTableProjectionPending && isProcessListPageVisibleForRecording())
+            {
+                rebuildTable();
+            }
+        });
         return;
     }
 
@@ -4900,17 +5291,26 @@ void ProcessDock::showEvent(QShowEvent* event)
     m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
     updateProcessActivityStatusLabel();
     requestAsyncRefresh(true);
 
     // showEvent 内部阶段列表页的 isVisible() 可能尚未稳定，延迟到事件循环首轮再启动周期计时器。
     QTimer::singleShot(0, this, [this]() {
+        syncProcessEtwCaptureDemand();
         if (m_refreshTimer != nullptr && isProcessActivityRefreshAllowedNow())
         {
             m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
         }
         updateProcessActivityStatusLabel();
     });
+}
+
+void ProcessDock::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    syncProcessEtwCaptureDemand();
+    updateProcessActivityStatusLabel();
 }
 
 bool ProcessDock::invokeMainWindowPidListSlot(const char* methodName, const QString& pidListText) const
@@ -4988,7 +5388,7 @@ namespace
     class ThreadRowThemeDelegate final : public QStyledItemDelegate
     {
     public:
-        explicit ThreadRowThemeDelegate(QTreeWidget* table)
+        explicit ThreadRowThemeDelegate(QTreeView* table)
             : QStyledItemDelegate(table)
         {
         }
@@ -5032,6 +5432,132 @@ void ProcessDock::refreshThemeVisuals()
         }
     }
 }
+
+const ProcessDock::NavigationDefinitions& ProcessDock::navigationDefinitions()
+{
+    // These rows are consumed by both the real tab factories and the cold catalog.
+    static const NavigationDefinitions definitions{{
+        {"list", "", "process.tab.list", "进程列表",
+            {QStringLiteral("PID"), QStringLiteral("CPU"), QStringLiteral("GPU")}, true},
+        {"threads", "", "process.tab.threads", "线程列表",
+            {QStringLiteral("PID"), QStringLiteral("TID")}, false},
+        {"cross_view", "", "process.tab.cross_view", "Process Cross-View",
+            {QStringLiteral("Cross-View"), QStringLiteral("R0")}, false},
+        {"cross_view.process", "cross_view", "process.cross_view.process_tab", "Process Cross-View",
+            {QStringLiteral("EPROCESS"), QStringLiteral("PID")}, true},
+        {"cross_view.thread", "cross_view", "process.cross_view.thread_tab", "Thread Cross-View",
+            {QStringLiteral("ETHREAD"), QStringLiteral("TID")}, false},
+        {"create", "", "process.tab.create", "创建进程",
+            {QStringLiteral("CreateProcessW"), QStringLiteral("Token"), QStringLiteral("lpApplicationName"), QStringLiteral("lpCommandLine")}, false}
+    }};
+    return definitions;
+}
+
+void ProcessDock::registerNavigationTab(const NavigationPage page, QTabWidget* const tabs,
+    QWidget* const widget, const QIcon& icon)
+{
+    const auto row = static_cast<std::size_t>(page);
+    const auto& definitions = navigationDefinitions();
+    if (row >= definitions.size() || tabs == nullptr || widget == nullptr) return;
+    const auto& definition = definitions[row];
+    const QString key = QString::fromUtf8(definition.translationKey);
+    const QString fallback = QString::fromUtf8(definition.fallbackTitle);
+    const QString title = ks::i18n::LanguageManager::instance().text(key, fallback);
+    const int existingIndex = tabs->indexOf(widget);
+    if (existingIndex < 0) tabs->addTab(widget, icon, title);
+    else
+    {
+        tabs->setTabText(existingIndex, title);
+        tabs->setTabIcon(existingIndex, icon);
+    }
+    ks::i18n::LanguageManager::instance().bindTab(tabs, widget, key, fallback);
+    m_navigationPages[row] = widget;
+    m_navigationTabs[row] = tabs;
+}
+
+ks::ui::PageNavigationCatalog ProcessDock::navigationCatalog(const ProcessDock* const existing)
+{
+    const auto& definitions = navigationDefinitions();
+    ks::ui::PageNavigationCatalog result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (std::size_t row = 0; row < definitions.size(); ++row)
+    {
+        const auto& definition = definitions[row];
+        ks::ui::PageNavigationDescriptor descriptor;
+        descriptor.id = QString::fromUtf8(definition.id);
+        descriptor.parentId = QString::fromUtf8(definition.parentId);
+        const QString fallback = QString::fromUtf8(definition.fallbackTitle);
+        descriptor.title = ks::i18n::LanguageManager::instance().text(QString::fromUtf8(definition.translationKey), fallback);
+        descriptor.searchTexts = definition.searchTexts;
+        descriptor.searchTexts.append(fallback);
+        descriptor.current = definition.defaultCurrent;
+        if (existing != nullptr)
+        {
+            const auto widget = existing->m_navigationPages[row];
+            const auto tabs = existing->m_navigationTabs[row];
+            const int index = widget != nullptr && tabs != nullptr ? tabs->indexOf(widget.data()) : -1;
+            descriptor.visible = index >= 0 && tabs->isTabVisible(index);
+            descriptor.enabled = index >= 0 && tabs->isEnabled() && tabs->isTabEnabled(index);
+            descriptor.current = index >= 0 && tabs->currentWidget() == widget.data();
+            if (index >= 0) descriptor.title = tabs->tabText(index);
+        }
+        descriptor.searchTexts.append(descriptor.title);
+        descriptor.searchTexts.removeDuplicates();
+        result.append(std::move(descriptor));
+    }
+    return result;
+}
+
+QWidget* ProcessDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto& definitions = navigationDefinitions();
+    const auto found = std::find_if(definitions.begin(), definitions.end(), [&id](const NavigationDefinition& definition) {
+        return id == QString::fromUtf8(definition.id);
+    });
+    if (found == definitions.end()) return nullptr;
+    std::vector<std::size_t> chain;
+    auto row = static_cast<std::size_t>(found - definitions.begin());
+    for (;;)
+    {
+        chain.push_back(row);
+        const QString parentId = QString::fromUtf8(definitions[row].parentId);
+        if (parentId.isEmpty()) break;
+        const auto parent = std::find_if(definitions.begin(), definitions.end(), [&parentId](const NavigationDefinition& definition) {
+            return parentId == QString::fromUtf8(definition.id);
+        });
+        if (parent == definitions.end() || chain.size() >= definitions.size()) return nullptr;
+        row = static_cast<std::size_t>(parent - definitions.begin());
+    }
+    // Validate the whole route before its first selection, then revalidate each hop.
+    const auto available = [this](const std::size_t index) {
+        const auto widget = m_navigationPages[index];
+        const auto tabs = m_navigationTabs[index];
+        const int tabIndex = widget != nullptr && tabs != nullptr ? tabs->indexOf(widget.data()) : -1;
+        return tabIndex >= 0 && tabs->isTabVisible(tabIndex) && tabs->isEnabled()
+            && tabs->isTabEnabled(tabIndex);
+    };
+    for (const auto index : chain) if (!available(index)) return nullptr;
+    const QPointer<ProcessDock> owner(this);
+    QPointer<QWidget> target = m_navigationPages[chain.front()];
+    for (auto hop = chain.rbegin(); hop != chain.rend(); ++hop)
+    {
+        if (owner.isNull() || !available(*hop)) return nullptr;
+        const auto tabs = m_navigationTabs[*hop];
+        const auto widget = m_navigationPages[*hop];
+        if (tabs->currentWidget() != widget.data())
+            tabs->setCurrentWidget(widget.data()); // original currentChanged semantics stay intact
+        if (owner.isNull() || tabs.isNull() || widget.isNull()
+            || tabs->currentWidget() != widget.data() || !available(*hop)) return nullptr;
+    }
+    if (owner.isNull()) return nullptr;
+    for (const auto index : chain)
+    {
+        if (!available(index) || m_navigationTabs[index]->currentWidget() != m_navigationPages[index].data())
+            return nullptr;
+    }
+    return target.data();
+}
+
 
 void ProcessDock::initializeUi()
 {
@@ -5633,6 +6159,7 @@ void ProcessDock::handleProcessWindowPickerRelease(const QPoint& globalPos)
     m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
     if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
     {
         const bool oldUpdating = m_activityTimelineSliderUpdating;
@@ -5753,6 +6280,12 @@ void ProcessDock::initializeProcessTable()
     m_processSortProxy->setSourceModel(m_processTableModel);
     static_cast<ProcessTableSortProxy*>(m_processSortProxy)->setHeaderTexts(ProcessTableHeaders);
     m_processTable->setModel(m_processSortProxy);
+    // FlatTableModel already translates DisplayRole/headers on demand; its
+    // readonly cells must not be walked by runtime compatibility translation.
+    m_processTableModel->setProperty("ks_i18n_preserve_model_data", true);
+    m_processTable->setProperty("ks_i18n_preserve_model_data", true);
+    ks::ui::RegisterCompleteExportTableProducer(m_processTable, [guard = QPointer<ProcessDock>(this)]()
+    { return guard ? guard->makeProcessCompleteExportTable() : ks::ui::CompleteExportPublishedTable{}; });
 
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     // 选择模式：
@@ -5818,12 +6351,7 @@ void ProcessDock::initializeProcessTable()
     m_processPageLayout->addWidget(m_processTable, 1);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
-    m_sideTabWidget->addTab(m_processListPage, blueTintedIcon(IconProcessMain), "进程列表");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_processListPage,
-        QStringLiteral("process.tab.list"),
-        QStringLiteral("进程列表"));
+    registerNavigationTab(NavigationPage::List, m_sideTabWidget, m_processListPage, blueTintedIcon(IconProcessMain));
     m_sideTabWidget->setCurrentIndex(0);
     refreshSideTabIconContrast();
 }
@@ -6286,12 +6814,7 @@ void ProcessDock::initializeCreateProcessPage()
     m_siFillAttributeEdit->setToolTip("STARTUPINFO.dwFillAttribute：控制台颜色/样式位；可在下方复选框组合。");
     m_tokenDesiredAccessEdit->setToolTip("Token DesiredAccess：令牌访问掩码；可在下方复选框组合。");
 
-    m_sideTabWidget->addTab(m_createProcessPage, blueTintedIcon(IconStart), "创建进程");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_createProcessPage,
-        QStringLiteral("process.tab.create"),
-        QStringLiteral("创建进程"));
+    registerNavigationTab(NavigationPage::Create, m_sideTabWidget, m_createProcessPage, blueTintedIcon(IconStart));
     refreshSideTabIconContrast();
     initializeCreateProcessConnections();
 }
@@ -6359,6 +6882,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         kLogEvent logEvent;
         info << logEvent
             << "[ProcessDock] 内核进程对比开关变更, enabled="
@@ -6384,6 +6908,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         // 用户手动切换复选框后退出表头触发的普通扁平模式，并重置友好视图排序会话。
         m_flatListForcedByHeaderSort = false;
         m_friendlySortActive = false;
@@ -6406,6 +6931,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
 
         const int customIndex = currentCustomViewIndex();
         kLogEvent logEvent;
@@ -6446,6 +6972,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         if (m_refreshTimer != nullptr)
         {
             if (isProcessActivityRefreshAllowedNow())
@@ -6474,7 +7001,7 @@ void ProcessDock::initializeConnections()
         m_processIconPathsInFlight.clear();
         stopProcessNetworkTrafficCapture();
         stopCpuCoreUsageCapture();
-        m_threadCounterSampleByIdentity.clear();
+        resetThreadCounterBaseline();
         updateProcessActivityStatusLabel();
     });
 
@@ -6505,10 +7032,12 @@ void ProcessDock::initializeConnections()
 
     // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
-        m_activitySamples.clear();
+        retireProcessActivityHistory();
+        if (m_activityChartWidget != nullptr) m_activityChartWidget->notifyHistoryReset();
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         m_activityNextSequence = 0;
         m_activityRecordingStartTick100ns = steadyNow100ns();
         m_activityTimelinePinnedToLatest = true;
@@ -6565,20 +7094,9 @@ void ProcessDock::initializeConnections()
     // - 未勾选时，进程页隐藏后周期刷新和记录都会自动暂停；
     // - 勾选后允许后台继续刷新，除非“不记录历史”主动禁止写记录。
     connect(m_activityBackgroundRecordCheck, &QCheckBox::toggled, this, [this]() {
+        syncProcessEtwCaptureDemand();
         updateProcessActivityStatusLabel();
-        if (m_refreshTimer != nullptr && m_monitoringEnabled)
-        {
-            if (isProcessActivityRefreshAllowedNow())
-            {
-                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
-            }
-            else
-            {
-                m_refreshTimer->stop();
-                stopCpuCoreUsageCapture();
-            }
-        }
-        if (m_monitoringEnabled && isProcessActivityRefreshAllowedNow())
+        if (isProcessActivityRefreshAllowedNow())
         {
             requestAsyncRefresh(true);
         }
@@ -6587,6 +7105,7 @@ void ProcessDock::initializeConnections()
     // 不记录历史保留已有样本；切换到最近 N 次或减少 N 时立即裁剪缓存。
     const auto applyActivityHistoryRetention = [this]() {
         m_activityHistoryMode = static_cast<ActivityHistoryMode>(m_activityHistoryModeCombo->currentData().toInt());
+        m_activitySamples.NotePolicyChange(); // Accepted policy generations never publish through worker results.
         m_activityHistoryLimitSpin->setVisible(m_activityHistoryMode == ActivityHistoryMode::Recent);
         const std::size_t removedSampleCount = trimProcessActivitySamples();
         refreshProcessActivityTimeline(removedSampleCount);
@@ -6688,8 +7207,13 @@ void ProcessDock::initializeConnections()
         refreshSideTabIconContrast();
 
         QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
+        syncProcessEtwCaptureDemand();
         if (currentPage == m_processListPage)
         {
+            if (m_processTableProjectionPending)
+            {
+                rebuildTable();
+            }
             if (m_monitoringEnabled && m_refreshTimer != nullptr && !m_refreshTimer->isActive())
             {
                 m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
@@ -6702,21 +7226,10 @@ void ProcessDock::initializeConnections()
             }
             return;
         }
-        if (m_monitoringEnabled &&
-            m_activityBackgroundRecordCheck != nullptr &&
-            !m_activityBackgroundRecordCheck->isChecked())
-        {
-            if (m_refreshTimer != nullptr)
-            {
-                m_refreshTimer->stop();
-            }
-            // 页面自动暂停刷新时同步后台停止唯一 CSwitch 会话，避免无人消费仍常驻高频事件。
-            stopCpuCoreUsageCapture();
-        }
         if (currentPage == m_threadPage)
         {
             updateProcessActivityStatusLabel();
-            requestAsyncThreadRefresh(true);
+            activateThreadPage();
             return;
         }
         updateProcessActivityStatusLabel();
@@ -7545,29 +8058,14 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const std::uint32_t cpuCount = m_logicalCpuCount;
     auto previousCache = m_cacheByIdentity;
     auto previousCounters = m_counterSampleByIdentity;
-    ensureProcessNetworkTrafficCaptureStarted();
-    auto networkTrafficSnapshot = snapshotProcessNetworkTrafficCounters();
-    // CPU核心列可见或详情窗口需要数据时，才常驻同一个系统级 CSwitch 会话。
-    // 强制刷新若来自隐藏页面或不需要逐核心数据，也不能偷偷保留高频会话。
-    const bool cpuCoreUsageDemanded =
-        isProcessColumnVisible(TableColumn::CpuCore) ||
-        std::any_of(
-            m_detailWindowByIdentity.cbegin(),
-            m_detailWindowByIdentity.cend(),
-            [](const auto& detailWindowPair)
-            {
-                return detailWindowPair.second != nullptr;
-            });
-    const bool cpuCoreCaptureAllowed =
-        isProcessActivityRefreshAllowedNow() && cpuCoreUsageDemanded;
-    if (cpuCoreCaptureAllowed)
-    {
-        ensureCpuCoreUsageCaptureStarted();
-    }
-    else if (m_cpuCoreUsageCaptureStarted)
-    {
-        stopCpuCoreUsageCapture();
-    }
+    syncProcessEtwCaptureDemand();
+    const auto networkService = m_processNetworkTrafficCaptureStarted
+        ? m_processNetworkTrafficService : nullptr;
+    const auto networkLifecycle = m_processNetworkCaptureLifecycle;
+    const auto networkCaptureGeneration = networkLifecycle->Generation();
+    const bool resetNetworkBaseline = m_processNetworkBaselineResetRequired;
+    const bool cpuCoreCaptureAllowed = m_cpuCoreUsageCaptureStarted;
+    const std::uint64_t cpuCoreCaptureGeneration = m_cpuCoreCaptureLifecycle->Generation();
     const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreUsageService =
         cpuCoreCaptureAllowed ? m_cpuCoreUsageService : nullptr;
     const std::chrono::steady_clock::time_point cpuCoreSnapshotNow =
@@ -7622,18 +8120,48 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         forceUiRefresh,
         previousCache = std::move(previousCache),
         previousCounters = std::move(previousCounters),
-        networkTrafficSnapshot = std::move(networkTrafficSnapshot),
+        networkService,
+        networkLifecycle,
+        networkCaptureGeneration,
+        resetNetworkBaseline,
         cpuCoreUsageService,
+        cpuCoreCaptureLifecycle = m_cpuCoreCaptureLifecycle,
+        cpuCoreCaptureGeneration,
         cpuCoreSnapshotDue,
         previousCpuCoreUsageSnapshot]() mutable {
+        std::unordered_map<std::uint32_t, NetworkTrafficCounters> networkTrafficSnapshot;
+        const bool networkSnapshotValid = networkService != nullptr &&
+            networkLifecycle->SnapshotIfCurrent(networkCaptureGeneration, [&]()
+            {
+                networkTrafficSnapshot = ProcessDock::snapshotProcessNetworkTrafficCounters(networkService);
+            });
+        if (resetNetworkBaseline || !networkSnapshotValid)
+        {
+            // Preserve CPU/IO/memory baselines. The first post-pause network interval starts
+            // at this snapshot and cannot spread hidden time across an instantaneous rate.
+            for (auto& pair : previousCounters)
+            {
+                const auto cached = previousCache.find(pair.first);
+                const auto counter = cached == previousCache.end()
+                    ? networkTrafficSnapshot.end()
+                    : networkTrafficSnapshot.find(cached->second.record.pid);
+                pair.second.networkRxBytes = counter == networkTrafficSnapshot.end() ? 0 : counter->second.rxBytes;
+                pair.second.networkTxBytes = counter == networkTrafficSnapshot.end() ? 0 : counter->second.txBytes;
+            }
+        }
+
         // 先在工作线程构造完整 PID/TID×核心快照，ETW 回调锁竞争不会占用 GUI 事件循环。
         std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> cpuCoreUsageSnapshot =
             previousCpuCoreUsageSnapshot;
         if (cpuCoreUsageService != nullptr && cpuCoreSnapshotDue)
         {
             // 即使异步 Start 尚未完成也取得带处理器拓扑的失效态快照，让 UI 画灰槽而非假 0%。
-            cpuCoreUsageSnapshot = std::make_shared<ks::process::CpuCoreUsageSnapshot>(
-                cpuCoreUsageService->SnapshotAndReset());
+            cpuCoreUsageSnapshot.reset();
+            (void)cpuCoreCaptureLifecycle->SnapshotIfCurrent(cpuCoreCaptureGeneration, [&]()
+            {
+                cpuCoreUsageSnapshot = std::make_shared<ks::process::CpuCoreUsageSnapshot>(
+                    cpuCoreUsageService->SnapshotAndReset());
+            });
         }
 
         ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
@@ -7648,6 +8176,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             networkTrafficSnapshot,
             cpuCount);
         refreshResult.cpuCoreUsageSnapshot = std::move(cpuCoreUsageSnapshot);
+        refreshResult.cpuCoreCaptureGeneration = cpuCoreCaptureGeneration;
+        refreshResult.networkCaptureGeneration = networkCaptureGeneration;
+        refreshResult.networkSnapshotValid = networkSnapshotValid;
 
         if (guard == nullptr)
         {
@@ -7711,13 +8242,20 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     const auto elapsedMs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - m_lastRefreshStartTime).count());
 
+    if (refreshResult.networkSnapshotValid &&
+        refreshResult.networkCaptureGeneration == m_processNetworkCaptureLifecycle->Generation())
+    {
+        m_processNetworkBaselineResetRequired = false;
+    }
+
     restorePersistedAffinityForNewProcesses(refreshResult);
 
     // 逐核心快照与本轮进程缓存来自同一次 ticket；暂停后到达的旧结果不得复活最后一帧。
     const std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> previousCpuCoreSnapshot =
         m_latestCpuCoreUsageSnapshot;
     if (m_monitoringEnabled &&
-        m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire))
+        m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire) &&
+        refreshResult.cpuCoreCaptureGeneration == m_cpuCoreCaptureLifecycle->Generation())
     {
         m_latestCpuCoreUsageSnapshot = std::move(refreshResult.cpuCoreUsageSnapshot);
     }
@@ -7783,10 +8321,12 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     // 每轮刷新立即为全部进程映像投递后台图标查询，表格不再等待滚动空闲期。
     queueProcessIconExtractionsForCurrentProcesses();
 
+    appendCurrentPerformanceSamplesToDetailWindows();
     appendProcessActivitySample();
-    if (isProcessActivityTableSnapshotActive())
+    if (!isProcessListPageVisibleForRecording() && !isProcessActivityTableSnapshotActive())
     {
-        rebuildProcessActivityTableSnapshotRecords();
+        // 规范数据及历史照常推进；隐藏主表只记一次待展示状态。
+        m_processTableProjectionPending = true;
     }
     const bool processTableRebuilt = shouldRebuildProcessTableForRefresh(forceUiRefresh);
     if (processTableRebuilt)
@@ -7794,8 +8334,8 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
         rebuildTable();
         m_lastProcessTableRebuildTime = nowTime;
     }
-    else if (cpuCoreSnapshotChanged &&
-        m_processTable != nullptr &&
+    else if (cpuCoreSnapshotChanged && isProcessListPageVisibleForRecording() &&
+        !isProcessActivityTableSnapshotActive() && m_processTable != nullptr &&
         m_processTable->viewport() != nullptr)
     {
         // 逐核心快照独立于整表 2 秒节流：只重绘 CPU 列可见矩形，不触碰其它列或模型行。
@@ -7980,10 +8520,19 @@ void ProcessDock::restorePersistedAffinityForNewProcesses(RefreshResult& refresh
 
 bool ProcessDock::shouldRebuildProcessTableForRefresh(const bool forceUiRefresh) const
 {
-    // 强制刷新、历史快照表格、首轮显示必须立刻重绘。
-    if (forceUiRefresh || isProcessActivityTableSnapshotActive() || m_lastProcessTableRebuildTime.time_since_epoch().count() == 0)
+    if (!isProcessListPageVisibleForRecording())
+    {
+        return false;
+    }
+    // 明确操作及重显消费一次；不变的冻结样本不被每轮实时采样重新投影。
+    if (forceUiRefresh || m_processTableProjectionPending || m_lastProcessTableRebuildTime.time_since_epoch().count() == 0)
     {
         return true;
+    }
+
+    if (isProcessActivityTableSnapshotActive())
+    {
+        return !isProcessActivitySnapshotProjectionCurrent();
     }
 
     // 非强制后台监视按独立 UI 间隔节流，避免高频采样时重建整张进程表。
@@ -8724,6 +9273,11 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
 void ProcessDock::rebuildTable()
 {
+    if (!isProcessListPageVisibleForRecording())
+    {
+        m_processTableProjectionPending = true;
+        return;
+    }
     if (m_processTable == nullptr || m_processTableModel == nullptr || m_processSortProxy == nullptr)
     {
         return;
@@ -8732,7 +9286,7 @@ void ProcessDock::rebuildTable()
     // 右键菜单保存的是当前模型行。菜单关闭前禁止替换模型，
     // 否则周期刷新会让菜单动作落到另一进程。
     const QPointer<ProcessDock> safeThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(
         this,
         QStringLiteral("process-main-table-rebuild"),
         {m_processTable},
@@ -8811,6 +9365,7 @@ void ProcessDock::rebuildTable()
 
     // 预计算所有资源/工作量列的本轮最大幅值，供单元格强度染色共用。
     // CPU/GPU 是 0~100 的绝对百分比；其它指标按当前可见进程中的同列最大幅值归一化。
+    const auto previousHighlightMaximums = m_processUsageHighlightMaximums;
     m_processUsageHighlightMaximums.fill(0.0);
     for (const DisplayRow& displayRow : displayRows)
     {
@@ -8898,6 +9453,10 @@ void ProcessDock::rebuildTable()
         }
         tableRow.depth = displayRow.depth;
         tableRow.hasChildren = displayRow.hasChildren;
+        tableRow.expanded = tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate
+            ? m_friendlyExpandedStateByKey.value(tableRow.expansionKey, false)
+            : tableRow.rowKind == ProcessTableRowKind::GroupHeader
+                ? m_friendlyExpandedStateByKey.value(tableRow.expansionKey, true) : tableRow.hasChildren;
         tableRow.isNew = displayRow.isNew;
         tableRow.isExited = displayRow.isExited;
         tableRow.isKernelOnly = displayRow.isKernelOnly;
@@ -9001,9 +9560,18 @@ void ProcessDock::rebuildTable()
     }
     m_processTable->setUpdatesEnabled(false);
 
+    const std::weak_ptr<const ks::process::CpuCoreUsageSnapshot> currentCpuSnapshot(m_latestCpuCoreUsageSnapshot);
+    const bool cpuSnapshotChanged = currentCpuSnapshot.owner_before(m_presentedCpuCoreUsageSnapshot)
+        || m_presentedCpuCoreUsageSnapshot.owner_before(currentCpuSnapshot);
+    const bool cpuSizeChanged = m_presentedLogicalCpuCount != m_logicalCpuCount;
+    m_processTableModel->setRowChangeResolver([this, previousHighlightMaximums, cpuSnapshotChanged, cpuSizeChanged]
+        (const ProcessTableRow& before, const ProcessTableRow& after)
+        { return processTableChanges(before, after, previousHighlightMaximums, cpuSnapshotChanged, cpuSizeChanged); });
     const auto modelApplyStartTime = std::chrono::steady_clock::now();
     const ProcessTableModel::UpdateStats modelUpdateStats =
         m_processTableModel->setRows(std::move(tableRows));
+    m_presentedCpuCoreUsageSnapshot = currentCpuSnapshot;
+    m_presentedLogicalCpuCount = m_logicalCpuCount;
     const auto modelApplyElapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - modelApplyStartTime).count();
 
@@ -9140,6 +9708,9 @@ void ProcessDock::rebuildTable()
             horizontalScrollBar->maximum()));
     }
 
+    // 仅实际提交完成后清 dirty；菜单延迟回调仍保留待展示状态。
+    m_processTableProjectionPending = false;
+    m_lastProcessTableRebuildTime = std::chrono::steady_clock::now();
     // 表格重建完成后恢复刷新绘制。
     m_processTable->setUpdatesEnabled(true);
     m_processTable->viewport()->update();
@@ -9416,26 +9987,12 @@ bool ProcessDock::isProcessListPageVisibleForRecording() const
     return m_sideTabWidget != nullptr &&
         m_processListPage != nullptr &&
         m_sideTabWidget->currentWidget() == m_processListPage &&
-        m_processListPage->isVisible();
+        m_processListPage->isVisible() && !window()->isMinimized();
 }
 
 bool ProcessDock::isProcessActivityRefreshAllowedNow() const
 {
-    // 刷新允许逻辑只关心“是否应该继续枚举列表”：
-    // - 暂停按钮关闭后不再刷新；
-    // - 当前在进程列表页时允许刷新；
-    // - 后台保持开关允许离开进程列表页后继续刷新。
-    if (!m_monitoringEnabled)
-    {
-        return false;
-    }
-
-    if (m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
-    {
-        return true;
-    }
-
-    return isProcessListPageVisibleForRecording();
+    return currentEtwCaptureDemand().RefreshAllowed();
 }
 
 bool ProcessDock::isProcessActivityRecordingAllowedNow() const
@@ -9443,7 +10000,8 @@ bool ProcessDock::isProcessActivityRecordingAllowedNow() const
     // 记录允许逻辑在刷新允许之上额外叠加“不记录历史”：
     // - 这样可以继续更新下方列表；
     // - 同时不污染上方时间轴样本。
-    if (!isProcessActivityRefreshAllowedNow())
+    // Visible independent details require sampling, not implicit background history.
+    if (!currentEtwCaptureDemand().RecordingAllowed())
     {
         return false;
     }
@@ -9590,10 +10148,6 @@ void ProcessDock::appendProcessActivitySample()
     {
         m_activityChartWidget->notifySampleAppended();
     }
-    if (!m_activitySamples.empty())
-    {
-        appendProcessActivitySampleToDetailWindows(m_activitySamples.back());
-    }
     refreshProcessActivityTimeline(removedSampleCount);
     refreshProcessActivityChart();
     updateProcessActivityStatusLabel();
@@ -9637,38 +10191,86 @@ void ProcessDock::synchronizeDetailWindowPerformanceHistory(
     detailWindow->setPerformanceHistory(std::move(history));
 }
 
-void ProcessDock::appendProcessActivitySampleToDetailWindows(const ProcessActivitySample& sample)
+void ProcessDock::appendCurrentPerformanceSamplesToDetailWindows()
 {
+    if (!m_monitoringEnabled)
+    {
+        return;
+    }
+    // Preserve canonical history for every opened detail while global recording is
+    // authorized. Presentation still belongs to the detail's visible-page gate.
+    const bool archiveAllOpenDetails = isProcessActivityRecordingAllowedNow();
+    const std::int64_t sampleTime = QDateTime::currentMSecsSinceEpoch();
     for (const auto& detailWindowPair : m_detailWindowByIdentity)
     {
         ProcessDetailWindow* const detailWindow = detailWindowPair.second.data();
-        if (detailWindow == nullptr)
+        if (detailWindow == nullptr ||
+            (!archiveAllOpenDetails && (!detailWindow->isVisible() || detailWindow->isMinimized())))
         {
             continue;
         }
-
-        const auto processPointIt = std::find_if(
-            sample.processes.cbegin(),
-            sample.processes.cend(),
-            [&detailWindowPair](const ProcessActivityProcessPoint& processPoint) {
-                return processPoint.identityKey == detailWindowPair.first;
-            });
-        if (processPointIt == sample.processes.cend())
+        const auto cached = m_cacheByIdentity.find(detailWindowPair.first);
+        if (cached == m_cacheByIdentity.end() || cached->second.isExitedInLatestRound)
         {
             continue;
         }
-
+        const auto& record = cached->second.record;
         ProcessDetailWindow::PerformanceHistorySample detailSample;
-        detailSample.unixMilliseconds = sample.unixMilliseconds;
-        detailSample.cpuPercent = processPointIt->cpuPercent;
-        detailSample.cpuCorePercent = processPointIt->cpuCorePercent;
-        detailSample.memoryMB = processPointIt->workingSetMB;
-        detailSample.diskMBps = processPointIt->diskMBps;
-        detailSample.networkRxKBps = processPointIt->netRxKBps;
-        detailSample.networkTxKBps = processPointIt->netTxKBps;
-        detailSample.gpuPercent = processPointIt->gpuPercent;
+        detailSample.unixMilliseconds = sampleTime;
+        detailSample.cpuPercent = record.cpuPercent;
+        detailSample.cpuCorePercent = record.cpuCorePercent;
+        detailSample.memoryMB = record.workingSetMB;
+        detailSample.diskMBps = record.diskMBps;
+        detailSample.networkRxKBps = record.netRxKBps;
+        detailSample.networkTxKBps = record.netTxKBps;
+        detailSample.gpuPercent = record.gpuPercent;
         detailWindow->appendPerformanceHistorySample(detailSample);
     }
+}
+
+void ProcessDock::scheduleProcessActivityHistoryRetirement()
+{
+    if (m_activitySamples.retiredSize() == 0) return;
+    if (m_activityHistoryRetirementTimer == nullptr)
+    {
+        m_activityHistoryRetirementTimer = new QTimer(this);
+        m_activityHistoryRetirementTimer->setInterval(16);
+        connect(m_activityHistoryRetirementTimer, &QTimer::timeout,
+            this, &ProcessDock::pumpProcessActivityHistoryRetirement);
+    }
+    if (!m_activityHistoryRetirementTimer->isActive()) m_activityHistoryRetirementTimer->start();
+    pumpProcessActivityHistoryRetirement();
+}
+
+void ProcessDock::pumpProcessActivityHistoryRetirement()
+{
+    // O(32) pointer handoff only: no process strings/vectors are copied or freed here.
+    const auto lane = m_activityHistoryRetirementLane;
+    if (lane->TryBegin(m_activitySamples, 32))
+    {
+        QThreadPool::globalInstance()->start(QRunnable::create([lane]() { lane->Drain(); }));
+    }
+    if (m_activitySamples.retiredSize() == 0 && m_activityHistoryRetirementTimer != nullptr)
+    {
+        m_activityHistoryRetirementTimer->stop();
+    }
+}
+
+void ProcessDock::retireProcessActivityHistory(const bool finalizing)
+{
+    if (finalizing)
+    {
+        if (m_activityHistoryRetirementTimer != nullptr) m_activityHistoryRetirementTimer->stop();
+        const auto lane = m_activityHistoryRetirementLane;
+        // One final O(1) backing swap. The active worker, if any, consumes it itself.
+        if (lane->Finalize(m_activitySamples))
+        {
+            QThreadPool::globalInstance()->start(QRunnable::create([lane]() { lane->Drain(); }));
+        }
+        return;
+    }
+    m_activitySamples.Clear();
+    scheduleProcessActivityHistoryRetirement();
 }
 
 std::size_t ProcessDock::trimProcessActivitySamples()
@@ -9679,23 +10281,14 @@ std::size_t ProcessDock::trimProcessActivitySamples()
         return 0;
     }
     const std::size_t sampleLimit = static_cast<std::size_t>(m_activityHistoryLimitSpin->value());
-    if (m_activitySamples.size() <= sampleLimit)
-    {
-        return 0;
-    }
-    const std::size_t removeCount = m_activitySamples.size() - sampleLimit;
-    for (std::size_t removeIndex = 0; removeIndex < removeCount; ++removeIndex)
-    {
-        m_activitySamples.pop_front();
-    }
+    const std::size_t removeCount = m_activitySamples.TrimTo(sampleLimit);
     if (m_activityTableSnapshotIndex >= 0)
     {
-        m_activityTableSnapshotIndex -= static_cast<int>(removeCount);
-        if (m_activityTableSnapshotIndex < 0)
-        {
-            m_activityTableSnapshotIndex = -1;
-        }
+        const auto oldIndex = static_cast<std::size_t>(m_activityTableSnapshotIndex);
+        m_activityTableSnapshotIndex = oldIndex < removeCount
+            ? -1 : static_cast<int>(oldIndex - removeCount);
     }
+    scheduleProcessActivityHistoryRetirement();
     return removeCount;
 }
 
@@ -9708,8 +10301,9 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
 
     const bool oldUpdating = m_activityTimelineSliderUpdating;
     const int sampleCount = static_cast<int>(m_activitySamples.size());
+    const auto oldTimelineIndex = static_cast<std::size_t>(std::max(0, m_activityTimelineSlider->value()));
     const int previousValue = (removedSampleCount > 0 && !m_activityTimelinePinnedToLatest)
-        ? std::max(0, m_activityTimelineSlider->value() - static_cast<int>(removedSampleCount))
+        ? static_cast<int>(oldTimelineIndex > removedSampleCount ? oldTimelineIndex - removedSampleCount : 0)
         : m_activityTimelineSlider->value();
     const int previousMaximum = m_activityTimelineSlider->maximum();
     const bool snapshotActive = isProcessActivityTableSnapshotActive(); // 最新索引仍可能是已选快照。
@@ -9743,6 +10337,7 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
             m_activityTableSnapshotActive = false;
             m_activityTableSnapshotIndex = -1;
             m_activityTableSnapshotRecords.clear();
+            m_activityTableSnapshotProjectionValid = false;
         }
         else if (isProcessActivityTableSnapshotActive())
         {
@@ -9779,6 +10374,7 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         if (m_activitySnapshotLabel != nullptr && m_activitySnapshotLabel->isVisible())
         {
             m_activitySnapshotLabel->setText(processContextText(
@@ -9815,6 +10411,7 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         previewProcessActivitySnapshotForIndex(-1);
         rebuildTable();
         updateProcessActivityStatusLabel();
@@ -9837,6 +10434,7 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
     if (followLatest)
     {
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
     }
     if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
     {
@@ -9857,11 +10455,29 @@ bool ProcessDock::isProcessActivityTableSnapshotActive() const
     return m_activityTableSnapshotActive;
 }
 
+bool ProcessDock::isProcessActivitySnapshotProjectionCurrent() const
+{
+    if (!m_activityTableSnapshotProjectionValid ||
+        m_activityTableSnapshotRecordingTick != m_activityRecordingStartTick100ns)
+    {
+        return false;
+    }
+    // 已淘汰的冻结样本仍由独立记录持有，不能映射到新的索引或实时进程。
+    if (m_activityTableSnapshotIndex < 0 ||
+        m_activityTableSnapshotIndex >= static_cast<int>(m_activitySamples.size()))
+    {
+        return true;
+    }
+    return m_activityTableSnapshotSequence ==
+        m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)].sequence;
+}
+
 void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
 {
     if (!isProcessActivityTableSnapshotActive())
     {
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         return;
     }
 
@@ -9872,10 +10488,17 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         return;
     }
 
+    if (isProcessActivitySnapshotProjectionCurrent())
+    {
+        return;
+    }
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
 
     const ProcessActivitySample& sample =
         m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)];
+    const std::string snapshotTime = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds)
+        .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")).toStdString();
     m_activityTableSnapshotRecords.reserve(sample.processes.size());
     for (const ProcessActivityProcessPoint& processPoint : sample.processes)
     {
@@ -9892,9 +10515,7 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         record.commandLine = "时间轴历史样本";
         record.userName = "-";
         record.signatureState = "历史快照";
-        record.startTimeText = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds)
-            .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
-            .toStdString();
+        record.startTimeText = snapshotTime;
         copyProcessActivityDynamicFields(record, processPoint);
         record.activePrivateWorkingSetBytes = processPoint.processSuspended
             ? 0U
@@ -9903,6 +10524,9 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         record.dynamicCountersReady = true;
         m_activityTableSnapshotRecords.push_back(std::move(record));
     }
+    m_activityTableSnapshotSequence = sample.sequence;
+    m_activityTableSnapshotRecordingTick = m_activityRecordingStartTick100ns;
+    m_activityTableSnapshotProjectionValid = true;
 }
 
 QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) const
@@ -9915,19 +10539,61 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
     const ProcessActivitySample& sample = m_activitySamples[static_cast<std::size_t>(safeIndex)];
     const std::vector<std::string> selectionKeys = currentProcessActivitySelectionKeys();
-
-    const double cpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys);
-    const double memoryValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys);
-    const double diskValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys);
-    const double netValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Network, selectionKeys);
-    const double gpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Gpu, selectionKeys);
-    double maxDiskValue = 0.0;
-    double maxNetValue = 0.0;
-    for (const ProcessActivitySample& historySample : m_activitySamples)
+    std::uint32_t metricMask = 0;
+    for (const ProcessActivityMetric metric : {ProcessActivityMetric::Cpu, ProcessActivityMetric::Memory,
+        ProcessActivityMetric::Disk, ProcessActivityMetric::Network, ProcessActivityMetric::Gpu})
     {
-        maxDiskValue = std::max(maxDiskValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Disk, selectionKeys));
-        maxNetValue = std::max(maxNetValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
+        if (isProcessActivityMetricEnabled(metric))
+        {
+            metricMask |= 1U << static_cast<unsigned>(metric);
+        }
     }
+    const QString languageId = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (m_activitySnapshotTextCacheValid &&
+        m_activitySnapshotTextSequence == sample.sequence &&
+        m_activitySnapshotTextRecordingTick == m_activityRecordingStartTick100ns &&
+        m_activitySnapshotTextFirstSequence == m_activitySamples.front().sequence &&
+        m_activitySnapshotTextLastSequence == m_activitySamples.back().sequence &&
+        m_activitySnapshotTextSelectionKeys == selectionKeys &&
+        m_activitySnapshotTextMetricMask == metricMask &&
+        m_activitySnapshotTextMemoryMB == m_activityTotalPhysicalMemoryMB &&
+        m_activitySnapshotTextLanguageId == languageId)
+    {
+        return m_activitySnapshotTextCache;
+    }
+
+    ProcessActivityChartWidget::SnapshotMetrics cachedMetrics{};
+    if (m_activityChartWidget != nullptr)
+    {
+        cachedMetrics = m_activityChartWidget->snapshotMetrics(safeIndex, selectionKeys);
+    }
+    else
+    {
+        cachedMetrics.ready = true;
+        cachedMetrics.values = {processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Network, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Gpu, selectionKeys)};
+        for (const auto& historySample : m_activitySamples)
+        {
+            cachedMetrics.denominators[2] = std::max(cachedMetrics.denominators[2],
+                processActivitySampleMetricValue(historySample, ProcessActivityMetric::Disk, selectionKeys));
+            cachedMetrics.denominators[3] = std::max(cachedMetrics.denominators[3],
+                processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
+        }
+    }
+    if (!cachedMetrics.ready)
+    {
+        return processContextText("process.activity.preparing", QStringLiteral("正在准备活动历史数据..."));
+    }
+    const double cpuValue = cachedMetrics.values[0];
+    const double memoryValue = cachedMetrics.values[1];
+    const double diskValue = cachedMetrics.values[2];
+    const double netValue = cachedMetrics.values[3];
+    const double gpuValue = cachedMetrics.values[4];
+    const double maxDiskValue = cachedMetrics.denominators[2];
+    const double maxNetValue = cachedMetrics.denominators[3];
     const double memoryPercent = clampPercentValue(
         (memoryValue / std::max(1.0, m_activityTotalPhysicalMemoryMB)) * 100.0);
     const double diskPercent = clampPercentValue((diskValue / std::max(1.0, maxDiskValue)) * 100.0);
@@ -9976,7 +10642,7 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     {
         if (isProcessActivityMetricEnabled(metric))
         {
-            const double metricValue = processActivitySampleMetricValue(sample, metric, selectionKeys);
+            const double metricValue = cachedMetrics.values[static_cast<std::size_t>(metric)];
             double percentValue = 0.0;
             switch (metric)
             {
@@ -10030,6 +10696,16 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
         text += QStringLiteral(" | 进程数: %1").arg(static_cast<qulonglong>(sample.processes.size()));
     }
 
+    m_activitySnapshotTextCache = text;
+    m_activitySnapshotTextSequence = sample.sequence;
+    m_activitySnapshotTextRecordingTick = m_activityRecordingStartTick100ns;
+    m_activitySnapshotTextFirstSequence = m_activitySamples.front().sequence;
+    m_activitySnapshotTextLastSequence = m_activitySamples.back().sequence;
+    m_activitySnapshotTextSelectionKeys = selectionKeys;
+    m_activitySnapshotTextMetricMask = metricMask;
+    m_activitySnapshotTextMemoryMB = m_activityTotalPhysicalMemoryMB;
+    m_activitySnapshotTextLanguageId = languageId;
+    m_activitySnapshotTextCacheValid = true;
     return text;
 }
 
@@ -10311,32 +10987,346 @@ bool ProcessDock::processUsageHighlightValue(
     return true;
 }
 
-bool ProcessDock::processUsageHighlightRatio(
-    const ks::process::ProcessRecord& processRecord,
-    const TableColumn column,
-    double* const ratioOut) const
+std::vector<ProcessDock::ProcessTableModel::ColumnChange> ProcessDock::processTableChanges(
+    const ProcessTableRow& before, const ProcessTableRow& after,
+    const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& previousMaximums,
+    bool cpuSnapshotChanged, bool cpuSizeChanged) const
 {
-    if (ratioOut == nullptr)
+    using Change = ProcessTableModel::ColumnChange;
+    std::vector<Change> result;
+    const int last = static_cast<int>(TableColumn::Count) - 1;
+    if (before.rowKind != after.rowKind) return {{0, last, {}}}; // includes flags/font/row semantics
+    const auto& a = before.record;
+    const auto& b = after.record;
+    const auto add = [&](TableColumn column, int role)
+        { result.push_back({static_cast<int>(column), static_cast<int>(column), {role}}); };
+    if (before.identityKey != after.identityKey) result.push_back({0, last, {Qt::UserRole}});
+    const bool group = after.rowKind == ProcessTableRowKind::GroupHeader;
+    if (cpuSizeChanged) add(TableColumn::CpuCore, Qt::SizeHintRole);
+    if (before.depth != after.depth) add(TableColumn::Name, ProcessTreeDepthRole);
+    if (before.hasChildren != after.hasChildren) add(TableColumn::Name, ProcessExpandableRole);
+    if (before.expanded != after.expanded) add(TableColumn::Name, ProcessExpandedRole);
+    if (!group)
     {
-        return false;
+        if (a.processName != b.processName || a.imagePath != b.imagePath)
+            add(TableColumn::Name, Qt::DecorationRole); // cached icon identity; never resolve icons here
+        if (a.efficiencyModeSupported != b.efficiencyModeSupported) add(TableColumn::Name, ProcessEfficiencyModeKnownRole);
+        if (a.efficiencyModeEnabled != b.efficiencyModeEnabled) add(TableColumn::Name, ProcessEfficiencyModeRole);
+        if (before.friendlyGroupType != after.friendlyGroupType)
+        { add(TableColumn::ProcessType, Qt::DisplayRole); add(TableColumn::ProcessType, ProcessNumericSortRole); }
+        if (before.cpuCoreProcessIds != after.cpuCoreProcessIds
+            || before.activitySnapshotActive != after.activitySnapshotActive)
+            add(TableColumn::CpuCore, ks::ui::ProcessCpuProcessIdsRole);
+        const auto hasCpuSample = [](const ProcessTableRow& row)
+            { return !row.activitySnapshotActive && !row.isExited && !row.cpuCoreProcessIds.isEmpty(); };
+        if (hasCpuSample(before) != hasCpuSample(after) || (hasCpuSample(after) && cpuSnapshotChanged))
+            add(TableColumn::CpuCore, ks::ui::ProcessCpuUsageSnapshotRole);
     }
-
-    double value = 0.0;
-    if (!processUsageHighlightValue(processRecord, column, &value))
+    const bool colorStateChanged = before.isNew != after.isNew || before.isExited != after.isExited
+        || before.isKernelOnly != after.isKernelOnly || a.r0Flags != b.r0Flags;
+    for (int index = 0; index <= last; ++index)
     {
-        return false;
+        const auto column = static_cast<TableColumn>(index);
+        bool displayDirty = false, numericDirty = false;
+        switch (column)
+        {
+        case TableColumn::Name:
+            displayDirty = a.processName != b.processName;
+            numericDirty = false;
+            break;
+        case TableColumn::Pid:
+            displayDirty = a.pid != b.pid;
+            numericDirty = a.pid != b.pid;
+            break;
+        case TableColumn::Cpu:
+            displayDirty = a.cpuPercent != b.cpuPercent;
+            numericDirty = a.cpuPercent != b.cpuPercent;
+            break;
+        case TableColumn::Ram:
+            displayDirty = a.ramMB != b.ramMB || a.workingSetMB != b.workingSetMB;
+            numericDirty = a.workingSetMB != b.workingSetMB;
+            break;
+        case TableColumn::Disk:
+            displayDirty = a.diskMBps != b.diskMBps;
+            numericDirty = a.diskMBps != b.diskMBps;
+            break;
+        case TableColumn::Gpu:
+            displayDirty = a.gpuPercent != b.gpuPercent;
+            numericDirty = a.gpuPercent != b.gpuPercent;
+            break;
+        case TableColumn::Net:
+            displayDirty = a.netRxKBps != b.netRxKBps || a.netTxKBps != b.netTxKBps;
+            numericDirty = a.netKBps != b.netKBps;
+            break;
+        case TableColumn::Signature:
+            displayDirty = a.signatureState != b.signatureState;
+            numericDirty = false;
+            break;
+        case TableColumn::Path:
+            displayDirty = a.imagePath != b.imagePath;
+            numericDirty = false;
+            break;
+        case TableColumn::ParentPid:
+            displayDirty = a.parentPid != b.parentPid;
+            numericDirty = a.parentPid != b.parentPid;
+            break;
+        case TableColumn::CommandLine:
+            displayDirty = a.commandLine != b.commandLine;
+            numericDirty = false;
+            break;
+        case TableColumn::User:
+            displayDirty = a.userName != b.userName;
+            numericDirty = false;
+            break;
+        case TableColumn::StartTime:
+            displayDirty = a.startTimeText != b.startTimeText;
+            numericDirty = a.creationTime100ns != b.creationTime100ns;
+            break;
+        case TableColumn::IsAdmin:
+            displayDirty = a.isAdmin != b.isAdmin;
+            numericDirty = a.isAdmin != b.isAdmin;
+            break;
+        case TableColumn::PplLevel:
+            displayDirty = a.protectionLevelKnown != b.protectionLevelKnown || a.protectionLevelText != b.protectionLevelText;
+            numericDirty = a.protectionLevel != b.protectionLevel || a.protectionLevelKnown != b.protectionLevelKnown;
+            break;
+        case TableColumn::Protection:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0Protection != b.r0Protection;
+            numericDirty = a.r0Protection != b.r0Protection;
+            break;
+        case TableColumn::Ppl:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0Protection != b.r0Protection;
+            numericDirty = a.r0Protection != b.r0Protection;
+            break;
+        case TableColumn::HandleCount:
+            displayDirty = a.handleCount != b.handleCount;
+            numericDirty = a.handleCount != b.handleCount;
+            break;
+        case TableColumn::HandleTable:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0ObjectTableAddress != b.r0ObjectTableAddress;
+            numericDirty = a.r0FieldFlags != b.r0FieldFlags;
+            break;
+        case TableColumn::SectionObject:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0SectionObjectAddress != b.r0SectionObjectAddress;
+            numericDirty = a.r0FieldFlags != b.r0FieldFlags;
+            break;
+        case TableColumn::R0Status:
+            displayDirty = a.r0Status != b.r0Status;
+            numericDirty = a.r0Status != b.r0Status;
+            break;
+        case TableColumn::PackageName:
+            displayDirty = a.packageFullName != b.packageFullName || a.packageNameKnown != b.packageNameKnown;
+            numericDirty = false;
+            break;
+        case TableColumn::Status:
+            displayDirty = a.processStateKnown != b.processStateKnown || a.processSuspended != b.processSuspended;
+            numericDirty = a.processStateKnown != b.processStateKnown || a.processSuspended != b.processSuspended;
+            break;
+        case TableColumn::SessionId:
+            displayDirty = a.sessionId != b.sessionId;
+            numericDirty = a.sessionId != b.sessionId;
+            break;
+        case TableColumn::JobObject:
+            displayDirty = a.inJobObject != b.inJobObject || a.jobObjectKnown != b.jobObjectKnown;
+            numericDirty = a.inJobObject != b.inJobObject || a.jobObjectKnown != b.jobObjectKnown;
+            break;
+        case TableColumn::CpuTime:
+            displayDirty = a.rawCpuTime100ns != b.rawCpuTime100ns;
+            numericDirty = a.rawCpuTime100ns != b.rawCpuTime100ns;
+            break;
+        case TableColumn::CycleTime:
+            displayDirty = a.cycleTime != b.cycleTime || a.cycleTimeKnown != b.cycleTimeKnown;
+            numericDirty = a.cycleTime != b.cycleTime || a.cycleTimeKnown != b.cycleTimeKnown;
+            break;
+        case TableColumn::WorkingSet:
+            displayDirty = a.rawWorkingSetBytes != b.rawWorkingSetBytes;
+            numericDirty = a.rawWorkingSetBytes != b.rawWorkingSetBytes;
+            break;
+        case TableColumn::PeakWorkingSet:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.peakWorkingSetBytes != b.peakWorkingSetBytes;
+            numericDirty = a.peakWorkingSetBytes != b.peakWorkingSetBytes;
+            break;
+        case TableColumn::WorkingSetDelta:
+            displayDirty = a.workingSetDeltaBytes != b.workingSetDeltaBytes;
+            numericDirty = a.workingSetDeltaBytes != b.workingSetDeltaBytes;
+            break;
+        case TableColumn::ActivePrivateWorkingSet:
+            displayDirty = a.activePrivateWorkingSetBytes != b.activePrivateWorkingSetBytes || a.privateWorkingSetKnown != b.privateWorkingSetKnown;
+            numericDirty = a.activePrivateWorkingSetBytes != b.activePrivateWorkingSetBytes;
+            break;
+        case TableColumn::PrivateWorkingSet:
+            displayDirty = a.privateWorkingSetBytes != b.privateWorkingSetBytes || a.privateWorkingSetKnown != b.privateWorkingSetKnown;
+            numericDirty = a.privateWorkingSetBytes != b.privateWorkingSetBytes;
+            break;
+        case TableColumn::SharedWorkingSet:
+            displayDirty = a.privateWorkingSetKnown != b.privateWorkingSetKnown || a.sharedWorkingSetBytes != b.sharedWorkingSetBytes;
+            numericDirty = a.sharedWorkingSetBytes != b.sharedWorkingSetBytes;
+            break;
+        case TableColumn::CommitSize:
+            displayDirty = a.commitSizeBytes != b.commitSizeBytes || a.memoryDetailKnown != b.memoryDetailKnown;
+            numericDirty = a.commitSizeBytes != b.commitSizeBytes;
+            break;
+        case TableColumn::PagedPool:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pagedPoolBytes != b.pagedPoolBytes;
+            numericDirty = a.pagedPoolBytes != b.pagedPoolBytes;
+            break;
+        case TableColumn::NonPagedPool:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.nonPagedPoolBytes != b.nonPagedPoolBytes;
+            numericDirty = a.nonPagedPoolBytes != b.nonPagedPoolBytes;
+            break;
+        case TableColumn::PageFaults:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pageFaultCount != b.pageFaultCount;
+            numericDirty = a.pageFaultCount != b.pageFaultCount;
+            break;
+        case TableColumn::PageFaultDelta:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pageFaultDeltaCount != b.pageFaultDeltaCount;
+            numericDirty = a.pageFaultDeltaCount != b.pageFaultDeltaCount;
+            break;
+        case TableColumn::BasePriority:
+            displayDirty = a.basePriority != b.basePriority;
+            numericDirty = a.basePriority != b.basePriority;
+            break;
+        case TableColumn::ThreadCount:
+            displayDirty = a.threadCount != b.threadCount;
+            numericDirty = a.threadCount != b.threadCount;
+            break;
+        case TableColumn::UserObjects:
+            displayDirty = a.guiResourceKnown != b.guiResourceKnown || a.userObjectCount != b.userObjectCount;
+            numericDirty = a.guiResourceKnown != b.guiResourceKnown || a.userObjectCount != b.userObjectCount;
+            break;
+        case TableColumn::GdiObjects:
+            displayDirty = a.gdiObjectCount != b.gdiObjectCount || a.guiResourceKnown != b.guiResourceKnown;
+            numericDirty = a.gdiObjectCount != b.gdiObjectCount || a.guiResourceKnown != b.guiResourceKnown;
+            break;
+        case TableColumn::IoReads:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioReadOperationCount != b.ioReadOperationCount;
+            numericDirty = a.ioReadOperationCount != b.ioReadOperationCount;
+            break;
+        case TableColumn::IoWrites:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioWriteOperationCount != b.ioWriteOperationCount;
+            numericDirty = a.ioWriteOperationCount != b.ioWriteOperationCount;
+            break;
+        case TableColumn::IoOther:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioOtherOperationCount != b.ioOtherOperationCount;
+            numericDirty = a.ioOtherOperationCount != b.ioOtherOperationCount;
+            break;
+        case TableColumn::IoReadBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioReadTransferBytes != b.ioReadTransferBytes;
+            numericDirty = a.ioReadTransferBytes != b.ioReadTransferBytes;
+            break;
+        case TableColumn::IoWriteBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioWriteTransferBytes != b.ioWriteTransferBytes;
+            numericDirty = a.ioWriteTransferBytes != b.ioWriteTransferBytes;
+            break;
+        case TableColumn::IoOtherBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioOtherTransferBytes != b.ioOtherTransferBytes;
+            numericDirty = a.ioOtherTransferBytes != b.ioOtherTransferBytes;
+            break;
+        case TableColumn::OsContext:
+            displayDirty = a.osContextText != b.osContextText;
+            numericDirty = false;
+            break;
+        case TableColumn::Platform:
+            displayDirty = a.architectureText != b.architectureText;
+            numericDirty = false;
+            break;
+        case TableColumn::UacVirtualization:
+            displayDirty = a.uacVirtualizationState != b.uacVirtualizationState;
+            numericDirty = a.uacVirtualizationState != b.uacVirtualizationState;
+            break;
+        case TableColumn::Description:
+            displayDirty = a.fileDescription != b.fileDescription;
+            numericDirty = false;
+            break;
+        case TableColumn::DataExecutionPrevention:
+            displayDirty = a.dataExecutionPreventionState != b.dataExecutionPreventionState;
+            numericDirty = a.dataExecutionPreventionState != b.dataExecutionPreventionState;
+            break;
+        case TableColumn::ControlFlowGuard:
+            displayDirty = a.controlFlowGuardState != b.controlFlowGuardState;
+            numericDirty = a.controlFlowGuardState != b.controlFlowGuardState;
+            break;
+        case TableColumn::HardwareStackProtection:
+            displayDirty = a.hardwareStackProtectionState != b.hardwareStackProtectionState;
+            numericDirty = a.hardwareStackProtectionState != b.hardwareStackProtectionState;
+            break;
+        case TableColumn::DpiAwareness:
+            displayDirty = a.dpiAwarenessLevel != b.dpiAwarenessLevel;
+            numericDirty = a.dpiAwarenessLevel != b.dpiAwarenessLevel;
+            break;
+        case TableColumn::EnterpriseContext:
+            displayDirty = a.enterpriseContextText != b.enterpriseContextText;
+            numericDirty = false;
+            break;
+        case TableColumn::PowerThrottling:
+            displayDirty = a.efficiencyModeEnabled != b.efficiencyModeEnabled || a.efficiencyModeSupported != b.efficiencyModeSupported;
+            numericDirty = a.efficiencyModeEnabled != b.efficiencyModeEnabled || a.efficiencyModeSupported != b.efficiencyModeSupported;
+            break;
+        case TableColumn::GpuEngine:
+            displayDirty = a.gpuEngineText != b.gpuEngineText;
+            numericDirty = false;
+            break;
+        case TableColumn::GpuDedicatedMemory:
+            displayDirty = a.gpuDedicatedMemoryBytes != b.gpuDedicatedMemoryBytes || a.gpuMemoryKnown != b.gpuMemoryKnown;
+            numericDirty = a.gpuDedicatedMemoryBytes != b.gpuDedicatedMemoryBytes || a.gpuMemoryKnown != b.gpuMemoryKnown;
+            break;
+        case TableColumn::GpuSharedMemory:
+            displayDirty = a.gpuMemoryKnown != b.gpuMemoryKnown || a.gpuSharedMemoryBytes != b.gpuSharedMemoryBytes;
+            numericDirty = a.gpuMemoryKnown != b.gpuMemoryKnown || a.gpuSharedMemoryBytes != b.gpuSharedMemoryBytes;
+            break;
+        case TableColumn::ProcessType:
+            displayDirty = false;
+            numericDirty = false;
+            break;
+        case TableColumn::CpuCore:
+            displayDirty = false;
+            numericDirty = a.cpuCorePercent != b.cpuCorePercent;
+            break;
+        case TableColumn::InjectionSurface:
+            displayDirty = a.injectionDynamicRegions != b.injectionDynamicRegions || a.injectionSurfaceState != b.injectionSurfaceState || a.injectionWritableExecRegions != b.injectionWritableExecRegions;
+            numericDirty = a.injectionDynamicRegions != b.injectionDynamicRegions || a.injectionSurfaceState != b.injectionSurfaceState;
+            break;
+        default: break;
+        }
+        if (column == TableColumn::Name && (group || after.rowKind == ProcessTableRowKind::ApplicationAggregate))
+        {
+            if (before.syntheticTitle != after.syntheticTitle) add(column, Qt::DisplayRole);
+        }
+        else if (!group && displayDirty
+            && formatColumnText(a, column, before.depth) != formatColumnText(b, column, after.depth))
+            add(column, Qt::DisplayRole);
+        if (!group && numericDirty
+            && processNumericSortValue(a, column) != processNumericSortValue(b, column))
+            add(column, ProcessNumericSortRole);
+        // Color dependencies include the per-snapshot normalization maximum,
+        // not just the row's raw value. The same brush function serves painting.
+        if (!group && (displayDirty || numericDirty || colorStateChanged
+            || previousMaximums[static_cast<std::size_t>(index)] != m_processUsageHighlightMaximums[static_cast<std::size_t>(index)]
+            || (column == TableColumn::Signature && (a.signatureTrusted != b.signatureTrusted || a.signatureState != b.signatureState))))
+            for (int role : {Qt::BackgroundRole, Qt::ForegroundRole})
+                if (processTableBrush(before, column, role, previousMaximums)
+                    != processTableBrush(after, column, role, m_processUsageHighlightMaximums)) add(column, role);
     }
-
-    const std::size_t columnIndex = static_cast<std::size_t>(column);
-    if (columnIndex >= m_processUsageHighlightMaximums.size())
+    // Only these table tooltips depend on row values; the others are constant.
+    if (!group)
     {
-        return false;
+        const auto tooltip = [&](TableColumn column, bool dirty)
+        {
+            if (dirty && const_cast<ProcessDock*>(this)->processTableData(before, static_cast<int>(column), Qt::ToolTipRole)
+                != const_cast<ProcessDock*>(this)->processTableData(after, static_cast<int>(column), Qt::ToolTipRole))
+                add(column, Qt::ToolTipRole);
+        };
+        tooltip(TableColumn::Name, a.processName != b.processName || a.r0Flags != b.r0Flags
+            || a.efficiencyModeEnabled != b.efficiencyModeEnabled || before.isKernelOnly != after.isKernelOnly
+            || before.activitySnapshotActive != after.activitySnapshotActive);
+        tooltip(TableColumn::CpuCore, a.cpuPercent != b.cpuPercent || a.cpuCorePercent != b.cpuCorePercent
+            || before.activitySnapshotActive != after.activitySnapshotActive);
+        tooltip(TableColumn::Protection, a.r0ProtectionSource != b.r0ProtectionSource);
+        tooltip(TableColumn::Ppl, a.r0ProtectionSource != b.r0ProtectionSource);
+        tooltip(TableColumn::HandleTable, a.r0ObjectTableSource != b.r0ObjectTableSource);
+        tooltip(TableColumn::SectionObject, a.r0SectionObjectSource != b.r0SectionObjectSource);
     }
-    const double maximumValue = m_processUsageHighlightMaximums[columnIndex];
-    *ratioOut = maximumValue > 0.0
-        ? std::clamp(value / maximumValue, 0.0, 1.0)
-        : 0.0;
-    return true;
+    return result;
 }
 
 QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const int column, const int role)
@@ -10375,15 +11365,7 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         }
         if (role == ProcessExpandedRole)
         {
-            if (tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate)
-            {
-                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, false);
-            }
-            if (tableRow.rowKind == ProcessTableRowKind::GroupHeader)
-            {
-                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, true);
-            }
-            return tableRow.hasChildren;
+            return tableRow.expanded;
         }
     }
     if (tableColumn == TableColumn::CpuCore && role == Qt::SizeHintRole)
@@ -10599,6 +11581,13 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         return {};
     }
 
+    return processTableBrush(tableRow, tableColumn, role, m_processUsageHighlightMaximums);
+}
+
+QVariant ProcessDock::processTableBrush(const ProcessTableRow& tableRow, TableColumn tableColumn, int role,
+    const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& maximums) const
+{
+    const auto& processRecord = tableRow.record;
     const QColor adminYesColor = KswordTheme::SuccessColor();
     const QColor adminNoColor = KswordTheme::ErrorColor();
 
@@ -10634,10 +11623,10 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
     }
 
     double usageHighlightRatio = 0.0;
-    const bool hasUsageHighlight = processUsageHighlightRatio(
-        processRecord,
-        tableColumn,
-        &usageHighlightRatio);
+    double highlightValue = 0.0;
+    const bool hasUsageHighlight = processUsageHighlightValue(processRecord, tableColumn, &highlightValue);
+    const double maximum = maximums[static_cast<std::size_t>(tableColumn)];
+    usageHighlightRatio = maximum > 0.0 ? std::clamp(highlightValue / maximum, 0.0, 1.0) : 0.0;
 
     if (role == Qt::ForegroundRole)
     {
@@ -10671,6 +11660,70 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         return QBrush(usageRatioToHighlightColor(usageHighlightRatio));
     }
     return {};
+}
+
+ks::ui::CompleteExportPublishedTable ProcessDock::makeProcessCompleteExportTable()
+{
+    // The shared export capture lease keeps presentation at this exact version;
+    // ordinary sampling/cache/archive work continues. Copy one value row per
+    // queued capture unit, then format all requested DisplayRole cells on worker.
+    struct ExportRow
+    {
+        ks::process::ProcessRecord record;
+        ProcessTableRowKind kind;
+        FriendlyProcessGroupType group;
+        QString title;
+        int depth = 0;
+    };
+    struct Values
+    {
+        std::map<int, ExportRow> rows;
+        ks::i18n::SourceTextSnapshot translator;
+        QLocale locale;
+    };
+    ks::ui::CompleteExportPublishedTable result;
+    if (!m_processTable || !m_processTable->model()) return result;
+    auto storage = std::make_shared<Values>();
+    storage->translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    storage->locale = QLocale::system();
+    const auto retained = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const Values>(storage));
+    const auto writable = std::shared_ptr<Values>(retained, storage.get());
+    storage.reset();
+    result.values = retained;
+    result.rows = m_processTable->model()->rowCount(m_processTable->rootIndex());
+    result.columns = m_processTable->model()->columnCount(m_processTable->rootIndex());
+    result.sourceIdentity = QStringLiteral("process-list/%1").arg(reinterpret_cast<quintptr>(this), 0, 16);
+    result.sourceVersion = ++m_processCompleteExportVersion;
+    result.prepareRow = [guard = QPointer<ProcessDock>(this), writable](int row)
+    {
+        if (!guard || !guard->m_processTable || !guard->m_processTable->model())
+            throw std::runtime_error("process export source closed");
+        const auto viewIndex = guard->m_processTable->model()->index(row, 0, guard->m_processTable->rootIndex());
+        const auto* source = guard->processTableRowForViewIndex(viewIndex);
+        if (!source) throw std::runtime_error("process export source version changed");
+        writable->rows.emplace(row, ExportRow{ source->record, source->rowKind,
+            source->friendlyGroupType, source->syntheticTitle, source->depth });
+    };
+    result.cell = [](const void* value, int row, int column) -> QString
+    {
+        const auto& values = *static_cast<const Values*>(value);
+        const auto& source = values.rows.at(row);
+        const auto tableColumn = static_cast<TableColumn>(column);
+        ScopedProcessExportText frozen(values.translator, values.locale);
+        QString display;
+        if (source.kind == ProcessTableRowKind::GroupHeader)
+            display = tableColumn == TableColumn::Name ? source.title : QString();
+        else if (tableColumn == TableColumn::ProcessType)
+            display = friendlyGroupTypeName(source.group);
+        else if (source.kind == ProcessTableRowKind::ApplicationAggregate && tableColumn == TableColumn::Name)
+            display = source.title;
+        else
+            display = formatColumnText(source.record, tableColumn,
+                source.kind == ProcessTableRowKind::Process && tableColumn == TableColumn::Name ? 0 : source.depth);
+        // FlatTableModel applies normal sourceText after the original resolver.
+        return values.translator.sourceText(display);
+    };
+    return result;
 }
 
 const ProcessDock::ProcessTableRow* ProcessDock::processTableRowForViewIndex(const QModelIndex& viewIndex) const
@@ -13831,7 +14884,7 @@ void ProcessDock::dispatchProcessActionTargetsInParallel(
     }
 }
 
-QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processRecord, const TableColumn column, const int depth) const
+QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processRecord, const TableColumn column, const int depth)
 {
     switch (column)
     {
@@ -15247,6 +16300,12 @@ void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
 
 void ProcessDock::executeCreateProcessRequest()
 {
+    // 已接受的创建是不可撤销事务：重复点击不排第二个请求，隐藏/关闭页面不撤销系统调用。
+    if (m_createProcessInProgress)
+    {
+        return;
+    }
+
     // 创建进程动作日志：整段流程复用同一个 kLogEvent，避免离散调用链。
     kLogEvent createProcessEvent;
     bool buildOk = false;
@@ -15262,36 +16321,123 @@ void ProcessDock::executeCreateProcessRequest()
         return;
     }
 
-    ks::process::CreateProcessResult createResult{};
-    const bool launchOk = ks::process::LaunchProcess(request, &createResult);
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
-        ks::i18n::sourceText(launchOk ? QStringLiteral("成功") : QStringLiteral("失败"))));
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("路径模式: %1")).arg(
-        createResult.usedTokenPath ? QStringLiteral("Token") : QStringLiteral("CreateProcessW")));
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("错误码: %1")).arg(createResult.win32Error));
-    appendCreateResultLine(QString::fromStdString(createResult.detailText));
-    if (createResult.processInfoAvailable)
+    ScopedProcessActionHandle tokenIdentityHold(nullptr);
+    std::uint64_t expectedTokenCreationTime100ns = 0;
+    if (request.tokenModeEnabled)
     {
-        appendCreateResultLine(
-            ks::i18n::sourceText(QStringLiteral(
-                "输出 PI: pid=%1 tid=%2（后端已关闭返回的 hProcess/hThread 句柄快照: 0x%3 / 0x%4）"))
-            .arg(createResult.dwProcessId)
-            .arg(createResult.dwThreadId)
-            .arg(QString::number(createResult.hProcess, 16))
-            .arg(QString::number(createResult.hThread, 16)));
+        bool cachedSourceExited = false;
+        for (const auto& pair : m_cacheByIdentity)
+        {
+            const auto& record = pair.second.record;
+            if (record.pid == request.tokenSourcePid && record.creationTime100ns > expectedTokenCreationTime100ns)
+            {
+                expectedTokenCreationTime100ns = record.creationTime100ns;
+                cachedSourceExited = pair.second.isExitedInLatestRound;
+            }
+        }
+        std::string identityError;
+        const bool identityKnown = !cachedSourceExited &&
+            (expectedTokenCreationTime100ns != 0U || ks::process::QueryProcessCreationTimeByPid(
+                request.tokenSourcePid, &expectedTokenCreationTime100ns, &identityError));
+        HANDLE rawIdentityHandle = nullptr;
+        const bool pinned = identityKnown && acquireProcessActionIdentityHold(
+            request.tokenSourcePid, expectedTokenCreationTime100ns, &rawIdentityHandle, &identityError);
+        tokenIdentityHold = ScopedProcessActionHandle(rawIdentityHandle);
+        if (!pinned || !tokenSourceIdentityIsActive(
+            tokenIdentityHold.get(), expectedTokenCreationTime100ns, &identityError))
+        {
+            if (identityError.empty()) identityError = "process identity is unavailable; action skipped";
+            appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
+                ks::i18n::sourceText(QStringLiteral("失败"))));
+            appendCreateResultLine(QString::fromStdString(identityError));
+            err << createProcessEvent << identityError << eol;
+            return;
+        }
     }
 
-    (launchOk ? info : err) << createProcessEvent
-        << "[ProcessDock] CreateProcess 请求完成, ok=" << (launchOk ? "true" : "false")
-        << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
-        << ", error=" << createResult.win32Error
-        << ", detail=" << createResult.detailText
-        << eol;
-
-    if (launchOk)
+    using LaunchOutcome = std::pair<bool, ks::process::CreateProcessResult>;
+    const auto promise = std::make_shared<QPromise<LaunchOutcome>>();
+    auto* watcher = new QFutureWatcher<LaunchOutcome>(this);
+    // 记录自身禁用状态，不把父容器临时禁用永久写进按钮。
+    const bool launchButtonWasEnabled = m_launchProcessButton != nullptr
+        && m_launchProcessButton->isEnabledTo(m_launchProcessButton->parentWidget());
+    connect(watcher, &QFutureWatcher<LaunchOutcome>::finished, this,
+        [this, watcher, launchButtonWasEnabled]() {
+        LaunchOutcome outcome = watcher->future().takeResult();
+        watcher->deleteLater();
+        m_createProcessInProgress = false;
+        if (m_launchProcessButton != nullptr)
+        {
+            m_launchProcessButton->setEnabled(launchButtonWasEnabled);
+        }
+        const bool launchOk = outcome.first;
+        const ks::process::CreateProcessResult& createResult = outcome.second;
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
+            ks::i18n::sourceText(launchOk ? QStringLiteral("成功") : QStringLiteral("失败"))));
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("路径模式: %1")).arg(
+            createResult.usedTokenPath ? QStringLiteral("Token") : QStringLiteral("CreateProcessW")));
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("错误码: %1")).arg(createResult.win32Error));
+        appendCreateResultLine(QString::fromStdString(createResult.detailText));
+        if (createResult.processInfoAvailable)
+        {
+            appendCreateResultLine(
+                ks::i18n::sourceText(QStringLiteral(
+                    "输出 PI: pid=%1 tid=%2（后端已关闭返回的 hProcess/hThread 句柄快照: 0x%3 / 0x%4）"))
+                .arg(createResult.dwProcessId)
+                .arg(createResult.dwThreadId)
+                .arg(QString::number(createResult.hProcess, 16))
+                .arg(QString::number(createResult.hThread, 16)));
+        }
+        if (launchOk)
+        {
+            requestAsyncRefresh(true);
+        }
+    });
+    promise->start();
+    watcher->setFuture(promise->future());
+    m_createProcessInProgress = true;
+    if (m_launchProcessButton != nullptr)
     {
-        requestAsyncRefresh(true);
+        m_launchProcessButton->setEnabled(false);
     }
+
+    // watcher 的结果连接属于 Dock；Dock 销毁只丢弃展示，不等待、取消或终止已接受创建。
+    // 工作线程只持有请求/结果/日志事件，后端继续按原顺序关闭返回的进程和线程句柄。
+    QRunnable* launchTask = QRunnable::create([request, promise, createProcessEvent,
+        expectedTokenCreationTime100ns, tokenIdentityHold = std::move(tokenIdentityHold)]() {
+        LaunchOutcome outcome{};
+        outcome.second.usedTokenPath = request.tokenModeEnabled;
+        try
+        {
+            if (request.tokenModeEnabled && !tokenSourceIdentityIsActive(
+                tokenIdentityHold.get(), expectedTokenCreationTime100ns, &outcome.second.detailText))
+            {
+                outcome.second.win32Error = ERROR_PROCESS_ABORTED;
+            }
+            else
+            {
+                outcome.first = ks::process::LaunchProcess(request, &outcome.second);
+            }
+        }
+        catch (...)
+        {
+            // 即使后端抛出异常，也交付一次失败并结束 future，不能让执行按钮永久停在 busy。
+            outcome.first = false;
+            outcome.second.success = false;
+            outcome.second.win32Error = ERROR_UNHANDLED_EXCEPTION;
+        }
+        const auto& createResult = outcome.second;
+        (outcome.first ? info : err) << createProcessEvent
+            << "[ProcessDock] CreateProcess 请求完成, ok=" << (outcome.first ? "true" : "false")
+            << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
+            << ", error=" << createResult.win32Error
+            << ", detail=" << createResult.detailText
+            << eol;
+        promise->addResult(std::move(outcome));
+        promise->finish();
+    });
+    launchTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(launchTask);
 }
 
 bool ProcessDock::isTreeModeEnabled() const
@@ -15496,8 +16642,8 @@ void ProcessDock::showHvmDispositionResult(
  * ALREADY_ARMED 却不知道为什么。
  */
 bool ProcessDock::stepFailedRestartResident(
-    const QString& actionTitle,
-    const kLogEvent& actionEvent)
+    HvmActionResult& output,
+    const ks::i18n::SourceTextSnapshot& translator)
 {
     const ksword::hvm::HvmCommandResult started = ksword::hvm::startResident(0UL);
 
@@ -15505,19 +16651,14 @@ bool ProcessDock::stepFailedRestartResident(
     {
         return false;
     }
-    showHvmDispositionResult(
-        actionTitle,
-        false,
-        (ks::i18n::sourceText(QStringLiteral("启动常驻（已经装上了，但常驻没起来）")) +
-            QStringLiteral("：") + started.message).toStdString(),
-        KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-        actionEvent);
+    output = {false, (translator.sourceText(QStringLiteral("启动常驻（已经装上了，但常驻没起来）")) +
+            QStringLiteral("：") + started.message).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
     return true;
 }
 
 bool ProcessDock::prepareHvmForArming(
-    const QString& actionTitle,
-    const kLogEvent& actionEvent)
+    HvmActionResult& output,
+    const ks::i18n::SourceTextSnapshot& translator)
 {
     const auto stepFailed = [&](const QString& stepName,
                                 const ksword::hvm::HvmCommandResult& r) {
@@ -15525,16 +16666,11 @@ bool ProcessDock::prepareHvmForArming(
         {
             return false;
         }
-        showHvmDispositionResult(
-            actionTitle,
-            false,
-            (stepName + QStringLiteral("：") + r.message).toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            actionEvent);
+        output = {false, (stepName + QStringLiteral("：") + r.message).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
         return true;
     };
     // 停常驻。已经停着时返回成功，不需要先查。
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("停止常驻")),
+    if (stepFailed(translator.sourceText(QStringLiteral("停止常驻")),
                    ksword::hvm::stopResident(0UL)))
     {
         return false;
@@ -15544,7 +16680,7 @@ bool ProcessDock::prepareHvmForArming(
      * 后端与 CR3 追踪都只在 PREPARE / 建 VMCS 时被读，而 ensurePrepared 在资源
      * 已就绪时不会重发 PREPARE——不先释放，这两个设置这一轮根本不会生效。
      */
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("释放资源")),
+    if (stepFailed(translator.sourceText(QStringLiteral("释放资源")),
                    ksword::hvm::releaseResources(0UL)))
     {
         return false;
@@ -15571,11 +16707,7 @@ bool ProcessDock::prepareHvmForArming(
         currentCrPolicy.ok ? currentCrPolicy.log : false);
     if (!crResult.ok)
     {
-        showHvmDispositionResult(
-            actionTitle, false,
-            crResult.message.toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_CR3_TRACKING_REQUIRED,
-            actionEvent);
+        output = {false, crResult.message.toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_CR3_TRACKING_REQUIRED, {}};
         return false;
     }
     /*
@@ -15588,15 +16720,11 @@ bool ProcessDock::prepareHvmForArming(
      */
     if (ksword::hvm::isLocalEptEnabled() || ksword::hvm::isVmFuncEnabled())
     {
-        showHvmDispositionResult(
-            actionTitle, false,
-            ks::i18n::sourceText(QStringLiteral("R-1 处置需要 EPTP 切换后端，而它与「每处理器私有 EPT」「VMFUNC」互斥。请先在虚拟化菜单里关掉这两项。")).toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_EPTP_SWITCH_REQUIRED,
-            actionEvent);
+        output = {false, translator.sourceText(QStringLiteral("R-1 处置需要 EPTP 切换后端，而它与「每处理器私有 EPT」「VMFUNC」互斥。请先在虚拟化菜单里关掉这两项。")).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_EPTP_SWITCH_REQUIRED, {}};
         return false;
     }
     ksword::hvm::setEptpSwitchEnabled(true);
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("准备资源")),
+    if (stepFailed(translator.sourceText(QStringLiteral("准备资源")),
                    ksword::hvm::ensurePrepared()))
     {
         return false;
@@ -15605,12 +16733,44 @@ bool ProcessDock::prepareHvmForArming(
     return true;
 }
 
+void ProcessDock::submitHvmAction(const QString& title, const ProcessActionTarget& target,
+    std::function<HvmActionResult()> work)
+{
+    if (!m_hvmOperation) m_hvmOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    if (m_hvmOperation->isBusy()) return;
+    const kLogEvent event;
+    const auto exceptionText = ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString();
+    m_hvmOperation->submitTransaction<std::function<HvmActionResult()>, HvmActionResult>(std::move(work),
+        [target, event, exceptionText](const std::function<HvmActionResult()>& action)
+        {
+            HvmActionResult result;
+            HANDLE raw = nullptr;
+            if (!target.isKernelOnly && !acquireProcessActionIdentityHold(target.record.pid,
+                target.record.creationTime100ns, &raw, &result.detail)) return result;
+            const ScopedProcessActionHandle identity(raw);
+            try { result = action(); }
+            catch (const std::exception& error) { result.detail = error.what(); }
+            catch (...) { result.detail = exceptionText; }
+            (result.ok ? info : err) << event << "[ProcessDock] HVM transaction completed, pid=" << target.record.pid
+                << ", identity=" << target.identityKey << ", ok=" << result.ok << ", status=" << result.status
+                << ", detail=" << result.detail << ", advice=" << result.advice.toStdString() << eol;
+            return result;
+        },
+        [this, title, event](const HvmActionResult& result, std::uint64_t)
+        { showHvmDispositionResult(title, result.ok, result.detail, result.status, event, result.advice); return true; },
+        [this, title, event, exceptionText](std::exception_ptr)
+        { showHvmDispositionResult(title, false, exceptionText, KSWORD_ARK_HVM_PROCESS_STATUS_OK, event); },
+        [event](ks::ui::AsyncOperationOutcome outcome)
+        { info << event << "[ProcessDock] HVM transaction cleanup, outcome=" << static_cast<int>(outcome) << eol; });
+}
+
 void ProcessDock::executeHvmProcessDispositionAction(
     const unsigned long operation)
 {
     // 输入：operation 取 FREEZE / TERMINATE / RELEASE。
     // 处理：解析目标页的客户线性地址，确认后下达一次 R-1 处置。
     // 返回：无返回值；结果通过消息框与日志反馈。
+    if ((m_hvmOperation && m_hvmOperation->isBusy()) || (m_hvmPreflightOperation && m_hvmPreflightOperation->isBusy())) return;
     const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
     if (actionTargets.empty())
     {
@@ -15642,7 +16802,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
 
     if (operation == KSWORD_ARK_HVM_PROCESS_OP_RELEASE)
     {
-        kLogEvent releaseEvent;
+        const QString title = ks::i18n::sourceText(QStringLiteral("%1 解除（冻结/结束）")).arg(hvmName);
+        submitHvmAction(title, target, [targetPid]
+        {
         ksword::ark::DriverClient releaseClient;
         const ksword::ark::HvmProcessResult releaseResult =
             releaseClient.controlHvmProcess(
@@ -15650,14 +16812,10 @@ void ProcessDock::executeHvmProcessDispositionAction(
                 targetPid,
                 0ULL,
                 true);
-        showHvmDispositionResult(
-            ks::i18n::sourceText(QStringLiteral("%1 解除（冻结/结束）")).arg(hvmName),
-            releaseResult.io.ok &&
-                releaseResult.response.status ==
-                    KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            releaseResult.io.message,
-            releaseResult.response.status,
-            releaseEvent);
+
+            return HvmActionResult{releaseResult.io.ok && releaseResult.response.status == KSWORD_ARK_HVM_PROCESS_STATUS_OK,
+                releaseResult.io.message, releaseResult.response.status, {}};
+        });
         return;
     }
 
@@ -15685,11 +16843,29 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 什么都没做，而那和成功在外面看不出区别——这类静默失效是这套机制最贵的
      * 失败方式，不该出现在默认路径上。
      */
-    quint64 guestLinearAddress = hvmProcessRunningThreadRip(target.record.pid);
-    if (guestLinearAddress == 0ULL)
-    {
-        guestLinearAddress = hvmProcessEntryPointAddress(target.record.pid);
-    }
+    if (!m_hvmPreflightOperation) m_hvmPreflightOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_hvmPreflightOperation->submit<ProcessActionTarget, quint64>(target,
+        [](const ProcessActionTarget& value, const ks::ui::AsyncOperationToken&)
+        {
+            HANDLE raw = nullptr; std::string detail;
+            if (!value.isKernelOnly && !acquireProcessActionIdentityHold(value.record.pid,
+                value.record.creationTime100ns, &raw, &detail)) return quint64(0);
+            const ScopedProcessActionHandle identity(raw);
+            quint64 address = hvmProcessRunningThreadRip(value.record.pid);
+            return address != 0 ? address : hvmProcessEntryPointAddress(value.record.pid);
+        },
+        [this, operation, target, manualAddress](const quint64& address, std::uint64_t)
+        { continueHvmProcessDispositionAction(operation, target, manualAddress, address); return true; },
+        [this, hvmName](std::exception_ptr)
+        { const kLogEvent event; showHvmDispositionResult(hvmName, false,
+            ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString(), 0, event); });
+}
+
+void ProcessDock::continueHvmProcessDispositionAction(const unsigned long operation,
+    ProcessActionTarget target, const bool manualAddress, quint64 guestLinearAddress)
+{
+    const auto targetPid = target.record.pid;
+    const QString hvmName = ks::settings::hvmDisplayNameLabel(ks::settings::loadAppearanceSettings().hvmDisplayName);
     if (manualAddress)
     {
     const QString defaultAddress = QStringLiteral("0x%1")
@@ -15789,6 +16965,12 @@ void ProcessDock::executeHvmProcessDispositionAction(
         << operation
         << " pid=" << targetPid
         << eol;
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    // Accept the confirmed effect before returning to the event loop. The read
+    // controller owns preflight only; the transaction retains the real outcome.
+    submitHvmAction(actionTitle, target, [operation, targetPid, guestLinearAddress, actionEvent, translator, freezing]
+        {
+            HvmActionResult output;
     ksword::ark::DriverClient driverClient;
     /*
      * 把三条前提按顺序补齐，再下达处置，最后把常驻恢复回去。
@@ -15816,9 +16998,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 那一层还顺带处理了 generation 传递、资源已就绪时不重复 PREPARE、以及把
      * 协议状态码翻成已本地化的原因——这三件如果在这里重做，就是第三份副本。
      */
-    if (!prepareHvmForArming(actionTitle, actionEvent))
+    if (!prepareHvmForArming(output, translator))
     {
-        return;
+        return output;
     }
     // 下达处置。此刻常驻是停着的，正是安装要求的状态。
     const ksword::ark::HvmProcessResult result = driverClient.controlHvmProcess(
@@ -15838,9 +17020,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
          * 失败混成一句，会让人以为什么都没发生，然后下一次安装撞上 ALREADY_ARMED
          * 却不知道为什么。
          */
-        if (stepFailedRestartResident(actionTitle, actionEvent))
+        if (stepFailedRestartResident(output, translator))
         {
-            return;
+            return output;
         }
     }
     /*
@@ -15852,15 +17034,10 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 等，一个是换一页重下。
      */
     const QString successAdvice = freezing
-        ? ks::i18n::sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程可能不会立刻停住——正卡在等待或睡眠中的进程要等它再次运行到那里。若长时间没有反应，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"))
-        : ks::i18n::sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程退出可能有延迟——正卡在等待或睡眠中的进程要等它再次运行到那里，期间它会继续留在列表里。若长时间没有退出，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"));
-    showHvmDispositionResult(
-        actionTitle,
-        armed,
-        result.io.message,
-        result.response.status,
-        actionEvent,
-        successAdvice);
+        ? translator.sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程可能不会立刻停住——正卡在等待或睡眠中的进程要等它再次运行到那里。若长时间没有反应，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"))
+        : translator.sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程退出可能有延迟——正卡在等待或睡眠中的进程要等它再次运行到那里，期间它会继续留在列表里。若长时间没有退出，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"));
+    return HvmActionResult{armed, result.io.message, result.response.status, successAdvice};
+    });
 }
 
 void ProcessDock::executeHvmInjectAction(const unsigned long operation)
@@ -15868,6 +17045,7 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     // 输入：operation 取 ARM（注入 DLL）或 RELEASE（撤销）。
     // 处理：补齐前提、选 DLL、下达注入，最后恢复常驻。
     // 返回：无返回值；结果通过消息框与日志反馈。
+    if ((m_hvmOperation && m_hvmOperation->isBusy()) || (m_hvmPreflightOperation && m_hvmPreflightOperation->isBusy())) return;
     const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
     if (actionTargets.empty())
     {
@@ -15893,20 +17071,18 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
 
     if (operation == KSWORD_ARK_HVM_INJECT_OP_RELEASE)
     {
-        kLogEvent releaseEvent;
+        const QString title = ks::i18n::sourceText(QStringLiteral("%1 撤销注入")).arg(hvmName);
+        submitHvmAction(title, target, [targetPid]
+        {
         ksword::ark::DriverClient releaseClient;
         const ksword::ark::HvmInjectResult releaseResult =
             releaseClient.controlHvmInject(
                 KSWORD_ARK_HVM_INJECT_OP_RELEASE,
                 targetPid, 0UL, 0ULL, 0ULL, nullptr, 0UL, true);
-        showHvmDispositionResult(
-            ks::i18n::sourceText(QStringLiteral("%1 撤销注入")).arg(hvmName),
-            releaseResult.io.ok &&
-                releaseResult.response.status ==
-                    KSWORD_ARK_HVM_INJECT_STATUS_OK,
-            releaseResult.io.message,
-            KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            releaseEvent);
+
+            return HvmActionResult{releaseResult.io.ok && releaseResult.response.status == KSWORD_ARK_HVM_INJECT_STATUS_OK,
+                releaseResult.io.message, KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
+        });
         return;
     }
 
@@ -15926,7 +17102,27 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
      * 代码上。入口点不行：它只在启动时执行一次，对已经跑起来的进程等于永远不
      * 触发，而那和成功在外面看不出区别。
      */
-    const quint64 triggerAddress = hvmProcessRunningThreadRip(targetPid);
+    if (!m_hvmPreflightOperation) m_hvmPreflightOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_hvmPreflightOperation->submit<ProcessActionTarget, quint64>(target,
+        [](const ProcessActionTarget& value, const ks::ui::AsyncOperationToken&)
+        {
+            HANDLE raw = nullptr; std::string detail;
+            if (!value.isKernelOnly && !acquireProcessActionIdentityHold(value.record.pid,
+                value.record.creationTime100ns, &raw, &detail)) return quint64(0);
+            const ScopedProcessActionHandle identity(raw);
+            return hvmProcessRunningThreadRip(value.record.pid);
+        },
+        [this, target, dllPath](const quint64& address, std::uint64_t)
+        { continueHvmInjectAction(target, dllPath, address); return true; },
+        [this, hvmName](std::exception_ptr)
+        { const kLogEvent event; showHvmDispositionResult(hvmName, false,
+            ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString(), 0, event); });
+}
+
+void ProcessDock::continueHvmInjectAction(ProcessActionTarget target, QString dllPath, const quint64 triggerAddress)
+{
+    const auto targetPid = target.record.pid;
+    const QString hvmName = ks::settings::hvmDisplayNameLabel(ks::settings::loadAppearanceSettings().hvmDisplayName);
     if (triggerAddress == 0ULL)
     {
         QMessageBox::warning(
@@ -15971,9 +17167,13 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     warn << actionEvent
         << "[ProcessDock] executeHvmInjectAction: pid=" << targetPid
         << eol;
-    if (!prepareHvmForArming(actionTitle, actionEvent))
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    submitHvmAction(actionTitle, target, [targetPid, triggerAddress, loadLibrary, dllPath, actionEvent, translator]
+        {
+            HvmActionResult output;
+    if (!prepareHvmForArming(output, translator))
     {
-        return;
+        return output;
     }
     /*
      * 路径按 UTF-16 传（LoadLibraryW），长度不含结尾的零——驱动把超出长度的部分
@@ -15998,9 +17198,9 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     {
         // 注入只有在常驻起来之后才真的生效。这一步失败要单独报：注入**已经装上
         // 了**，只是没人在执行它。
-        if (stepFailedRestartResident(actionTitle, actionEvent))
+        if (stepFailedRestartResident(output, translator))
         {
-            return;
+            return output;
         }
     }
     /*
@@ -16013,7 +17213,7 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
      * 执行数为零时再主动给目标一次继续执行的机会：静止的进程线程全停在等待里，
      * 那一页可以一直等不到。
      */
-    QString injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上。它在目标下一次执行到那一页时才生效，所以可能不会立刻看到效果。若长时间没有反应，多半是那一页没被执行到，或这一带找不到足够长的空隙。"));
+    QString injectDetail = translator.sourceText(QStringLiteral("注入已装上。它在目标下一次执行到那一页时才生效，所以可能不会立刻看到效果。若长时间没有反应，多半是那一页没被执行到，或这一带找不到足够长的空隙。"));
     if (armed)
     {
         unsigned long long executionCount =
@@ -16035,24 +17235,19 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
             << eol;
         if (executionCount != 0ULL)
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("载荷已经在目标里执行过 %1 次，注入确实生效了。")).arg(executionCount);
+            injectDetail = translator.sourceText(QStringLiteral("载荷已经在目标里执行过 %1 次，注入确实生效了。")).arg(executionCount);
         }
         else if (wakenedWindows != 0U)
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上，但目标还没有执行到那一页。已向它的 %1 个窗口各投递一条空消息把消息循环唤醒（不写目标内存、不建线程），仍未触发。载荷会一直挂着，目标下次执行到那一页时自然生效。")).arg(wakenedWindows);
+            injectDetail = translator.sourceText(QStringLiteral("注入已装上，但目标还没有执行到那一页。已向它的 %1 个窗口各投递一条空消息把消息循环唤醒（不写目标内存、不建线程），仍未触发。载荷会一直挂着，目标下次执行到那一页时自然生效。")).arg(wakenedWindows);
         }
         else
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上，但目标当前是静止的：它的线程都停在等待里，那一页还没有被执行到，而且它没有可唤醒的顶层窗口。载荷会一直挂着，等目标自己再次运行才生效——对长期空闲的后台进程，这可能一直不发生。"));
+            injectDetail = translator.sourceText(QStringLiteral("注入已装上，但目标当前是静止的：它的线程都停在等待里，那一页还没有被执行到，而且它没有可唤醒的顶层窗口。载荷会一直挂着，等目标自己再次运行才生效——对长期空闲的后台进程，这可能一直不发生。"));
         }
     }
-    showHvmDispositionResult(
-        actionTitle,
-        armed,
-        result.io.message,
-        KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-        actionEvent,
-        injectDetail);
+    return HvmActionResult{armed, result.io.message, KSWORD_ARK_HVM_PROCESS_STATUS_OK, injectDetail};
+    });
 }
 
 void ProcessDock::executeR0SetProcessHiddenAction(
@@ -17716,6 +18911,7 @@ void ProcessDock::openProcessDetailsPlaceholder()
     connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
         m_detailWindowByIdentity.erase(identityKey);
         m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+        syncProcessEtwCaptureDemand();
     });
 
     // “转到父进程”由详情窗口发信号到这里统一处理。
@@ -17794,6 +18990,7 @@ void ProcessDock::openSelectedProcessHotkeyScanner()
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
@@ -17882,6 +19079,7 @@ void ProcessDock::openSelectedProcessInjectionPage()
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
@@ -17955,6 +19153,7 @@ void ProcessDock::showProcessDetailWindowForRecord(
         {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
     connect(
         detailWindow,
@@ -18075,4 +19274,32 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
         queriedRecord.pid,
         queriedRecord.creationTime100ns);
     showProcessDetailWindowForRecord(identityKey, queriedRecord);
+}
+
+namespace
+{
+    [[maybe_unused]] const bool kProcessNavigationRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<ProcessDock>(QStringLiteral("process"));
+}
+
+void ProcessDock::changeEvent(QEvent* event)
+{
+    const QPointer<ProcessDock> alive(this);
+    QWidget::changeEvent(event);
+    if (!alive || !event || !m_processTableModel) return;
+    const bool language = event->type() == QEvent::LanguageChange;
+    const bool color = event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange;
+    const bool font = event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange;
+    if (!language && !color && !font) return;
+    const QPointer<QAbstractItemModel> model(m_processTableModel);
+    const int columns = model->columnCount();
+    if (language && columns > 0) emit model->headerDataChanged(Qt::Horizontal, 0, columns - 1);
+    if (!alive || !model || m_processTableModel != model.data()) return;
+    QList<int> roles;
+    if (language) roles << Qt::DisplayRole << Qt::ToolTipRole;
+    if (color) roles << Qt::BackgroundRole << Qt::ForegroundRole << Qt::DecorationRole;
+    if (font) roles << Qt::FontRole << Qt::SizeHintRole;
+    const int rows = model->rowCount();
+    if (rows > 0 && columns > 0)
+        emit model->dataChanged(model->index(0, 0), model->index(rows - 1, columns - 1), roles);
 }

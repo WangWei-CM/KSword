@@ -12,11 +12,14 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include <QHash>
 
 #include <atomic> // std::atomic_bool：防止历史刷新并发。
 #include <cstdint> // std::uint32_t/std::uint64_t：审计进程身份字段。
 #include <deque>  // std::deque：实时事件队列按固定上限 O(1) 淘汰最旧项。
 #include <mutex>  // std::mutex：实时回调队列保护。
+#include <memory>
+#include <optional>
 #include <thread> // std::thread：可等待的历史/规则刷新线程。
 #include <vector> // std::vector：事件批量回投。
 
@@ -26,7 +29,9 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QTabWidget;
-class QTableWidget;
+class QTableView;
+namespace ks::ui { class AsyncOperation; }
+namespace network_value_detail { template<class Row> class Model; }
 class QTimer;
 class QVBoxLayout;
 class QSplitter;
@@ -99,6 +104,8 @@ public:
         QString protocolText;      // protocolText：TCP/UDP/ICMP 或协议号。
         QString timestampText;     // timestampText：事件时间。
         bool isDrop = false;       // isDrop：是否为 DROP，仅供筛选，不改变正常文字颜色。
+        quint64 displayIdentity = 0;   // GUI-owned sequence; retained across hostname updates.
+        QString searchDocumentText;   // N01-29 folded document of all original displayed fields.
     };
 
     // FirewallRuleEntry：
@@ -126,11 +133,13 @@ public:
         long directionValue = 0;      // directionValue：NET_FW_RULE_DIRECTION 原始值。
         long profilesValue = 0;       // profilesValue：NET_FW_PROFILE_TYPE2 位掩码。
         long protocolValue = 0;       // protocolValue：协议原始值。
+        QString searchDocumentText;   // N01-29 folded document of all original displayed fields.
     };
 
 protected:
     // changeEvent 在 palette 传播后只重着色既有规则，不刷新或改动系统防火墙规则。
     void changeEvent(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
 
@@ -180,16 +189,16 @@ private:
     // - 输入：批量事件、是否清空旧内容；
     // - 处理：写入表格；DROP 仅保留筛选标记，文字使用正常主题色；
     // - 无返回值。
-    void appendEventsToTable(const std::vector<FirewallEventEntry>& eventList, bool clearBeforeAppend);
+    void appendEventsToTable(std::shared_ptr<const std::vector<FirewallEventEntry>> eventList, bool clearBeforeAppend);
+    void preparePendingEventSource();
+    void presentPendingFirewallValues();
+    void applyResolvedHostnames(const QHash<QString, QString>& resolvedHostnameMap);
 
     // applyFilterToRows 作用：
     // - 根据搜索文本和“仅 DROP”状态隐藏表格行；
     // - 无输入参数；
     // - 无返回值。
     void applyFilterToRows();
-
-    // applyFilterToRowRange 作用：只刷新指定行区间的筛选状态，避免实时追加时反复扫描全表。
-    void applyFilterToRowRange(int firstRow, int rowCount);
 
     // flushLiveEventsToUi 作用：
     // - 周期性从实时队列取出事件并追加到 UI；
@@ -356,7 +365,7 @@ private:
     QPushButton* m_clearButton = nullptr;      // m_clearButton：清空表格。
     QLineEdit* m_searchEdit = nullptr;         // m_searchEdit：搜索输入框。
     QCheckBox* m_dropOnlyCheck = nullptr;      // m_dropOnlyCheck：仅显示 DROP。
-    QTableWidget* m_eventTable = nullptr;      // m_eventTable：防火墙事件表。
+    QTableView* m_eventTable = nullptr;      // m_eventTable：防火墙事件表。
     QTimer* m_liveFlushTimer = nullptr;        // m_liveFlushTimer：实时队列消费定时器。
     std::atomic_bool m_refreshingHistory{ false }; // m_refreshingHistory：历史刷新互斥。
     std::thread m_historyRefreshThread;        // m_historyRefreshThread：析构前等待的历史枚举线程。
@@ -372,14 +381,42 @@ private:
     QLineEdit* m_ruleSearchEdit = nullptr;     // m_ruleSearchEdit：规则搜索输入框。
     QCheckBox* m_ruleEnabledOnlyCheck = nullptr; // m_ruleEnabledOnlyCheck：仅显示启用规则。
     QSplitter* m_ruleSplitter = nullptr;       // m_ruleSplitter：规则表与详情 3:1 垂直分栏。
-    QTableWidget* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
+    QTableView* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
+    network_value_detail::Model<FirewallEventEntry>* m_eventValueModel = nullptr;
+    network_value_detail::Model<FirewallRuleEntry>* m_ruleValueModel = nullptr;
+    ks::ui::AsyncOperation* m_eventFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_ruleFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_eventDiffOperation = nullptr;
+    ks::ui::AsyncOperation* m_ruleDiffOperation = nullptr;
+    quint64 m_eventSourceRevision = 0, m_ruleSourceRevision = 0;
+    std::optional<quint64> m_eventDiffRequestedRevision, m_ruleDiffRequestedRevision;
+    std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventFilterSource;
+    std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleFilterSource;
+    std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventEntryList = std::make_shared<const std::vector<FirewallEventEntry>>();
+    struct EventMutation
+    {
+        std::shared_ptr<const EventMutation> previous;
+        std::shared_ptr<const std::vector<FirewallEventEntry>> events;
+        QHash<QString, QString> hostnames;
+        quint64 firstIdentity = 0;
+        bool clear = false;
+    };
+    std::shared_ptr<const EventMutation> m_eventMutations;
+    ks::ui::AsyncOperation* m_eventSourceOperation = nullptr;
+    quint64 m_eventSourceReadyRevision = 0;
+    std::size_t m_eventCanonicalCount = 0;
+    quint64 m_nextEventIdentity = 0;
+    bool m_eventProjectionDirty = false;
+    bool m_eventFilterDirty = false;
+    bool m_ruleFilterDirty = false;
+    bool m_ruleProjectionDirty = false;
     bool m_itemThemeRefreshScheduled = false; // 合并主题事件，保留隐藏行、排序和当前规则选择。
     ks::ui::StructuredFieldView* m_ruleDetailEditor = nullptr; // m_ruleDetailEditor：完整规则详情只读编辑器。
     std::atomic_bool m_refreshingRules{ false }; // m_refreshingRules：规则刷新互斥。
     std::thread m_ruleRefreshThread;           // m_ruleRefreshThread：析构前等待的规则枚举线程。
     std::atomic_bool m_initialRefreshRequested{ false }; // m_initialRefreshRequested：首轮刷新门控。
     std::atomic_bool m_shuttingDown{ false };  // m_shuttingDown：阻止后台线程在析构期间继续回投 UI。
-    std::vector<FirewallRuleEntry> m_ruleEntryList; // m_ruleEntryList：规则快照缓存。
+    std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleEntryList = std::make_shared<const std::vector<FirewallRuleEntry>>(); // m_ruleEntryList：规则快照缓存。
     void* m_fwpuclntModule = nullptr;          // m_fwpuclntModule：fwpuclnt.dll 模块句柄。
     void* m_liveEngineHandle = nullptr;        // m_liveEngineHandle：实时监控 BFE engine。
     void* m_liveSubscriptionHandle = nullptr;  // m_liveSubscriptionHandle：实时订阅句柄。

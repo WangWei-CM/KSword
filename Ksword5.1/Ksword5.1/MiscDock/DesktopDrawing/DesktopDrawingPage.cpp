@@ -23,6 +23,59 @@
 
 namespace
 {
+    enum class DesktopDrawingBodyText
+    {
+        Display, Refresh, Pattern, Cross, Circle, Rectangle, Diamond, Star,
+        X, Y, Center, Size, LineWidth, Rate, Color, Start, Stop, Hotkey, Idle, DisplayChanged
+    };
+    struct DesktopDrawingBodyEntry
+    {
+        const char* target;
+        QString key;
+        QString source;
+        bool mnemonic;
+    };
+    const DesktopDrawingBodyEntry& desktopDrawingBodyEntry(DesktopDrawingBodyText id)
+    {
+        static const DesktopDrawingBodyEntry entries[] = {
+            {"ks_desktop_drawing_display", QStringLiteral("misc.desktop_drawing.display"), QStringLiteral("绘制显示器"), false},
+            {"ks_desktop_drawing_refresh", QStringLiteral("misc.desktop_drawing.refresh"), QStringLiteral("刷新显示器"), true},
+            {"ks_desktop_drawing_pattern", QStringLiteral("misc.desktop_drawing.pattern"), QStringLiteral("绘制图案"), false},
+            {"ks_desktop_drawing_pattern_combo", QStringLiteral("misc.desktop_drawing.cross"), QStringLiteral("十字准星"), false},
+            {"ks_desktop_drawing_pattern_combo", QStringLiteral("misc.desktop_drawing.circle"), QStringLiteral("圆环"), false},
+            {"ks_desktop_drawing_pattern_combo", QStringLiteral("misc.desktop_drawing.rectangle"), QStringLiteral("矩形边框"), false},
+            {"ks_desktop_drawing_pattern_combo", QStringLiteral("misc.desktop_drawing.diamond"), QStringLiteral("菱形"), false},
+            {"ks_desktop_drawing_pattern_combo", QStringLiteral("misc.desktop_drawing.star"), QStringLiteral("五角星"), false},
+            {"ks_desktop_drawing_x", QStringLiteral("misc.desktop_drawing.x"), QStringLiteral("中心横坐标（物理像素）"), false},
+            {"ks_desktop_drawing_y", QStringLiteral("misc.desktop_drawing.y"), QStringLiteral("中心纵坐标（物理像素）"), false},
+            {"ks_desktop_drawing_center", QStringLiteral("misc.desktop_drawing.center"), QStringLiteral("居中到所选显示器"), true},
+            {"ks_desktop_drawing_size", QStringLiteral("misc.desktop_drawing.size"), QStringLiteral("图案尺寸（物理像素）"), false},
+            {"ks_desktop_drawing_line_width", QStringLiteral("misc.desktop_drawing.line_width"), QStringLiteral("线条宽度（物理像素）"), false},
+            {"ks_desktop_drawing_rate", QStringLiteral("misc.desktop_drawing.rate"), QStringLiteral("每秒重绘次数"), false},
+            {"ks_desktop_drawing_color", QStringLiteral("misc.desktop_drawing.color"), QStringLiteral("图案颜色"), false},
+            {"ks_desktop_drawing_start", QStringLiteral("misc.desktop_drawing.start"), QStringLiteral("开始绘制"), true},
+            {"ks_desktop_drawing_stop", QStringLiteral("misc.desktop_drawing.stop"), QStringLiteral("停止并刷新"), true},
+            {"ks_desktop_drawing_hotkey", QStringLiteral("misc.desktop_drawing.hotkey"), QStringLiteral("按 Ctrl+Alt+F10 停止绘制。"), false},
+            {"ks_desktop_drawing_status", QStringLiteral("misc.desktop_drawing.idle"), QStringLiteral("尚未开始绘制。"), false},
+            {"ks_desktop_drawing_status", QStringLiteral("misc.desktop_drawing.display_changed"), QStringLiteral("显示器不可用或布局已变化。请刷新显示器后重新开始。"), false},
+        };
+        return entries[static_cast<int>(id)];
+    }
+    void bindDesktopDrawingBody(ks::i18n::LanguageManager& language, QWidget* widget,
+        DesktopDrawingBodyText id)
+    {
+        const auto& entry = desktopDrawingBodyEntry(id);
+        widget->setObjectName(QString::fromLatin1(entry.target));
+        language.bindText(widget, entry.key, entry.source);
+    }
+    QString desktopDrawingDisplayText(const ks::misc::desktop_drawing::Display& display)
+    {
+        const QString name = QString::fromStdWString(display.name);
+        return QStringLiteral("%1  (%2 x %3)").arg(name)
+            .arg(display.bounds.right - display.bounds.left)
+            .arg(display.bounds.bottom - display.bounds.top);
+    }
+
     constexpr int kStopHotkeyId = 0x4B44;
 
     QSpinBox* makeSpin(QWidget* parent, int minimum, int maximum, int value)
@@ -37,6 +90,46 @@ namespace
 
 namespace ks::misc
 {
+    QColor DesktopDrawingPage::initialDrawingColor()
+    {
+        return QColor(255, 80, 80);
+    }
+
+    QVector<ks::ui::PageSearchBodyText> DesktopDrawingPage::coldSearchBody(
+        const std::vector<desktop_drawing::Display>& initialDisplays)
+    {
+        // The caller must provide the actual fresh enumeration snapshot. An
+        // assumed display/default status cannot represent the initial page.
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(20 + static_cast<qsizetype>(initialDisplays.size()));
+        const auto append = [&body](DesktopDrawingBodyText id)
+        {
+            const auto& entry = desktopDrawingBodyEntry(id);
+            body.append({ks::i18n::text(entry.key, entry.source),
+                QString::fromLatin1(entry.target), {}, entry.mnemonic});
+        };
+        // Real QObject creation order: combo before its label, and the color
+        // button before the color label. Spin values are not search text.
+        // GlobalUiSearch skips all combo items when the real count exceeds 60.
+        if (initialDisplays.size() <= 60)
+            for (const auto& display : initialDisplays)
+                body.append({ks::i18n::sourceText(desktopDrawingDisplayText(display)),
+                    QStringLiteral("ks_desktop_drawing_display_combo"), {}, false});
+        append(DesktopDrawingBodyText::Display);
+        append(DesktopDrawingBodyText::Refresh);
+        for (const auto id : {DesktopDrawingBodyText::Cross, DesktopDrawingBodyText::Circle,
+            DesktopDrawingBodyText::Rectangle, DesktopDrawingBodyText::Diamond, DesktopDrawingBodyText::Star}) append(id);
+        for (const auto id : {DesktopDrawingBodyText::Pattern, DesktopDrawingBodyText::X, DesktopDrawingBodyText::Y,
+            DesktopDrawingBodyText::Center, DesktopDrawingBodyText::Size, DesktopDrawingBodyText::LineWidth,
+            DesktopDrawingBodyText::Rate}) append(id);
+        body.append({initialDrawingColor().name(QColor::HexRgb),
+            QStringLiteral("ks_desktop_drawing_color_button"), {}, true});
+        for (const auto id : {DesktopDrawingBodyText::Color, DesktopDrawingBodyText::Start,
+            DesktopDrawingBodyText::Stop, DesktopDrawingBodyText::Hotkey}) append(id);
+        append(initialDisplays.empty() ? DesktopDrawingBodyText::DisplayChanged : DesktopDrawingBodyText::Idle);
+        return body;
+    }
+
     DesktopDrawingPage::DesktopDrawingPage(QWidget* parent) : QWidget(parent)
     {
         initializeUi();
@@ -75,55 +168,59 @@ namespace ks::misc
         form->setHorizontalSpacing(16);
         form->setVerticalSpacing(8);
         form->setRowWrapPolicy(QFormLayout::WrapLongRows);
-        auto addRow = [&](const QString& key, const QString& text, QWidget* control)
+        auto addRow = [&](DesktopDrawingBodyText id, QWidget* control)
             {
                 auto* label = new QLabel(m_settings);
-                language.bindText(label, key, text);
+                bindDesktopDrawingBody(language, label, id);
                 label->setBuddy(control);
                 form->addRow(label, control);
             };
 
         m_displayCombo = new QComboBox(m_settings);
+        m_displayCombo->setObjectName(QStringLiteral("ks_desktop_drawing_display_combo"));
         ks::ui::StylePrimaryCombo(m_displayCombo);
         m_displayCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         m_displayCombo->setMinimumContentsLength(20);
-        addRow(QStringLiteral("misc.desktop_drawing.display"), QStringLiteral("绘制显示器"), m_displayCombo);
+        addRow(DesktopDrawingBodyText::Display, m_displayCombo);
         auto* refresh = new QPushButton(m_settings);
-        language.bindText(refresh, QStringLiteral("misc.desktop_drawing.refresh"), QStringLiteral("刷新显示器"));
+        bindDesktopDrawingBody(language, refresh, DesktopDrawingBodyText::Refresh);
         form->addRow(QString(), refresh);
 
         m_patternCombo = new QComboBox(m_settings);
+        m_patternCombo->setObjectName(QStringLiteral("ks_desktop_drawing_pattern_combo"));
         ks::ui::StylePrimaryCombo(m_patternCombo);
-        auto addPattern = [&](desktop_drawing::Pattern pattern, const QString& key, const QString& text)
+        auto addPattern = [&](desktop_drawing::Pattern pattern, DesktopDrawingBodyText id)
             {
                 const int index = m_patternCombo->count();
-                m_patternCombo->addItem(text, static_cast<int>(pattern));
-                language.bindComboBoxItem(m_patternCombo, index, key, text);
+                const auto& entry = desktopDrawingBodyEntry(id);
+                m_patternCombo->addItem(entry.source, static_cast<int>(pattern));
+                language.bindComboBoxItem(m_patternCombo, index, entry.key, entry.source);
             };
-        addPattern(desktop_drawing::Pattern::Cross, QStringLiteral("misc.desktop_drawing.cross"), QStringLiteral("十字准星"));
-        addPattern(desktop_drawing::Pattern::Circle, QStringLiteral("misc.desktop_drawing.circle"), QStringLiteral("圆环"));
-        addPattern(desktop_drawing::Pattern::Rectangle, QStringLiteral("misc.desktop_drawing.rectangle"), QStringLiteral("矩形边框"));
-        addPattern(desktop_drawing::Pattern::Diamond, QStringLiteral("misc.desktop_drawing.diamond"), QStringLiteral("菱形"));
-        addPattern(desktop_drawing::Pattern::Star, QStringLiteral("misc.desktop_drawing.star"), QStringLiteral("五角星"));
+        addPattern(desktop_drawing::Pattern::Cross, DesktopDrawingBodyText::Cross);
+        addPattern(desktop_drawing::Pattern::Circle, DesktopDrawingBodyText::Circle);
+        addPattern(desktop_drawing::Pattern::Rectangle, DesktopDrawingBodyText::Rectangle);
+        addPattern(desktop_drawing::Pattern::Diamond, DesktopDrawingBodyText::Diamond);
+        addPattern(desktop_drawing::Pattern::Star, DesktopDrawingBodyText::Star);
         m_patternCombo->setCurrentIndex(4);
-        addRow(QStringLiteral("misc.desktop_drawing.pattern"), QStringLiteral("绘制图案"), m_patternCombo);
+        addRow(DesktopDrawingBodyText::Pattern, m_patternCombo);
 
         m_xSpin = makeSpin(m_settings, 0, 0, 0);
         m_ySpin = makeSpin(m_settings, 0, 0, 0);
         m_sizeSpin = makeSpin(m_settings, 16, 1024, 160);
         m_lineWidthSpin = makeSpin(m_settings, 1, 32, 3);
         m_rateSpin = makeSpin(m_settings, 5, 120, 30);
-        addRow(QStringLiteral("misc.desktop_drawing.x"), QStringLiteral("中心横坐标（物理像素）"), m_xSpin);
-        addRow(QStringLiteral("misc.desktop_drawing.y"), QStringLiteral("中心纵坐标（物理像素）"), m_ySpin);
+        addRow(DesktopDrawingBodyText::X, m_xSpin);
+        addRow(DesktopDrawingBodyText::Y, m_ySpin);
         auto* center = new QPushButton(m_settings);
-        language.bindText(center, QStringLiteral("misc.desktop_drawing.center"), QStringLiteral("居中到所选显示器"));
+        bindDesktopDrawingBody(language, center, DesktopDrawingBodyText::Center);
         form->addRow(QString(), center);
-        addRow(QStringLiteral("misc.desktop_drawing.size"), QStringLiteral("图案尺寸（物理像素）"), m_sizeSpin);
-        addRow(QStringLiteral("misc.desktop_drawing.line_width"), QStringLiteral("线条宽度（物理像素）"), m_lineWidthSpin);
-        addRow(QStringLiteral("misc.desktop_drawing.rate"), QStringLiteral("每秒重绘次数"), m_rateSpin);
+        addRow(DesktopDrawingBodyText::Size, m_sizeSpin);
+        addRow(DesktopDrawingBodyText::LineWidth, m_lineWidthSpin);
+        addRow(DesktopDrawingBodyText::Rate, m_rateSpin);
         m_colorButton = new QPushButton(m_settings);
+        m_colorButton->setObjectName(QStringLiteral("ks_desktop_drawing_color_button"));
         updateColorButton();
-        addRow(QStringLiteral("misc.desktop_drawing.color"), QStringLiteral("图案颜色"), m_colorButton);
+        addRow(DesktopDrawingBodyText::Color, m_colorButton);
         // 绘制结果在桌面上，此页保留单列表单，不创建空的结果面板。
         ks::ui::StyleParameterFields(m_settings);
         scroll->setWidget(m_settings);
@@ -132,8 +229,8 @@ namespace ks::misc
         auto* actions = new QHBoxLayout;
         m_startButton = new QPushButton(this);
         m_stopButton = new QPushButton(this);
-        language.bindText(m_startButton, QStringLiteral("misc.desktop_drawing.start"), QStringLiteral("开始绘制"));
-        language.bindText(m_stopButton, QStringLiteral("misc.desktop_drawing.stop"), QStringLiteral("停止并刷新"));
+        bindDesktopDrawingBody(language, m_startButton, DesktopDrawingBodyText::Start);
+        bindDesktopDrawingBody(language, m_stopButton, DesktopDrawingBodyText::Stop);
         m_stopButton->setEnabled(false);
         actions->addWidget(m_startButton);
         actions->addWidget(m_stopButton);
@@ -142,12 +239,11 @@ namespace ks::misc
         root->addLayout(actions);
         m_hotkeyLabel = new QLabel(this);
         m_hotkeyLabel->setWordWrap(true);
-        language.bindText(m_hotkeyLabel, QStringLiteral("misc.desktop_drawing.hotkey"),
-            QStringLiteral("按 Ctrl+Alt+F10 停止绘制。"));
+        bindDesktopDrawingBody(language, m_hotkeyLabel, DesktopDrawingBodyText::Hotkey);
         root->addWidget(m_hotkeyLabel);
         m_statusLabel = new QLabel(this);
         m_statusLabel->setWordWrap(true);
-        language.bindText(m_statusLabel, QStringLiteral("misc.desktop_drawing.idle"), QStringLiteral("尚未开始绘制。"));
+        bindDesktopDrawingBody(language, m_statusLabel, DesktopDrawingBodyText::Idle);
         ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Idle);
         root->addWidget(m_statusLabel);
 
@@ -169,9 +265,7 @@ namespace ks::misc
         for (const auto& display : m_displays)
         {
             const QString name = QString::fromStdWString(display.name);
-            m_displayCombo->addItem(QStringLiteral("%1  (%2 x %3)").arg(name)
-                .arg(display.bounds.right - display.bounds.left)
-                .arg(display.bounds.bottom - display.bounds.top), name);
+            m_displayCombo->addItem(desktopDrawingDisplayText(display), name);
         }
         const int previousIndex = m_displayCombo->findData(previous);
         if (previousIndex >= 0)
@@ -316,8 +410,7 @@ namespace ks::misc
         }
         else if (result == desktop_drawing::DrawResult::DisplayChanged)
         {
-            language.bindText(m_statusLabel, QStringLiteral("misc.desktop_drawing.display_changed"),
-                QStringLiteral("显示器不可用或布局已变化。请刷新显示器后重新开始。"));
+            bindDesktopDrawingBody(language, m_statusLabel, DesktopDrawingBodyText::DisplayChanged);
         }
         else
         {

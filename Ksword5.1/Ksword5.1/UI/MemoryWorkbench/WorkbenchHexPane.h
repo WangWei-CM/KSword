@@ -113,7 +113,8 @@ namespace ks::ui
 
         // insertionAddress：当前插入点地址，转发 canvas_->caretAddress()。
         std::uint64_t insertionAddress() const;
-        void requestBrowseWindow(std::uint64_t address, std::uint64_t length);
+        void requestBrowseWindow(std::uint64_t address, std::uint64_t length,
+            HexCanvas::RangeReadPurpose purpose = HexCanvas::RangeReadPurpose::Browse);
         void setExternalBrowseMode(bool enabled);
 
         // selectionStart：选区的起点（闭区间的 first）；没有选区时退回插入点。

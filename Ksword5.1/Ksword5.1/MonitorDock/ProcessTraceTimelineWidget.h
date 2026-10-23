@@ -14,9 +14,11 @@
 #include <QRectF>
 #include <QString>
 #include "EventTimelineModel.h"
+#include "TimelineRateModel.h"
 
 #include <cstdint>     // std::uint64_t：ETW FILETIME 兼容的 100ns 时间戳。
 #include <functional>  // std::function：不依赖 Qt moc signal 的轻量回调。
+#include <memory>
 #include <vector>      // std::vector：从事件表缓存复制而来的轻量点列表。
 
 class QEvent;
@@ -24,6 +26,7 @@ class QMouseEvent;
 class QPaintEvent;
 class QWheelEvent;
 class QVariantAnimation;
+namespace ks::ui { class AsyncOperation; }
 
 // ProcessTraceTimelineEventPoint：
 // - time100ns：ETW 绝对时间戳，单位为 100ns；
@@ -36,12 +39,6 @@ using ProcessTraceTimelineEventPoint = ks::ui::EventTimelinePoint;
 // - uploadBytesPerSecond：该秒出站/上传速率，单位 B/s；
 // - downloadBytesPerSecond：该秒入站/下载速率，单位 B/s；
 // - 该结构是可选叠加层，ETW 页面不设置时不会绘制任何速率折线。
-struct ProcessTraceTimelineRatePoint
-{
-    std::uint64_t time100ns = 0;
-    double uploadBytesPerSecond = 0.0;
-    double downloadBytesPerSecond = 0.0;
-};
 
 class ProcessTraceTimelineWidget final : public QWidget
 {
@@ -82,11 +79,53 @@ public:
     // 未声明 categoryId 的旧点返回 false 并保留现有数据；旧调用需显式 MakeLegacyTimelinePoint。
     bool setEventPoints(const std::vector<ProcessTraceTimelineEventPoint>& eventPointList);
 
+    // Explicit worker path. Complete source and projection travel together;
+    // ordinary setEventPoints/eventBuckets callers keep their synchronous contract.
+    struct EventProjectionParameters
+    {
+        std::vector<ks::ui::EventTimelineTrack> tracks;
+        std::uint64_t start100ns = 0;
+        std::uint64_t end100ns = 0;
+        std::uint64_t trackRevision = 0;
+        std::uint64_t viewRevision = 0;
+        int pixelBudget = 0;
+    };
+    class PreparedEventPoints final
+    {
+    public:
+        PreparedEventPoints() = default;
+    private:
+        std::shared_ptr<const std::vector<ProcessTraceTimelineEventPoint>> m_points;
+        std::shared_ptr<const std::vector<ks::ui::EventTimelineBucket>> m_buckets;
+        EventProjectionParameters m_projection;
+        friend class ProcessTraceTimelineWidget;
+    };
+    EventProjectionParameters eventProjectionParameters(std::uint64_t start100ns,
+        std::uint64_t end100ns) const;
+    static PreparedEventPoints prepareEventPoints(std::vector<ProcessTraceTimelineEventPoint> points,
+        EventProjectionParameters projection);
+    bool applyPreparedEventPoints(const PreparedEventPoints& prepared);
+
     // setRateOverlayPoints：
     // - 替换用于绘制的上传/下载速率折线缓存；
     // - 调用方负责按秒聚合，本控件只做缩放映射与叠加绘制；
     // - 传入空列表表示关闭速率折线叠加层。
     void setRateOverlayPoints(const std::vector<ProcessTraceTimelineRatePoint>& ratePointList);
+
+    // Pure-value preparation may run on a worker. The opaque result owns every
+    // point and retires its complete vector off GUI, including drop/reset/close.
+    class PreparedRateOverlay final
+    {
+    public:
+        PreparedRateOverlay() = default;
+    private:
+        std::shared_ptr<const ks::ui::TimelineRateValues> m_values;
+        friend class ProcessTraceTimelineWidget;
+    };
+    static PreparedRateOverlay prepareRateOverlayPoints(
+        std::vector<ProcessTraceTimelineRatePoint> ratePointList);
+    void applyRateOverlayPoints(const PreparedRateOverlay& prepared);
+
 
     // setSelectionChangedCallback：
     // - 注册用户交互导致选区变化时的回调；
@@ -103,6 +142,9 @@ public:
     // - 返回当前选区终点的绝对 100ns 时间戳；
     // - 捕获范围尚未初始化时返回 0。
     std::uint64_t selectionEnd100ns() const;
+
+    // 全范围选区不冻结时间右端；宿主据此停用历史时间过滤。
+    bool hasUserAdjustedSelection() const { return m_userAdjustedSelection; }
 
 protected:
     bool event(QEvent* eventPointer) override; // 轨道密度悬停提示与热主题/语言重绘。
@@ -149,8 +191,8 @@ private:
         ResizeLeft,
         ResizeRight
     };
+    const std::vector<ProcessTraceTimelineRatePoint>& rateOverlayPoints() const;
     ProcessTraceTimelineRatePoint animatedRatePointAt(std::size_t pointIndex) const;
-    double animatedRateTimeToX(std::uint64_t time100ns) const;
 
 
     // timelineRect：
@@ -184,6 +226,8 @@ private:
     std::uint64_t xToTime(double xValue) const;
 
     void ensureEventBuckets() const; // 原始点/范围/轨道/viewport 改变后才更新投影缓存。
+    void invalidateEventBuckets();
+    void scheduleEventProjection();
 
     // formatDurationText：
     // - 把 100ns 持续时间格式化为 mm:ss 或 hh:mm:ss；
@@ -201,12 +245,22 @@ private:
     void notifySelectionChanged();
 
 private:
-    std::vector<ProcessTraceTimelineEventPoint> m_eventPointList; // m_eventPointList：仅用于绘制的轻量事件缓存。
+    PreparedEventPoints m_events; // Complete raw values and the matching immutable projection.
     std::vector<ks::ui::EventTimelineTrack> m_tracks; // 两个生产宿主配置各自轨道，类别文字不参与分类。
-    mutable std::vector<ks::ui::EventTimelineBucket> m_eventBuckets; // count/min/max 绘制投影，不取代原始数据。
+    mutable std::shared_ptr<const std::vector<ks::ui::EventTimelineBucket>> m_eventBuckets;
     mutable bool m_eventBucketsDirty = true; // 合成事件、范围或 viewport 变化时置脏。
     mutable int m_bucketPixelBudget = 0;     // DPR 改变即使尺寸相同也会重聚合。
-    std::vector<ProcessTraceTimelineRatePoint> m_ratePointList; // m_ratePointList：上传/下载速率折线点缓存，空时不绘制。
+    ks::ui::AsyncOperation* m_eventProjectionOperation = nullptr;
+    std::uint64_t m_eventProjectionRevision = 0;
+    std::uint64_t m_eventProjectionSubmittedRevision = 0;
+    int m_eventProjectionSubmittedPixelBudget = 0;
+    std::uint64_t m_trackRevision = 0;
+    bool m_asyncEventProjection = false;
+    bool m_eventProjectionQueued = false;
+    PreparedRateOverlay m_rateOverlay; // Complete immutable values; GUI replaces only this owner.
+    ks::ui::TimelineRateValues::Projection m_rateProjection;
+    ks::ui::TimelineRateValues::Parameters m_rateProjectionParameters;
+    bool m_rateProjectionValid = false;
     QVariantAnimation* m_rateAnimation = nullptr; // m_rateAnimation：最新速率点插值动画。
     ProcessTraceTimelineRatePoint m_previousRatePoint; // m_previousRatePoint：最新点动画起始值。
     double m_rateAnimationProgress = 1.0; // m_rateAnimationProgress：最新速率点动画进度。

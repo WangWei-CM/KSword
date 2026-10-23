@@ -13,6 +13,12 @@
 #include "../../ksword/file/pe_analyzer.h"
 #include "../../theme.h"
 #include "../../UI/VisibleTableWidget.h"
+#include "../../UI/FlatTableModel.h"
+#include <QAbstractProxyModel>
+#include <QSortFilterProxyModel>
+#include <QItemSelectionModel>
+#include "../../UI/TablePresentation.h"
+#include "../../UI/TableInteractionSupport.h"
 
 #include <QAbstractItemView>
 #include <QAction>
@@ -78,6 +84,162 @@ namespace
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::PrimaryBlueHex));
         return table;
+    }
+
+    // The model owns the complete value snapshot. Formatting happens only for requested cells.
+    template<typename RowT>
+    QTableView* createValueTable(QWidget* parent, const QStringList& headers,
+        typename ks::ui::FlatTableModel<RowT>::DataResolver resolver,
+        ks::ui::FlatTableModel<RowT>*& model)
+    {
+        using Model = ks::ui::FlatTableModel<RowT>;
+        auto* table = new ks::ui::TableActionTableView(parent);
+        std::vector<typename Model::ColumnSpec> columns;
+        columns.reserve(static_cast<std::size_t>(headers.size()));
+        for (const QString& header : headers)
+        {
+            columns.push_back({header});
+        }
+        model = new Model(std::move(columns), std::move(resolver), table);
+        auto* proxy = new QSortFilterProxyModel(table);
+        proxy->setSourceModel(model);
+        table->setModel(proxy);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setAlternatingRowColors(true);
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        table->setSortingEnabled(true);
+        table->sortByColumn(-1, Qt::AscendingOrder);
+        ks::ui::ApplyTablePresentation(table);
+        return table;
+    }
+
+    template<typename RowT>
+    const RowT* valueAt(const ks::ui::FlatTableModel<RowT>* model, QModelIndex index)
+    {
+        while (index.isValid() && index.model() != model)
+        {
+            const auto* proxy = qobject_cast<const QAbstractProxyModel*>(index.model());
+            if (proxy == nullptr)
+            {
+                return nullptr;
+            }
+            index = proxy->mapToSource(index);
+        }
+        return index.isValid() && index.model() == model ? model->rowAt(index.row()) : nullptr;
+    }
+
+    QVariant rawCell(const ks::misc::RawFileEntry& entry, const int column, const int role)
+    {
+        using namespace ks::misc;
+        std::uint64_t firstPhysical = 0;
+        bool firstPhysicalExact = false;
+        if (column == 6)
+        {
+            for (const RawFileExtent& extent : entry.extents)
+            {
+                if (extent.physicalMappingExact && !extent.sparse)
+                {
+                    firstPhysical = extent.absoluteOffset;
+                    firstPhysicalExact = true;
+                    break;
+                }
+            }
+        }
+        if (role == Qt::UserRole)
+        {
+            if (column == 5) return QVariant::fromValue<qulonglong>(entry.metadataOffset);
+            if (column == 6) return QVariant::fromValue<qulonglong>(firstPhysical);
+        }
+        if (role == Qt::UserRole + 1 && column == 6) return firstPhysicalExact;
+        if (role != Qt::DisplayRole) return {};
+        switch (column)
+        {
+        case 0: return entry.name;
+        case 1: return DiskRawFileSystemBrowser::objectTypeText(entry.type);
+        case 2: return QString::number(entry.fileSizeBytes);
+        case 3: return QString::number(entry.allocatedSizeBytes);
+        case 4: return QString::number(entry.objectId);
+        case 5: return hexOffset(entry.metadataOffset);
+        case 6: return firstPhysicalExact ? hexOffset(firstPhysical) : QStringLiteral("-");
+        case 7:
+        {
+            QStringList texts;
+            for (const RawFileExtent& extent : entry.extents)
+            {
+                const QString state = extent.sparse ? QStringLiteral("稀疏")
+                    : extent.unwritten ? QStringLiteral("未写入")
+                    : extent.compressed ? QStringLiteral("压缩") : QString();
+                texts.push_back(QStringLiteral("%1:%2+%3%4")
+                    .arg(hexOffset(extent.logicalOffset))
+                    .arg(extent.physicalMappingExact ? hexOffset(extent.absoluteOffset) : QStringLiteral("-"))
+                    .arg(static_cast<qulonglong>(extent.lengthBytes))
+                    .arg(state.isEmpty() ? QString() : QStringLiteral("[%1]").arg(state)));
+            }
+            if (entry.extentsTruncated) texts.push_back(QStringLiteral("…[物理映射未完整展开]"));
+            return texts.isEmpty() ? QStringLiteral("-") : texts.join(QStringLiteral("; "));
+        }
+        default: return {};
+        }
+    }
+
+    QVariant extentCell(const ks::misc::PhysicalFileExtent& extent, const int column, const int role)
+    {
+        if (column == 4 && role == Qt::UserRole) return QVariant::fromValue<qulonglong>(extent.physicalOffset);
+        if (column == 4 && role == Qt::UserRole + 1) return extent.physicalMappingExact;
+        if (role != Qt::DisplayRole) return {};
+        switch (column)
+        {
+        case 0: return extent.diskNumber >= 0 ? QStringLiteral("PhysicalDrive%1").arg(extent.diskNumber) : QStringLiteral("-");
+        case 1: return hexOffset(extent.fileOffset);
+        case 2: return QString::number(extent.startingVcn);
+        case 3: return extent.sparse ? QStringLiteral("Sparse") : QString::number(extent.startingLcn);
+        case 4: return extent.physicalMappingExact ? hexOffset(extent.physicalOffset) : QStringLiteral("-");
+        case 5: return QString::number(extent.lengthBytes);
+        case 6: return extent.sparse ? QStringLiteral("稀疏区间") : extent.physicalMappingExact
+            ? QStringLiteral("可跳转") : QStringLiteral("多区间卷，仅返回卷内 LCN");
+        default: return {};
+        }
+    }
+
+    QVariant reverseCell(const ks::misc::ReverseClusterEntry& entry, const int column, const int role)
+    {
+        if (role != Qt::DisplayRole) return {};
+        switch (column)
+        {
+        case 0: return QString::number(entry.cluster);
+        case 1: return QString::number(entry.clusterCount);
+        case 2: return entry.streamPath;
+        default: return {};
+        }
+    }
+
+    QVariant deletedCell(const ks::misc::DeletedDirectoryEntry& entry, const int column, const int role)
+    {
+        if (role != Qt::DisplayRole) return {};
+        switch (column)
+        {
+        case 0: return entry.name;
+        case 1: return entry.directoryPath;
+        case 2: return QString::number(entry.fileSizeBytes);
+        case 3: return QString::number(entry.firstCluster);
+        case 4: return hexOffset(entry.directoryEntryOffset);
+        case 5:
+        {
+            QStringList texts;
+            for (const ks::misc::DeletedFileExtent& extent : entry.extents)
+            {
+                texts.push_back(QStringLiteral("%1+%2").arg(hexOffset(extent.physicalOffset))
+                    .arg(static_cast<qulonglong>(extent.lengthBytes)));
+            }
+            return texts.isEmpty() ? QStringLiteral("-") : texts.join(QStringLiteral("; "));
+        }
+        case 6: return entry.exactExtents && entry.clustersCurrentlyFree && !entry.directory
+            ? QStringLiteral("离线磁盘可擦除") : QStringLiteral("只读取证");
+        case 7: return entry.evidenceText;
+        default: return {};
+        }
     }
 
     bool parseUnsignedAddress(
@@ -278,7 +440,7 @@ namespace ks::misc
         rawToolbar->addWidget(m_rawMoreButton, 0, 5);
         rawToolbar->addWidget(m_rawSummaryLabel, 1, 0, 1, 6);
         rawLayout->addLayout(rawToolbar);
-        m_rawTable = createTable(rawGroup, {
+        m_rawTable = createValueTable<RawFileEntry>(rawGroup, {
             QStringLiteral("名称"),
             QStringLiteral("类型"),
             QStringLiteral("逻辑大小"),
@@ -287,7 +449,7 @@ namespace ks::misc
             QStringLiteral("元数据偏移"),
             QStringLiteral("首个物理偏移"),
             QStringLiteral("区段")
-            });
+            }, rawCell, m_rawModel);
         // 原始目录浏览已有专用预览/导出动作，不添加重复操作栏。
         ks::ui::SetTableActionBarMode(m_rawTable, ks::ui::TableActionBarMode::None);
         rawLayout->addWidget(m_rawTable, 1);
@@ -317,7 +479,7 @@ namespace ks::misc
         deletedToolbar->addWidget(m_deletedEraseButton, 0, 1);
         deletedToolbar->addWidget(m_deletedSummaryLabel, 0, 2);
         deletedLayout->addLayout(deletedToolbar);
-        m_deletedTable = createTable(deletedGroup, {
+        m_deletedTable = createValueTable<DeletedDirectoryEntry>(deletedGroup, {
             QStringLiteral("名称"),
             QStringLiteral("原目录"),
             QStringLiteral("大小"),
@@ -326,7 +488,7 @@ namespace ks::misc
             QStringLiteral("精确区间"),
             QStringLiteral("擦除资格"),
             QStringLiteral("证据")
-            });
+            }, deletedCell, m_deletedModel);
         // 删除目录项是一次性证据结果，保留紧凑复制导出。
         ks::ui::SetTableActionBarMode(m_deletedTable, ks::ui::TableActionBarMode::Compact);
         deletedLayout->addWidget(m_deletedTable, 1);
@@ -353,7 +515,7 @@ namespace ks::misc
         extentToolbar->addWidget(m_fileBrowseButton, 0, 1);
         extentToolbar->addWidget(m_extentButton, 0, 2);
         extentLayout->addLayout(extentToolbar);
-        m_extentTable = createTable(extentGroup, {
+        m_extentTable = createValueTable<PhysicalFileExtent>(extentGroup, {
             QStringLiteral("磁盘"),
             QStringLiteral("文件偏移"),
             QStringLiteral("VCN"),
@@ -361,7 +523,7 @@ namespace ks::misc
             QStringLiteral("物理偏移"),
             QStringLiteral("长度"),
             QStringLiteral("状态")
-            });
+            }, extentCell, m_extentModel);
         // 文件区间映射是静态下钻结果，不需要冻结或快照比较。
         ks::ui::SetTableActionBarMode(m_extentTable, ks::ui::TableActionBarMode::None);
         extentLayout->addWidget(m_extentTable, 1);
@@ -399,11 +561,11 @@ namespace ks::misc
         reverseToolbar->addWidget(m_clusterEdit, 0, 3);
         reverseToolbar->addWidget(m_reverseButton, 0, 4);
         reverseLayout->addLayout(reverseToolbar);
-        m_reverseTable = createTable(reverseGroup, {
+        m_reverseTable = createValueTable<ReverseClusterEntry>(reverseGroup, {
             QStringLiteral("簇号"),
             QStringLiteral("簇数量"),
             QStringLiteral("文件流路径")
-            });
+            }, reverseCell, m_reverseModel);
         // 单个簇号的反查结果较少，隐藏无关快照工具条。
         ks::ui::SetTableActionBarMode(m_reverseTable, ks::ui::TableActionBarMode::None);
         reverseLayout->addWidget(m_reverseTable, 1);
@@ -487,54 +649,29 @@ namespace ks::misc
         {
             analyzeSelectedRawPe();
         });
-        connect(
-            m_rawTable,
-            &QTableWidget::itemSelectionChanged,
-            this,
+        connect(m_rawTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             [this]()
             {
-                const int row = m_rawTable->currentRow();
-                const bool fileSelected =
-                    row >= 0
-                    && row < static_cast<int>(m_rawEntries.size())
-                    && m_rawEntries[static_cast<std::size_t>(row)].type
-                        != RawFileObjectType::Directory;
-                m_rawPreviewButton->setEnabled(
-                    !m_busy && fileSelected);
-                m_rawExportButton->setEnabled(
-                    !m_busy && fileSelected);
-                m_rawPeAction->setEnabled(
-                    !m_busy && fileSelected);
+                const RawFileEntry* entry = selectedRawEntry();
+                const bool fileSelected = entry != nullptr && entry->type != RawFileObjectType::Directory;
+                m_rawPreviewButton->setEnabled(!m_busy && fileSelected);
+                m_rawExportButton->setEnabled(!m_busy && fileSelected);
+                m_rawPeAction->setEnabled(!m_busy && fileSelected);
             });
-        connect(
-            m_rawTable,
-            &QTableWidget::cellDoubleClicked,
-            this,
-            [this](const int row, const int column)
+        connect(m_rawTable, &QTableView::doubleClicked, this,
+            [this](const QModelIndex& index)
             {
-                if (row < 0
-                    || row >= static_cast<int>(m_rawEntries.size()))
+                const RawFileEntry* entry = valueAt(m_rawModel, index);
+                if (entry == nullptr) return;
+                if (index.column() == 6)
                 {
+                    if (index.data(Qt::UserRole + 1).toBool() && m_jumpCallback)
+                        m_jumpCallback(index.data(Qt::UserRole).toULongLong());
                     return;
                 }
-                if (column == 6)
+                if (entry->type == RawFileObjectType::Directory)
                 {
-                    const QTableWidgetItem* item =
-                        m_rawTable->item(row, column);
-                    if (item != nullptr
-                        && item->data(Qt::UserRole + 1).toBool()
-                        && m_jumpCallback)
-                    {
-                        m_jumpCallback(
-                            item->data(Qt::UserRole).toULongLong());
-                    }
-                    return;
-                }
-                const RawFileEntry& entry =
-                    m_rawEntries[static_cast<std::size_t>(row)];
-                if (entry.type == RawFileObjectType::Directory)
-                {
-                    m_rawPathEdit->setText(entry.fullPath);
+                    m_rawPathEdit->setText(entry->fullPath);
                     browseRawDirectory();
                     return;
                 }
@@ -577,54 +714,38 @@ namespace ks::misc
                 m_jumpCallback(item->data(Qt::UserRole).toULongLong());
             }
         });
-        connect(m_extentTable, &QTableWidget::cellDoubleClicked, this,
-            [this](const int row, const int column)
-        {
-            Q_UNUSED(column);
-            const QTableWidgetItem* item = m_extentTable->item(row, 4);
-            if (item != nullptr
-                && item->data(Qt::UserRole + 1).toBool()
-                && m_jumpCallback)
+        connect(m_extentTable, &QTableView::doubleClicked, this,
+            [this](const QModelIndex& index)
             {
-                m_jumpCallback(item->data(Qt::UserRole).toULongLong());
-            }
-        });
-        connect(
-            m_deletedTable,
-            &QTableWidget::itemSelectionChanged,
-            this,
+                const PhysicalFileExtent* extent = valueAt(m_extentModel, index);
+                if (extent != nullptr && extent->physicalMappingExact && m_jumpCallback)
+                    m_jumpCallback(extent->physicalOffset);
+            });
+        connect(m_deletedTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             [this]()
             {
-                const int row = m_deletedTable->currentRow();
-                const bool eligible =
-                    row >= 0
-                    && row < static_cast<int>(m_deletedEntries.size())
-                    && m_deletedEntries[static_cast<std::size_t>(row)]
-                        .exactExtents
-                    && m_deletedEntries[static_cast<std::size_t>(row)]
-                        .clustersCurrentlyFree;
+                const DeletedDirectoryEntry* entry = selectedDeletedEntry();
+                const bool eligible = entry != nullptr && entry->exactExtents && entry->clustersCurrentlyFree;
                 m_deletedEraseButton->setEnabled(!m_busy && eligible);
             });
-        connect(
-            m_deletedTable,
-            &QTableWidget::cellDoubleClicked,
-            this,
-            [this](const int row, const int column)
+        connect(m_deletedTable, &QTableView::doubleClicked, this,
+            [this](const QModelIndex& index)
             {
-                Q_UNUSED(column);
-                if (row < 0
-                    || row >= static_cast<int>(m_deletedEntries.size())
-                    || !m_jumpCallback)
-                {
-                    return;
-                }
-                const DeletedDirectoryEntry& entry =
-                    m_deletedEntries[static_cast<std::size_t>(row)];
-                const std::uint64_t offset = !entry.extents.empty()
-                    ? entry.extents.front().physicalOffset
-                    : entry.directoryEntryOffset;
-                m_jumpCallback(offset);
+                const DeletedDirectoryEntry* entry = valueAt(m_deletedModel, index);
+                if (entry == nullptr || !m_jumpCallback) return;
+                m_jumpCallback(!entry->extents.empty()
+                    ? entry->extents.front().physicalOffset : entry->directoryEntryOffset);
             });
+    }
+
+    const RawFileEntry* DiskFileSystemForensicsPanel::selectedRawEntry() const
+    {
+        return valueAt(m_rawModel, m_rawTable->currentIndex());
+    }
+
+    const DeletedDirectoryEntry* DiskFileSystemForensicsPanel::selectedDeletedEntry() const
+    {
+        return valueAt(m_deletedModel, m_deletedTable->currentIndex());
     }
 
     void DiskFileSystemForensicsPanel::probeCurrentPartition()
@@ -741,13 +862,12 @@ namespace ks::misc
         {
             return;
         }
-        const int row = m_rawTable->currentRow();
-        if (row < 0 || row >= static_cast<int>(m_rawEntries.size()))
+        const RawFileEntry* selectedEntry = selectedRawEntry();
+        if (selectedEntry == nullptr)
         {
             return;
         }
-        const RawFileEntry entry =
-            m_rawEntries[static_cast<std::size_t>(row)];
+        const RawFileEntry entry = *selectedEntry;
         if (entry.type == RawFileObjectType::Directory)
         {
             return;
@@ -819,13 +939,12 @@ namespace ks::misc
         {
             return;
         }
-        const int row = m_rawTable->currentRow();
-        if (row < 0 || row >= static_cast<int>(m_rawEntries.size()))
+        const RawFileEntry* selectedEntry = selectedRawEntry();
+        if (selectedEntry == nullptr)
         {
             return;
         }
-        const RawFileEntry entry =
-            m_rawEntries[static_cast<std::size_t>(row)];
+        const RawFileEntry entry = *selectedEntry;
         if (entry.type == RawFileObjectType::Directory)
         {
             return;
@@ -889,13 +1008,12 @@ namespace ks::misc
         {
             return;
         }
-        const int row = m_rawTable->currentRow();
-        if (row < 0 || row >= static_cast<int>(m_rawEntries.size()))
+        const RawFileEntry* selectedEntry = selectedRawEntry();
+        if (selectedEntry == nullptr)
         {
             return;
         }
-        const RawFileEntry entry =
-            m_rawEntries[static_cast<std::size_t>(row)];
+        const RawFileEntry entry = *selectedEntry;
         if (entry.type == RawFileObjectType::Directory)
         {
             return;
@@ -941,6 +1059,9 @@ namespace ks::misc
                         entry.fileSizeBytes));
                 QString readError;
                 std::uint64_t offset = 0U;
+                const auto readSession = DiskRawFileSystemBrowser::createReadSession(
+                    selection.diskIndex, selection.backend, selection.partitionOffset,
+                    selection.partitionLength, selection.logicalSectorSize, fileSystem, entry.fullPath);
                 while (offset < entry.fileSizeBytes)
                 {
                     const std::uint32_t length =
@@ -948,17 +1069,7 @@ namespace ks::misc
                             std::min<std::uint64_t>(
                                 kReadChunkBytes,
                                 entry.fileSizeBytes - offset));
-                    RawFileReadResult chunk =
-                        DiskRawFileSystemBrowser::readFile(
-                            selection.diskIndex,
-                            selection.backend,
-                            selection.partitionOffset,
-                            selection.partitionLength,
-                            selection.logicalSectorSize,
-                            fileSystem,
-                            entry.fullPath,
-                            offset,
-                            length);
+                    RawFileReadResult chunk = readSession(offset, length);
                     if (!chunk.success
                         || chunk.bytes.size()
                             != static_cast<qsizetype>(length))
@@ -1011,17 +1122,9 @@ namespace ks::misc
                         safeThis->m_busy = false;
                         safeThis->m_rawListButton->setEnabled(
                             safeThis->m_rawSelection.has_value());
-                        const int selectedRow =
-                            safeThis->m_rawTable->currentRow();
-                        const bool fileSelected =
-                            selectedRow >= 0
-                            && selectedRow
-                                < static_cast<int>(
-                                    safeThis->m_rawEntries.size())
-                            && safeThis->m_rawEntries[
-                                static_cast<std::size_t>(
-                                    selectedRow)].type
-                                != RawFileObjectType::Directory;
+                        const RawFileEntry* selectedEntry = safeThis->selectedRawEntry();
+                        const bool fileSelected = selectedEntry != nullptr
+                            && selectedEntry->type != RawFileObjectType::Directory;
                         safeThis->m_rawPreviewButton->setEnabled(
                             fileSelected);
                         safeThis->m_rawExportButton->setEnabled(
@@ -1274,13 +1377,12 @@ namespace ks::misc
         {
             return;
         }
-        const int row = m_deletedTable->currentRow();
-        if (row < 0 || row >= static_cast<int>(m_deletedEntries.size()))
+        const DeletedDirectoryEntry* selectedEntry = selectedDeletedEntry();
+        if (selectedEntry == nullptr)
         {
             return;
         }
-        const DeletedDirectoryEntry entry =
-            m_deletedEntries[static_cast<std::size_t>(row)];
+        const DeletedDirectoryEntry entry = *selectedEntry;
         const DiskForensicsSelection selection = *m_deletedSelection;
         if (!entry.exactExtents || !entry.clustersCurrentlyFree)
         {
@@ -1388,11 +1490,23 @@ namespace ks::misc
         DiskForensicsSelection selection,
         FileSystemProbeResult result)
     {
+        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_rawTable, m_probeTable}))
+        {
+            const QPointer<DiskFileSystemForensicsPanel> safeThis(this);
+            ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("disk-forensics-probe-apply"), {m_rawTable, m_probeTable},
+                [safeThis, selection = std::move(selection), result = std::move(result)]() mutable
+                {
+                    if (!safeThis.isNull())
+                        safeThis->applyProbeResult(std::move(selection), std::move(result));
+                });
+            return;
+        }
+
         m_busy = false;
         m_probeButton->setEnabled(true);
         m_probeTable->setRowCount(0);
-        m_rawTable->setRowCount(0);
-        m_rawEntries.clear();
+        m_rawModel->clearRows();
         m_rawSelection.reset();
         m_rawFileSystem = ForensicFileSystemKind::Unknown;
         m_rawUpButton->setEnabled(false);
@@ -1463,9 +1577,21 @@ namespace ks::misc
         DiskForensicsSelection selection,
         RawDirectoryResult result)
     {
+        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_rawTable}))
+        {
+            const QPointer<DiskFileSystemForensicsPanel> safeThis(this);
+            ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("disk-forensics-rawdirectory-apply"), {m_rawTable},
+                [safeThis, selection = std::move(selection), result = std::move(result)]() mutable
+                {
+                    if (!safeThis.isNull())
+                        safeThis->applyRawDirectoryResult(std::move(selection), std::move(result));
+                });
+            return;
+        }
+
         m_busy = false;
-        m_rawTable->setRowCount(0);
-        m_rawEntries.clear();
+        m_rawModel->clearRows();
         m_rawPreviewButton->setEnabled(false);
         m_rawExportButton->setEnabled(false);
         m_rawPeAction->setEnabled(false);
@@ -1485,7 +1611,7 @@ namespace ks::misc
         m_rawSelection = std::move(selection);
         m_rawFileSystem = result.fileSystem;
         m_rawPathEdit->setText(result.canonicalPath);
-        m_rawEntries = std::move(result.entries);
+        m_rawModel->setRows(std::move(result.entries));
         m_rawUpButton->setEnabled(
             result.canonicalPath != QStringLiteral("\\"));
         m_rawListButton->setEnabled(true);
@@ -1497,106 +1623,11 @@ namespace ks::misc
                     result.directoryObjectId))
                 .arg(static_cast<qulonglong>(
                     result.scannedRecords))
-                .arg(m_rawEntries.size())
+                .arg(m_rawModel->rowCount())
                 .arg(result.truncated
                     ? QStringLiteral("（已达到显示上限）")
                     : QString()));
-        m_rawTable->setRowCount(
-            static_cast<int>(m_rawEntries.size()));
-        for (int row = 0;
-             row < static_cast<int>(m_rawEntries.size());
-             ++row)
-        {
-            const RawFileEntry& entry =
-                m_rawEntries[static_cast<std::size_t>(row)];
-            m_rawTable->setItem(row, 0, readOnlyItem(entry.name));
-            m_rawTable->setItem(
-                row,
-                1,
-                readOnlyItem(
-                    DiskRawFileSystemBrowser::objectTypeText(
-                        entry.type)));
-            m_rawTable->setItem(
-                row,
-                2,
-                readOnlyItem(QString::number(entry.fileSizeBytes)));
-            m_rawTable->setItem(
-                row,
-                3,
-                readOnlyItem(
-                    QString::number(entry.allocatedSizeBytes)));
-            m_rawTable->setItem(
-                row,
-                4,
-                readOnlyItem(QString::number(entry.objectId)));
-            auto* metadataItem =
-                readOnlyItem(hexOffset(entry.metadataOffset));
-            metadataItem->setData(
-                Qt::UserRole,
-                static_cast<qulonglong>(entry.metadataOffset));
-            m_rawTable->setItem(row, 5, metadataItem);
 
-            QStringList extentTexts;
-            std::uint64_t firstPhysical = 0;
-            bool firstPhysicalExact = false;
-            for (const RawFileExtent& extent : entry.extents)
-            {
-                if (!firstPhysicalExact
-                    && extent.physicalMappingExact
-                    && !extent.sparse)
-                {
-                    firstPhysical = extent.absoluteOffset;
-                    firstPhysicalExact = true;
-                }
-                QString state;
-                if (extent.sparse)
-                {
-                    state = QStringLiteral("稀疏");
-                }
-                else if (extent.unwritten)
-                {
-                    state = QStringLiteral("未写入");
-                }
-                else if (extent.compressed)
-                {
-                    state = QStringLiteral("压缩");
-                }
-                extentTexts.push_back(
-                    QStringLiteral("%1:%2+%3%4")
-                        .arg(hexOffset(extent.logicalOffset))
-                        .arg(extent.physicalMappingExact
-                            ? hexOffset(extent.absoluteOffset)
-                            : QStringLiteral("-"))
-                        .arg(static_cast<qulonglong>(
-                            extent.lengthBytes))
-                        .arg(state.isEmpty()
-                            ? QString()
-                            : QStringLiteral("[%1]").arg(state)));
-            }
-            if (entry.extentsTruncated)
-            {
-                extentTexts.push_back(
-                    QStringLiteral("…[物理映射未完整展开]"));
-            }
-            auto* physicalItem = readOnlyItem(
-                firstPhysicalExact
-                    ? hexOffset(firstPhysical)
-                    : QStringLiteral("-"));
-            physicalItem->setData(
-                Qt::UserRole,
-                static_cast<qulonglong>(firstPhysical));
-            physicalItem->setData(
-                Qt::UserRole + 1,
-                firstPhysicalExact);
-            m_rawTable->setItem(row, 6, physicalItem);
-            m_rawTable->setItem(
-                row,
-                7,
-                readOnlyItem(extentTexts.isEmpty()
-                    ? QStringLiteral("-")
-                    : extentTexts.join(QStringLiteral("; "))));
-        }
-        m_rawTable->resizeColumnsToContents();
     }
 
     void DiskFileSystemForensicsPanel::applyRawReadResult(
@@ -1606,12 +1637,9 @@ namespace ks::misc
         m_rawListButton->setEnabled(m_rawSelection.has_value());
         m_rawUpButton->setEnabled(
             m_rawPathEdit->text().trimmed() != QStringLiteral("\\"));
-        const int row = m_rawTable->currentRow();
-        const bool fileSelected =
-            row >= 0
-            && row < static_cast<int>(m_rawEntries.size())
-            && m_rawEntries[static_cast<std::size_t>(row)].type
-                != RawFileObjectType::Directory;
+        const RawFileEntry* selectedEntry = selectedRawEntry();
+        const bool fileSelected = selectedEntry != nullptr
+            && selectedEntry->type != RawFileObjectType::Directory;
         m_rawPreviewButton->setEnabled(fileSelected);
         m_rawExportButton->setEnabled(fileSelected);
         m_rawPeAction->setEnabled(fileSelected);
@@ -1652,12 +1680,9 @@ namespace ks::misc
         m_rawListButton->setEnabled(m_rawSelection.has_value());
         m_rawUpButton->setEnabled(
             m_rawPathEdit->text().trimmed() != QStringLiteral("\\"));
-        const int row = m_rawTable->currentRow();
-        const bool fileSelected =
-            row >= 0
-            && row < static_cast<int>(m_rawEntries.size())
-            && m_rawEntries[static_cast<std::size_t>(row)].type
-                != RawFileObjectType::Directory;
+        const RawFileEntry* selectedEntry = selectedRawEntry();
+        const bool fileSelected = selectedEntry != nullptr
+            && selectedEntry->type != RawFileObjectType::Directory;
         m_rawPreviewButton->setEnabled(fileSelected);
         m_rawExportButton->setEnabled(fileSelected);
         m_rawPeAction->setEnabled(fileSelected);
@@ -1688,9 +1713,22 @@ namespace ks::misc
     void DiskFileSystemForensicsPanel::applyExtentResult(
         FileExtentResult result)
     {
+        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_extentTable}))
+        {
+            const QPointer<DiskFileSystemForensicsPanel> safeThis(this);
+            ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("disk-forensics-extent-apply"), {m_extentTable},
+                [safeThis, result = std::move(result)]() mutable
+                {
+                    if (!safeThis.isNull())
+                        safeThis->applyExtentResult(std::move(result));
+                });
+            return;
+        }
+
         m_busy = false;
         m_extentButton->setEnabled(true);
-        m_extentTable->setRowCount(0);
+        m_extentModel->clearRows();
         if (!result.success)
         {
             QMessageBox::warning(
@@ -1700,50 +1738,28 @@ namespace ks::misc
             return;
         }
 
-        m_extentTable->setRowCount(
-            static_cast<int>(result.extents.size()));
-        for (int row = 0; row < static_cast<int>(result.extents.size()); ++row)
-        {
-            const PhysicalFileExtent& extent =
-                result.extents[static_cast<std::size_t>(row)];
-            m_extentTable->setItem(
-                row,
-                0,
-                readOnlyItem(extent.diskNumber >= 0
-                    ? QStringLiteral("PhysicalDrive%1").arg(extent.diskNumber)
-                    : QStringLiteral("-")));
-            m_extentTable->setItem(row, 1, readOnlyItem(hexOffset(extent.fileOffset)));
-            m_extentTable->setItem(row, 2, readOnlyItem(QString::number(extent.startingVcn)));
-            m_extentTable->setItem(row, 3, readOnlyItem(extent.sparse ? QStringLiteral("Sparse") : QString::number(extent.startingLcn)));
-            auto* physicalItem = readOnlyItem(extent.physicalMappingExact
-                ? hexOffset(extent.physicalOffset)
-                : QStringLiteral("-"));
-            physicalItem->setData(
-                Qt::UserRole,
-                static_cast<qulonglong>(extent.physicalOffset));
-            physicalItem->setData(
-                Qt::UserRole + 1,
-                extent.physicalMappingExact);
-            m_extentTable->setItem(row, 4, physicalItem);
-            m_extentTable->setItem(row, 5, readOnlyItem(QString::number(extent.lengthBytes)));
-            m_extentTable->setItem(
-                row,
-                6,
-                readOnlyItem(extent.sparse
-                    ? QStringLiteral("稀疏区间")
-                    : (extent.physicalMappingExact
-                        ? QStringLiteral("可跳转")
-                        : QStringLiteral("多区间卷，仅返回卷内 LCN"))));
-        }
-        m_extentTable->resizeColumnsToContents();
+        m_extentModel->setRows(std::move(result.extents));
     }
 
     void DiskFileSystemForensicsPanel::applyReverseResult(
         ReverseClusterResult result)
     {
+        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_reverseTable}))
+        {
+            const QPointer<DiskFileSystemForensicsPanel> safeThis(this);
+            ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("disk-forensics-reverse-apply"), {m_reverseTable},
+                [safeThis, result = std::move(result)]() mutable
+                {
+                    if (!safeThis.isNull())
+                        safeThis->applyReverseResult(std::move(result));
+                });
+            return;
+        }
+
         m_busy = false;
         m_reverseButton->setEnabled(true);
-        m_reverseTable->setRowCount(0);
+        m_reverseModel->clearRows();
         if (!result.success)
         {
             QMessageBox::warning(
@@ -1753,28 +1769,30 @@ namespace ks::misc
             return;
         }
 
-        m_reverseTable->setRowCount(
-            static_cast<int>(result.entries.size()));
-        for (int row = 0; row < static_cast<int>(result.entries.size()); ++row)
-        {
-            const ReverseClusterEntry& entry =
-                result.entries[static_cast<std::size_t>(row)];
-            m_reverseTable->setItem(row, 0, readOnlyItem(QString::number(entry.cluster)));
-            m_reverseTable->setItem(row, 1, readOnlyItem(QString::number(entry.clusterCount)));
-            m_reverseTable->setItem(row, 2, readOnlyItem(entry.streamPath));
-        }
-        m_reverseTable->resizeColumnsToContents();
+        m_reverseModel->setRows(std::move(result.entries));
     }
 
     void DiskFileSystemForensicsPanel::applyDeletedResult(
         DiskForensicsSelection selection,
         DeletedEntryScanResult result)
     {
+        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_deletedTable}))
+        {
+            const QPointer<DiskFileSystemForensicsPanel> safeThis(this);
+            ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("disk-forensics-deleted-apply"), {m_deletedTable},
+                [safeThis, selection = std::move(selection), result = std::move(result)]() mutable
+                {
+                    if (!safeThis.isNull())
+                        safeThis->applyDeletedResult(std::move(selection), std::move(result));
+                });
+            return;
+        }
+
         m_busy = false;
         m_deletedScanButton->setEnabled(true);
         m_deletedEraseButton->setEnabled(false);
-        m_deletedTable->setRowCount(0);
-        m_deletedEntries.clear();
+        m_deletedModel->clearRows();
         m_deletedSelection.reset();
         if (!result.success)
         {
@@ -1785,61 +1803,7 @@ namespace ks::misc
 
         m_deletedSummaryLabel->setText(result.summaryText);
         m_deletedSelection = std::move(selection);
-        m_deletedEntries = std::move(result.entries);
-        m_deletedTable->setRowCount(
-            static_cast<int>(m_deletedEntries.size()));
-        for (int row = 0;
-             row < static_cast<int>(m_deletedEntries.size());
-             ++row)
-        {
-            const DeletedDirectoryEntry& entry =
-                m_deletedEntries[static_cast<std::size_t>(row)];
-            m_deletedTable->setItem(row, 0, readOnlyItem(entry.name));
-            m_deletedTable->setItem(
-                row,
-                1,
-                readOnlyItem(entry.directoryPath));
-            m_deletedTable->setItem(
-                row,
-                2,
-                readOnlyItem(QString::number(entry.fileSizeBytes)));
-            m_deletedTable->setItem(
-                row,
-                3,
-                readOnlyItem(QString::number(entry.firstCluster)));
-            m_deletedTable->setItem(
-                row,
-                4,
-                readOnlyItem(hexOffset(entry.directoryEntryOffset)));
-
-            QStringList extentTexts;
-            for (const DeletedFileExtent& extent : entry.extents)
-            {
-                extentTexts.push_back(
-                    QStringLiteral("%1+%2")
-                        .arg(hexOffset(extent.physicalOffset))
-                        .arg(static_cast<qulonglong>(extent.lengthBytes)));
-            }
-            m_deletedTable->setItem(
-                row,
-                5,
-                readOnlyItem(extentTexts.isEmpty()
-                    ? QStringLiteral("-")
-                    : extentTexts.join(QStringLiteral("; "))));
-            m_deletedTable->setItem(
-                row,
-                6,
-                readOnlyItem(entry.exactExtents
-                        && entry.clustersCurrentlyFree
-                        && !entry.directory
-                    ? QStringLiteral("离线磁盘可擦除")
-                    : QStringLiteral("只读取证")));
-            m_deletedTable->setItem(
-                row,
-                7,
-                readOnlyItem(entry.evidenceText));
-        }
-        m_deletedTable->resizeColumnsToContents();
+        m_deletedModel->setRows(std::move(result.entries));
     }
 
     void DiskFileSystemForensicsPanel::applyEraseResult(

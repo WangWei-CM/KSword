@@ -31,6 +31,11 @@ QSS_SELECTOR_RE = re.compile(
     r"(?:\s+Q[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\r\n]+\])?(?:::[A-Za-z_-][A-Za-z0-9_-]*)?)*,?$"
 )
 QSS_PALETTE_TOKEN_RE = re.compile(r"^palette\([A-Za-z_][A-Za-z0-9_]*\)$")
+# Header names are preprocessing tokens, not translatable C++ string literals.
+CPP_INCLUDE_HEADER_RE = re.compile(
+    r'#(?:[^\S\r\n]|\\\r?\n|/\*[\s\S]*?\*/)*include\b'
+    r'(?:[^\S\r\n]|\\\r?\n|/\*[\s\S]*?\*/)*(?:"[^"\r\n]*"|<[^>\r\n]*>)'
+)
 
 
 @dataclass
@@ -147,10 +152,19 @@ def scan_cpp_string_tokens(source_text: str) -> Iterable[CppStringToken]:
     index = 0
     line = 1
     length = len(source_text)
+    directive_start = True
     while index < length:
         character = source_text[index]
         if character == "\n":
             line += 1
+            directive_start = True
+            index += 1
+            continue
+        if source_text.startswith(("\\\n", "\\\r\n"), index):
+            line += 1
+            index += 3 if source_text.startswith("\\\r\n", index) else 2
+            continue
+        if character.isspace():
             index += 1
             continue
         if source_text.startswith("//", index):
@@ -163,10 +177,36 @@ def scan_cpp_string_tokens(source_text: str) -> Iterable[CppStringToken]:
             close_index = source_text.find("*/", index + 2)
             if close_index < 0:
                 return
-            line += source_text.count("\n", index, close_index + 2)
+            newlines = source_text.count("\n", index, close_index + 2)
+            line += newlines
+            if newlines:
+                directive_start = True
             index = close_index + 2
             continue
+        if character == "#" and directive_start:
+            header = CPP_INCLUDE_HEADER_RE.match(source_text, index)
+            if header is not None:
+                line += source_text.count("\n", index, header.end())
+                index = header.end()
+                directive_start = False
+                continue
+        directive_start = False
         if character == "'":
+            # C++ digit separators belong to a number, not a character literal.
+            # Otherwise 10'000 can consume later strings/comments up to a quote.
+            number_start = index - 1
+            while number_start >= 0 and (
+                source_text[number_start].isalnum() or source_text[number_start] in "_.'"
+            ):
+                number_start -= 1
+            number_prefix = source_text[number_start + 1 : index]
+            numeric_prefix = number_prefix and (
+                number_prefix[0].isdigit()
+                or (number_prefix.startswith(".") and len(number_prefix) > 1 and number_prefix[1].isdigit())
+            )
+            if numeric_prefix and index + 1 < length and source_text[index + 1].isalnum():
+                index += 1
+                continue
             index += 1
             while index < length:
                 if source_text[index] == "\\":

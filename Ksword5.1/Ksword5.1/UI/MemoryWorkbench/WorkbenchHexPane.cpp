@@ -18,6 +18,7 @@
 #include "WorkbenchBaselineFeeder.h"
 #include "WorkbenchPageProvider.h"
 #include "WorkbenchWriteController.h"
+#include "WorkbenchWorkerValue.h"
 
 #include <QSplitter>
 #include <QVBoxLayout>
@@ -48,7 +49,15 @@ namespace ks::ui
     // WorkbenchHexPane::overlay() 指针是否仍然有效，与它们相对本类的声明顺序
     // 无关，取决于调用方自己的销毁顺序约定，不是本类需要在这里主动做什么的事）。
     // 因此这里不需要写任何函数体，交给成员的默认析构顺序（声明的逆序）即可。
-    WorkbenchHexPane::~WorkbenchHexPane() = default;
+    WorkbenchHexPane::~WorkbenchHexPane()
+    {
+        try
+        {
+            const auto retired = MakeWorkerValue<ksword::memwb::MemoryDiffOverlay>(overlay_);
+            overlay_ = ksword::memwb::MemoryDiffOverlay{};
+        }
+        catch (...) { /* An allocation failure still permits ordinary object teardown. */ }
+    }
 
     // overlay：返回唯一一份暂存叠加层的引用，供三条管线与三个只读子页经非拥有
     // 指针/引用使用。本类自己不对外转移这份对象的所有权。
@@ -176,6 +185,18 @@ namespace ks::ui
         {
             controller->setOverlay(&overlay_);
         }
+        if (canvas_)
+        {
+            const QPointer<WorkbenchWriteController> weak(controller);
+            canvas_->setStageSubmitter(controller ? HexCanvas::StageSubmitter{
+                [weak](std::uint64_t address, const QByteArray& bytes, HexCanvas::StageCompletion completion)
+                { return weak && weak->beginPendingStage(address, bytes, std::move(completion)) != 0; }}
+                : HexCanvas::StageSubmitter{});
+            canvas_->setDiscardSubmitter(controller ? HexCanvas::DiscardSubmitter{
+                [weak](std::uint64_t address, std::uint64_t length, std::function<void(bool, std::uint64_t)> completion)
+                { return weak && weak->beginPendingDiscard(address, length, false, std::move(completion)) != 0; }}
+                : HexCanvas::DiscardSubmitter{});
+        }
     }
 
     // setSourceRevisionProvider：见头文件增量②的声明处注释，只是存一份回调。
@@ -262,6 +283,7 @@ namespace ks::ui
         // 驱动 BaselineFeeder 喂入。bytes/validMask 都传空向量，长度为 0 的
         // 窗口是 MemoryDiffOverlay::LoadBaseline 的合法输入（校验只检查两者
         // 等长且 baseAddress+长度不溢出，0 长度恒满足）。
+        const auto retired = MakeWorkerValue<ksword::memwb::MemoryDiffOverlay>(overlay_);
         overlay_.LoadBaseline(identityKey, firstAddress, {}, {});
 
         if (baselineFeeder_)
@@ -351,6 +373,7 @@ namespace ks::ui
 
         // 身份串清空、窗口清空：与 setAddressSpace 同一个 LoadBaseline 调用，
         // 只是新身份串是空串——"无目标"本身就是一种身份，旧补丁同样被清空。
+        const auto retired = MakeWorkerValue<ksword::memwb::MemoryDiffOverlay>(overlay_);
         overlay_.LoadBaseline(std::string(), 0, {}, {});
 
         if (baselineFeeder_)
@@ -383,13 +406,13 @@ namespace ks::ui
         return (canvas_ != nullptr) ? canvas_->caretAddress() : 0;
     }
 
-    void WorkbenchHexPane::requestBrowseWindow(std::uint64_t address, std::uint64_t length)
+    void WorkbenchHexPane::requestBrowseWindow(std::uint64_t address, std::uint64_t length, HexCanvas::RangeReadPurpose purpose)
     {
         if (!canvas_ || !length) return;
         const auto bounds = canvas_->addressSpaceRange();
         if (!bounds || address < bounds->first || address > bounds->last) return;
         const auto last = address + std::min<std::uint64_t>(length - 1, bounds->last - address);
-        canvas_->requestAddressRange(address, last);
+        canvas_->requestAddressRange(address, last, purpose);
         lastVisibleFirst_ = address;
         lastVisibleLast_ = last;
         hasVisibleRange_ = true;

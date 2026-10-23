@@ -17,12 +17,15 @@
 #include <QEvent>
 #include <QFont>
 #include <QTimer>
+#include <QElapsedTimer>
+#include <QPointer>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QString>
 #include <QStringList>
 #include <QByteArray>
 #include <QPixmap>
+#include <QColor>
 #include <QToolButton>
 
 #include <functional>
@@ -54,6 +57,8 @@
 #include "SettingsDock/AppearanceSettings.h"
 // HvmAvailability：右上角虚拟化按钮的状态从这个完整取值算，见 m_hvmAvailability。
 #include "UI/HvmControl.h"
+#include "UI/AsyncCleanupRegistry.h"
+#include "UI/CoordinatedApplicationQuit.h"
 #include "StartupDock/StartupDock.h"
 #include "ServerDock/ServiceDock.h"
 #include "WindowDock/WindowDock.h"
@@ -78,6 +83,8 @@ namespace ks::ui
 
 class QDialog;
 class QScreen;
+struct MainWindowShutdownServiceState;
+struct MainWindowMemoryQuitState;
 
 class MainWindow : public QMainWindow
 {
@@ -88,6 +95,10 @@ public:
     // - 主窗口构造期间把细分阶段进度回传给启动画面；
     // - 主函数可传入 lambda，同步百分比、翻译后的文字和稳定阶段键。
     using StartupProgressCallback = std::function<void(int, const QString&, const QString&)>;
+
+    // QApplication 创建后、首个业务控件创建前，复用正式外观配方准备应用级主题。
+    // 字体基线仍由 main 保存；窗口背景、预览和热换保持原生命周期。
+    static void prepareStartupAppearance(const ks::settings::AppearanceSettings& settings);
 
     // 构造函数作用：
     // - 初始化主窗口菜单、Dock、布局与外观；
@@ -213,6 +224,27 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
+    ks::ui::LeaveEntryStatus prepareMemoryWorkbenchesForShutdown();
+    void cancelMemoryWorkbenchPreparation(const std::shared_ptr<MainWindowMemoryQuitState>&);
+    std::shared_ptr<MainWindowMemoryQuitState> m_memoryQuitState;
+    void beginCoordinatedShutdownWait();
+    void pollCoordinatedShutdown();
+    void cancelCoordinatedShutdown(bool preserveRestart = false);
+    void finishCoordinatedShutdown();
+    bool requestCoordinatedRestart(ks::ui::DeferredApplicationRestart::Launch launch);
+    ks::ui::DeferredApplicationRestart m_shutdownRestart;
+    QTimer* m_shutdownTimer = nullptr;
+    QElapsedTimer m_shutdownClock;
+    ks::ui::AsyncShutdownWait m_shutdownWait;
+    QString m_shutdownOriginalTitle;
+    std::size_t m_shutdownLastPending = static_cast<std::size_t>(-1);
+    bool m_shutdownWaiting = false;
+    bool m_shutdownFinalizing = false;
+    bool m_shutdownCleanupReady = false;
+    bool m_shutdownServiceReported = false;
+    std::shared_ptr<MainWindowShutdownServiceState> m_shutdownServiceState;
+    std::vector<QPointer<MemoryDock>> m_shutdownPreparedMemoryDocks;
+
     void initMenus();
     // initializeWindowDockMenuActions：
     // - 在辅助 Dock 创建完成后，把 ADS 原生显示/隐藏动作挂到“窗口”菜单；
@@ -255,6 +287,9 @@ private:
     void applyDdmaButtonState();
     void showHvmMenu(const QPoint& globalPosition);
     void refreshHvmStatusAsync();
+    void bindMemoryHvmAvailabilityConsumer();
+    bool canRefreshHvmMemoryAvailability() const;
+    void invalidateMemoryHvmAvailability(const QString& reason = {});
     void applyHvmButtonState();
     // runHvmSoak：启动常驻、保持指定毫秒数、再停止，用于证明常驻能长期存活。
     void runHvmSoak(unsigned long milliseconds);
@@ -279,7 +314,7 @@ private:
     // - 获取 SYSTEM 进程令牌，DuplicateTokenEx 为主令牌；
     // - 对复制令牌调用 SetTokenInformation(TokenUIAccess)；
     // - 最后通过 CreateProcessAsUserW 启动自身。
-    bool launchSelfWithSystemUiAccessToken(QString* detailTextOut);
+    bool launchSelfWithSystemUiAccessToken(const QStringList& arguments, QString* detailTextOut);
     bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
     // suppressPrivilegeElevationPrompt：true 时权限不足只显示启动失败，不弹出管理员重启/UAC 提示。
     bool startR0DriverService(bool suppressPrivilegeElevationPrompt = false);
@@ -319,8 +354,10 @@ private:
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
-    void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
-    void prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget);
+    void ensureDockContentInitialized(ads::CDockWidget* dockWidget, bool useColdBodies = false);
+    ks::ui::PageSearchPreparation prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget,
+        bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false,
+        std::function<void()> resume = {});
 
     // BackdropBlurKind 作用：
     // - 描述“透明背景效果”配置解析后的磨砂实现方式；
@@ -359,7 +396,7 @@ private:
 
     // refreshBackgroundImageBlurCache 作用：
     // - 按“玻璃模糊半径”设置重建背景图的模糊副本，半径为 0 时清空副本；
-    // - 主窗口根容器与浮动 Dock 画刷都通过 cachedBackgroundImage 取图，
+    // - 主窗口根容器与浮动 Dock 背景宿主都通过 cachedBackgroundImage 取图，
     //   在这里统一生成既保证两者观感一致，又避免每次重绘都重新模糊；
     // - 系统亚克力的模糊半径由 DWM 内部固定（ACCENT_POLICY 无半径字段），
     //   因此可调半径只能作用于这一层自绘模糊。
@@ -634,7 +671,7 @@ private:
     // 调用方式：应用样式或重建背景时调用。
     // 入参 settings：外观配置结构体。
     // 返回：true=深色；false=浅色。
-    bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const;
+    static bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings);
 
     // rebuildWindowBackgroundBrush 作用：
     // - 把当前纯色、背景图与透明度交给主窗口背景宿主；
@@ -666,9 +703,14 @@ private:
     const QPixmap* cachedBackgroundImage(const QString& rawImagePath) const;
 
     // applyFloatingDockContainerAppearance 作用：
-    // - 把当前主题色、背景图与样式同步到指定浮动 Dock 容器；
-    // - 解决“拖出后浮动窗口背景变成纯黑未填充”的问题。
-    void applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const;
+    // - 创建/显示/外观设置变化时同步浮动 Dock；Resize 只调整背景宿主几何。
+    // - 配方按主题种子/透明内容策略缓存；图片复用主窗口背景宿主直接绘制原图。
+    void applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget);
+    QString m_floatingDockAppearanceStyleSheet;
+    QColor m_floatingDockAppearanceAccentColor;
+    QColor m_floatingDockAppearanceBaseColor;
+    bool m_floatingDockAppearanceDarkMode = false;
+    bool m_floatingDockAppearanceTransparency = false;
 
     // buildAppearanceOverlayStyleSheet 作用：
     // - 生成深色/浅色覆盖样式字符串，叠加在基础 QSS 之后。
@@ -793,6 +835,10 @@ private:
         ksword::hvm::HvmAvailability::DriverNotRunning;
     bool m_hvmFaulted = false;                  // m_hvmFaulted：存在故障或待回滚，点击前必须先重置。
     bool m_hvmQueryInFlight = false;            // m_hvmQueryInFlight：合并并发的后台状态查询，避免请求堆积。
+    bool m_hvmQueryIncludesMemoryAvailability = false;
+    bool m_hvmMemoryAvailabilityFollowupPending = false;
+    quint64 m_hvmMemoryAvailabilityQueryEpoch = 0;
+    quint64 m_hvmMemoryAvailabilityGeneration = 0;
     bool m_hvmOperationRunning = false;         // m_hvmOperationRunning：常驻切换或保持自检期间禁用按钮。
     unsigned long m_hvmGeneration = 0;          // m_hvmGeneration：用于 compare-before 控制请求的状态代次。
     // m_hvmBackend：驱动当前选定的虚拟化后端，取 KSWORD_ARK_HVM_BACKEND_*。

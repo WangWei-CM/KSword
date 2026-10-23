@@ -14,6 +14,8 @@ class QProcess;
 class QTemporaryDir;
 class QTabWidget;
 class PoolAllocationAnalysisWidget;
+class TraceMetadataWriter;
+struct TraceExitState;
 
 // Separate consumer observations and prospective allocation history. Neither
 // data source is added to the PFN ledger or used to rename its residual.
@@ -37,6 +39,8 @@ private:
     void appendCommandOutput(const QString& output);
     void updateTraceControls();
     void persistTrace();
+    void retireTrace();
+    void initializeTraceProcess();
     void retranslate();
     QPushButton* m_gpuButton = nullptr;
     QPushButton* m_traceStart = nullptr;
@@ -56,6 +60,11 @@ private:
     QString m_instance, m_output, m_metadataOutput, m_wpr, m_commandOutput, m_profileSpec, m_commandStarted;
     std::unique_ptr<QTemporaryDir> m_profileDirectory;
     QJsonObject m_traceEvidence;
+    std::shared_ptr<TraceMetadataWriter> m_metadataWriter;
+    std::shared_ptr<TraceExitState> m_traceExit;
+    struct TraceReservation;
+    std::shared_ptr<TraceReservation> m_traceReservation;
+    std::uint64_t m_metadataRevision = 0;
     ksword::pool_trace::CaptureState m_capture;
     int m_captureDuration = 30;
     qint64 m_previousOutputModified = 0, m_previousOutputSize = -1;

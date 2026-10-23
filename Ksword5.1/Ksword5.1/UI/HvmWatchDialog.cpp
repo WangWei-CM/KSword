@@ -245,8 +245,6 @@ namespace ks::ui
         const quint64 kernelAddress,
         const QString& label)
     {
-        const QString title =
-            text(QStringLiteral("监视页表项"));
         if (kernelAddress == 0ULL)
         {
             return;
@@ -259,8 +257,15 @@ namespace ks::ui
          * 地址把表项读出来的），这个功能拿不到别的来源。
          */
         const ksword::ark::DriverClient client;
-        const ksword::ark::VirtualAddressTranslateResult walk =
-            client.translateVirtualAddress(0U, kernelAddress);
+        const auto walk = client.translateVirtualAddress(0U, kernelAddress);
+        openHvmWatchOnPtePrepared(parent, kernelAddress, label, walk);
+    }
+
+    void openHvmWatchOnPtePrepared(QWidget* const parent, const quint64 kernelAddress,
+        const QString& label, const ksword::ark::VirtualAddressTranslateResult& walk)
+    {
+        const QString title = text(QStringLiteral("监视页表项"));
+        if (kernelAddress == 0ULL) return;
         if (!walk.io.ok)
         {
             QMessageBox::warning(

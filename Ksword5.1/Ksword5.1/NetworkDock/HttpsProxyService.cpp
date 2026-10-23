@@ -1,13 +1,18 @@
 #include "HttpsProxyService.h"
+#include "../UI/RetainedCleanupJob.h"
+#include "../UI/AsyncCleanupRegistry.h"
 #include "../ksword/network/network_connection_tools.h"
 
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <deque>
+#include <QtCore/QElapsedTimer>
 
 #include <QtCore/QMetaObject>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
+#include <QtCore/QDeadlineTimer>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QProcess>
@@ -37,16 +42,36 @@
 
 namespace ks::network
 {
-    // close 与 post 使用同一把锁，接收器析构后晚线程只看到关闭状态。
-    class HttpsProxyUiDispatcher final
+    struct HttpsProxyStopState
+    {
+        std::atomic_bool listenerClosed{true};
+        std::atomic_bool stopRequested{false};
+        std::mutex mutex;
+        std::function<void()> completion;
+        std::function<void()> nativeCompletion;
+        bool nativeFinished = false;
+    };
+
+    // Accepted parsed entries have one FIFO owner; only its wakeup is coalesced.
+    // close and publication share the lock, so late session threads never borrow
+    // a destroyed QObject. A queued drain owns only this value bridge.
+    class HttpsProxyUiDispatcher final : public std::enable_shared_from_this<HttpsProxyUiDispatcher>
     {
     public:
-        explicit HttpsProxyUiDispatcher(QObject* receiver) : m_receiver(receiver) {}
+        using ParsedDelivery = std::function<void(const HttpsProxyParsedEntry&)>;
+        explicit HttpsProxyUiDispatcher(QObject* receiver, ParsedDelivery parsedDelivery)
+            : m_receiver(receiver), m_parsedDelivery(std::move(parsedDelivery)) {}
 
         void close()
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_receiver = nullptr;
+            std::deque<HttpsProxyParsedEntry> retired;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_receiver = nullptr;
+                m_parsedDelivery = {};
+                retired.swap(m_parsedEntries);
+            }
+            // Release complete raw/header/certificate values outside the producer lock.
         }
 
         void post(std::function<void()> callback)
@@ -54,13 +79,67 @@ namespace ks::network
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_receiver != nullptr)
             {
+                if (m_parsedWake.expired()) scheduleParsedDrainLocked();
                 QMetaObject::invokeMethod(m_receiver, std::move(callback), Qt::QueuedConnection);
             }
         }
 
+        void postParsed(const HttpsProxyParsedEntry& parsedEntry)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_receiver == nullptr) return;
+            m_parsedEntries.push_back(parsedEntry);
+            if (m_parsedWake.expired()) scheduleParsedDrainLocked();
+        }
+
     private:
+        void scheduleParsedDrainLocked()
+        {
+            if (m_receiver == nullptr || m_parsedEntries.empty()) return;
+            // Only the queued/running functor owns this ticket. If Qt discards
+            // it, the weak ticket expires without locking/posting from a destructor;
+            // the next producer/status wake can safely schedule the retained FIFO.
+            const auto wake = std::make_shared<char>();
+            m_parsedWake = wake;
+            const auto bridge = shared_from_this();
+            try { QMetaObject::invokeMethod(m_receiver, [bridge, wake]() { bridge->drainParsed(); }, Qt::QueuedConnection); }
+            catch (...) { m_parsedWake.reset(); }
+        }
+
+        void drainParsed()
+        {
+            QElapsedTimer elapsed;
+            elapsed.start();
+            for (int count = 0; count < 64; ++count)
+            {
+                HttpsProxyParsedEntry entry;
+                ParsedDelivery delivery;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_receiver == nullptr || m_parsedEntries.empty())
+                    {
+                        m_parsedWake.reset();
+                        return;
+                    }
+                    entry = std::move(m_parsedEntries.front());
+                    m_parsedEntries.pop_front();
+                    delivery = m_parsedDelivery;
+                }
+                // No lock across callbacks: a callback can publish, stop or destroy
+                // the service. The next iteration revalidates the same bridge.
+                if (delivery) delivery(entry);
+                if (elapsed.elapsed() >= 4) break;
+            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_parsedWake.reset();
+            scheduleParsedDrainLocked();
+        }
+
         std::mutex m_mutex;
         QObject* m_receiver;
+        ParsedDelivery m_parsedDelivery;
+        std::deque<HttpsProxyParsedEntry> m_parsedEntries;
+        std::weak_ptr<char> m_parsedWake;
     };
 
     // 会话证书工作不依赖 QObject；慢任务可以安全地晚于服务退出。
@@ -1073,7 +1152,29 @@ namespace ks::network
                     m_sessionWorkerList.end());
             }
 
-            void stopAndWait()
+            void reapFinished(QThread* threadValue, const std::shared_ptr<ProxySessionRegistry>& owner)
+            {
+                std::shared_ptr<QThread> thread;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    for (const auto& worker : m_sessionWorkerList)
+                        if (worker.thread.get() == threadValue) { thread = worker.thread; break; }
+                }
+                if (!thread) return;
+                // finished precedes native TLS teardown. Keep the registry's
+                // thread owner until a background wait proves actual termination.
+                try
+                {
+                    QThreadPool::globalInstance()->start([owner, thread]()
+                    {
+                        thread->wait();
+                        owner->remove(thread.get());
+                    });
+                }
+                catch (...) {} // The next retained STOP still owns and waits this entry.
+            }
+
+            bool stopAndWait()
             {
                 std::vector<SessionWorker> sessionWorkerList;
                 {
@@ -1092,26 +1193,21 @@ namespace ks::network
                     }
                 }
 
-                // 会话线程可能正卡在叶子证书生成的 powershell.exe 上，等待必须带超时：
-                // 先给一轮常规等待，超时后请求中断并再次 quit，最后仍未退出就放弃等待，
-                // 绝不允许调用方（含析构路径）在这里无限期挂死。
+                // One aggregate deadline covers the whole accepted session set;
+                // N blocked certificate workers must not multiply the close wait.
+                const QDeadlineTimer deadline(kSessionStopFirstWaitMs + kSessionStopFinalWaitMs);
+                bool allStopped = true;
                 for (const SessionWorker& worker : sessionWorkerList)
                 {
                     if (worker.thread == nullptr || worker.thread.get() == QThread::currentThread())
                     {
                         continue;
                     }
-                    if (worker.thread->wait(kSessionStopFirstWaitMs))
-                    {
-                        continue;
-                    }
-                    worker.thread->requestInterruption();
-                    worker.thread->quit();
-                    worker.thread->wait(kSessionStopFinalWaitMs);
+                    allStopped = worker.thread->wait(deadline) && allStopped;
                 }
 
-                // 超时线程继续由登记表持有，到 finished 的 remove 才释放。
-                // finished 回调持有登记表，外部服务销毁不会触发运行中 QThread 的析构。
+                // A timeout retains the registry and exit lease for explicit Retry.
+                return allStopped;
             }
 
         private:
@@ -1177,7 +1273,7 @@ namespace ks::network
                     {
                         if (sessionRegistry != nullptr)
                         {
-                            sessionRegistry->remove(sessionThread);
+                            sessionRegistry->reapFinished(sessionThread, sessionRegistry);
                         }
                     },
                     Qt::DirectConnection);
@@ -1197,14 +1293,24 @@ namespace ks::network
     HttpsMitmProxyService::HttpsMitmProxyService()
         : QObject(nullptr)
         , m_certificateStore(std::make_shared<HttpsProxyCertificateStore>())
-        , m_uiDispatcher(std::make_shared<HttpsProxyUiDispatcher>(this))
+        , m_uiDispatcher(std::make_shared<HttpsProxyUiDispatcher>(this,
+            [this](const HttpsProxyParsedEntry& entry) { emitParsedEntry(entry); }))
     {
     }
 
     HttpsMitmProxyService::~HttpsMitmProxyService()
     {
+        // QTcpServer belongs to this GUI thread; close listening here before
+        // handing only independent registry/certificate values to cleanup.
         m_uiDispatcher->close();
-        stop();
+        if (m_server)
+        {
+            m_server->close();
+            m_server.reset();
+        }
+        if (m_stopState) m_stopState->listenerClosed.store(true);
+        if (m_sessionCleanup && !m_sessionCleanup->isCleanupRequested()) m_sessionCleanup->requestCleanup();
+        else if (m_sessionCleanup) m_sessionCleanup->notifyReadyToAttempt();
     }
 
     bool HttpsMitmProxyService::start(
@@ -1237,6 +1343,11 @@ namespace ks::network
         }
 
         stop();
+        if (m_sessionCleanup && !m_sessionCleanup->isComplete())
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("状态：正在停止HTTPS代理...");
+            return false;
+        }
 
         const QPointer<HttpsMitmProxyService> safeThis(this);
 
@@ -1245,15 +1356,9 @@ namespace ks::network
             {
                 return certificateStore->loadHostCertificateBundle(hostName, certificateOut, privateKeyOut, certErrorOut);
             };
-        auto parsedEmitter = [safeThis, dispatcher = m_uiDispatcher](const HttpsProxyParsedEntry& parsedEntry)
+        auto parsedEmitter = [dispatcher = m_uiDispatcher](const HttpsProxyParsedEntry& parsedEntry)
             {
-                dispatcher->post([safeThis, parsedEntry]()
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->emitParsedEntry(parsedEntry);
-                    }
-                });
+                dispatcher->postParsed(parsedEntry);
             };
         auto statusEmitter = [safeThis, dispatcher = m_uiDispatcher](const QString& statusText)
             {
@@ -1275,16 +1380,47 @@ namespace ks::network
             };
         const std::shared_ptr<ProxySessionRegistry> sessionRegistry = std::make_shared<ProxySessionRegistry>();
 
-        m_server = std::make_unique<ProxyServer>(
-            std::move(hostCertLoader),
-            std::move(parsedEmitter),
-            std::move(statusEmitter),
-            std::move(sessionIdProvider),
-            sessionRegistry);
-        m_stopSessionWorkers = [sessionRegistry]()
+        const auto state = std::make_shared<HttpsProxyStopState>();
+        const auto dispatcher = m_uiDispatcher;
+        const auto closeListener = [this, state]()
         {
-            sessionRegistry->stopAndWait();
+            if (m_stopState != state) return;
+            stopAsync({});
         };
+        const auto cleanup = ks::ui::RetainedCleanupJob::create(
+            [sessionRegistry, state, dispatcher]()
+            {
+                if (!sessionRegistry->stopAndWait()) return false;
+                std::function<void()> completion;
+                std::function<void()> nativeCompletion;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    completion = std::move(state->completion);
+                    nativeCompletion = std::move(state->nativeCompletion);
+                    state->nativeFinished = true;
+                }
+                if (nativeCompletion) nativeCompletion();
+                if (completion) dispatcher->post(std::move(completion));
+                return true;
+            }, 0, [state, dispatcher, closeListener]()
+            {
+                state->stopRequested.store(true);
+                dispatcher->post(closeListener);
+            },
+            [state]() { return state->listenerClosed.load(); });
+        if (!cleanup) return false;
+        m_stopState = state;
+        m_sessionCleanup = cleanup;
+        state->listenerClosed.store(false);
+        if (state->stopRequested.load())
+        {
+            state->listenerClosed.store(true);
+            cleanup->notifyReadyToAttempt();
+            return false;
+        }
+        m_server = std::make_unique<ProxyServer>(
+            std::move(hostCertLoader), std::move(parsedEmitter),
+            std::move(statusEmitter), std::move(sessionIdProvider), sessionRegistry);
 
         if (!m_server->listen(listenAddress, listenPort))
         {
@@ -1293,7 +1429,8 @@ namespace ks::network
                 *errorTextOut = QStringLiteral("HTTPS代理监听失败：%1").arg(m_server->errorString());
             }
             m_server.reset();
-            m_stopSessionWorkers = {};
+            state->listenerClosed.store(true);
+            cleanup->requestCleanup();
             return false;
         }
 
@@ -1305,94 +1442,49 @@ namespace ks::network
 
     void HttpsMitmProxyService::stop()
     {
-        const bool hadActiveProxy = m_server != nullptr || static_cast<bool>(m_stopSessionWorkers);
-        if (m_server != nullptr)
-        {
-            m_server->close();
-            m_server.reset();
-        }
-        // 若上一轮走的是 stopAsync，先回收那个后台收尾线程；它内部的等待都带超时。
-        joinStopWorkerThread();
-        if (m_stopSessionWorkers)
-        {
-            // 有界等待会话退出；晚退出会话只持有独立证书状态和投递到 UI 的守卫回调。
-            const std::function<void()> stopSessionWorkers = std::move(m_stopSessionWorkers);
-            m_stopSessionWorkers = {};
-            stopSessionWorkers();
-        }
-        m_listenAddress = QHostAddress();
-        m_listenPort = 0;
-        if (hadActiveProxy)
-        {
-            emitStatus(QStringLiteral("HTTPS代理已停止。"));
-        }
+        stopAsync({});
     }
 
-    void HttpsMitmProxyService::stopAsync(std::function<void()> completionCallback)
+    void HttpsMitmProxyService::stopAsync(std::function<void()> completionCallback,
+        std::function<void()> nativeCleanupCompleted)
     {
-        // 关闭监听必须留在本线程：QTcpServer 有线程亲和性，不能交给后台线程处理。
-        const bool hadActiveProxy = m_server != nullptr || static_cast<bool>(m_stopSessionWorkers);
-        if (m_server != nullptr)
-        {
-            m_server->close();
-            m_server.reset();
-        }
-        joinStopWorkerThread();
-
-        std::function<void()> stopSessionWorkers = std::move(m_stopSessionWorkers);
-        m_stopSessionWorkers = {};
+        const bool hadActiveProxy = m_server != nullptr;
+        if (m_server) { m_server->close(); m_server.reset(); }
         m_listenAddress = QHostAddress();
         m_listenPort = 0;
-
-        if (!stopSessionWorkers)
+        if (!m_sessionCleanup || m_sessionCleanup->isComplete())
         {
-            if (hadActiveProxy)
-            {
-                emitStatus(QStringLiteral("HTTPS代理已停止。"));
-            }
-            if (completionCallback)
-            {
-                completionCallback();
-            }
+            if (hadActiveProxy) emitStatus(QStringLiteral("HTTPS代理已停止。"));
+            if (completionCallback) completionCallback();
+            if (nativeCleanupCompleted) nativeCleanupCompleted();
             return;
         }
-
-        // stopSessionWorkers 只持有会话登记表的 shared_ptr，不触碰本服务对象，
-        // 因此即便服务先于后台线程析构，后台等待本身也是安全的。
+        const auto state = m_stopState;
         const QPointer<HttpsMitmProxyService> guardedSelf(this);
-        const auto dispatcher = m_uiDispatcher;
-        m_stopWorkerThread = std::make_unique<std::thread>(
-            [guardedSelf, dispatcher, stopSessionWorkers = std::move(stopSessionWorkers), completionCallback, hadActiveProxy]()
-            {
-                stopSessionWorkers();
-
-                dispatcher->post(
-                    [guardedSelf, completionCallback, hadActiveProxy]()
-                    {
-                        if (!guardedSelf.isNull())
-                        {
-                            // 后台线程此时已经跑到最后一条语句，这里 join 只是回收句柄，不会长时间阻塞。
-                            guardedSelf->joinStopWorkerThread();
-                            if (hadActiveProxy)
-                            {
-                                guardedSelf->emitStatus(QStringLiteral("HTTPS代理已停止。"));
-                            }
-                        }
-                        if (completionCallback)
-                        {
-                            completionCallback();
-                        }
-                    });
-            });
-    }
-
-    void HttpsMitmProxyService::joinStopWorkerThread()
-    {
-        if (m_stopWorkerThread != nullptr && m_stopWorkerThread->joinable())
+        const auto completed = [guardedSelf, completionCallback, hadActiveProxy]()
         {
-            m_stopWorkerThread->join();
+            if (guardedSelf && hadActiveProxy)
+                guardedSelf->emitStatus(QStringLiteral("HTTPS代理已停止。"));
+            if (completionCallback) completionCallback();
+        };
+        bool nativeFinished;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            nativeFinished = state->nativeFinished;
+            if (!nativeFinished)
+            {
+                if (nativeCleanupCompleted) state->nativeCompletion = std::move(nativeCleanupCompleted);
+                if (completionCallback || hadActiveProxy) state->completion = completed;
+            }
         }
-        m_stopWorkerThread.reset();
+        if (nativeFinished)
+        {
+            if (nativeCleanupCompleted) nativeCleanupCompleted();
+            completed();
+        }
+        state->listenerClosed.store(true);
+        if (!m_sessionCleanup->isCleanupRequested()) m_sessionCleanup->requestCleanup();
+        else m_sessionCleanup->notifyReadyToAttempt();
     }
 
     bool HttpsMitmProxyService::isRunning() const
@@ -1476,12 +1568,14 @@ namespace ks::network
             return;
         }
 
+        const auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire();
+        if (!cleanupLease) return;
         const QString scriptText = buildRootCertificateScriptText(
             certificateStore->rootCertificatePfxPath(),
             certificateStore->rootCertificateCerPath(),
             installToTrustStore);
         QThreadPool::globalInstance()->start(
-            [certificateStore, dispatcher, scriptText, completionCallback]()
+            [certificateStore, dispatcher, scriptText, completionCallback, cleanupLease]()
             {
                 // 后台线程只处理值类型入参与 QProcess，不触碰本服务对象的任何成员。
                 QString standardOutputText;

@@ -304,6 +304,20 @@ namespace
     }
 }
 
+void NetworkDock::updateMultiThreadDownloadCaptureSettingsUi()
+{
+    if (m_multiDownloadAutoCaptureClipboardCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_multiDownloadAutoCaptureClipboardCheck);
+        m_multiDownloadAutoCaptureClipboardCheck->setChecked(m_multiDownloadAutoCaptureClipboardEnabled);
+    }
+    if (m_multiDownloadCaptureSuffixEdit != nullptr)
+    {
+        const QSignalBlocker blocker(m_multiDownloadCaptureSuffixEdit);
+        m_multiDownloadCaptureSuffixEdit->setText(joinSuffixListForLineEdit(m_multiDownloadCaptureSuffixList));
+    }
+}
+
 void NetworkDock::loadMultiThreadDownloadCaptureSettings()
 {
     // loadEvent 用途：贯穿“读取下载捕获设置”流程的统一日志事件对象。
@@ -350,16 +364,7 @@ void NetworkDock::loadMultiThreadDownloadCaptureSettings()
 
     m_multiDownloadAutoCaptureClipboardEnabled = autoCaptureEnabled;
     m_multiDownloadCaptureSuffixList = suffixList;
-    if (m_multiDownloadAutoCaptureClipboardCheck != nullptr)
-    {
-        const QSignalBlocker blocker(m_multiDownloadAutoCaptureClipboardCheck);
-        m_multiDownloadAutoCaptureClipboardCheck->setChecked(m_multiDownloadAutoCaptureClipboardEnabled);
-    }
-    if (m_multiDownloadCaptureSuffixEdit != nullptr)
-    {
-        const QSignalBlocker blocker(m_multiDownloadCaptureSuffixEdit);
-        m_multiDownloadCaptureSuffixEdit->setText(joinSuffixListForLineEdit(m_multiDownloadCaptureSuffixList));
-    }
+    updateMultiThreadDownloadCaptureSettingsUi();
 
     if (QGuiApplication::clipboard() != nullptr)
     {
@@ -617,10 +622,11 @@ void NetworkDock::showMultiThreadDownloadClipboardPrompt(const QString& urlText)
         });
     connect(startButton, &QPushButton::clicked, promptDialog, [this, promptDialog, urlEdit, saveDirEdit]()
         {
-            const bool started = startMultiThreadDownloadTaskFromInput(
+            // Accepted means queued preparation; asynchronous failures remain visible in the main task row.
+            const bool accepted = startMultiThreadDownloadTaskFromInput(
                 urlEdit->text().trimmed(),
                 saveDirEdit->text().trimmed());
-            if (started)
+            if (accepted)
             {
                 promptDialog->close();
             }

@@ -45,6 +45,7 @@ constexpr UINT kMenuOpenProcess = 67645;
 
 constexpr UINT kMsgRefreshCompleted = WM_APP + 675;
 constexpr UINT kMsgFilterCompleted = WM_APP + 676;
+constexpr UINT kMsgReportCompleted = WM_APP + 677;
 
 constexpr int kGap = 6;
 constexpr int kRowHeight = 24;
@@ -79,6 +80,52 @@ struct HierarchyFilterResult final {
     std::vector<std::size_t> visibleIndexes;
 };
 
+using HierarchyReportTask = Ksword::Ui::AsyncSnapshotTask<std::wstring>;
+
+struct ReportWindowIdentity final {
+    HWND window = nullptr;
+    DWORD processId = 0;
+    DWORD threadId = 0;
+};
+
+ReportWindowIdentity CaptureReportWindowIdentity(const HWND window) {
+    ReportWindowIdentity identity{};
+    identity.window = window;
+    if (window) {
+        identity.threadId = ::GetWindowThreadProcessId(window, &identity.processId);
+    }
+    return identity;
+}
+
+bool ReportWindowIdentityMatches(const ReportWindowIdentity& expected) {
+    if (!expected.window) {
+        return true;
+    }
+    const auto current = CaptureReportWindowIdentity(expected.window);
+    return expected.threadId != 0 && expected.processId != 0 &&
+        current.threadId == expected.threadId && current.processId == expected.processId;
+}
+
+void RequestLiveHierarchyReport(HierarchyReportTask& task, const HWND reportEdit, const HWND window) {
+    const auto identity = CaptureReportWindowIdentity(window);
+    task.request(
+        [identity] {
+            if (!ReportWindowIdentityMatches(identity)) {
+                return BuildHierarchyReport(nullptr);
+            }
+            std::wstring report = BuildHierarchyReport(identity.window);
+            return ReportWindowIdentityMatches(identity) ? std::move(report) : BuildHierarchyReport(nullptr);
+        },
+        [identity, reportEdit](std::uint64_t, std::optional<std::wstring>&& report, std::exception_ptr error) {
+            if (error || !report || !ReportWindowIdentityMatches(identity)) {
+                const std::wstring unavailable = BuildHierarchyReport(nullptr);
+                ::SetWindowTextW(reportEdit, unavailable.c_str());
+                return;
+            }
+            ::SetWindowTextW(reportEdit, report->c_str());
+        });
+}
+
 struct HierarchyViewState final {
     HWND hwnd = nullptr;
     HWND refreshButton = nullptr;
@@ -95,6 +142,7 @@ struct HierarchyViewState final {
     std::uint64_t displayGeneration = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::vector<TopLevelWindowInfo>>> refreshTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<HierarchyFilterResult>> filterTask;
+    std::unique_ptr<HierarchyReportTask> reportTask;
 };
 
 // DpiApi resolves the per-window DPI entry points at run time.
@@ -197,8 +245,9 @@ void ShowReportForSelection(HierarchyViewState& state) {
     if (!state.reportEdit) {
         return;
     }
-    const std::wstring report = BuildHierarchyReport(SelectedWindowHandle(state));
-    ::SetWindowTextW(state.reportEdit, report.c_str());
+    if (state.reportTask) {
+        RequestLiveHierarchyReport(*state.reportTask, state.reportEdit, SelectedWindowHandle(state));
+    }
 }
 
 // SelectRowAtPoint makes row commands act on the window under the pointer,
@@ -558,6 +607,7 @@ LRESULT CALLBACK HierarchyViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 std::make_unique<Ksword::Ui::AsyncSnapshotTask<std::vector<TopLevelWindowInfo>>>(hwnd, kMsgRefreshCompleted);
             state->filterTask =
                 std::make_unique<Ksword::Ui::AsyncSnapshotTask<HierarchyFilterResult>>(hwnd, kMsgFilterCompleted);
+            state->reportTask = std::make_unique<HierarchyReportTask>(hwnd, kMsgReportCompleted);
             LayoutView(*state);
             ShowReportForSelection(*state);
             BeginRefresh(*state);
@@ -644,6 +694,10 @@ LRESULT CALLBACK HierarchyViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 state->refreshTask->consume(hwnd, wParam, lParam);
                 return 0;
             }
+            if (msg == kMsgReportCompleted && state->reportTask) {
+                state->reportTask->consume(hwnd, wParam, lParam);
+                return 0;
+            }
             if (msg == kMsgFilterCompleted && state->filterTask) {
                 state->filterTask->consume(hwnd, wParam, lParam);
                 return 0;
@@ -655,6 +709,9 @@ LRESULT CALLBACK HierarchyViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
             if (state->filterTask) {
                 state->filterTask->cancel();
+            }
+            if (state->reportTask) {
+                state->reportTask->cancel();
             }
             state->windowList.detach();
             delete state;
@@ -683,6 +740,7 @@ bool EnsureHierarchyViewClass() {
 struct HierarchyReportViewState final {
     HWND hwnd = nullptr;
     HWND reportEdit = nullptr;
+    std::unique_ptr<HierarchyReportTask> reportTask;
 };
 
 HierarchyReportViewState* ReportStateFromWindow(HWND hwnd) {
@@ -722,6 +780,7 @@ LRESULT CALLBACK HierarchyReportViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (!state->reportEdit) {
             return -1;
         }
+        state->reportTask = std::make_unique<HierarchyReportTask>(hwnd, kMsgReportCompleted);
         Ksword::Ui::AttachTextFindSupport(state->reportEdit);
         Ksword::Ui::SetWindowFontRecursive(hwnd);
         ::SetWindowTextW(state->reportEdit, BuildHierarchyReport(nullptr).c_str());
@@ -759,7 +818,15 @@ LRESULT CALLBACK HierarchyReportViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         break;
+    case kMsgReportCompleted:
+        if (state && state->reportTask) {
+            state->reportTask->consume(hwnd, wParam, lParam);
+        }
+        return 0;
     case WM_NCDESTROY:
+        if (state && state->reportTask) {
+            state->reportTask->cancel();
+        }
         delete state;
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return 0;
@@ -811,8 +878,9 @@ void UpdateWindowHierarchyReportView(HWND reportView, HWND selectedWindow) {
     if (!state || !state->reportEdit) {
         return;
     }
-    const std::wstring report = BuildHierarchyReport(selectedWindow);
-    ::SetWindowTextW(state->reportEdit, report.c_str());
+    if (state->reportTask) {
+        RequestLiveHierarchyReport(*state->reportTask, state->reportEdit, selectedWindow);
+    }
 }
 
 } // namespace Ksword::Features::WindowTools

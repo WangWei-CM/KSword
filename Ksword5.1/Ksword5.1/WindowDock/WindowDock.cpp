@@ -1,4 +1,11 @@
 #include "WindowDock.h"
+#include "WindowSnapshotSupport.h"
+#include "WindowImmutableTableSupport.h"
+#include <QImage>
+#include <QItemSelectionModel>
+#include <shellapi.h>
+#include <objbase.h>
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "WindowEventHookTab.h"
@@ -33,7 +40,6 @@
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
-#include <QFileIconProvider>
 #include <QGuiApplication>
 #include <QHash>
 #include <QHBoxLayout>
@@ -62,8 +68,6 @@
 #include <QScreen>
 #include <QShowEvent>
 #include <QStringList>
-#include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QThread>
 #include <QVBoxLayout>
@@ -89,6 +93,21 @@
 
 namespace
 {
+    struct WindowAuditRequest
+    {
+        QVector<QStringList> clipboard;
+        QString screenName;
+        QRect screenGeometry;
+        double screenDpi = 0.0;
+        ks::window::SnapshotTexts texts;
+    };
+    struct WindowAuditSnapshot
+    {
+        ks::ui::FieldDocument sessionSummary, hotkeyHookSummary, displaySummary;
+        QVector<QStringList> windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows, deviceRows, clipboardRows;
+        QString failure;
+    };
+
     // kColumnPresetSelectedProperty 作用：标识 A/B 列预设按钮的当前选中态。
     // 该内部属性名不是用户可见文本，集中定义可避免误入 i18n 语言包。
     constexpr char kColumnPresetSelectedProperty[] = {
@@ -679,22 +698,16 @@ namespace
             .arg(formatUInt64Hex(flags));
     }
 
-    QString messageHookLayoutSourceText(const std::uint32_t source)
+    QString messageHookLayoutSourceText(const std::uint32_t source, const ks::window::SnapshotTexts& texts)
     {
         switch (source)
         {
         case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.exact"),
-                QStringLiteral("精确 PE 身份"));
+            return texts.value(QStringLiteral("window.message_hook.layout.exact"), QStringLiteral("精确 PE 身份"));
         case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.previous"),
-                QStringLiteral("最近旧版回退"));
+            return texts.value(QStringLiteral("window.message_hook.layout.previous"), QStringLiteral("最近旧版回退"));
         default:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.unknown"),
-                QStringLiteral("未知"));
+            return texts.value(QStringLiteral("window.message_hook.layout.unknown"), QStringLiteral("未知"));
         }
     }
 
@@ -1630,13 +1643,13 @@ namespace
         const QString textColor = KswordTheme::TextPrimaryColorHex();
 
         return QStringLiteral(
-            "QTableWidget{"
+            "QTableView{"
             "  background-color:%1;"
             "  alternate-background-color:%2;"
             "  color:%3;"
             "  gridline-color:%4;"
             "}"
-            "QTableWidget::item{"
+            "QTableView::item{"
             "  color:%3;"
             "  padding:3px 5px;"
             "}"
@@ -1664,18 +1677,18 @@ namespace
         const QString textColor = KswordTheme::TextPrimaryColorHex();
 
         return QStringLiteral(
-            "QTableWidget{"
+            "QTableView{"
             "  background:transparent;"
             "  background-color:transparent;"
             "  alternate-background-color:transparent;"
             "  color:%1;"
             "  gridline-color:%2;"
             "}"
-            "QTableWidget::viewport{"
+            "QTableView::viewport{"
             "  background:transparent;"
             "  background-color:transparent;"
             "}"
-            "QTableWidget::item{"
+            "QTableView::item{"
             "  color:%1;"
             "  padding:3px 5px;"
             "}"
@@ -1694,7 +1707,7 @@ namespace
     // - 输入 table：WindowDock 审计页中的只读表格；
     // - 处理：同时写 QPalette 和 viewport 背景，避免父级透明 Dock 或异常 QSS 让表格“有行但看不见”；
     // - 返回：无，只影响控件绘制，不改变任何 R0/R3 数据路径。
-    void applyAuditTablePalette(QTableWidget* table)
+    void applyAuditTablePalette(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr)
         {
@@ -1728,7 +1741,7 @@ namespace
         }
     }
 
-    void refreshAuditTableTheme(QTableWidget* table)
+    void refreshAuditTableTheme(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr)
         {
@@ -1752,7 +1765,7 @@ namespace
             }
             style += rules;
             table->setProperty("ksword_window_audit_style_block", rules);
-            const QPointer<QTableWidget> guardedTable(table);
+            const QPointer<ks::ui::ImmutableValueTable> guardedTable(table);
             if (table->styleSheet() != style)
             {
                 table->setStyleSheet(style);
@@ -1772,7 +1785,7 @@ namespace
     class AuditTableThemeOnShow final : public QObject
     {
     public:
-        explicit AuditTableThemeOnShow(QTableWidget* table)
+        explicit AuditTableThemeOnShow(ks::ui::ImmutableValueTable* table)
             : QObject(table), m_table(table)
         {
             table->installEventFilter(this);
@@ -1790,14 +1803,14 @@ namespace
         }
 
     private:
-        QPointer<QTableWidget> m_table; // 过滤器与表格同寿命，不跨页面保存裸指针。
+        QPointer<ks::ui::ImmutableValueTable> m_table; // 过滤器与表格同寿命，不跨页面保存裸指针。
     };
 
     // applyTransparentAuditTableBackground 作用：
     // - 输入 table：需要穿透父级背景的 WindowDock 审计表；
     // - 处理：写入持久化属性、透明 QSS 和绘制属性；
     // - 返回：无。后续刷新调用 applyAuditTablePalette 时会保留透明状态。
-    void applyTransparentAuditTableBackground(QTableWidget* table)
+    void applyTransparentAuditTableBackground(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr)
         {
@@ -1812,7 +1825,7 @@ namespace
     // - 把当前表格行按 TSV 复制到剪贴板；
     // - 输入 table：目标表格；
     // - 返回：无，失败时静默保持 UI 稳定。
-    void copyTableCurrentRow(QTableWidget* table)
+    void copyTableCurrentRow(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr || QApplication::clipboard() == nullptr)
         {
@@ -1829,8 +1842,7 @@ namespace
         fields.reserve(table->columnCount());
         for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->cell(rowIndex, columnIndex).toString());
         }
         QApplication::clipboard()->setText(fields.join('\t'));
     }
@@ -1841,7 +1853,7 @@ namespace
     // - 如果表格设置了 kswordSandboxPidColumn 属性，则额外添加“上传到沙箱 -> VT”并按该列 PID 上传进程 EXE；
     // - 输入 table：需要安装菜单的表格；
     // - 返回：无，菜单 action 只读，不触发任何系统修改。
-    void installTableCopyMenu(QTableWidget* table)
+    void installTableCopyMenu(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr)
         {
@@ -1849,13 +1861,13 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
-                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
-                table->selectRow(clickedIndex.row());
+                table->selectionModel()->setCurrentIndex(clickedIndex, QItemSelectionModel::NoUpdate);
+                table->selectionModel()->select(clickedIndex, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
             }
 
             QMenu menu(table);
@@ -1871,14 +1883,9 @@ namespace
             if (processDetailPidColumnValue.isValid())
             {
                 const int processDetailPidColumn = processDetailPidColumnValue.toInt();
-                const QTableWidgetItem* processIdItem =
-                    processDetailPidColumn >= 0 && processDetailPidColumn < table->columnCount() && table->currentRow() >= 0
-                    ? table->item(table->currentRow(), processDetailPidColumn)
-                    : nullptr;
                 bool processIdOk = false;
-                processId = processIdItem != nullptr
-                    ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-                    : 0U;
+                processId = processDetailPidColumn >= 0 && processDetailPidColumn < table->columnCount() && table->currentRow() >= 0
+                    ? table->cell(table->currentRow(), processDetailPidColumn).toString().trimmed().toUInt(&processIdOk, 10) : 0U;
                 openProcessAction = menu.addAction(
                     QIcon(QStringLiteral(":/Icon/process_details.svg")),
                     QStringLiteral("转到进程详细信息"));
@@ -1900,10 +1907,9 @@ namespace
                         // 返回：空 filePath 表示让统一层按 PID 查询 EXE。
                         ks::online_scan::SandboxUploadTarget uploadTarget;
                         const int rowIndex = table != nullptr ? table->currentRow() : -1;
-                        const QTableWidgetItem* pidItem =
-                            (table != nullptr && rowIndex >= 0) ? table->item(rowIndex, sandboxPidColumn) : nullptr;
+                        const QString pidText = table != nullptr && rowIndex >= 0 ? table->cell(rowIndex, sandboxPidColumn).toString() : QString();
                         std::uint32_t pidValue = 0;
-                        if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue))
+                        if (pidText.isEmpty() || !ks::online_scan::tryParsePidFromText(pidText, &pidValue))
                         {
                             uploadTarget.errorText = QStringLiteral("当前窗口/GUI线程行没有可解析的 PID。");
                             return uploadTarget;
@@ -1945,7 +1951,7 @@ namespace
     // - 处理：按表格属性刷新按钮着色，自定义列布局时两者均不着色；
     // - 返回：无。
     void updateColumnPresetButtons(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         QPushButton* buttonA,
         QPushButton* buttonB)
     {
@@ -1969,7 +1975,7 @@ namespace
     // - 处理：仅切换列显隐，不改动行模型、排序和刷新状态；
     // - 返回：无。
     void applyColumnPresetToTable(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         const QVector<int>& columnGroup,
         const QString& presetText,
         QPushButton* buttonA,
@@ -1992,7 +1998,7 @@ namespace
     // - 输入 table：目标表格；
     // - 处理：统计未隐藏列，避免右键菜单隐藏最后一列；
     // - 返回：可见列数量。
-    int visibleColumnCount(QTableWidget* table)
+    int visibleColumnCount(ks::ui::ImmutableValueTable* table)
     {
         if (table == nullptr)
         {
@@ -2034,7 +2040,7 @@ namespace
     // - 处理：在表头安装显式主题样式右键菜单，允许逐列勾选显示；
     // - 返回：无，手动改列后设置为 Custom 状态。
     void installHeaderColumnMenu(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         QPushButton* buttonA,
         QPushButton* buttonB)
     {
@@ -2051,10 +2057,7 @@ namespace
             menu.setStyleSheet(tableCopyMenuStyle());
             for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
             {
-                const QTableWidgetItem* headerItem = table->horizontalHeaderItem(columnIndex);
-                const QString headerText = headerItem != nullptr
-                    ? headerItem->text()
-                    : QStringLiteral("Column %1").arg(columnIndex);
+                const QString headerText = table->model()->headerData(columnIndex, Qt::Horizontal, Qt::DisplayRole).toString();
                 QAction* columnAction = menu.addAction(headerText);
                 columnAction->setCheckable(true);
                 columnAction->setChecked(!table->isColumnHidden(columnIndex));
@@ -2086,7 +2089,7 @@ namespace
     // - 处理：绑定 A/B 切换和表头列菜单，默认应用 A 组；
     // - 返回：无。
     void installColumnPresetControls(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         QPushButton* buttonA,
         QPushButton* buttonB,
         const QVector<int>& groupA,
@@ -2579,7 +2582,8 @@ namespace
 
     QVector<QStringList> buildHookRows(
         const ksword::ark::Win32kHooksPdbResult& result,
-        const ksword::ark::KeyboardHookEnumResult* const fallbackResult)
+        const ksword::ark::KeyboardHookEnumResult* const fallbackResult,
+        const ks::window::SnapshotTexts& texts)
     {
         QVector<QStringList> rows;
         rows.reserve(static_cast<int>(result.entries.size()));
@@ -2626,7 +2630,7 @@ namespace
                 QStringLiteral("fieldFlags=%1; moduleBase=%2; layout=%3; profileFull=%4/%5; currentFull=%6/%7; %8")
                     .arg(formatUInt64Hex(entry.fieldFlags))
                     .arg(formatUInt64Hex(entry.moduleBase))
-                    .arg(messageHookLayoutSourceText(result.layout.source))
+                    .arg(messageHookLayoutSourceText(result.layout.source, texts))
                     .arg(formatUInt64Hex(result.layout.timeDateStamp))
                     .arg(formatUInt64Hex(result.layout.imageSize))
                     .arg(formatUInt64Hex(result.win32kfullTimeDateStamp))
@@ -2832,66 +2836,55 @@ namespace
     // - 把行模型写入 QTableWidget，单元格只读、保持排序开关；
     // - 输入 table：目标表格，rows：每行的列文本；
     // - 返回：无。
-    void populateTable(QTableWidget* table, const QVector<QStringList>& rows)
+    // Worker-only native image cache; QFileInfo/Shell/COM never run on the GUI path.
+    QImage auditProcessImage(const QString& imagePath)
     {
-        if (table == nullptr)
+        const QFileInfo info(imagePath);
+        const QString key = QDir::fromNativeSeparators(imagePath).toLower() + QLatin1Char('|')
+            + QString::number(info.exists()) + QLatin1Char('|') + QString::number(info.size())
+            + QLatin1Char('|') + QString::number(info.lastModified().toMSecsSinceEpoch());
+        static QMutex mutex;
+        static QHash<QString, QImage> cache;
+        const QMutexLocker lock(&mutex);
+        const auto cached = cache.constFind(key);
+        if (cached != cache.cend()) return *cached;
+        QImage image;
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (info.exists())
         {
-            return;
-        }
-        const bool wasSorting = table->isSortingEnabled();
-        table->setSortingEnabled(false);
-        table->setVisible(true);
-        table->clearContents();
-        applyAuditTablePalette(table);
-        table->setRowCount(rows.size());
-        bool hasProcessIconColumn = false;
-        bool hasProcessPathColumn = false;
-        const int processIconColumn = table->property("kswordProcessIconColumn").toInt(&hasProcessIconColumn);
-        const int processPathColumn = table->property("kswordProcessPathColumn").toInt(&hasProcessPathColumn);
-        static QFileIconProvider fileIconProvider;
-        static QHash<QString, QIcon> processIconCache;
-        for (int rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
-        {
-            const QStringList& columns = rows.at(rowIndex);
-            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            SHFILEINFOW shell{};
+            if (::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(imagePath.utf16()), 0, &shell,
+                sizeof(shell), SHGFI_ICON | SHGFI_SMALLICON) != 0 && shell.hIcon)
             {
-                const QString cellText = columnIndex < columns.size() ? columns.at(columnIndex) : QString();
-                QTableWidgetItem* item = new QTableWidgetItem(cellText);
-                item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-                item->setToolTip(cellText);
-                // 普通单元格随 palette/交替行取得当前主题色，不保存构造时的中性画刷。
-                // 独立业务写入的 Foreground/BackgroundRole 仍由原委托处理。
-                if (hasProcessIconColumn &&
-                    hasProcessPathColumn &&
-                    columnIndex == processIconColumn &&
-                    processPathColumn >= 0 &&
-                    processPathColumn < columns.size() &&
-                    !cellText.startsWith(QChar('<')) &&
-                    cellText != QStringLiteral("N/A"))
-                {
-                    const QString imagePath = columns.at(processPathColumn).trimmed();
-                    const QString cacheKey = QDir::fromNativeSeparators(imagePath).toLower();
-                    QIcon processIcon = processIconCache.value(cacheKey);
-                    if (processIcon.isNull() && QFileInfo::exists(imagePath))
-                    {
-                        processIcon = fileIconProvider.icon(QFileInfo(imagePath));
-                    }
-                    if (processIcon.isNull())
-                    {
-                        processIcon = QIcon(QStringLiteral(":/Icon/process_main.svg"));
-                    }
-                    processIconCache.insert(cacheKey, processIcon);
-                    item->setIcon(processIcon);
-                }
-                table->setItem(rowIndex, columnIndex, item);
+                image = QImage::fromHICON(shell.hIcon);
+                ::DestroyIcon(shell.hIcon);
             }
         }
-        table->setSortingEnabled(wasSorting);
-        table->resizeRowsToContents();
-        if (table->viewport() != nullptr)
-        {
-            table->viewport()->update();
-        }
+        if (SUCCEEDED(initialized)) ::CoUninitialize();
+        if (image.isNull()) image.load(QStringLiteral(":/Icon/process_main.svg"));
+        cache.insert(key, image);
+        return image;
+    }
+
+    void populateTable(ks::ui::ImmutableValueTable* table, const QVector<QStringList>& rows)
+    {
+        if (!table) return;
+        bool hasIcon = false, hasPath = false;
+        const int iconColumn = table->property("kswordProcessIconColumn").toInt(&hasIcon);
+        const int pathColumn = table->property("kswordProcessPathColumn").toInt(&hasPath);
+        const auto identityColumns = hasIcon ? QVector<int>{ HotkeyColumnObject, HotkeyColumnId,
+            HotkeyColumnVirtualKey, HotkeyColumnModifiers, HotkeyColumnProcessId,
+            HotkeyColumnThreadId, HotkeyColumnSession, HotkeyColumnHwnd, HotkeyColumnSource } : QVector<int>{0, 1, 2};
+        table->setSourceFactory([rows, identityColumns, hasIcon, hasPath, iconColumn, pathColumn](const auto& translator) {
+            const auto canonical = ks::window::makeWindowTableSource(rows, identityColumns);
+            auto values = std::const_pointer_cast<ks::ui::ImmutableTableValues>(ks::window::formatWindowTableSource(canonical, translator));
+            if (values && hasIcon && hasPath)
+                for (auto& row : values->rows)
+                    if (iconColumn >= 0 && pathColumn >= 0 && pathColumn < row.cells.size()
+                        && !row.cells.value(iconColumn).startsWith(QChar('<')) && row.cells.value(iconColumn) != QStringLiteral("N/A"))
+                        row.columnRoles[iconColumn].insert(Qt::DecorationRole, auditProcessImage(row.cells[pathColumn].trimmed()));
+            return ks::ui::ImmutableTableSource(std::move(values));
+        });
     }
 
     // buildPendingRows 作用：
@@ -2899,7 +2892,7 @@ namespace
     // - 输入 table：目标表格，用于读取列数；primaryText：首列状态；detailText：末列说明；
     // - 返回：一行 QStringList，列数与表格一致，方便 populateTable 立即展示。
     QVector<QStringList> buildPendingRows(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         const QString& primaryText,
         const QString& detailText)
     {
@@ -2926,7 +2919,7 @@ namespace
     // - 处理：当后台/本地枚举路径意外产生空行模型时，补一行可读诊断；
     // - 返回：无，直接更新 rows，保证关键审计表不会以 rowCount=0 的空白形态显示。
     void ensureNonEmptyAuditRows(
-        QTableWidget* table,
+        ks::ui::ImmutableValueTable* table,
         QVector<QStringList>& rows,
         const QString& primaryText,
         const QString& detailText)
@@ -2947,8 +2940,12 @@ namespace
 WindowDock::WindowDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_auditOperation = new ks::ui::AsyncOperation(this);
+    m_windowDetailOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
     initializeConnections();
+    m_auditOperation->setStateChangedCallback([this] { reconcileAuditRefreshState(); });
+    m_windowDetailOperation->setStateChangedCallback([this] { reconcileWindowDetailState(); });
 
     // 初始状态：
     // - 窗口列表页由内嵌 OtherDock 保持原有行为；
@@ -2985,6 +2982,12 @@ WindowDock::WindowDock(QWidget* parent)
 
 WindowDock::~WindowDock()
 {
+    m_auditOperation->close();
+    m_windowDetailOperation->close();
+    ks::window::retireSnapshotValues(std::move(m_cachedSessionSummary), std::move(m_cachedHotkeyHookSummary),
+        std::move(m_cachedDisplaySummary), std::move(m_cachedWindowsRows), std::move(m_cachedGuiThreadRows),
+        std::move(m_cachedSessionRows), std::move(m_cachedHotkeyRows), std::move(m_cachedHookRows),
+        std::move(m_cachedDeviceRows), std::move(m_cachedClipboardRows));
 }
 
 void WindowDock::focusWindowsByPids(const QVector<quint32>& processIds)
@@ -2999,7 +3002,7 @@ void WindowDock::focusWindowsByPids(const QVector<quint32>& processIds)
 void WindowDock::refreshThemeVisuals()
 {
     // auditTables 用途：只包含 WindowDock 自己的审计表，避免覆盖内嵌 OtherDock 的表格策略。
-    const QVector<QTableWidget*> auditTables = {
+    const QVector<ks::ui::ImmutableValueTable*> auditTables = {
         m_windowsTable,
         m_guiThreadsTable,
         m_sessionTable,
@@ -3009,7 +3012,7 @@ void WindowDock::refreshThemeVisuals()
         m_deviceTable
     };
 
-    for (QTableWidget* const table : auditTables)
+    for (ks::ui::ImmutableValueTable* const table : auditTables)
     {
         if (table == nullptr || !table->isVisible())
         {
@@ -3025,7 +3028,12 @@ void WindowDock::refreshThemeVisuals()
 
 void WindowDock::showEvent(QShowEvent* showEventPointer)
 {
+    const QPointer<WindowDock> alive(this);
     QWidget::showEvent(showEventPointer);
+    if (!alive) return;
+    reconcileAuditRefreshState();
+    if (!alive) return;
+    reconcileWindowDetailState();
 }
 
 void WindowDock::initializeUi()
@@ -3073,7 +3081,7 @@ void WindowDock::initializeUi()
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     // 配置只读结构化表格：可排序、行选择、内容自适应列宽、末列拉伸。
-    const auto configureTable = [](QTableWidget* table)
+    const auto configureTable = [](ks::ui::ImmutableValueTable* table)
     {
         // 表格可视性保护：
         // - WindowDock 被嵌入到 Dock/透明父容器时，默认 palette 可能被父级样式污染；
@@ -3088,7 +3096,7 @@ void WindowDock::initializeUi()
         table->setMinimumHeight(120);
         refreshAuditTableTheme(table);
         new AuditTableThemeOnShow(table);
-        const QPointer<QTableWidget> guardedTable(table);
+        const QPointer<ks::ui::ImmutableValueTable> guardedTable(table);
         ks::ui::BindWidgetTheme(table, [guardedTable]()
             {
                 if (guardedTable != nullptr && guardedTable->isVisible())
@@ -3097,7 +3105,9 @@ void WindowDock::initializeUi()
                 }
             });
         table->verticalHeader()->setVisible(false);
-        table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        table->horizontalHeader()->setResizeContentsPrecision(100);
+        table->sourceReady = [table] { table->resizeColumnsToContents(); };
         table->horizontalHeader()->setStretchLastSection(true);
         installTableCopyMenu(table);
     };
@@ -3109,7 +3119,7 @@ void WindowDock::initializeUi()
             const QStringList& headers,
             const QVector<int>& groupA,
             const QVector<int>& groupB,
-            QTableWidget** tableOut) -> QWidget*
+            ks::ui::ImmutableValueTable** tableOut) -> QWidget*
     {
         QWidget* group = new QWidget(m_tabWidget);
         QVBoxLayout* groupLayout = new QVBoxLayout(group);
@@ -3140,9 +3150,10 @@ void WindowDock::initializeUi()
         ks::ui::NormalizeToolbarRow(presetLayout, 0);
         groupLayout->addLayout(presetLayout, 0);
 
-        QTableWidget* table = new ks::ui::VisibleTableWidget(group);
-        table->setColumnCount(headers.size());
-        table->setHorizontalHeaderLabels(headers);
+        QVector<ks::ui::ImmutableTableHeader> valueHeaders;
+        valueHeaders.reserve(headers.size());
+        for (const auto& header : headers) valueHeaders.push_back(ks::ui::ImmutableTableHeader(header));
+        auto* table = new ks::ui::ImmutableValueTable(group, std::move(valueHeaders));
         configureTable(table);
         installColumnPresetControls(table, groupAButton, groupBButton, groupA, groupB);
         groupLayout->addWidget(table, 1);
@@ -3484,35 +3495,27 @@ void WindowDock::initializeConnections()
     }
     if (m_windowsTable != nullptr)
     {
-        connect(m_windowsTable, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int)
-        {
-            updateSelectedWindowSnapshotDetail(currentRow);
-        });
+        m_windowsTable->currentRowChanged = [this] { updateSelectedWindowSnapshotDetail(m_windowsTable->currentRow()); };
+        m_windowsTable->sourceReady = [this] {
+            const QPointer<WindowDock> alive(this);
+            m_windowsTable->resizeColumnsToContents();
+            if (!alive) return;
+            if (m_windowsTable->currentRow() < 0 && m_windowsTable->rowCount() > 0) m_windowsTable->selectRow(0);
+            else updateSelectedWindowSnapshotDetail(m_windowsTable->currentRow());
+        };
     }
 }
 
 void WindowDock::setRefreshingPlaceholderRows()
 {
-    // 这些即时行只说明当前正在采集，不替代后续真实 R0/R3 行。
-    // 目的：避免后台查询期间，GUI/Session 与热键/钩子页出现完全空表。
-    // 处理：窗口/GUI线程/Session 先用本地 Win32 只读枚举生成具体行，
-    //       热键/Hook 暂无纯 R3 安全枚举路径时至少生成明确诊断行。
+    ++m_auditViewRevision;
+    ks::window::retireSnapshotValues(std::move(m_cachedSessionSummary), std::move(m_cachedHotkeyHookSummary),
+        std::move(m_cachedDisplaySummary), std::move(m_cachedWindowsRows), std::move(m_cachedGuiThreadRows),
+        std::move(m_cachedSessionRows), std::move(m_cachedHotkeyRows), std::move(m_cachedHookRows),
+        std::move(m_cachedDeviceRows), std::move(m_cachedClipboardRows));
+    // Loading rows describe state only. R0/R3 discovery remains in the worker;
+    // invoking the final row builders here also invokes their EnumWindows fallback.
     const QString pendingDetailText = QStringLiteral("正在收集窗口信息，请稍候...");
-
-    ksword::ark::Win32kWindowsResult localWindowsResult;
-    localWindowsResult.io.message = "R0 refresh is pending; showing local EnumWindows fallback rows.";
-
-    ksword::ark::Win32kGuiThreadsResult localGuiThreadsResult;
-    localGuiThreadsResult.io.message = "R0 refresh is pending; showing local GetGUIThreadInfo fallback rows.";
-
-    ksword::ark::Win32kProfileStatusResult localProfileResult;
-    localProfileResult.io.message = "R0 refresh is pending; showing local session fallback row.";
-
-    ksword::ark::Win32kHotkeysPdbResult pendingHotkeyResult;
-    pendingHotkeyResult.io.message = "R0 hotkey snapshot is still refreshing; no pure R3 system hotkey table is available.";
-
-    ksword::ark::Win32kHooksPdbResult pendingHookResult;
-    pendingHookResult.io.message = "R0 hook snapshot is still refreshing; no pure R3 global hook chain is available.";
 
     m_cachedSessionSummary =
         ks::ui::FieldDocument{}.note(QStringLiteral("[win32k GUI/session]\n正在刷新结构化窗口、GUI线程和Session审计行...\n"));
@@ -3521,11 +3524,26 @@ void WindowDock::setRefreshingPlaceholderRows()
     m_cachedDisplaySummary =
         ks::ui::FieldDocument{}.note(QStringLiteral("[GPU / Display / Watchdog]\n正在刷新显示设备只读审计行...\n"));
 
-    m_cachedWindowsRows = buildWindowsRows(localWindowsResult);
-    m_cachedGuiThreadRows = buildGuiThreadRows(localGuiThreadsResult);
-    m_cachedSessionRows = buildSessionRows(localProfileResult);
-    m_cachedHotkeyRows = buildHotkeyRows(pendingHotkeyResult, nullptr);
-    m_cachedHookRows = buildHookRows(pendingHookResult, nullptr);
+    m_cachedWindowsRows = buildPendingRows(
+        m_windowsTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedGuiThreadRows = buildPendingRows(
+        m_guiThreadsTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedSessionRows = buildPendingRows(
+        m_sessionTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedHotkeyRows = buildPendingRows(
+        m_hotkeysTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedHookRows = buildPendingRows(
+        m_hooksTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
     m_cachedClipboardRows = buildPendingRows(
         m_clipboardTable,
         QStringLiteral("<采集中>"),
@@ -3538,8 +3556,20 @@ void WindowDock::setRefreshingPlaceholderRows()
     applyAuditViews();
 }
 
+void WindowDock::reconcileAuditRefreshState()
+{
+    if (!m_refreshing.load() || m_auditOperation->isBusy() || m_auditOperation->isInFlight()) return;
+    const QPointer<WindowDock> alive(this);
+    m_refreshing.store(false);
+    if (m_refreshButton) m_refreshButton->setEnabled(true);
+    if (alive && !m_auditOperation->isBusy() && !m_auditOperation->isInFlight() && m_statusLabel) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+}
+
 void WindowDock::requestAsyncRefresh()
 {
+    const QPointer<WindowDock> refreshOwner(this);
+    reconcileAuditRefreshState();
+    if (!refreshOwner) return;
     // 一轮窗口审计会同步替换七张关联表；任一表格菜单打开时，启动阶段的
     // 占位缓存和七表提交都必须作为一个整体延后。
     const QPointer<WindowDock> deferredGuard(this);
@@ -3576,7 +3606,9 @@ void WindowDock::requestAsyncRefresh()
     {
         m_statusLabel->setText(QStringLiteral("正在采集窗口审计快照..."));
     }
+    if (!deferredGuard) return;
     setRefreshingPlaceholderRows();
+    if (!deferredGuard) return;
 
     // UI线程快照：
     // - 输入：当前 Qt GUI 线程可安全访问的剪贴板与屏幕对象；
@@ -3596,113 +3628,19 @@ void WindowDock::requestAsyncRefresh()
         primaryScreenDpi = primaryScreen->logicalDotsPerInch();
     }
 
-    QPointer<WindowDock> safeThis(this);
-    std::thread([safeThis, clipboardSnapshot, primaryScreenName, primaryScreenGeometry, primaryScreenDpi]()
-    {
-        // reportRefreshFailure 作用：
-        // - 输入 failureText：后台线程捕获到的异常或失败描述；
-        // - 处理：通过 queued connection 回到 UI 线程写入可读诊断行；
-        // - 返回：无，但一定释放 m_refreshing，避免一次异常后刷新按钮永久失效。
-        const auto reportRefreshFailure = [safeThis](const QString& failureText)
-        {
-            if (safeThis.isNull())
+    WindowAuditRequest request{clipboardSnapshot, primaryScreenName, primaryScreenGeometry, primaryScreenDpi, {
+        {QStringLiteral("window.message_hook.layout.exact"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.exact"), QStringLiteral("精确 PE 身份"))},
+        {QStringLiteral("window.message_hook.layout.previous"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.previous"), QStringLiteral("最近旧版回退"))},
+        {QStringLiteral("window.message_hook.layout.unknown"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.unknown"), QStringLiteral("未知"))}}};
+    m_auditOperation->submit<WindowAuditRequest, std::shared_ptr<const WindowAuditSnapshot>>(
+        std::move(request),
+        [](const WindowAuditRequest& request, const ks::ui::AsyncOperationToken&) {
+            const auto& clipboardSnapshot = request.clipboard;
+            const auto& primaryScreenName = request.screenName;
+            const auto& primaryScreenGeometry = request.screenGeometry;
+            const double primaryScreenDpi = request.screenDpi;
+            try
             {
-                return;
-            }
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                safeThis.data(),
-                [safeThis, failureText]()
-                {
-                    const auto commitFailure = [safeThis, failureText]()
-                    {
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-
-                    const ks::ui::FieldDocument summaryText = ks::ui::FieldDocument{}.note(QStringLiteral(
-                        "[Window audit refresh]\n"
-                        "后台刷新异常，已保留/写入诊断行，用户可再次点击刷新。\n"
-                        "原因: %1\n").arg(failureText));
-
-                    safeThis->m_cachedSessionSummary = summaryText;
-                    safeThis->m_cachedHotkeyHookSummary = summaryText;
-                    safeThis->m_cachedDisplaySummary = summaryText;
-                    safeThis->m_cachedWindowsRows = buildPendingRows(
-                        safeThis->m_windowsTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedGuiThreadRows = buildPendingRows(
-                        safeThis->m_guiThreadsTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedSessionRows = buildPendingRows(
-                        safeThis->m_sessionTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedHotkeyRows = buildPendingRows(
-                        safeThis->m_hotkeysTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedHookRows = buildPendingRows(
-                        safeThis->m_hooksTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedClipboardRows = buildPendingRows(
-                        safeThis->m_clipboardTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedDeviceRows = buildPendingRows(
-                        safeThis->m_deviceTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->applyAuditViews();
-                    kLogEvent failureEvent;
-                    warn << failureEvent
-                        << "[WindowDock] audit refresh failed, detail="
-                        << failureText.toStdString()
-                        << eol;
-                    if (safeThis->m_statusLabel != nullptr)
-                    {
-                        safeThis->m_statusLabel->setText(QStringLiteral(
-                            "窗口审计刷新异常；详情已写入日志。"));
-                    }
-                    safeThis->m_refreshing.store(false);
-                    };
-
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-                    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                        safeThis.data(),
-                        QStringLiteral("window-audit-failure-apply"),
-                        {
-                            safeThis->m_windowsTable,
-                            safeThis->m_guiThreadsTable,
-                            safeThis->m_sessionTable,
-                            safeThis->m_hotkeysTable,
-                            safeThis->m_hooksTable,
-                            safeThis->m_clipboardTable,
-                            safeThis->m_deviceTable
-                        },
-                        commitFailure))
-                    {
-                        return;
-                    }
-                    commitFailure();
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk && !safeThis.isNull())
-            {
-                safeThis->m_refreshing.store(false);
-            }
-        };
-
-        try
-        {
             // ArkDriverClient 只读 wrapper：
             // - 作用：统一通过 R3 client 访问 R0 PDB 审计结果；
             // - 处理：在后台线程顺序采集，避免阻塞 UI；
@@ -3828,99 +3766,94 @@ void WindowDock::requestAsyncRefresh()
                 keyboardHotkeysFallbackQueried ? &keyboardHotkeysFallbackResult : nullptr);
             const QVector<QStringList> hookRows = buildHookRows(
                 win32kHooksResult,
-                keyboardHooksFallbackQueried ? &keyboardHooksFallbackResult : nullptr);
+                keyboardHooksFallbackQueried ? &keyboardHooksFallbackResult : nullptr, request.texts);
             const QVector<QStringList> deviceRows = buildDeviceRows(gpuAuditResult);
-
-            if (safeThis.isNull())
-            {
-                return;
+                return ks::window::makeSnapshotValue(WindowAuditSnapshot{sessionSummary, hotkeyHookSummary,
+                    displaySummary, windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows,
+                    deviceRows, clipboardRows, {}});
             }
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                safeThis.data(),
-                [safeThis, sessionSummary, hotkeyHookSummary, displaySummary,
-                 windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows, deviceRows, clipboardRows]()
+            catch (const std::exception& exceptionObject)
+            {
+                WindowAuditSnapshot failed;
+                failed.failure = QString::fromLocal8Bit(exceptionObject.what());
+                return ks::window::makeSnapshotValue(std::move(failed));
+            }
+            catch (...)
+            {
+                WindowAuditSnapshot failed;
+                failed.failure = QStringLiteral("未知异常");
+                return ks::window::makeSnapshotValue(std::move(failed));
+            }
+        },
+        [this](const std::shared_ptr<const WindowAuditSnapshot>& snapshot, std::uint64_t ticket) {
+            const QPointer<WindowDock> alive(this);
+            const auto commit = [alive, snapshot, ticket](bool deferred) {
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                ks::window::retireSnapshotValues(std::move(alive->m_cachedSessionSummary), std::move(alive->m_cachedHotkeyHookSummary),
+                    std::move(alive->m_cachedDisplaySummary), std::move(alive->m_cachedWindowsRows), std::move(alive->m_cachedGuiThreadRows),
+                    std::move(alive->m_cachedSessionRows), std::move(alive->m_cachedHotkeyRows), std::move(alive->m_cachedHookRows),
+                    std::move(alive->m_cachedDeviceRows), std::move(alive->m_cachedClipboardRows));
+                if (snapshot->failure.isEmpty())
                 {
-                    const auto commitSnapshot = [
-                        safeThis,
-                        sessionSummary,
-                        hotkeyHookSummary,
-                        displaySummary,
-                        windowsRows,
-                        guiThreadRows,
-                        sessionRows,
-                        hotkeyRows,
-                        hookRows,
-                        deviceRows,
-                        clipboardRows]()
-                    {
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-
-                    safeThis->m_cachedSessionSummary = sessionSummary;
-                    safeThis->m_cachedHotkeyHookSummary = hotkeyHookSummary;
-                    safeThis->m_cachedDisplaySummary = displaySummary;
-                    safeThis->m_cachedWindowsRows = windowsRows;
-                    safeThis->m_cachedGuiThreadRows = guiThreadRows;
-                    safeThis->m_cachedSessionRows = sessionRows;
-                    safeThis->m_cachedHotkeyRows = hotkeyRows;
-                    safeThis->m_cachedHookRows = hookRows;
-                    safeThis->m_cachedDeviceRows = deviceRows;
-                    safeThis->m_cachedClipboardRows = clipboardRows;
-                    safeThis->applyAuditViews();
-                    if (safeThis->m_statusLabel != nullptr)
-                    {
-                        safeThis->m_statusLabel->setText(
-                            QStringLiteral("最近刷新：%1")
-                            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
-                    }
-                    safeThis->m_refreshing.store(false);
-                    };
-
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-                    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                        safeThis.data(),
-                        QStringLiteral("window-audit-seven-table-apply"),
-                        {
-                            safeThis->m_windowsTable,
-                            safeThis->m_guiThreadsTable,
-                            safeThis->m_sessionTable,
-                            safeThis->m_hotkeysTable,
-                            safeThis->m_hooksTable,
-                            safeThis->m_clipboardTable,
-                            safeThis->m_deviceTable
-                        },
-                        commitSnapshot))
-                    {
-                        return;
-                    }
-                    commitSnapshot();
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk && !safeThis.isNull())
-            {
-                safeThis->m_refreshing.store(false);
-            }
-        }
-        catch (const std::exception& exceptionObject)
-        {
-            reportRefreshFailure(QString::fromLocal8Bit(exceptionObject.what()));
-        }
-        catch (...)
-        {
-            reportRefreshFailure(QStringLiteral("未知异常"));
-        }
-    }).detach();
+                    alive->m_cachedSessionSummary = snapshot->sessionSummary;
+                    alive->m_cachedHotkeyHookSummary = snapshot->hotkeyHookSummary;
+                    alive->m_cachedDisplaySummary = snapshot->displaySummary;
+                    alive->m_cachedWindowsRows = snapshot->windowsRows;
+                    alive->m_cachedGuiThreadRows = snapshot->guiThreadRows;
+                    alive->m_cachedSessionRows = snapshot->sessionRows;
+                    alive->m_cachedHotkeyRows = snapshot->hotkeyRows;
+                    alive->m_cachedHookRows = snapshot->hookRows;
+                    alive->m_cachedDeviceRows = snapshot->deviceRows;
+                    alive->m_cachedClipboardRows = snapshot->clipboardRows;
+                }
+                else
+                {
+                    const auto summary = ks::ui::FieldDocument{}.note(QStringLiteral(
+                        "[Window audit refresh]\n"
+                        "后台刷新异常，已保留/写入诊断行，用户可再次点击刷新。\n"
+                        "原因: %1\n").arg(snapshot->failure));
+                    alive->m_cachedSessionSummary = summary;
+                    alive->m_cachedHotkeyHookSummary = summary;
+                    alive->m_cachedDisplaySummary = summary;
+                    alive->m_cachedWindowsRows = buildPendingRows(alive->m_windowsTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedGuiThreadRows = buildPendingRows(alive->m_guiThreadsTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedSessionRows = buildPendingRows(alive->m_sessionTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedHotkeyRows = buildPendingRows(alive->m_hotkeysTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedHookRows = buildPendingRows(alive->m_hooksTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedClipboardRows = buildPendingRows(alive->m_clipboardTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedDeviceRows = buildPendingRows(alive->m_deviceTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    kLogEvent failureEvent;
+                    warn << failureEvent << "[WindowDock] audit refresh failed, detail=" << snapshot->failure.toStdString() << eol;
+                }
+                ++alive->m_auditViewRevision;
+                alive->applyAuditViews();
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                if (alive->m_statusLabel)
+                    alive->m_statusLabel->setText(snapshot->failure.isEmpty()
+                        ? QStringLiteral("最近刷新：%1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                        : QStringLiteral("窗口审计刷新异常；详情已写入日志。"));
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                alive->m_refreshing.store(false);
+                if (deferred) alive->m_auditOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("window-audit-seven-table-apply"),
+                {m_windowsTable, m_guiThreadsTable, m_sessionTable, m_hotkeysTable, m_hooksTable, m_clipboardTable, m_deviceTable},
+                [commit] { commit(true); })) return false;
+            commit(false);
+            return true;
+        },
+        [this](std::exception_ptr) {
+            // Infrastructure allocation/dispatch failure still releases the refresh latch.
+            m_refreshing.store(false);
+            if (m_statusLabel) m_statusLabel->setText(QStringLiteral("窗口审计刷新异常；详情已写入日志。"));
+        });
 }
 
 void WindowDock::applyAuditViews()
 {
+    const QPointer<WindowDock> alive(this);
+    const auto viewRevision = m_auditViewRevision;
     // 表格空白硬保护：
     // - 输入：后台线程或刷新占位阶段生成的缓存行；
     // - 处理：关键审计页即使遇到异常空结果，也补成一行诊断而不是 0 行空表；
@@ -3961,36 +3894,52 @@ void WindowDock::applyAuditViews()
         QStringLiteral("<无显示设备行模型>"),
         QStringLiteral("GPU/Display/Watchdog 审计没有生成任何行；请重新刷新或检查 R0 设备审计状态。"));
 
+    if (m_summaryViewRevision != viewRevision)
+    {
     if (m_sessionSummaryEditor != nullptr && !m_cachedSessionSummary.isEmpty())
     {
         m_sessionSummaryEditor->setDocument(m_cachedSessionSummary);
+        if (!alive || viewRevision != m_auditViewRevision) return;
     }
     if (m_hotkeyHookSummaryEditor != nullptr && !m_cachedHotkeyHookSummary.isEmpty())
     {
         m_hotkeyHookSummaryEditor->setDocument(m_cachedHotkeyHookSummary);
+        if (!alive || viewRevision != m_auditViewRevision) return;
     }
     if (m_displaySummaryEditor != nullptr && !m_cachedDisplaySummary.isEmpty())
     {
         m_displaySummaryEditor->setDocument(m_cachedDisplaySummary);
+        if (!alive || viewRevision != m_auditViewRevision) return;
     }
 
+    if (viewRevision == m_auditViewRevision) m_summaryViewRevision = viewRevision;
+    }
     populateTable(m_windowsTable, m_cachedWindowsRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_guiThreadsTable, m_cachedGuiThreadRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_sessionTable, m_cachedSessionRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_hotkeysTable, m_cachedHotkeyRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_hooksTable, m_cachedHookRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_clipboardTable, m_cachedClipboardRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
     populateTable(m_deviceTable, m_cachedDeviceRows);
+    if (!alive || viewRevision != m_auditViewRevision) return;
 
     if (m_windowsTable != nullptr && m_windowsTable->rowCount() > 0 && m_windowsTable->currentRow() < 0)
     {
-        m_windowsTable->setCurrentCell(0, 0);
+        m_windowsTable->selectRow(0);
+        if (!alive || viewRevision != m_auditViewRevision) return;
     }
     updateSelectedWindowSnapshotDetail(m_windowsTable != nullptr ? m_windowsTable->currentRow() : -1);
 }
 
 void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
 {
+    const QPointer<WindowDock> alive(this);
     // 选中窗口快照详情：
     // - 输入 currentRow：窗口表当前行；
     // - 处理：从可见列生成多行说明，不访问驱动；
@@ -3999,9 +3948,10 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     {
         return;
     }
-    if (m_windowsTable == nullptr || currentRow < 0 || currentRow >= m_windowsTable->rowCount())
+    if (m_windowsTable == nullptr || ((currentRow < 0 || currentRow >= m_windowsTable->rowCount()) && m_cachedWindowsRows.isEmpty()))
     {
         m_windowDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择 Win32K 窗口行查看快照；需要更深诊断时点击“查询选中窗口详情”。")));
+        if (!alive) return;
         if (m_queryWindowDetailButton != nullptr)
         {
             m_queryWindowDetailButton->setEnabled(false);
@@ -4011,8 +3961,8 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
 
     const auto cellText = [this, currentRow](const int columnIndex) -> QString
     {
-        const QTableWidgetItem* item = m_windowsTable->item(currentRow, columnIndex);
-        return item != nullptr ? item->text() : QString();
+        return currentRow >= 0 && currentRow < m_windowsTable->rowCount()
+            ? m_windowsTable->cell(currentRow, columnIndex).toString() : m_cachedWindowsRows.value(0).value(columnIndex);
     };
 
     const QString hwndText = cellText(0);
@@ -4023,12 +3973,12 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     snapshot.section(QStringLiteral("Win32K Window Snapshot"));
     for (int column = 0; column < m_windowsTable->columnCount(); ++column)
     {
-        const auto* header = m_windowsTable->horizontalHeaderItem(column);
-        snapshot.field(header ? header->text() : QString::number(column), cellText(column));
+        snapshot.field(m_windowsTable->model()->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString(), cellText(column));
     }
     snapshot.note(QStringLiteral("SnapshotDetail: GUI/Session 窗口表仅保留可见字段；tagWND/profile/capability 详情请使用下方按需查询。"));
     snapshot.note(QStringLiteral("提示：批量刷新不会逐 HWND 查询 detail；如需查看 tagWND readiness/能力缺口，请点击“查询选中窗口详情”。"));
     m_windowDetailEditor->setDocument(snapshot);
+        if (!alive) return;
 
     if (m_queryWindowDetailButton != nullptr)
     {
@@ -4036,8 +3986,18 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     }
 }
 
+void WindowDock::reconcileWindowDetailState()
+{
+    if (!m_windowDetailRefreshing.load() || m_windowDetailOperation->isBusy() || m_windowDetailOperation->isInFlight()) return;
+    m_windowDetailRefreshing.store(false);
+    updateSelectedWindowSnapshotDetail(m_windowsTable ? m_windowsTable->currentRow() : -1);
+}
+
 void WindowDock::requestSelectedWindowRuntimeDetail()
 {
+    const QPointer<WindowDock> requestOwner(this);
+    reconcileWindowDetailState();
+    if (!requestOwner) return;
     // 单 HWND runtime detail：
     // - 输入来自当前窗口表选中行；
     // - 处理：后台只读调用 ArkDriverClient wrapper，不在 UI 线程阻塞；
@@ -4048,7 +4008,7 @@ void WindowDock::requestSelectedWindowRuntimeDetail()
     }
 
     const int currentRow = m_windowsTable->currentRow();
-    if (currentRow < 0 || currentRow >= m_windowsTable->rowCount())
+    if ((currentRow < 0 || currentRow >= m_windowsTable->rowCount()) && m_cachedWindowsRows.isEmpty())
     {
         m_windowDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请先选择一条 Win32K 窗口行。")));
         return;
@@ -4056,13 +4016,14 @@ void WindowDock::requestSelectedWindowRuntimeDetail()
 
     const auto cellText = [this, currentRow](const int columnIndex) -> QString
     {
-        const QTableWidgetItem* item = m_windowsTable->item(currentRow, columnIndex);
-        return item != nullptr ? item->text() : QString();
+        return currentRow >= 0 && currentRow < m_windowsTable->rowCount()
+            ? m_windowsTable->cell(currentRow, columnIndex).toString() : m_cachedWindowsRows.value(0).value(columnIndex);
     };
 
     const std::uint64_t hwndValue = parseUInt64Text(cellText(0), 0U);
     const std::uint32_t processId = parseUInt32Text(cellText(1), 0U);
     const std::uint32_t threadId = parseUInt32Text(cellText(2), 0U);
+    const quint64 auditRevision = m_auditViewRevision;
     if (hwndValue == 0U)
     {
         m_windowDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前行没有有效 HWND，不能执行单窗口 detail 查询。")));
@@ -4077,55 +4038,71 @@ void WindowDock::requestSelectedWindowRuntimeDetail()
     }
 
     updateSelectedWindowSnapshotDetail(currentRow);
+    if (!requestOwner) return;
     const ks::ui::FieldDocument snapshot = m_windowDetailEditor->document();
     if (m_queryWindowDetailButton != nullptr)
     {
         m_queryWindowDetailButton->setEnabled(false);
     }
+    if (!requestOwner) return;
     auto pending = snapshot;
     pending.section(QStringLiteral("Win32K Window Runtime Detail"));
     pending.note(QStringLiteral("正在后台按需查询 HWND=%1 ...").arg(formatUInt64Hex(hwndValue)));
     m_windowDetailEditor->setDocument(pending);
+    if (!requestOwner) return;
 
-    QPointer<WindowDock> safeThis(this);
-    std::thread([safeThis, hwndValue, processId, threadId, snapshot]()
+    struct Request
     {
-        auto detail = snapshot;
-        const auto runtime = win32kWindowRuntimeDocument(hwndValue, processId, threadId);
-        const auto catalog = win32kPublicPdbCatalogPreview();
-        detail.nodes += runtime.nodes;
-        detail.nodes += catalog.nodes;
-        if (safeThis.isNull())
-        {
-            return;
-        }
-
-        const bool invokeOk = QMetaObject::invokeMethod(
-            safeThis.data(),
-            [safeThis, hwndValue, detail]()
-            {
-                if (safeThis.isNull())
-                {
-                    return;
-                }
-                safeThis->m_windowDetailRefreshing.store(false);
-                if (safeThis->m_queryWindowDetailButton != nullptr)
-                {
-                    safeThis->m_queryWindowDetailButton->setEnabled(true);
-                }
-                if (safeThis->m_windowDetailEditor != nullptr)
-                {
-                    const int row = safeThis->m_windowsTable->currentRow();
-                    const auto* item = row >= 0 ? safeThis->m_windowsTable->item(row, 0) : nullptr;
-                    if (item && parseUInt64Text(item->text(), 0U) == hwndValue)
-                        safeThis->m_windowDetailEditor->setDocument(detail);
-                }
-            },
-            Qt::QueuedConnection);
-
-        if (!invokeOk && !safeThis.isNull())
-        {
-            safeThis->m_windowDetailRefreshing.store(false);
-        }
-    }).detach();
+        std::uint64_t hwnd = 0;
+        std::uint32_t pid = 0, tid = 0;
+        quint64 auditRevision = 0;
+        ks::ui::FieldDocument snapshot;
+    };
+    m_windowDetailOperation->submit<Request, std::shared_ptr<const ks::ui::FieldDocument>>(
+        Request{hwndValue, processId, threadId, auditRevision, snapshot},
+        [](const Request& request, const ks::ui::AsyncOperationToken&) {
+            auto detail = request.snapshot;
+            const auto runtime = win32kWindowRuntimeDocument(request.hwnd, request.pid, request.tid);
+            const auto catalog = win32kPublicPdbCatalogPreview();
+            detail.nodes += runtime.nodes;
+            detail.nodes += catalog.nodes;
+            return ks::window::makeSnapshotValue(std::move(detail));
+        },
+        [this, hwndValue, processId, threadId, auditRevision](
+            const std::shared_ptr<const ks::ui::FieldDocument>& detail, std::uint64_t ticket) {
+            const QPointer<WindowDock> alive(this);
+            m_windowDetailRefreshing.store(false);
+            const int row = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const auto cell = [this, row](int column) {
+                return row >= 0 ? m_windowsTable->cell(row, column).toString() : m_cachedWindowsRows.value(0).value(column);
+            };
+            const bool sameTarget = auditRevision == m_auditViewRevision
+                && parseUInt64Text(cell(0), 0U) == hwndValue
+                && parseUInt32Text(cell(1), 0U) == processId && parseUInt32Text(cell(2), 0U) == threadId;
+            if (sameTarget && m_windowDetailEditor) m_windowDetailEditor->setDocument(*detail);
+            else updateSelectedWindowSnapshotDetail(row);
+            if (!alive || !m_windowDetailOperation->isCurrent(ticket)) return true;
+            const int currentRow = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const QString currentHwnd = currentRow >= 0 ? m_windowsTable->cell(currentRow, 0).toString()
+                : m_cachedWindowsRows.value(0).value(0);
+            if (m_queryWindowDetailButton) m_queryWindowDetailButton->setEnabled(parseUInt64Text(currentHwnd, 0U) != 0U);
+            return true;
+        },
+        [this, hwndValue, processId, threadId, auditRevision](std::exception_ptr) {
+            const QPointer<WindowDock> alive(this);
+            const auto failedGeneration = m_windowDetailOperation->generation();
+            m_windowDetailRefreshing.store(false);
+            updateSelectedWindowSnapshotDetail(m_windowsTable ? m_windowsTable->currentRow() : -1);
+            if (!alive || !m_windowDetailOperation->isCurrent(failedGeneration) || !m_windowDetailEditor) return;
+            const int currentRow = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const auto currentCell = [this, currentRow](int column) {
+                return currentRow >= 0 ? m_windowsTable->cell(currentRow, column).toString()
+                    : m_cachedWindowsRows.value(0).value(column);
+            };
+            if (auditRevision != m_auditViewRevision || parseUInt64Text(currentCell(0), 0U) != hwndValue
+                || parseUInt32Text(currentCell(1), 0U) != processId || parseUInt32Text(currentCell(2), 0U) != threadId) return;
+            auto failure = m_windowDetailEditor->document();
+            failure.note(QStringLiteral("后台任务发生异常。"));
+            m_windowDetailEditor->setDocument(failure);
+        });
 }

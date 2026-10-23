@@ -24,7 +24,8 @@ foreach ($reportPart in @('ucrt', 'shared', 'um')) {
     $reportIncludes += '/external:I' + (Join-Path $reportSdk ('Include/' + $reportSdkVersion + '/' + $reportPart))
 }
 $reportSources = @('tools/complex_report_model_tests.cpp',
-    'Ksword5.1/Ksword5.1/UI/ComplexReportModel.cpp', 'Ksword5.1/Ksword5.1/UI/FieldDocument.cpp')
+    'Ksword5.1/Ksword5.1/UI/ComplexReportModel.cpp', 'Ksword5.1/Ksword5.1/UI/FieldDocument.cpp',
+    'Ksword5.1/Ksword5.1/UI/FieldTreeModel.cpp')
 $reportLibs = @(('/LIBPATH:' + (Join-Path $reportVc 'lib/x64')), ('/LIBPATH:' + (Join-Path $reportQt 'lib')))
 foreach ($reportPart in @('ucrt', 'um')) {
     $reportLibs += '/LIBPATH:' + (Join-Path $reportSdk ('Lib/' + $reportSdkVersion + '/' + $reportPart + '/x64'))

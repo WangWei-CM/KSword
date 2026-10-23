@@ -6,6 +6,8 @@
 #include "../include/ads/DockContainerWidget.h"
 #include "../include/ads/DockManager.h"
 #include "../include/ads/DockWidgetTab.h"
+#include "../include/ads/DockWidget.h"
+#include "../include/ads/AutoHideDockContainer.h"
 #include "../include/ads/IconProvider.h"
 #include "../theme.h"
 
@@ -15,6 +17,8 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QStyle>
+#include <QPointer>
+#include <QSet>
 #include <array>
 
 namespace ks::ui
@@ -83,57 +87,76 @@ namespace ks::ui
                         source = source.scaled(physicalSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
                     }
                     source.setDevicePixelRatio(density);
+                    // On/Off 颜色相同，保留两种状态但共用同一组着色结果。
+                    const std::array<QPixmap, 4> tinted{{tintPixmap(source, normal),
+                        tintPixmap(source, active), tintPixmap(source, selected), tintPixmap(source, disabled)}};
+                    constexpr std::array<QIcon::Mode, 4> modes{{QIcon::Normal, QIcon::Active,
+                        QIcon::Selected, QIcon::Disabled}};
                     for (const QIcon::State state : { QIcon::Off, QIcon::On })
                     {
-                        themed.addPixmap(tintPixmap(source, normal), QIcon::Normal, state);
-                        themed.addPixmap(tintPixmap(source, active), QIcon::Active, state);
-                        themed.addPixmap(tintPixmap(source, selected), QIcon::Selected, state);
-                        themed.addPixmap(tintPixmap(source, disabled), QIcon::Disabled, state);
+                        for (std::size_t index = 0; index < modes.size(); ++index)
+                        {
+                            themed.addPixmap(tinted[index], modes[index], state);
+                        }
                     }
                 }
             }
             return themed;
         }
 
-        // refreshContainer 作用：更新已存在的标题栏与标签关闭按钮，注册 provider 不会回写它们。
-        // container 为普通或浮动停靠容器；icons 为角色顺序的主题图标；无返回值。
-        void refreshContainer(
-            ads::CDockContainerWidget* container,
-            const std::array<QIcon, 6>& icons)
+        class DockIconCache final : public QObject
         {
-            if (container == nullptr)
+        public:
+            explicit DockIconCache(ads::CDockManager* manager) : QObject(manager) {}
+            QPointer<QStyle> style;
+            qint64 paletteKey = 0;
+            QString iconTheme;
+            std::array<QColor, 4> colors;
+            std::array<QIcon, 6> icons;
+            bool ready = false;
+        };
+
+        DockIconCache* iconCache(ads::CDockManager* manager)
+        {
+            // 缓存由 manager 直接拥有；只检查该明确宿主的直接 QObject 子对象。
+            for (QObject* child : manager->children())
+            {
+                if (auto* cache = dynamic_cast<DockIconCache*>(child))
+                {
+                    return cache;
+                }
+            }
+            return new DockIconCache(manager);
+        }
+
+        void setManagedIcon(QAbstractButton* button, const QIcon& icon)
+        {
+            if (button == nullptr)
             {
                 return;
             }
-
-            // titleBars 覆盖当前容器的停靠区和自动隐藏区，button 使用上游公开编号。
-            const auto titleBars = container->findChildren<ads::CDockAreaTitleBar*>();
-            for (ads::CDockAreaTitleBar* titleBar : titleBars)
+            if (!button->property("ksword_theme_icon_managed").toBool())
             {
-                for (std::size_t index = 1; index < kIconDescriptors.size(); ++index)
-                {
-                    // button 是对应角色的实际控件，保持既有 enabled/visible 状态。
-                    QAbstractButton* button = titleBar->button(kIconDescriptors[index].titleButton);
-                    if (button != nullptr)
-                    {
-                        // 由本模块维护多状态与对比度，通用单色扫描不能再次压成一个颜色。
-                        button->setProperty("ksword_theme_icon_managed", true);
-                        button->setIcon(icons[index]);
-                    }
-                }
+                button->setProperty("ksword_theme_icon_managed", true);
             }
-
-            // dockTabs 是业务标签；上游未提供关闭按钮 getter，但固定设置了该对象名称。
-            const auto dockTabs = container->findChildren<ads::CDockWidgetTab*>();
-            for (ads::CDockWidgetTab* dockTab : dockTabs)
+            if (button->icon().cacheKey() != icon.cacheKey())
             {
-                QAbstractButton* closeButton = dockTab->findChild<QAbstractButton*>(
-                    QStringLiteral("tabCloseButton"), Qt::FindDirectChildrenOnly);
-                if (closeButton != nullptr)
-                {
-                    closeButton->setProperty("ksword_theme_icon_managed", true);
-                    closeButton->setIcon(icons[0]);
-                }
+                button->setIcon(icon);
+            }
+        }
+
+        void refreshArea(ads::CDockAreaWidget* area, const std::array<QIcon, 6>& icons,
+            QSet<ads::CDockAreaTitleBar*>& visited)
+        {
+            ads::CDockAreaTitleBar* titleBar = area != nullptr ? area->titleBar() : nullptr;
+            if (titleBar == nullptr || visited.contains(titleBar))
+            {
+                return;
+            }
+            visited.insert(titleBar);
+            for (std::size_t index = 1; index < kIconDescriptors.size(); ++index)
+            {
+                setManagedIcon(titleBar->button(kIconDescriptors[index].titleButton), icons[index]);
             }
         }
     }
@@ -197,20 +220,66 @@ namespace ks::ui
             return;
         }
 
-        // icons 为这次主题的六类图标；provider 负责随后创建的按钮和恢复布局中新建的按钮。
-        std::array<QIcon, 6> icons;
+        DockIconCache* cache = iconCache(dockManager);
+        const std::array<QColor, 4> colors{{
+            KswordTheme::DockTabGlyphColor(KswordTheme::DockTabState::Inactive),
+            KswordTheme::DockTabGlyphColor(KswordTheme::DockTabState::Hover),
+            KswordTheme::DockTabGlyphColor(KswordTheme::DockTabState::Active),
+            KswordTheme::DockTabGlyphColor(KswordTheme::DockTabState::Inactive, true)}};
+        const qint64 paletteKey = dockManager->palette().cacheKey();
+        const QString iconTheme = QIcon::themeName() + QLatin1Char('|') + QIcon::fallbackThemeName();
+        if (!cache->ready || cache->style != dockManager->style() || cache->paletteKey != paletteKey
+            || cache->iconTheme != iconTheme || cache->colors != colors)
+        {
+            for (std::size_t index = 0; index < kIconDescriptors.size(); ++index)
+            {
+                cache->icons[index] = makeThemeIcon(dockManager, kIconDescriptors[index].shape);
+            }
+            cache->style = dockManager->style();
+            cache->paletteKey = paletteKey;
+            cache->iconTheme = iconTheme;
+            cache->colors = colors;
+            cache->ready = true;
+        }
         for (std::size_t index = 0; index < kIconDescriptors.size(); ++index)
         {
-            icons[index] = makeThemeIcon(dockManager, kIconDescriptors[index].shape);
-            ads::CDockManager::iconProvider().registerCustomIcon(
-                kIconDescriptors[index].iconId, icons[index]);
+            if (ads::CDockManager::iconProvider().customIcon(kIconDescriptors[index].iconId).cacheKey()
+                != cache->icons[index].cacheKey())
+            {
+                ads::CDockManager::iconProvider().registerCustomIcon(
+                    kIconDescriptors[index].iconId, cache->icons[index]);
+            }
         }
 
-        // containers 同时包含主停靠管理器与浮动容器，显式补齐已有按钮的 QIcon 缓存。
-        const auto containers = dockManager->dockContainers();
-        for (ads::CDockContainerWidget* container : containers)
+        // 只走 ADS 公开拓扑；隐藏业务内容不参与标题栏和关闭按钮发现。
+        QSet<ads::CDockAreaTitleBar*> visited;
+        for (ads::CDockContainerWidget* container : dockManager->dockContainers())
         {
-            refreshContainer(container, icons);
+            if (container == nullptr)
+            {
+                continue;
+            }
+            for (int index = 0; index < container->dockAreaCount(); ++index)
+            {
+                refreshArea(container->dockArea(index), cache->icons, visited);
+            }
+            for (ads::CAutoHideDockContainer* autoHide : container->autoHideWidgets())
+            {
+                if (autoHide != nullptr)
+                {
+                    refreshArea(autoHide->dockAreaWidget(), cache->icons, visited);
+                }
+            }
+        }
+        const auto docks = dockManager->dockWidgetsMap();
+        for (ads::CDockWidget* dock : docks)
+        {
+            ads::CDockWidgetTab* tab = dock != nullptr ? dock->tabWidget() : nullptr;
+            if (tab != nullptr)
+            {
+                setManagedIcon(tab->findChild<QAbstractButton*>(QStringLiteral("tabCloseButton"),
+                    Qt::FindDirectChildrenOnly), cache->icons[0]);
+            }
         }
     }
 }

@@ -13,6 +13,8 @@
 #include <QWidget>
 
 #include <atomic>
+#include <array>
+#include <limits>
 #include <vector>
 
 class QLabel;
@@ -21,6 +23,7 @@ class QPushButton;
 class QPoint;
 class QTableWidget;
 class QTableWidgetItem;
+class QTimer;
 
 class KernelCommunicationEndpointTab final : public QWidget
 {
@@ -34,6 +37,7 @@ private:
     void refreshAsync();
     void applyRefreshResult(std::vector<KernelObjectDirectoryDeepEntry> rows, const QString& errorText, bool success);
     void rebuildTable();
+    void applyFilter(bool allowDeferred = true);
     void showContextMenu(const QPoint& localPosition);
     void copyCurrentRow() const;
 
@@ -49,7 +53,7 @@ private:
     // - 返回：无返回值，只更新 UI。
     void insertDiagnosticRow(const QString& titleText, const QString& detailText);
 
-    bool rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry) const;
+    bool rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry, const QString& keyword) const;
     static bool isCommunicationEndpoint(const KernelObjectDirectoryDeepEntry& entry);
     static QTableWidgetItem* readOnlyItem(const QString& text);
 
@@ -58,6 +62,14 @@ private:
     QLineEdit* m_filterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
     QTableWidget* m_table = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    std::array<QTableWidgetItem*, 5> m_diagnosticItems{};
+    bool m_snapshotSucceeded = true;
+    QString m_snapshotError;
+    bool m_filterActive = false;
+    std::size_t m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
 
     std::atomic_bool m_refreshing{ false };
     std::vector<KernelObjectDirectoryDeepEntry> m_rows;

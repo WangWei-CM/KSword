@@ -283,18 +283,12 @@ namespace ks::misc
         }
     }
 
-    RawFileReadResult DiskRawFileSystemBrowser::readFile(
-        const int diskIndex,
-        const unsigned long backend,
-        const std::uint64_t partitionOffset,
-        const std::uint64_t partitionLength,
-        const std::uint32_t logicalSectorSize,
-        const ForensicFileSystemKind fileSystem,
-        const QString& path,
-        const std::uint64_t offset,
-        const std::uint32_t length)
+    namespace
     {
-        const QString normalized = rawfs::normalizePath(path);
+        RawFileReadResult readFileUsingReader(const rawfs::VolumeReader& reader,
+            const ForensicFileSystemKind fileSystem, const QString& normalized,
+            const std::uint64_t offset, const std::uint32_t length)
+        {
         if (length == 0U || length > rawfs::kMaximumSingleReadBytes)
         {
             RawFileReadResult result =
@@ -303,13 +297,6 @@ namespace ks::misc
                 "单次文件读取长度必须在 1 字节到 16 MiB 之间。");
             return result;
         }
-        const rawfs::VolumeReader reader(
-            diskIndex,
-            backend,
-            partitionOffset,
-            partitionLength,
-            logicalSectorSize);
-
         switch (fileSystem)
         {
         case ForensicFileSystemKind::Ntfs:
@@ -351,6 +338,43 @@ namespace ks::misc
         default:
             return unsupportedFileResult(fileSystem, normalized);
         }
+    }
+    }
+
+    RawFileReadResult DiskRawFileSystemBrowser::readFile(
+        const int diskIndex,
+        const unsigned long backend,
+        const std::uint64_t partitionOffset,
+        const std::uint64_t partitionLength,
+        const std::uint32_t logicalSectorSize,
+        const ForensicFileSystemKind fileSystem,
+        const QString& path,
+        const std::uint64_t offset,
+        const std::uint32_t length)
+    {
+        const QString normalized = rawfs::normalizePath(path);
+        const rawfs::VolumeReader reader(
+            diskIndex,
+            backend,
+            partitionOffset,
+            partitionLength,
+            logicalSectorSize);
+
+        return readFileUsingReader(reader, fileSystem, normalized, offset, length);
+    }
+
+    DiskRawFileSystemBrowser::FileReadSession DiskRawFileSystemBrowser::createReadSession(
+        const int diskIndex, const unsigned long backend, const std::uint64_t partitionOffset,
+        const std::uint64_t partitionLength, const std::uint32_t logicalSectorSize,
+        const ForensicFileSystemKind fileSystem, const QString& path)
+    {
+        const auto reader = std::make_shared<rawfs::VolumeReader>(diskIndex, backend,
+            partitionOffset, partitionLength, logicalSectorSize);
+        reader->enableFileSession();
+        const QString normalized = rawfs::normalizePath(path);
+        return [reader, fileSystem, normalized](const std::uint64_t offset, const std::uint32_t length) {
+            return readFileUsingReader(*reader, fileSystem, normalized, offset, length);
+        };
     }
 
     RawFileExportResult DiskRawFileSystemBrowser::exportFile(

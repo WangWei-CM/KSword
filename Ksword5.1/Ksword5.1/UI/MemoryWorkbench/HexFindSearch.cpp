@@ -108,7 +108,7 @@ namespace ks::ui::hexfind
         std::size_t readableCount = 0;
         for (std::size_t i = 0; i < count; ++i)
         {
-            const bool readable = m_validMask.at(static_cast<qsizetype>(dataOffset + i)) != 0;
+            const bool readable = m_validMask.at(static_cast<qsizetype>(dataOffset + i)) == 1;
             validOut[outOffset + i] = readable ? 1 : 0;
             readableCount += readable ? 1U : 0U;
         }
@@ -199,38 +199,33 @@ namespace ks::ui::hexfind
             return hits;
         }
 
-        // 逐个向前找：每次从上一个命中起点 + 1 开始（重叠命中都列出）。
-        ByteArraySource source(data, base, validMask);
-        ksword::memwb::SearchRange range;
-        range.first = scanFirst;
-        range.last = scanLast;
-        std::uint64_t start = scanFirst;
-        while (hits.size() < cap)
+        // Compile only significant mask positions once. Stream one immutable
+        // range, retaining readable-run length so wildcard bytes never match holes.
+        std::vector<std::pair<std::size_t, std::uint8_t>> significant;
+        significant.reserve(pattern.bytes.size());
+        for (std::size_t index = 0; index < pattern.bytes.size(); ++index)
+            if (pattern.mask[index] != 0) significant.push_back({index,
+                static_cast<std::uint8_t>(pattern.bytes[index] & pattern.mask[index])});
+        const auto firstOffset = static_cast<std::size_t>(scanFirst - base);
+        const auto lastOffset = static_cast<std::size_t>(scanLast - base);
+        std::size_t readableRun = 0;
+        for (std::size_t end = firstOffset; end <= lastOffset && hits.size() < cap; ++end)
         {
-            const ksword::memwb::SearchResult result = ksword::memwb::Find(
-                source, pattern, range, start, ksword::memwb::SearchDirection::Forward, false, nullptr, kSearchChunkBytes);
-            if (!result.found)
+            if (!validMask.isEmpty() && validMask.at(static_cast<qsizetype>(end)) != 1)
+            { readableRun = 0; continue; }
+            ++readableRun;
+            if (readableRun < length) continue;
+            const auto candidate = end - static_cast<std::size_t>(length - 1);
+            const auto address = base + candidate;
+            if (address > visibleLast) break;
+            if (base + end < visibleFirst) continue;
+            bool matches = true;
+            for (const auto& term : significant)
             {
-                break;
+                const auto byte = static_cast<std::uint8_t>(data.at(static_cast<qsizetype>(candidate + term.first)));
+                if ((byte & pattern.mask[term.first]) != term.second) { matches = false; break; }
             }
-
-            // 命中的末字节；起点已经越过可见末字节就不用再找了，其余只保留与可见范围有交集的命中。
-            if (result.address > visibleLast)
-            {
-                break;
-            }
-            const std::uint64_t hitLast = result.address + (length - 1ULL);
-            if (hitLast >= visibleFirst)
-            {
-                AddressRange hit;
-                hit.first = result.address;
-                hit.last = hitLast;
-                hits.push_back(hit);
-            }
-            if (!ksword::memwb::AdvanceSearchStart(result.address, ksword::memwb::SearchDirection::Forward, start))
-            {
-                break;
-            }
+            if (matches) hits.push_back(AddressRange{address, base + end});
         }
         return hits;
     }

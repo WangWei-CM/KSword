@@ -11,6 +11,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 离屏 UI 回归入口 `tools/hvm_lab/build-ui-tests.cmd`：链接实际 Dock、Guest、Evidence、KvmControl 与 DriverClient，仅替换 IOCTL 传输、确认和 SCM。测试源码由该独立构建清单登记，不进入主程序 vcxproj。Windows Qt offscreen 需显式加载中文字体，配合 `SetDarkModeEnabled` 与完整 palette（包括 PlaceholderText/AlternateBase/disabled roles）；否则缺字或默认浅色 palette 会制造错误的窄窗口/深色截图。Qt DLL 需部署到测试 exe 目录。
 
 - QADS 已升级到 **5.1.1**（`v5.1.1`，commit `023ce95934fecfd4cf5c672c9c404fabe0f54923`）。版本、许可证与复现步骤见 `third_party/qt_advanced_docking_system/NOTICE.md`；CMake 包装保留 `qtadvanceddocking[d].dll/.lib` 文件名，避免改名 DLL 后 import library 仍指向上游新文件名。`include/ads/ads_version.h` 是构建生成的必要头文件，升级时须与其余头文件、Release/Debug import library 和 DLL 一起更新。
+- 2026-10-21 同区 Dock 切页性能补丁：`third_party/qt_advanced_docking_system/patches/0001-keep-inactive-dock-parent.patch` 仅把 `CDockAreaLayout::setCurrentIndex` 的旧页 `setParent(nullptr)` 改为 `hide()`，保留同区父级与渲染上下文；活动布局仍只计当前页。真正移动、移除、浮动、恢复和销毁路径保持原语义。重建必须应用补丁，包装 CMake 检查源文件 SHA256；Release/Debug DLL 与导入库必须成套覆盖，禁止只换 exe。公共头及导出符号保持一致；实际布局恢复、浮动、跨 DPI、GPU/软件、主题和关闭验收由用户手测，不以编译通过认定。
+- 修改 ADS 后的分发材料：`third_party/qt_advanced_docking_system/qt-advanced-docking-system-5.1.1-ksword-source.zip` 保存完整库模块/资源/接口和上下游 CMake、原许可、带日期的修改源文件及补丁；主工程 CopyQtAdvancedDockingRuntime 同步复制 LICENSE/NOTICE/source.zip 到 `licenses/third_party/`。打包须保留该目录；源码包随源码/DLL变更重做，不能只放上游链接。版本 SHA 用于测试定位，不能限制用户替换兼容 LGPL DLL。
 - ADS 5.x 默认跟随 palette 自动加载内部 QSS。KSword 必须在创建 `CDockManager` 前设置 `DisableStylesheet=true`；仅在外观应用末尾 `setStyleSheet("")` 不够，后续 palette 事件仍会重新加载默认样式。`include/ads/` 属于上游头文件，Git 用 `-text` 保留混合 LF/CRLF，避免升级产生整文件换行 diff。
 
 ## UI 主题架构
@@ -307,6 +309,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 根QSS必须单一拥有：GlobalDialogTheme拥有普通QDialog；进程详情以 `ksword_detail_theme_owner` 声明业务拥有Chrome。框架不得追加又被业务changeEvent删除的相同块，StyleChange也不能触发文档重建。根样式/调色板及卡片标签只有实际变化才写入，禁止逐按钮手工重复polish。
 - 字号下限统一安装处补齐14px/10pt，保留更大字号及字体家族。`StyleSecondaryTabs` 与普通Tab同用PageTabMotion，静态下划线透明让动画唯一绘制，不另设持续全页刷新计时器。
 - 文档投影以documentRevision/语言/主题/搜索键合并通知；隐藏Tab只留dirty，Show首帧同步使用最新快照。规范字段相同的document-only快照不增代次、不发通知，纯搜索/主题不重新flatten；真实数值变化原位更新，值样式与行可见状态只在变化时写入。
+- 普通详情卡片仍以完整 StructuredFieldView 文档负责搜索、复制和导出；大分区在后台用冻结翻译快照准备纯值索引，界面只挂载视口字段，保留共享卡片、双列、说明及原 QLabel 选区。清空 QFormLayout 重排行时必须用 takeRow 移除行槽，不能仅 takeAt 留下空行；旧可视控件按预算退休，大值快照最终释放放在后台。复杂报告与专业布局不因这条普通卡片优化而改入口。
 - `StructuredFieldView` 本身直接作为Tab/Stack页时不能替换页对象：清掉旧布局后在source内部安装 `CreateDetailFieldProjection(source, source)`，保持原页索引/标题/currentWidget及业务指针。该模式不重挂或隐藏source，重复接入查其直接投影子节点，避免父子循环和重复宿主。
 
 ## UI 适配与性能补漏（2026-10-11）
@@ -402,3 +405,156 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 范围必须进入 `ComplexReportFilter` 的接受条件，不能只设 tree root：所选根被过滤为无效索引时，视图会意外退回全部根。多词搜索匹配完整规范上下文和显示短标题；清空恢复状态，搜索中换范围清掉旧范围的位置。
 - 原文、字段表与数值增量通知共用规范身份；三列分别提供真实可访问文本。首份数据才选择默认范围，刷新不重新选择类型。可选 toolbarPrefix 合并既有业务刷新与文档工具行，不给普通详情强加额外布局。
 - 验证使用真实主程序与生产目录；已观察正常/799px窄窗约23行字段、深浅主题、单元格复制、类型记忆和原文切换。驱动不可用时只验错误态和静态目录；不能推定实际采样、所有旧详情或DPI/背景矩阵均已通过。证据见 [Issue 223 记录](../../docs/Issue-223-复杂报告子页.md)。
+
+## 性能采集与 Dock 现场（2026-10-18）
+
+- `QApplication` 全局过滤器在 `QWidget::event()` 前收到 Paint/LayoutRequest；入口至 queued 回调只代表可重叠的墙钟/队列延迟，不是该事件的 CPU 耗时或实际呈现。指标已更名 `perf_scroll_paint_queue_latency`/`perf_scroll_layout_queue_latency`，合并状态仅存采集器，不写控件动态属性。范围仍仅为既有表格/滚动壳，不能宣称全控件事件测量。
+- Dock 现场直接缓存既有 `currentChanged`/`focusedDockWidgetChanged` 标记给出的身份；注册初态单独记录。不要每条记录或焦点变化时重新 `widgetAt`/`findChildren` 查 UI 树。主窗口只显式 `InitializePerfTrace`，旧现场查询回调已删除。
+- 心跳明确保存整个单调 ns 区间并标为未归因；末尾 Dock 标记不能解释此前整段工作。已有 `PerfScope` 记录配对 scope_id 起止；UUID/UTC/Qt/构建戳和 writer 读取的 EXE SHA256 区分会话。没有测得 input-to-ready/present、notify self CPU 或实际 FPS。
+- trace 默认 `KSWORD_PERF_TRACE_ENABLED=0`；MainWindow 诊断连接/动态属性/扫描块也由宏隔离。开启后仅值记录进入 2048 项有界队列，JSON/EXE hash/QFile 全由纯值 writer 处理，溢出记录丢弃数。退出关闭 admission 后异步 drain，不在 GUI 等 I/O；进程终止或 OS 写入阻塞仍可丢尾，不能声称持久化退出屏障。
+- `perf_scroll_driver_sync_work` 用 ns 记录包括最后一帧的同步驱动；动画墙钟另有 completed/canceled/replaced。正常帧等待不叫阻塞，驱动次数和滚动值变化不叫呈现帧数。此轮仅静态检查，累计构建与实际诊断/GUI仍待用户验收。
+
+## 移动滚动画布的不透明契约（2026-10-20）
+
+- `QScrollArea` 移动正文若仅靠QSS实底，Qt仍可能把正文视为nonopaque，普通小步滚动会使整个可见正文失效。不能把所有Widget全局标成`WA_OpaquePaintEvent`；只有专用画布在`paintEvent`对完整矩形实填、实际alpha为255时才声明该属性。
+- `ParameterWorkspace`的form是明确0圆角实底，使用同一content颜色源填充。`AdaptivePageScroll`普通主宿主使用固定`MainSurface.canvas`；共享详情Chrome已明确给`QScrollArea`及viewport设置`WindowColor`，详情画布只认当前顶层的`ksword_detail_shell`角色。未知独立窗口不沿祖先跨窗猜底色，主宿主壁纸/透明分支保留原合成。
+- 外部卡片/页根的圆角与内部移动正文是不同职责。正文全矩形实填须与其既定底面同色；未来新增不同背景角色时应先扩展共享surface策略，不能继续沿用默认canvas。主题绑定放在滚动壳上，避免业务给content绑定`StyleWorkspacePage`时替换该契约；只监听明确canvas的Show/Parent/Style/Palette生命周期。
+- 当前这组补丁只做源码、HostX64编译与抽取生产policy的纯逻辑验证；真实主程序Paint region、DPI/背景/外角和首帧仍由用户手测。paint面积变化不能直接宣称FPS或耗时倍数。
+## 异步事务与退出资源（2026-10-20）
+
+- Shell 关联备份保留 native value 类型/原始 bytes、root/view/path；旧 v1 只能合并已明确记录的键值，不能从缺失数据推断删除。其安全备份/当前 witness 也须显式保留 mergeOnly 语义，不能只让文件 decode 通过，却在真实 prepare→export→apply 链中丢失该语义。
+- 原生键路径和值名可能含孤立 UTF-16 surrogate；JSON 可读文本不能作为唯一身份。v2 同时保存原始 UTF-16 base64，读取严格校验 bytes 与可读投影的一致性，并兼容旧 text-only 文件。
+- 临时注册表测量先取得独立 cleanup lease，再做完整 worker 备份；Stop/退出先置原子停止，不等串行锁。恢复后再次核 Stop 再决定是否启动下一次 probe。关闭只请求首次 cleanup，不能把失败恢复变为隐式重试；仅显式 Retry 再尝试。新建空键使用非递归删除，避免空态见证后外部新建子键被递归删除。
+
+- Checked STOP失败仍拥有session/consumer/thread时，使用`RetainedCleanupJob`强持独立值owner和旧epoch的lease；false/throw不释放也不自动循环。退出提示的用户Retry显式调用`RetryRetainedCleanupJobs`，只重试已请求且失败的job一次；Cancel仅重开新admission，不撤销旧cleanup。只有后台确认STOP/close/join完成并销毁最后值闭包才归还lease。`create(null)`也可能已接纳旧epoch收尾，调用侧必须废弃该service/lifecycle，不能Reopen复用，否则旧STOP会撞新Start。
+
+- 有已接受reservation的持久资源先同步closing拒绝新reserve，再用`RetainedCleanupJob::ReadyToAttempt`短值检查count0；false只延后，不标failed、不占池线程。最后reservation在资源gate外调用`notifyReadyToAttempt()`，只交接初始调度机会；迟到就绪不能把刚失败的initial当成显式Retry。`requestCleanup()`保留外部显式失败重试语义。谓词与reserve共gate且closing后count只能减少，避免lost trigger和单池线程互等。reservation强持job至通知完成，resource owner仅weak job且不持reservation；全部实际cleanup成功后，attempt/stop/readiness值闭包在后台销毁才归还lease。
+
+- `AsyncOperation` CAS赢家将cleanup闭包移到局部，调用后在归还事务lease前销毁闭包，连同只由capture强持的最后值owner。不能只调用cleanup后把闭包留在request/丢投递残余Job里，否则pending先归零、原生资源后析构；成功、失败、throw、drop、close保持同一次收尾。
+
+- `AsyncOperationToken::deliver`的投递构造异常走同一`DeliveryDropped`物理收尾，不得把已完成副作用误报worker失败后再deliver。取消functor析构与异常fallback复用shared.active已有的受锁身份移除结果，防止双重状态通知；GUI恢复只尽力投递一次，恢复自身失败不递归。通用dispatcher的值取消回调异常不得穿出Qt functor析构。
+
+- `AsyncOperation::submit` 保留一个实际 worker 与一个最新 pending；尾部 `Cleanup={}, int workerPriority=0` 直接传 Qt 线程池排队优先级，不是 OS 线程优先级，也不抢占已运行调用。
+- 写操作/导出等已接受副作用使用独立 `submitTransaction` 控制器：worker 仅接值请求、不接取消令牌，busy 返回0与 `BusyRejected`；接受后先入线程池再通知状态，close/cancel/新查询不能吞事务。apply/failure 仍只留 UI 控制器，关页后不回投；值 cleanup 必须等 worker 完成且只执行一次。构造/排队异常属于“没有未完 worker”，必须先标记完成，再允许 failure 回调同步 close/delete。
+- `AsyncCleanupRegistry` 的 lease 只持值，不保活 QObject。事务由共享控制器自动登记；常驻会话在线程启动前登记弱 session 的 stop 回调，只置停止标志/唤醒，不在 UI join。STOP、归档/句柄等实际资源收尾后才归还；同一 session 不能通过 lease 回调强持自身形成环。
+- 主窗口先通过原内存退出守卫，再冻结新 lease、请求会话停止并用计时器等已接受收尾；最后才查询/停止 R0 服务。超时保持可见，提供重试/取消，不能用固定毫秒直接 quit 杀掉事务。取消退出不撤销已经接受的 STOP；等待期间新建的 MemoryDock 在就绪边界重新进入原退出确认。
+- 正常关闭、UIAccess/Admin 与功能级提权重启共用弱 owner 的协调退出入口，派生析构第一步撤销登记。运行期先冻结启动器值意图，等全部 cleanup/SCM 就绪才启动替代进程，避免子进程35s先超时而父级32s后Retry到40s才退出；Retry保留意图，用户Cancel和首轮内存确认拒绝清除意图，晚到MemoryDock重新确认保留意图。仅替换既有 wait-PID 键和值、保留其它 argv；父侧验证实际存活的 direct-child/same-exe 后才退出，失败恢复旧窗口及真实R0状态。子侧在首业务窗口/采样前验证父关系、映像及创建时间；超时或验证失败停止启动，不能靠 privilege marker 绕过等待。原崩溃报告 bool API 保持旧语义，正常接管使用独立状态矩阵。
+- 验证边界：真实 HostX64 翻译单元、QtCore 慢 STOP/事务与生产状态函数的假 WinAPI 矩阵可证明调度/值资源约束；不替代用户的实际 GUI、UAC/AppInfo、R0 STOP、语言/主题与 DPI 验收。
+
+- 2026-10-20 启动接管竞态：父进程已退出时，只要另一个句柄仍保活其进程对象，`OpenProcess` 仍能成功，而 `QueryFullProcessImageNameW` 可失败并返回 31。正常接管应先保留 direct-parent 与创建时间校验，区分“映像查询失败”及“已知映像不匹配”；仅查询失败后零超时 wait 确认退出才返回 AlreadyExited。活父不可查询、错映像、较新/无法核验创建时间和 wait 失败仍拒绝。独立 Console 父子夹具复现旧源码误拒绝；这不等同真实主程序/UAC验收。
+
+- 同次收缩：首次 Qt 业务窗口创建前的自动 UAC/缩放重启只保留 privilege marker 与业务 argv，并剥离继承的 runtime wait PID；这些简单启动不接入运行期清理/严格父进程接管。主入口只在显式 wait-PID 请求存在时执行严格失败门禁。运行期重启仍等待已接受清理和旧进程退出。
+
+- 主窗口全部内存许可、accepted cleanup及SCM完成后的唯一终点必须在UI线程调用`QCoreApplication::exit(0)`。Qt6.9.3的`quit()`发送Quit事件，QApplication会再次closeAllWindows；此时`m_shutdownFinalizing=true`的主窗口Close守卫会ignore，从而否决Quit。timer已停后所有后续Close仍被否决，形成永久关不掉。不能靠删资源等待或强制计时退出修复；前置守卫/Retry/Cancel保持。
+
+## 窗口快照清单与一次性排序（2026-10-20）
+
+- `QTableWidget::setSortingEnabled(false)` 仅关闭持续排序，旧共享入口仍可安装一次性表头点击；迁移为普通 `QTableView`/只读源模型时不能据此删除该交互。当前 `ConfigureResultTableInteractions` 的旧分支仍向 `QTableWidget` 转型，普通 view 须在 `bindModel` 后显式使用共享 `InstallTableHeaderClickSorting(QTableView*)`。视图排序可用既有 `QSortFilterProxyModel`；字符串表沿旧 DisplayRole/case/locale 规则，dynamic sorting 关闭。
+- 消息规范 FIFO 与用户的一次性显示排序是不同职责。新采样依旧撤销旧手动排序；选区范围、当前单元格和滚动锚点必须在 proxy/source 间映射后按 sequence 身份恢复，不能把 view 行号交给源模型。右键复制读选中 view index 的 sibling，完整导出继续读取唯一规范归档。
+- 本批按用户要求仅静态落地，最后统一构建与实际 GUI 排序/采集/复制组合由 root 和用户分别验收，不以候选或历史 TU 声称已实机通过。
+
+## 不可变权限表格与后台翻译入口（2026-10-20）
+
+- `ImmutableValueTable` 刷新后会保留相同规范身份，此时不重复触发 `currentRowChanged`。账户的所属组、所选组的成员等关联详情须同时接入 `sourceReady`，否则主表刷新先清空详情后，恢复原选中身份不会再次查询，详情会一直留空。普通搜索/排序不改变内容代次，不借此重做业务查询。
+- 账户、组和成员以 SID 作为稳定身份，显示名称或启用标志变化不应改变选择键；同一 SID 的多条直接权限以权限名和 SID 组合区分。SID 不可用时才使用名称回退。
+- 权限 worker 在 GUI 调度边界捕获 `SourceTextSnapshot`，用值作用域查询精确 `contextText`，不能从后台转回 `LanguageManager` 单例。跨翻译单元的权限快照采集也显式传入该值；嵌套作用域退出时恢复外层上下文。只有没有上下文的兼容入口保留规范源文。
+- 本轮仅有既有纯值/假原生检查与最终静态核对；后续按用户要求统一构建一次，真实 GUI、账号/令牌业务、语言/主题和 DPI 由用户验收。
+
+
+## 2026-10-21 异步模板与主程序体积
+
+- 对照精确匹配RSDS的Ksword-nice与固定85a8fc87，主程序从25,105,304增至31,042,560字节；差异主要为代码与数据，不能因Qt动态链接或资源较小便认定整轮增量合理。两版间还含10月15日至原审计10月19日的其它源码变化，不能把总差异全归于某单项优化。
+- MSVC会把多层lambda/模板完整类型名字放入PE可写数据；此对照中的类型名字从215,465增至1,097,893字节，带AsyncOperation的名字从10,241增至504,990字节。后台模板只需Request/Result/Worker类型；已由GUI Job拥有的Apply/Failure不应贯穿后台模板参数，也不必为事务再包一层适配lambda。既有Job、线程池、取消/事务/异常/退出租约保持，避免为缩体积增加运行时分配或删安全语义。源码/QtCore回归/同配置二进制A-B/用户GUI分开记录，不能据未测的源码简化宣称节省MB。
+
+## 2026-10-21 Dock热切与几何通知
+
+- KernelDock的同步准备、Show及末次ADS排队兜底继续读取实际当前分支并调用原ThemeBinding准备；不能用“已建页”跳过隐藏页主题dirty或惰性子页。初始化入口返回此次是否真实构造UI，首次显示或真实构造后才补原四个updateGeometry/update。普通热切不再无变化重复请求布局；真实字体/主题/尺寸/布局变化仍由原Qt事件和样式拥有者失效，不另缓存sizeHint或建立观察器。
+- 此步仅源码/累计构建核对，实际ADS恢复、首帧、字体/DPI/亮暗及主题色由用户验收，不据此声明实测切换耗时。
+
+- 七张KernelDock结果表的语言搜索缓存复用既有结果发布定时器分片，元数据模式保留原items、源索引及完整行域，暂关排序、完成后恢复原排序/显式禁用状态。新源接管须继承最初状态并取消旧定时器；每次可重入Qt调用后复核当前代次，旧分片不能解除新任务门禁。每片遵守完整值捕获屏障，过期语言不标记接纳。单次缓存退役、最终Qt排序和首次Minifilter建树仍有同步成本，不能据分片宣称整项完成或实测帧率。
+
+- Minifilter首次父/子节点填充及展开也已分片；源代次只在完整回调快照替换时递增，隐藏树不循环唤醒，Show继续同一游标。新树仍一次接入模型，首次完整过滤完成后才恢复原更新/显式禁用状态；字段、源索引、重复父键归属和匹配逻辑沿用原实现。每片接入原UiCommitCoordinator完整值捕获屏障。旧树与脱离模型的新树会短暂共存，取消的脱离树销毁、Qt clear/整批接入及最终排序仍有同步成本，不能宣称降低峰值内存或完成KCB-003。
+
+- 七表首次筛选也复用结果发布定时器：原最终排序后先让出，再按256行/4ms目标扫描原完整搜索字段；关键词或共享行布局修订变化重启匹配。完整canonical排除集合接纳并清理隐藏选择后才解除preparing/恢复输入/调用原onReady，回调树准备仍在回调表首筛后。空关键词/分隔行沿原同步帮助函数语义；Qt最终排序、共享排除集合规范化及集合/缓存最后引用退役仍同步，不能据遍历分片认定KCB-003全部完成。
+
+- `AsyncOperation`的回投包装拥有本次Result，现有`apply(*result, ticket)`可接收`Result&`；一次性PreparedRows在页面完成代次/可见性/模型修订/完整捕获门禁后直接move给模型，避免GUI再复制整份行向量及差异数组，不需新增共享指针或控制器。门禁延期只重新请求最新值，不保留对回投局部Result的引用；消费后不可重用计划。`setPreparedRows`仍按值拥有参数，保证模型通知中页面/控制器被销毁时计划活到提交退出。普通setRows、最终Qt结构提交/排序及旧值退役仍有原同步成本，不据此宣称整项完成或量测内存改善。
+
+- 诊断开启时，主程序在真实QApplication::notify前后用PerfNotifyScope记录分派墙钟及线程CPU；直接嵌套notify按scope/parent身份分出inclusive/self，不把后续0ms回投或其它事件时间塞进Paint/Layout。线程cycles保留原单位，不能换算毫秒；GetThreadTimes的100ns累计值保留OS计账精度，短事件为0不代表无CPU。probe_setup_ns/probe_until_enqueue_ns分别说明探针准备和截至受锁保护入队的墙钟开销，不包含最后unlock/notify尾部，也不能当CPU开销。receiver标签在派发前复制，之后不解引用；初始化后才采样，退出关闭前停用。默认宏0时仍直接构造QApplication，notify覆盖和CPU采样均编译移除。该边界是Qt分派，不等同物理呈现；输入到呈现及退出持久化仍由MR-003/004单列。
+
+
+- 2026-10-21 KCB-003后续已由七表/Minifilter完整后台值模型替代此前timer/items及detached树流程。源数组共享不可变根；字段/role/筛选/原Qt比较排序在既有worker准备，旧值在既有CompleteExport退役lane释放。sourceIndex、失败分隔行、persistent映射和捕获门禁继续保留；必要Qt通知/选择/展开仍在GUI。静态及HostX64构建44通过，真实GUI、原生事务与峰值内存没有代用户验收。此前分片段落记录历史阶段，不代表当前仍使用旧流程。
+
+- 速率时间轴的完整采样与绘制投影分开：后台对64点叶块建立小索引，绘制按物理像素列分别保留上下行首末及极值，最后一个原样本独立按原动画插值；最大Y值仍来自目标时间范围内全部原始值，不能改用动画值或降采样值。无序/非有限兼容输入保留原顺序和原扫描语义。投影缓存只按值源、目标/动画范围、物理宽度失效；主题和选区不重建原数据。纯值等价/峰谷守恒不等同GUI逐像素栅格一致或实测FPS证明，实际视觉由用户验收。
+
+- 网络审计/防火墙完整值模型接纳使用worker预备的持久范围树，使原begin/end增删通知内不再erase/shift/copy整个Row数组；最终回到连续根，固定模型/identity proxy保留persistent索引。排序比较在worker按实际显示QString和当前语言进行，切列时同值必须沿原Qt proxy的先前显示顺序稳定排列，不能每次从canonical顺序重排。root的真实QSortFilterProxyModel三次切列对照发现并纠正了此差异。必要Qt通知/真实persistent映射仍随规模增长，不能宣称常量时间。
+
+- 抓包主表的展示版本与规范缓存必须共享同一个PacketRecord负载所有者，不能为后台格式化再深拷贝packetBytes；R0/R3已消费批次move到该所有者。remoteDomain只在GUI更新，后台只读独立捕获的PacketMonitorRecord::domain，不能从后台读/复制可变的remoteDomain成员。展示快照/元数据COW只复制句柄和QString，旧值沿既有退役lane释放；真实复制/内存峰值仍须区分canonical、采集队列、NIDS独立队列与实际视图。root受控1MiB负载检查证明规范/展示字节缓冲身份相同，未量测实际应用峰值内存。
+
+- 网络值接纳后续已简化：用worker预备的连续值阶段替代持久范围树，先按稳定身份把待删行转到尾部，再一次尾删/尾插，最后按原target映射恢复顺序；正常路径最多两次layout、一批remove、一批insert和一个覆盖全部真实变化的dataChanged矩形，不能对5000个离散删除在GUI发5000组通知。公开模型和persistent身份保持，重复/无效键才用原reset回退；所有Row复制及阶段/旧值退役在后台。QtCore10000行/5000离散删除仍0次GUI Row复制，通知收敛到1次删除、2次layout；必要persistent remap仍在GUI，不宣称恒定时延。此前范围树段落为已替代历史。
+
+- 抓包展示Row后续只持字段、sequence/PID/地址和指向规范Record的weak_ptr；不能让隐藏旧表继续强持已被6000+320规范缓存裁掉的原始字节。后台输入仍强持一次完整源，保证准备期间安全；接受后的展示/导出只需完整表字段，详情/重放仍按规范序号查缓存，保持原清理语义。弱源过期时重建当前字段，元数据只按sequence查当前规范记录；未知域名另存布尔状态，不能用已本地化占位文字推断查询状态。15项受控所有权检查证明旧展示字段保留时字节所有者可释放，不代表实机退役时延/峰值测量。
+
+- 诊断探针的writer关闭请求不等于尾部日志已落盘。默认宏0不启动writer也不等待；显式启用时在app.exec返回后、Qt销毁前进行默认100ms有界等待（调用上限1000ms），不改退出码。writer排空全部已接纳记录并明确统计overflow丢失，QFile flush与Windows FlushFileBuffers均成功后才原子发布带session/实际路径/字节数的completed回执；单独writer_drain_end标记不能作为成功依据。超时、无法写入/flush/发布回执或进程异常退出都不得宣称完成；这不是物理呈现或整条输入因果链证据。
+
+- 插件结果固定source/identity proxy，完整块值及显示顺序在原AsyncOperation后台准备，GUI只接纳布局与persistent映射；完整捕获在请求时即标preparing，不能等下一轮timer才关屏障。同值沿实际先前显示顺序；原Qt dynamicSortFilter=false时，新发布批次只在批内排序后追加，不能静默整表重新排序，合并后台请求仍保留发布批次边界。sort(-1,Descending)也必须按原canonical行号降序；失败恢复原已应用列/方向，reentrant尾部发布保留新行身份。真实Qt旧代理对照140821项（10362行）通过；未验证产品GUI、捕获UI或实机退役时序，极长wrapped段落仍有Qt单次布局成本。
+
+- NIDS不能用TTL、单调时钟或删除历史流键解决驻留增长：原系统时间允许回拨/迟到，必须保留完整FIFO、累计值和cooldown。现将三类状态的合计热键限制为1024，旧键完整序列化到分析worker独占的系统winsqlite3临时库，成功写入后才移出热表；无provider/写失败保留全部热状态并回退RAM，冷读失败走原显式失败通道，不能当新键。零时间原本不记录cooldown，因此0只作未记录哨兵。Reset同时销毁临时库，沿原后台退役lane清理；不新增GUI等待/状态时钟。旧引擎逐包106450输入/38841告警全字段差分通过，资源/故障90012项通过。30000个冷流受控样本private增长旧26.72MB、新1.36MB，但worker耗时168ms→383ms；这是驻留历史键优化及其I/O代价，不能宣称全进程硬内存上限或实机UI提速，活动单键事件和原待处理队列仍完整保留。
+
+- 诊断操作身份来自真实notify入口的输入事件，Qt转发同一个QEvent复用ID，嵌套事件循环的不同输入另建ID；spontaneous与synthetic分开。AsyncOperation只在诊断宏1下捕获两个整数action/request ID并沿原worker、投递、apply、cleanup传递；请求ID全局唯一，子请求记录parent，0明确表示没有已证明的输入父项。UiCommitCoordinator与滚动动画/延迟probe也保存接纳时的值上下文，不能在回投时借用最新输入。取消settled可能早于query worker返回，不能叫ready；input_dispatch_end、apply和GL frameSwapped都不是物理呈现。心跳区间始终无单一action归因。writer提供QPC对时上下界，供外部WPR证据关联；没有自动运行产品采集。真实生产QtCore检查488项及原异步153项通过，普通宏0不保留新字段/worker调用/连接；完整input-to-present与非共享异步路径仍未完成。
+
+- 标题栏CurrentPage搜索的nested prepare必须与游标的visibleOnly范围一致。Memory/Misc的prepareNavigationPages(true)只准备当前选中根及当前工作台/调试视图，不置全局prepared；false默认仍保留完整兼容发现。搜索层传UiSearchScope，MainWindow只把CurrentPage映射为true，Taskbar及旧路由默认false；不通过改searchComplete伪造冷页正文索引。133项QtCore抽取实际方法/原路径对照证明全范围工厂调用顺序相同、当前页不调用其它工厂及重入销毁保护；实际GUI/可见正文/主题仍由用户验收，GN-009/FP-003全范围冷正文尚未完成。
+
+- 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。
+
+- 2026-10-21 诊断writer以实际EXE SHA匹配有大小上限的发行build-info，再记录commit/构建边界tracked dirty；没有匹配清单或旧清单没有dirty时明确unavailable，不从运行机器的Git猜身份。ADS当时只记录exe目录部署文件hash。运行条件仅在原Dock/外观事件记录值快照（窗口、DPI、系统报告刷新率、动画/主题/背景/字体与聚焦模型数量），不扫描隐藏页、不回调worker内UI；屏幕刷新率不是FPS，快照不是呈现或完整因果证明，普通宏0移除调用。
+
+- 2026-10-21 插件只读输出/诊断接入共享`AsyncLogTextView`：保留2000段落上限及逐次append顺序，规范化/前缀淘汰与完整QTextLayout均在既有异步worker，GUI按可见QTextLine绘制。不能只将超长字符串分批append而继续让GUI排版完整段落；也不能用私有Qt绘制ABI。搜索沿原QTextDocument::find规则在禁用布局的worker文档执行，复制按操作接纳点快照，旧命中按已知前缀身份映射，已淘汰范围拒绝。普通CodeTextEdit与新视图共用六项surface颜色公式；不变更可编辑器业务/语法。源/布局分别退役，关闭不等待worker；QtCore纯值对照及编译不代表GUI栅格、DPI、选择/拖出、辅助功能或实测帧率验收。连续写入时显示仍可滞后，首版必须由用户手测三处插件日志及原编辑器主题。
+
+- 2026-10-22 诊断ADS身份现从真实导入的`CDockManager::configFlags`地址记录整数值，既有writer以`GetModuleHandleExW(FROM_ADDRESS)`保活模块、解析实际路径并哈希该路径文件；不按DLL basename猜加载对象，也不在GUI读文件。旧`ads_runtime_sha256`保留且明确标exe目录文件。路径处文件hash不是已映射映像的内存证明，失败/零地址明确unavailable/error。进程GPU后端仅在原初始化/请求/回退边界写conditions，GL字符串只在原current上下文读取；记录实际格式、共享组及当前表行列数，不创建/强开上下文、不逐帧轮询。光栅记录的renderer明确为上次GL初始化值，不能冒充当前硬件。宏0编译移除新增运行工作；实际GPU/ADS GUI和开关对照仍由用户验收。
+
+- 2026-10-22 独立输入的首次几何合成仅让明确支持的现有LineEdit/Spin/PrimaryCombo绑定接管，复用原队列和`m_hasApplied`首轮状态；不在构造期强制执行颜色，LineEdit/Spin后续换肤不新增回填被业务替换的旧几何，PrimaryCombo保留原回填顺序。参数正文8px padding也与独立圆角/颜色按原顺序合成；自定义绑定、自动Combo原策略和已准备控件保留即时几何路径，替换绑定清除旧能力。PrimaryCombo原trimmed会移除几何前导换行，原callback随后可能再次追加同一规则；合成最终QSS时必须复现这一步，不擅改层叠/去掉中间业务规则。字符串/声明映射与QObject值替身检查不能代替真实控件polish、palette、DPI或GUI视觉验收。
+
+- 2026-10-22 篡改页HVM通道可用性改由主窗口既有后台HVM状态刷新独立读取原QUERY_WINDOW并发布；只在实际可见消费者需要时附加查询，DDMA广播只更新DDMA。页内两查询定时器和独立worker已退役；首次/再次显示、在途目标变化请求原宿主并只合并一个补查。每轮可见状态刷新都重读真实windowReady，不用SCM/HVM代次或TTL永久推定，因此同次加载内PnP最后控制器移除亦可由下一实际观察发现。consumer epoch+宿主服务失效generation+弱身份/退出门禁拒绝晚到成功；设备错误通知先于worker回投时，在新epoch明确发布失败，不能只失效后一直停在查询中。离线首次显示明确不可用，待查询时保留勾选偏好但禁用依赖动作；失败/windowReady0仍取消HVM路径。驱动/协议、HvmControl、实际扫描与REQUIRE_WINDOW严格读取保持原代码，普通HVM代次不等于私有窗口生命周期。控件/表格/详情布局及主题无改。源码/受控QtCore和产品构建与实际硬件/GUI验收分别记录。
+
+- 2026-10-22 T00外部证据工具位于`tools/ui_perf`，独立HostX64控制台编译，不进入主程序。默认Plan只读身份/列计划，用户显式Capture才启动独立UUID的PresentMon与私有GUID system logger，采CPU SampledProfile/CSwitch栈；仅停止成功创建的句柄，保留状态/丢失计数和SHA清单。正常有界等待是WAIT_TIMEOUT=258，取消0/父进程退出1不能算完成。离线分析用整数/Decimal保留QPC精度，交换链/输出/层分别统计，JSONL仅在实际PID/EXE SHA/会话/时钟匹配时给非因果的下一显示候选；不能把候选、配置栈成功或ETL存在称为实际操作完成/完整栈/物理发光测量。普通宏0发行版没有JSONL操作链，运行日志快照不代表writer完成回执。受控控制台夹具不含ETW/GUI/产品调用；真正采集与WPA栈覆盖和同条件A/B仍由用户执行，T00残留不得据工具交付直接关闭。
+
+- 2026-10-22 ThemeBinding首帧准备的dirty收集只在本次无回调阶段缓存共享祖先深度/不可达结论，不缓存叶绑定；缓存收集结束即释放。跨宿主公共链只检查一次，原可见/stack当前页/窗口边界、父先子后排序、回调前真实父链复核与弱寿命/新请求消费保持。不得把此临时结果带过回调、重挂或下一轮；仍逐个读取已有dirty身份，无新观察器/永久索引/全控件树扫描。53770项QtCore与冻结旧方法对照及真实TU通过；10000叶/12祖先夹具祖先读取130000→10012，非实际GUI耗时/FPS结论。
+
+- 2026-10-22 主程序QApplication创建/应用身份确定后调用MainWindow::prepareStartupAppearance，先安装标准绘制/度量/过滤器并显式跳过临时应用基线，再复用原15项正式palette和5段全局QSS；同配置业务首帧直接继承最终配方。InstallStandardWidgetTheme的其它调用默认仍下发完整旧基线。原热换/窗口背景/字体基线/预览取消链保持；标记块内容相同时忽略外围换行，避免无变化全局重写。1751项真实QPalette/QString值检查证明去掉中间基线后完整角色与原两阶段最终值相同，原运行期方法展开等价；不等于真实GUI/首帧/性能验收。
+
+- 2026-10-22 诊断宏1在既有Tab/ADS selected与实际冷挂载/页壳准备入口记录有界target路径/index、origin和navigation_id；ready限定shell_prepared，business_ready_proven/present_proven均false，warm Dock明确ready_unproven。宏0无新观察器/成员或业务分支。33项QtCore实际值API与3实际TU宏1检查通过，未运行GUI/采样。T00原要求包括真实受验操作链/可观测present/WPR栈与实测；不应扩张为所有无关后台任务接入或光学设备验收，也不能以外壳ready关闭T00。
+
+- 2026-10-22 `Invoke-KSwordBuildCheck.ps1 -EnablePerfTrace`仅通过本次临时props给主工程全部ClCompile传入诊断宏1，不修改PerfTrace.h默认0或工程。普通Build仍宏0；是否禁WPO继续只由既有独立开关决定。构建日志记录BUILD_PERF_TRACE_ENABLED，需按实际构建标识区分普通/诊断产物，不能用VerifyArtifactOnly证明编译宏。真实GUI/WPR采集仍由用户执行。
+
+- 2026-10-22 普通Neutral/Auto按钮在明确不透明主/ADS浮动宿主中，可复用宿主属性选择器的同一配方，不再逐按钮写相同局部QSS或保存五态背景列表。资格检查使用实际完整宿主QSS、主题代次、局部palette及祖先拥有块；主动作/危险色、显式外观、flat QPushButton、命名/复合按钮、未知业务QSS、透明/独立宿主保留原局部拥有者。配方和状态颜色公式保持原函数，宿主规则去除祖先拥有标记，避免误接管未声明按钮；业务QSS接管需清共享属性并重polish。重挂、样式/色板变化和迟到子控件通过原ThemeBinding队列失效；子按钮准备前先恢复已变为复合控件的父级原层叠，沿用弱寿命保护。584项QtCore/QtGui值和QObject替身检查验证拥有者/字符串/回调路径，不能代替QtWidgets层叠、真实热换肤/浮动、内存或FPS实测；真实GUI交用户验收。
+
+- 2026-10-22 表格冻结菜单只保留原QMenu/按钮/控制器在构造期，原数量控件、六动作及七连接延至首次aboutToShow；已有updateControls不提前创建，未创建的语言/状态刷新有空检查。首次打开在原barrier和状态刷新前完成原内容，文案按当时语言、主题按原入口；冻结后端、快照、模型、主操作条布局和完整closeFreezeMenuBarrier后业务尾部保持。静态逐字搬移核对及累计构建分别记录；首次菜单尺寸/主题/键盘和冻结业务由用户手测，不声明GUI已通过。
+
+- 2026-10-22 DDMA原串行transaction以诊断宏1值上下文关联worker/UI回投：探测完整磁盘缓存、表格/选区、标签及原会话回调完成后才记ddma_probe_business_data_ready；候选扫描只记候选规范快照ready并由原自动重探子request提供最终探测ready。队列拒绝/异常/业务失败/接收者销毁分别记录，不改变原无取消/替换准入。宏0预处理去诊断块后业务token与原文件一致；不能将此边界当paint/present，也不据源码与构建声明DDMA硬件或GUI已验收。
+
+- 2026-10-22 诊断宏1仅为明确ScrollArea的现有viewport/两bar注册观测，4096宿主上限，无新timer/布局/paint请求。valueChanged回调保存实际双轴值和回调上下文；Qt早先slot可重入，因此它明确不是输入因果证明。实际notify Paint入口复核真实bar值，早于回调时上下文置未知，分派退出只在同viewport身份/观测revision仍相符时接纳稳定观察；GPU swap仅关联最近完整Paint scope且不重复。换viewport/换bar/重挂/销毁有弱身份和失效保护，动画关时同样观察。离线仅统计Paint分派/值观察到Paint/同Paint到GL swap的间隔，不称呈现FPS或input-to-present；缺失/重复/变化/销毁显式分开。67项实际纯值/序列化QtCore和21项离线分析通过，宏0三文件原执行tokens保持；真实QtWidgets/GL/呈现/WPR由用户验收。
+
+- 2026-10-22 T00离线分析补齐navigation_stage及parent_request_id、路径/index/边界/原结果；无输入begin的程序化导航单列。每个ready/显式business_data_ready以QPC误差上界之后首条显示独立作非因果候选，嵌套请求不合并，重复ready拒绝、无后续为空。外壳ready不升级为业务ready/呈现证明。26离线回归通过。
+- 同次按原MR-001条目复核：现有QApplication notify真实包围、inclusive/self与ns、queue指标更名、宏0探针移除及外部栈工具已实现；当前生产PerfTrace.cpp在QCoreApplication+QObject夹具重跑2ms事件/16ms外部工作，45项及宏0无日志1项通过。无QApplication/QWidget/业务/ETW采集。MR-001源码实施可以关闭，真实GUI/栈采集验收仍待用户；MR-003预热Dock的真实ready与MR-004实测不随之关闭，不要求新增全库业务封装。
+
+- 2026-10-22 诊断宏1按实际ADS currentChanging→当前widget同步show返回→currentChanged记录同一dock_switch的begin/selected/限定ready/end。ready仅对进入前已初始化、同一Dock/同一内容实例、仍可见且未closed/initializing成立，边界名ads_current_widget_show_returned；不声称queued布局、业务数据或present已完成。嵌套替换/目标改变/内容替换/销毁不伪造ready，初始/焦点观察仍单列。原visibilityChanged的0ms挂载回调仅宏1保存/恢复输入context，原可见/寿命/构造准入保持。61项实际闭包QtCore/QObject替身检查和宏0全MainWindow token恒等通过；真实ADS/GUI/50次循环另由用户验收。没有新增主题准备、系统查询、业务等待或通用接管框架。
+
+- 2026-10-22 用户诊断日志确认持续出现七个复选框一组的StyleChange及双倍PaletteChange。`NormalizeToolbarControl`原来向所有QAbstractButton追加只匹配QPushButton/QToolButton的几何QSS；日志面板七个复选框的独立主题绑定又恢复纯颜色QSS，两者经原队列反复覆盖。几何追加现只对真实QPushButton/QToolButton执行，复选框/单选框原高度、图标尺寸、标记和业务状态保持。不得靠停掉主题绑定、忽略真实换肤或单纯节流掩盖此循环；复用工具行时须检查其QSS选择器实际覆盖的控件类型。诊断记录存在丢失，不能据此计算完整帧率或推定普通版耗时；修复后GUI/实际性能由用户验收。
+
+- 2026-10-22 构建35反馈的线程/模块等崩溃，匹配旧EXE/PDB的dump落在`ImmutableValueTable::startPending`完成回调读取零结果的QFuture。`watcher->setFuture({})`切到默认的已完成空Future，可在`deleteLater`前再投递finished；必须先断开该watcher到接收者的完成连接，并在读取结果前检查resultCount。空/空指针结果沿既有失败通道恢复旧表可用性，不能当作空成功覆盖数据；旧代结果继续受revision门禁。分析旧dump须匹配其实际模块路径/PE-PDB身份，反馈文件引用一个发行目录不代表所有dump都来自同一构建。
+
+- 同轮关闭dump的真实事件为`ChildRemoved(71)`，旧EXE反汇编在事件类型分派前调用QTabWidget::currentWidget，进入已经拆除子布局的QStackedLayout崩溃。PageTabEnvelope对ChildAdded/Removed只记布局失效并合并排队，不同步读取当前页；QPointer非空不代表Qt内部布局仍可访问。既有布局/几何/动画准备实现保持，真实GUI关闭仍须用户回归。
+
+
+- 2026-10-22 构建35字段反馈：DetailFieldProjection物化范围继续按原requestedFirst/requestedLast取行，但宿主clipFirst/clipLast必须覆盖这些行的完整高度；只修上边界会把最后一个长字段压缩在局部卡片内。0231346b保留两端完整行，另一列不因卡片变高而多物化。已有snapshot更新/视口预算未完成时保持原字段可见，4940582a只让首份加载使用整视口加载层。不要把QLabel大小策略调用顺序当作充分归因：本机Qt6.9.3的setText也会在updateLabel恢复height-for-width。8项纯值生产几何检查不是GUI验收。
+- 2026-10-22 组合框Show后排队加不透明frame/QSS会改变实际viewport和item度量，而Qt showPopup在Show前已计算窗口高度。223c6b2a仅在既有queued主题回调内用真实列表rect补足短列表缺口（最多32项并遵守maxVisibleItems/屏幕/maximumHeight），不改焦点、选中、长列表限制或提前创建Popup；仍禁止在Show/Resize栈内同步repolish。
+- 2026-10-22 保存布局和启动页：ADS 5.1.1会在各area的currentDockWidget属性保存XML Current身份。b330022f在初次外观挂载结束且restore成功时一次性收口所保存选中项；关闭/移出原area的目标跳过，没有第二份配置或重试timer。跨固定发行目录测试会使用不同exe/config，验证退出恢复必须在同一测试副本内进行。
+
+- 2026-10-22 c1bdcc83实测反馈：权限页自身的Account/Token/Snapshot完成回调也有`setFuture({})`重复finished问题；修共享ImmutableValueTable不会修到这些独立实现，四个完成入口均须先断开接收者再解绑future。两个实际生产回调的QtCore寿命检查覆盖先完成、后完成、接收者先销毁，不代替业务GUI验收。
+- 进程详情性能/CPU核心页的曝光过滤器必须在轻量页壳创建时安装。QTabWidget先Show再发currentChanged，若在惰性内容工厂才安装，会永久漏掉首次Show；这是确定事件顺序问题，不是机器速度或应增加固定延时。隐藏/最小化门禁仍保留。
+- 窗口图标的规范缓存路径可以用正斜杠，但传给SHGetFileInfoW前必须转原生分隔符。本机只读对照同一notepad/主程序EXE，正斜杠查询失败、反斜杠成功。预览QLabel的pixmap不能拥有布局尺寸：Ignored策略、contentsRect缩放/回投校验及空窗口矩形回退共同避免逐次加边框尺寸的放大回路。
+- USB等设备审计表的行增删通知保留，单元格批量填充阶段仅屏蔽model数据通知，结束后一次dataChanged，再恢复排序/选择/业务过滤。不得连结构信号一起屏蔽，否则持久行身份与冻结/搜索观察器失效。真实USB切页停顿仍须用户复测，不能由通知次数推算帧率。
+- 网络监控已有投影可继续交互，不能每批数据禁用整表导致按钮/图标变成Disabled再恢复。趋势捕获允许尾部追加，完整旧快照可在同代/同epoch及交互参数有效时先展示，再合并dirty追上，避免高负载下连续拒绝所有完成值；速率复用原接收/淘汰维护的秒桶。R0进入原预算消费通道前按队列余量限制查询，满则不前移cursor，不新增用户态丢包；R3原策略保留。设备打开失败且ENABLE未发出时才免除R0停用义务，真正IOCTL失败仍保留失败回执。
+- 透明主宿主的数据衬底统一由MainSurfaceStyle的TransparentMainDataSurfaceAlpha控制（192/255），表头节与工具带同入口；表头画布不再额外叠同色alpha层，前景按同一alpha的黑/白极端背板校准。独立窗和无背景模式保留原不透明配方，不用setWindowOpacity淡化文字。亮暗/主题色/背景模式热切换和GPU/普通表格实际合成仍由用户验收。
+
+- 同日用户要求可调控件背景：原固定192由AppearanceSettings::controlBackgroundOpacityPercent（默认75，0..100，control_background_opacity_percent）替代。设置→外观→背景的共享滑块只改待应用值；应用/取消/重载沿原流程。MainSurfaceStyle维护GUI线程运行值，变化时只失效原颜色/QSS代次、主/浮动宿主样式和已登记ThemeBinding，单改alpha不走业务枚举、背景文件重读或全局旧色扫描。表格/表头/工具带/标准按钮与输入/页签/ADS/监控时间轴复用现有绘制；Collapse与页根外壳透明，参数滚动三层由现有外板负责底面，避免重复同色铺底。参数正文只有实际alpha255才保留opaque快路径。下拉popup/独立窗和原生插件边界保持原实底，控件文字图标与语义颜色不整体淡化。82项实际alpha/cache/Combo弹层/ADS QSS纯值检查通过，无QApplication/QWidget；实际GUI与性能仍由用户测。

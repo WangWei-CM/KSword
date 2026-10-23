@@ -9,6 +9,8 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/TableColumnAutoFit.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -27,10 +29,12 @@
 #include <QPushButton>
 #include "../UI/SegmentedControl.h"
 #include <QSplitter>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
 #include <QTimer>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -130,9 +134,32 @@ KernelThreadAuditTab::KernelThreadAuditTab(const Mode mode, QWidget* parent)
     initializeUi();
     applyTranslatedText();
 
-    // 首次刷新延后到事件循环，避免 Dock 构造阶段同步查询系统信息。
+}
+
+void KernelThreadAuditTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (m_showRefreshQueued)
+    {
+        return;
+    }
+    m_showRefreshQueued = true;
     QTimer::singleShot(0, this, [this]() {
-        requestRefresh();
+        m_showRefreshQueued = false;
+        // A sibling tab or ADS host can hide again before this queued turn.
+        if (!isVisible())
+        {
+            return;
+        }
+        if (m_pendingSnapshot)
+        {
+            const auto snapshot = std::move(m_pendingSnapshot);
+            applySnapshot(*snapshot);
+        }
+        if (!m_initialRefreshStarted)
+        {
+            requestRefresh();
+        }
     });
 }
 
@@ -165,8 +192,9 @@ void KernelThreadAuditTab::initializeUi()
     m_evidenceButton = new QPushButton(QStringLiteral("B"), this);
     m_overviewButton->setFixedSize(28, 28);
     m_evidenceButton->setFixedSize(28, 28);
-    m_overviewButton->setVisible(m_mode != Mode::WorkQueueThreads);
-    m_evidenceButton->setVisible(m_mode != Mode::WorkQueueThreads);
+    // System-thread overview and address evidence now share one visible table.
+    m_overviewButton->hide();
+    m_evidenceButton->hide();
 
     m_filterEdit = new QLineEdit(this);
     ks::ui::StyleSearchField(m_filterEdit);
@@ -196,6 +224,7 @@ void KernelThreadAuditTab::initializeUi()
     // 表格与 ks::ui::StructuredFieldView 由纵向 splitter 组织，详情窗口保持项目统一编辑器。
     auto* splitter = new QSplitter(Qt::Vertical, this);
     m_table = new QTableWidget(splitter);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 系统/工作队列线程的变化与地址来源需要保留完整快照栏。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(Column::Count));
@@ -208,6 +237,13 @@ void KernelThreadAuditTab::initializeUi()
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
+    if (m_mode == Mode::SystemThreads)
+    {
+        // Keep the content widths measured below, including the complete entry-module
+        // name. This address-heavy view may scroll horizontally rather than compress it.
+        ks::ui::SetTableColumnAutoFitEnabled(m_table, false);
+        m_table->horizontalHeader()->setStretchLastSection(false);
+    }
 
     m_detailEditor = new ks::ui::StructuredFieldView(splitter);
 
@@ -219,7 +255,11 @@ void KernelThreadAuditTab::initializeUi()
 
     // 连接：刷新、筛选、选择、视图预设、表头菜单和行操作菜单。
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { requestRefresh(); });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { rebuildTable(); });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() { updateDetail(); });
     connect(m_overviewButton, &QPushButton::clicked, this, [this]() {
         applyColumnPreset(ViewPreset::Overview);
@@ -292,6 +332,8 @@ void KernelThreadAuditTab::requestRefresh()
         return;
     }
 
+    m_initialRefreshStarted = true;
+    m_pendingSnapshot.reset();
     m_refreshRunning = true;
     const std::uint64_t refreshTicket = ++m_refreshTicket;
     m_refreshButton->setEnabled(false);
@@ -317,6 +359,14 @@ void KernelThreadAuditTab::requestRefresh()
 
 void KernelThreadAuditTab::applySnapshot(const Snapshot& snapshot)
 {
+    if (!isVisible())
+    {
+        // Retain all evidence; only the replaceable table projection waits.
+        m_pendingSnapshot = std::make_shared<Snapshot>(snapshot);
+        m_refreshRunning = false;
+        m_refreshButton->setEnabled(true);
+        return;
+    }
     const QPointer<KernelThreadAuditTab> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
@@ -367,7 +417,10 @@ void KernelThreadAuditTab::applySnapshot(const Snapshot& snapshot)
 void KernelThreadAuditTab::rebuildTable()
 {
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-    const QString filterText = m_filterEdit->text().trimmed();
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    ks::ui::ApplyTableRowFilter(m_table, {});
     m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
 
@@ -426,11 +479,6 @@ void KernelThreadAuditTab::rebuildTable()
             r0Value,
             protectionText
         };
-        if (!filterText.isEmpty() &&
-            !cellTexts.join(QLatin1Char(' ')).contains(filterText, Qt::CaseInsensitive))
-        {
-            continue;
-        }
 
         const int targetRow = m_table->rowCount();
         m_table->insertRow(targetRow);
@@ -438,6 +486,7 @@ void KernelThreadAuditTab::rebuildTable()
         {
             auto* item = new QTableWidgetItem(cellTexts.value(columnIndex));
             item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            if (columnIndex == 0) item->setData(Qt::UserRole + 1, cellTexts.join(QLatin1Char(' ')));
             if (columnIndex == static_cast<int>(Column::ThreadId))
             {
                 item->setData(Qt::DisplayRole, static_cast<qulonglong>(row.threadId));
@@ -447,7 +496,51 @@ void KernelThreadAuditTab::rebuildTable()
     }
 
     m_table->setSortingEnabled(true);
-    m_table->resizeColumnsToContents();
+    if (!m_columnsSized && !m_rows.empty())
+    {
+        m_table->resizeColumnsToContents();
+        m_columnsSized = true;
+    }
+    applyFilter(false);
+}
+
+void KernelThreadAuditTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelThreadAuditTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-thread-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString filterText = m_filterEdit->text().trimmed();
+    const bool active = !filterText.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_table->currentIndex();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const bool visible = item != nullptr && (!active || item->data(Qt::UserRole + 1).toString().contains(filterText, Qt::CaseInsensitive));
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_table->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
+    {
+        if (firstVisible >= 0) m_table->selectRow(firstVisible);
+        else { m_table->setCurrentItem(nullptr); m_table->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
     updateDetail();
 }
 
@@ -525,7 +618,7 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
 {
     m_viewPreset = preset;
 
-    // A：调度/队列概览；B：地址/模块/R0 证据。两组均保持精简。
+    // Work-queue evidence retains its layout; system threads combine the former A/B fields.
     std::vector<Column> visibleColumns;
     if (m_mode == Mode::WorkQueueThreads)
     {
@@ -541,18 +634,6 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
             Column::ModulePath,
             Column::R0Status };
     }
-    else if (preset == ViewPreset::Evidence)
-    {
-        visibleColumns = {
-            Column::ThreadId,
-            Column::StartRoutine,
-            Column::Parameter,
-            Column::Module,
-            Column::ModuleBase,
-            Column::ModulePath,
-            Column::R0Status,
-            Column::Protection };
-    }
     else
     {
         visibleColumns = {
@@ -561,10 +642,14 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
             Column::QueueType,
             Column::State,
             Column::WaitReason,
+            Column::StartRoutine,
+            Column::Parameter,
             Column::Module,
+            Column::ModuleBase,
+            Column::ModulePath,
+            Column::R0Status,
             Column::Protection };
     }
-
     for (int columnIndex = 0; columnIndex < static_cast<int>(Column::Count); ++columnIndex)
     {
         const Column column = static_cast<Column>(columnIndex);
@@ -803,6 +888,7 @@ int KernelThreadAuditTab::selectedSourceIndex() const
     {
         return -1;
     }
+    if (ks::ui::IsTableRowExcludedByFilter(m_table, selectedItems.first()->row())) return -1;
     const qulonglong sourceIndex = selectedItems.first()->data(Qt::UserRole).toULongLong();
     if (sourceIndex > static_cast<qulonglong>((std::numeric_limits<int>::max)()))
     {

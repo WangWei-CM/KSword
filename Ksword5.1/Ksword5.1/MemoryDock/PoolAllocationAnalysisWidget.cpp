@@ -3,6 +3,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/FlowLayout.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -22,7 +24,9 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
-#include <QSortFilterProxyModel>
+#include <QShowEvent>
+#include <QThreadPool>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QTableView>
 #include <QTimer>
@@ -104,82 +108,162 @@ bool isLocalFixedPath(const QString& path) {
 }
 }
 
-class PoolAllocationTableModel final : public QAbstractTableModel {
-public:
+
+// Every pointer in these indices is owned by trace. All scans, aggregation,
+// search preparation and ordering run on plain worker values.
+struct PoolPreparedProjection {
     struct Row {
         QString source, search;
-        std::vector<std::uint64_t> groupIds;
+        std::vector<const Group*> groups;
         std::array<std::uint64_t, 8> counters{};
         std::array<bool, 8> saturated{};
     };
-    explicit PoolAllocationTableModel(QObject* parent) : QAbstractTableModel(parent) {}
-    int rowCount(const QModelIndex& parent = {}) const override {
-        return parent.isValid() ? 0 : static_cast<int>(rows.size());
-    }
-    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 9; }
-    QVariant data(const QModelIndex& index, int role) const override {
-        if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()) return {};
-        const auto& row = rows[static_cast<std::size_t>(index.row())];
-        if (role == groupIdsRole) {
-            QVariantList ids;
-            for (const auto id : row.groupIds) ids.push_back(QVariant::fromValue(static_cast<qulonglong>(id)));
-            return ids;
-        }
-        if (role == filterRole) return row.search;
-        if (role == sortRole) return index.column() == 0 ? QVariant(row.source)
-            : QVariant::fromValue(static_cast<qulonglong>(row.counters[static_cast<std::size_t>(index.column() - 1)]));
-        if (role == Qt::DisplayRole || role == Qt::ToolTipRole) {
-            if (index.column() == 0) return row.source;
-            const auto column = static_cast<std::size_t>(index.column() - 1);
-            if (role == Qt::ToolTipRole && row.saturated[column])
-                return L("Aggregated value exceeds the 64-bit range; the displayed value is a lower bound.");
-            return (row.saturated[column] ? QStringLiteral("\u2265") : QString()) + N(row.counters[column]);
-        }
-        if (role == Qt::TextAlignmentRole && index.column() != 0) return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
-        return {};
-    }
-    QVariant headerData(int section, Qt::Orientation orientation, int role) const override {
-        if (orientation != Qt::Horizontal || (role != Qt::DisplayRole && role != Qt::ToolTipRole))
-            return QAbstractTableModel::headerData(section, orientation, role);
-        static const char* headers[] = {"Allocation source", "Observed bytes", "Observed count",
-            "Paired release bytes", "Paired release count", "No observed free bytes",
-            "No observed free count", "Uncertain bytes", "Uncertain count"};
-        return section >= 0 && section < 9 ? L(headers[section]) : QVariant();
-    }
-    void replace(std::vector<Row> replacement) {
-        beginResetModel(); rows = std::move(replacement); endResetModel();
-    }
-    void retranslate() { emit headerDataChanged(Qt::Horizontal, 0, 8); }
-    std::vector<Row> rows;
+    std::shared_ptr<const TraceReadResult> trace;
+    ImageIndex images;
+    std::unordered_set<std::uint64_t> kernelImages;
+    std::unordered_map<std::uint64_t, const Group*> groups;
+    std::array<std::vector<Row>, 3> modes;
 };
-
-// A tag or module can contain ten thousand stacks. Format only the visible
-// combo entries instead of materializing ten thousand translated Qt items.
+namespace {
+template<class T> void retirePoolValue(T value) {
+    if (value) QThreadPool::globalInstance()->start([value = std::move(value)] {});
+}
+std::shared_ptr<const PoolPreparedProjection> preparePoolProjection(
+    std::shared_ptr<const TraceReadResult> trace, const ks::i18n::SourceTextSnapshot& text,
+    const QLocale& locale, const std::atomic_bool& cancel) {
+    auto out = std::make_shared<PoolPreparedProjection>(); out->trace = std::move(trace);
+    if (!out->trace) return out;
+    const auto tr = [&text](const char* source) { return text.packedSourceText(QString::fromUtf8(source)); };
+    const auto n = [&locale](std::uint64_t value) { return locale.toString(static_cast<qulonglong>(value)); };
+    const auto session = [&](std::uint32_t id) { return id == 0xffffffffU ? tr("ordinary pool") : tr("session %1").arg(n(id)); };
+    const auto imageName = [&](const TraceImage* image) { return image ? QString::fromStdWString(image->path) : tr("Unknown historical module"); };
+    for (const auto& image : out->trace->images) {
+        if (cancel.load(std::memory_order_relaxed)) return {};
+        out->images.emplace(image.id, &image);
+        auto path = QString::fromStdWString(image.path); path.replace(QChar('\\'), QChar('/'));
+        const auto name = path.section(QChar('/'), -1).toLower();
+        if (name == QStringLiteral("ntoskrnl.exe") || name == QStringLiteral("ntkrnlmp.exe")
+            || name == QStringLiteral("ntkrnlpa.exe") || name == QStringLiteral("ntkrpamp.exe")
+            || name == QStringLiteral("ntkrla57.exe") || name == QStringLiteral("hal.dll")) out->kernelImages.insert(image.id);
+    }
+    std::array<std::map<std::tuple<std::uint64_t,std::uint64_t,std::uint64_t>, std::size_t>,3> rowByKey;
+    std::array<std::vector<std::unordered_set<std::uint64_t>>,3> rowImages;
+    for (const auto& group : out->trace->analysis.groups) {
+        if (cancel.load(std::memory_order_relaxed)) return {};
+        out->groups.emplace(group.groupId, &group);
+        const auto* image = sourceImage(out->images, out->kernelImages, group);
+        const std::array<std::uint64_t,8> counters{group.allocatedBytes,group.allocatedCount,group.pairedFreedBytes,group.pairedFreedCount,
+            group.outstandingBytes,group.outstandingCount,group.uncertainBytes,group.uncertainCount};
+        // Deduplicate each stack once, then reuse it across all three modes.
+        std::unordered_set<std::uint64_t> imageIds(group.frameImageIds.begin(),group.frameImageIds.end());
+        for (int mode=0;mode<3;++mode) {
+            auto& rows=out->modes[mode];
+            const auto key=mode==0 ? std::make_tuple(std::uint64_t(group.tag),std::uint64_t(group.poolType),std::uint64_t(group.sessionId))
+                : mode==1 ? std::make_tuple(group.groupId,std::uint64_t{0},std::uint64_t{0})
+                : std::make_tuple(image?image->id:std::uint64_t{0},std::uint64_t{0},std::uint64_t{0});
+            auto found=rowByKey[mode].find(key);
+            if (found==rowByKey[mode].end()) {
+                PoolPreparedProjection::Row row;
+                row.source=mode==0 ? tr("Tag %1 | pool %2 | %3").arg(tagText(group.tag),n(group.poolType),session(group.sessionId))
+                    : mode==1 ? tr("Group %1 | tag %2 | pool %3 | %4 | %5").arg(n(group.groupId),tagText(group.tag),n(group.poolType),session(group.sessionId),imageName(image))
+                    : tr("Historical stack source: %1 | image %2").arg(imageName(image),n(image?image->id:0));
+                row.search=row.source+QChar(' ');
+                found=rowByKey[mode].emplace(key,rows.size()).first;rows.push_back(std::move(row));rowImages[mode].emplace_back();
+            }
+            auto& row=rows[found->second];row.groups.push_back(&group);
+            for(std::size_t column=0;column<counters.size();++column) {
+                row.saturated[column]=row.saturated[column] || counters[column]>(std::numeric_limits<std::uint64_t>::max)()-row.counters[column];
+                row.counters[column]=addSaturated(row.counters[column],counters[column]);
+            }
+            row.search+=tagText(group.tag)+QChar(' ')+session(group.sessionId)+QChar(' ');
+            for(const auto id:imageIds) if(rowImages[mode][found->second].insert(id).second)
+                if(const auto* frame=imageForId(out->images,id)) row.search+=QString::fromStdWString(frame->path)+QChar(' ');
+        }
+    }
+    return out;
+}
+struct PoolViewRows {
+    std::shared_ptr<const PoolPreparedProjection> source;
+    int mode=0;
+    std::vector<std::size_t> indices;
+    int selected=-1, selectedStack=0;
+};
+std::shared_ptr<const PoolViewRows> filterPoolProjection(std::shared_ptr<const PoolPreparedProjection> source,
+    int mode,const QString& filter,int column,Qt::SortOrder order,std::uint64_t selected,const std::atomic_bool& cancel) {
+    auto out=std::make_shared<PoolViewRows>();out->source=std::move(source);out->mode=mode;
+    const auto& rows=out->source->modes[mode];out->indices.reserve(rows.size());
+    for(std::size_t i=0;i<rows.size();++i) {
+        if(cancel.load(std::memory_order_relaxed)) return {};
+        if(filter.isEmpty()||rows[i].search.contains(filter,Qt::CaseInsensitive))out->indices.push_back(i);
+    }
+    std::stable_sort(out->indices.begin(),out->indices.end(),[&](std::size_t a,std::size_t b) {
+        const auto& x=rows[a];const auto& y=rows[b];
+        const int compare=column==0 ? QString::compare(x.source,y.source,Qt::CaseSensitive)
+            : x.counters[column-1]<y.counters[column-1] ? -1 : x.counters[column-1]>y.counters[column-1] ? 1 : 0;
+        return order==Qt::AscendingOrder?compare<0:compare>0;
+    });
+    if(cancel.load(std::memory_order_relaxed))return {};
+    if(selected) for(std::size_t i=0;i<out->indices.size();++i) {
+        const auto& groups=rows[out->indices[i]].groups;
+        for(std::size_t stack=0;stack<groups.size();++stack)if(groups[stack]->groupId==selected){out->selected=static_cast<int>(i);out->selectedStack=static_cast<int>(stack);}
+    }
+    if(out->selected<0&&!out->indices.empty())out->selected=0;
+    return out;
+}
+}
+class PoolAllocationTableModel final : public QAbstractTableModel {
+public:
+    explicit PoolAllocationTableModel(QObject* parent):QAbstractTableModel(parent){}
+    std::shared_ptr<const PoolViewRows> view;
+    std::function<void(int,Qt::SortOrder)> sortRequest;
+    const PoolPreparedProjection::Row* row(int index)const {
+        return view&&index>=0&&index<static_cast<int>(view->indices.size())?&view->source->modes[view->mode][view->indices[index]]:nullptr;
+    }
+    int rowCount(const QModelIndex& parent={})const override{return parent.isValid()||!view?0:static_cast<int>(view->indices.size());}
+    int columnCount(const QModelIndex& parent={})const override{return parent.isValid()?0:9;}
+    QVariant data(const QModelIndex& index,int role)const override {
+        const auto* r=row(index.row());if(!index.isValid()||!r||index.column()<0||index.column()>=9)return {};
+        if(role==filterRole)return r->search;
+        if(role==sortRole||role==Qt::UserRole)return index.column()==0?QVariant(r->source):QVariant::fromValue(static_cast<qulonglong>(r->counters[index.column()-1]));
+        if(role==Qt::DisplayRole||role==Qt::ToolTipRole) {
+            if(index.column()==0)return r->source;const auto c=index.column()-1;
+            if(role==Qt::ToolTipRole&&r->saturated[c])return L("Aggregated value exceeds the 64-bit range; the displayed value is a lower bound.");
+            return (r->saturated[c]?QStringLiteral("\u2265"):QString())+N(r->counters[c]);
+        }
+        if(role==Qt::TextAlignmentRole&&index.column()!=0)return static_cast<int>(Qt::AlignRight|Qt::AlignVCenter);return {};
+    }
+    QVariant headerData(int section,Qt::Orientation orientation,int role)const override {
+        if(orientation!=Qt::Horizontal||(role!=Qt::DisplayRole&&role!=Qt::ToolTipRole))return QAbstractTableModel::headerData(section,orientation,role);
+        static const char* headers[]={"Allocation source","Observed bytes","Observed count","Paired release bytes","Paired release count","No observed free bytes","No observed free count","Uncertain bytes","Uncertain count"};
+        return section>=0&&section<9?L(headers[section]):QVariant();
+    }
+    void sort(int column,Qt::SortOrder order)override{if(column>=0&&column<9&&sortRequest)sortRequest(column,order);}
+    void replace(std::shared_ptr<const PoolViewRows> replacement){beginResetModel();auto old=std::move(view);view=std::move(replacement);endResetModel();retirePoolValue(std::move(old));}
+    void retranslate(){emit headerDataChanged(Qt::Horizontal,0,8);}
+};
 class PoolStackListModel final : public QAbstractListModel {
 public:
-    explicit PoolStackListModel(QObject* parent) : QAbstractListModel(parent) {}
-    int rowCount(const QModelIndex& parent = {}) const override {
-        return parent.isValid() ? 0 : static_cast<int>(groups.size());
+    explicit PoolStackListModel(QObject* parent):QAbstractListModel(parent){}
+    std::shared_ptr<const PoolViewRows> owner;const PoolPreparedProjection::Row* row=nullptr;
+    int rowCount(const QModelIndex& parent={})const override{return parent.isValid()||!row?0:static_cast<int>(row->groups.size());}
+    const Group* group(int i)const{return row&&i>=0&&i<static_cast<int>(row->groups.size())?row->groups[i]:nullptr;}
+    QVariant data(const QModelIndex& index,int role)const override {
+        const auto* g=group(index.row());if(!index.isValid()||!g||!owner)return {};
+        if(role==Qt::UserRole)return QVariant::fromValue(static_cast<qulonglong>(g->groupId));
+        if(role==Qt::DisplayRole||role==Qt::ToolTipRole)return groupLabel(owner->source->images,owner->source->kernelImages,*g);return {};
     }
-    QVariant data(const QModelIndex& index, int role) const override {
-        if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()) return {};
-        const auto& group = *groups[static_cast<std::size_t>(index.row())];
-        if (role == Qt::UserRole) return QVariant::fromValue(static_cast<qulonglong>(group.groupId));
-        if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return groupLabel(*images, *kernelImages, group);
-        return {};
+    void replace(std::shared_ptr<const PoolViewRows> replacement,const PoolPreparedProjection::Row* r) {
+        beginResetModel();auto old=std::move(owner);owner=std::move(replacement);row=r;endResetModel();retirePoolValue(std::move(old));
     }
-    void replace(std::vector<const Group*> replacement, const ImageIndex* imageIndex,
-        const std::unordered_set<std::uint64_t>* kernelIndex) {
-        beginResetModel(); groups = std::move(replacement); images = imageIndex; kernelImages = kernelIndex; endResetModel();
-    }
-    std::vector<const Group*> groups;
-    const ImageIndex* images = nullptr;
-    const std::unordered_set<std::uint64_t>* kernelImages = nullptr;
 };
-
 struct PoolAllocationAnalysisWidget::ReadJob {
-    std::atomic_bool cancel{false}, done{false};
-    TraceReadResult result;
+    std::atomic_bool cancel{false},done{false};
+    std::shared_ptr<const TraceReadResult> result;
+};
+struct PoolAllocationAnalysisWidget::ProjectionJob {
+    std::atomic_bool cancel{false},done{false};bool failed=false;
+    std::uint64_t version=0;std::shared_ptr<const TraceReadResult> trace;
+    std::shared_ptr<const PoolViewRows> view;
 };
 struct PoolAllocationAnalysisWidget::ResolveJob {
     std::atomic_bool cancel{false}, done{false};
@@ -228,9 +312,11 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
     // ETL 的静态聚合结果没有实时快照语义，仅保留紧凑复制/导出。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
     m_model = new PoolAllocationTableModel(this);
-    m_proxy = new QSortFilterProxyModel(this); m_proxy->setSourceModel(m_model); m_proxy->setSortRole(sortRole);
-    m_proxy->setFilterRole(filterRole); m_proxy->setFilterKeyColumn(0); m_proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    m_table->setModel(m_proxy); m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_table->setModel(m_model);
+    m_table->setProperty("ks_i18n_preserve_model_data",true);m_model->setProperty("ks_i18n_preserve_model_data",true);
+    ks::ui::SetTableColumnAutoFitEnabled(m_table,false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table,ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+ m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection); m_table->setSortingEnabled(true);
     m_table->sortByColumn(5, Qt::DescendingOrder); m_table->setAlternatingRowColors(true);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers); m_table->verticalHeader()->hide();
@@ -239,7 +325,7 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
     auto* detail = new QWidget(split); auto* detailLayout = new QVBoxLayout(detail);
     detailLayout->setContentsMargins(0, 0, 0, 0);
     m_stacks = new QComboBox(detail); m_stacks->setObjectName(QStringLiteral("pool_analysis_stacks"));
-    m_stackModel = new PoolStackListModel(this); m_stacks->setModel(m_stackModel);
+    m_stackModel = new PoolStackListModel(this); m_stacks->setModel(m_stackModel);m_stacks->setProperty("ks_i18n_preserve_model_data",true);m_stackModel->setProperty("ks_i18n_preserve_model_data",true);
     m_stacks->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_stacks->setMinimumContentsLength(10); m_stacks->setMinimumWidth(0); detailLayout->addWidget(m_stacks);
     m_stacks->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -266,8 +352,14 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
         if (guard && !path.isEmpty()) guard->analyzeFile(path);
     });
     connect(m_cancel, &QPushButton::clicked, this, [this] { cancelJobs(); updateControls(); updateSummary(); });
-    connect(m_grouping, &QComboBox::currentIndexChanged, this, [this] { rebuildRows(); });
-    connect(m_filter, &QLineEdit::textChanged, m_proxy, &QSortFilterProxyModel::setFilterFixedString);
+    m_projectionDebounce = new QTimer(this); m_projectionDebounce->setSingleShot(true); m_projectionDebounce->setInterval(120);
+    connect(m_projectionDebounce, &QTimer::timeout, this, [this] { pollJobs(); });
+    m_model->sortRequest = [this](int column, Qt::SortOrder order) {
+        if (m_sortColumn == column && m_sortOrder == order) return;
+        m_sortColumn = column; m_sortOrder = order; requestProjection();
+    };
+    connect(m_grouping, &QComboBox::currentIndexChanged, this, [this] { requestProjection(); });
+    connect(m_filter, &QLineEdit::textChanged, this, [this] { requestProjection(); });
     connect(m_table->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { selectRow(); });
     connect(m_stacks, &QComboBox::currentIndexChanged, this, [this] { selectStack(); });
     connect(m_resolve, &QPushButton::clicked, this, [this] { resolveStack(); });
@@ -282,7 +374,14 @@ PoolAllocationAnalysisWidget::PoolAllocationAnalysisWidget(QWidget* parent) : QW
     retranslate(); updateControls();
 }
 
-PoolAllocationAnalysisWidget::~PoolAllocationAnalysisWidget() { cancelJobs(); clearStackModel(); }
+PoolAllocationAnalysisWidget::~PoolAllocationAnalysisWidget() {
+    cancelJobs();if(m_projectionJob)m_projectionJob->cancel.store(true,std::memory_order_relaxed);
+    // QObject child teardown owns the models; destruction emits no reset/selection
+    // signals. Drop their heavy value owners onto workers before deleting them.
+    m_stackModel->row=nullptr;retirePoolValue(std::move(m_stackModel->owner));retirePoolValue(std::move(m_model->view));
+    retirePoolValue(std::move(m_prepared));retirePoolValue(std::move(m_result));
+    retirePoolValue(std::move(m_readJob));retirePoolValue(std::move(m_resolveJob));retirePoolValue(std::move(m_projectionJob));
+}
 
 void PoolAllocationAnalysisWidget::setOpenModuleDetails(std::function<void(const QString&)> callback) {
     m_openModuleDetails = std::move(callback); updateControls();
@@ -306,137 +405,119 @@ void PoolAllocationAnalysisWidget::analyzeFile(const QString& path) {
 }
 void PoolAllocationAnalysisWidget::startRead(const QString& path) {
     if (m_resolveJob) m_resolveJob->cancel.store(true, std::memory_order_relaxed);
-    clearStackModel(); m_result.reset(); indexResult(); m_path = path; m_symbols.clear(); m_symbolGroupId = 0; rebuildRows();
+    const QPointer<PoolAllocationAnalysisWidget> guard(this);clearProjection();if(!guard)return; m_path = path; m_symbols.clear(); m_symbolGroupId = 0;
     auto job = std::make_shared<ReadJob>(); m_readJob = job;
     const auto reader = m_reader; const auto file = path.toStdWString();
     // Worker owns only plain/shared data; it never accesses this or Qt widgets.
     try {
         std::thread([job, reader, file] {
-            try { job->result = reader(file, job->cancel); }
-            catch (const std::bad_alloc&) { job->result.status = 8; }
-            catch (...) { job->result.status = 31; }
+            TraceReadResult result;
+            try { result = reader(file, job->cancel); }
+            catch (const std::bad_alloc&) { result.status = 8; }
+            catch (...) { result.status = 31; }
+            if (job->cancel.load(std::memory_order_relaxed)) { result.cancelled = true; result.analysis.cancelled = true; }
+            try { job->result = std::make_shared<const TraceReadResult>(std::move(result)); } catch (...) {}
             job->done.store(true, std::memory_order_release);
         }).detach();
-    } catch (...) { job->result.status = 31; job->done.store(true, std::memory_order_release); }
+    } catch (...) { TraceReadResult result; result.status = 31; job->result = std::make_shared<const TraceReadResult>(std::move(result)); job->done.store(true, std::memory_order_release); }
     m_poll->start(); updateSummary(); updateControls();
 }
+
 void PoolAllocationAnalysisWidget::pollJobs() {
     if (m_readJob && m_readJob->done.load(std::memory_order_acquire)) {
-        auto job = std::move(m_readJob);
-        if (!m_pendingPath.isEmpty()) {
-            const auto path = m_pendingPath; m_pendingPath.clear(); startRead(path);
-        } else {
-            if (job->cancel.load(std::memory_order_relaxed)) {
-                job->result.cancelled = true; job->result.analysis.cancelled = true;
-            }
-            clearStackModel(); m_result = std::make_shared<const TraceReadResult>(std::move(job->result)); indexResult(); rebuildRows();
+        auto job=std::move(m_readJob);
+        if(!m_pendingPath.isEmpty()) {const auto path=m_pendingPath;m_pendingPath.clear();startRead(path);}
+        else {m_result=std::move(job->result);if(!m_result){TraceReadResult failed;failed.status=8;m_result=std::make_shared<const TraceReadResult>(std::move(failed));}requestProjection(true);}
+        retirePoolValue(std::move(job));
+    }
+    if(m_projectionJob&&m_projectionJob->done.load(std::memory_order_acquire)) {
+        // Completed values can wait while hidden. Collection and cleanup never do.
+        if(m_projectionJob->version!=m_projectionVersion||m_projectionJob->trace!=m_result)retirePoolValue(std::move(m_projectionJob));
+        else if(isVisible()) {
+            auto job=std::move(m_projectionJob);m_projectionFailed=job->failed;
+            if(job->view) {
+                const auto scroll=m_table->verticalScrollBar()->value();
+                auto old=std::move(m_prepared);m_prepared=job->view->source;m_rebuildProjection=false;
+                const QPointer<PoolAllocationAnalysisWidget> guard(this);
+                QSignalBlocker tableBlocked(m_table->selectionModel());
+                m_model->replace(job->view);if(!guard){tableBlocked.dismiss();return;}
+                m_publishedVersion=job->version;m_table->setEnabled(true);
+                if(job->view->selected>=0)m_table->selectRow(job->view->selected);
+                selectRow();if(!guard){tableBlocked.dismiss();return;}
+                m_table->verticalScrollBar()->setValue(scroll);retirePoolValue(std::move(old));
+            } else {m_publishedVersion=job->version;m_table->setEnabled(true);}
+            retirePoolValue(std::move(job));
         }
     }
-    if (m_resolveJob && m_resolveJob->done.load(std::memory_order_acquire)) {
-        auto job = std::move(m_resolveJob);
-        const auto* group = selectedGroup();
-        if (!job->cancel.load(std::memory_order_relaxed) && m_result == job->trace && group && group->groupId == job->groupId) {
-            m_symbols = std::move(job->symbols); m_symbolGroupId = job->groupId; showStack();
-        }
+    if(!m_projectionJob&&m_result&&m_publishedVersion!=m_projectionVersion&&isVisible()&&!m_projectionDebounce->isActive()) {
+        auto job=std::make_shared<ProjectionJob>();job->version=m_projectionVersion;job->trace=m_result;m_projectionJob=job;
+        const auto cached=m_rebuildProjection?std::shared_ptr<const PoolPreparedProjection>{}:m_prepared;
+        const auto text=ks::i18n::LanguageManager::instance().sourceTextSnapshot();const QLocale locale;
+        const auto mode=m_grouping->currentIndex();const auto filter=m_filter->text();const auto column=m_sortColumn;const auto order=m_sortOrder;
+        const auto* selected=selectedGroup();const auto groupId=selected?selected->groupId:0;
+        try {std::thread([job,cached,text,locale,mode,filter,column,order,groupId] {
+            try {
+                auto prepared=cached?cached:preparePoolProjection(job->trace,text,locale,job->cancel);
+                if(prepared&&!job->cancel.load(std::memory_order_relaxed))job->view=filterPoolProjection(std::move(prepared),mode,filter,column,order,groupId,job->cancel);
+            }catch(...){job->failed=true;}
+            job->done.store(true,std::memory_order_release);
+        }).detach();}catch(...){job->failed=true;job->done.store(true,std::memory_order_release);}
     }
-    if (!m_readJob && !m_resolveJob) m_poll->stop();
-    updateControls(); updateSummary();
+    if(m_resolveJob&&m_resolveJob->done.load(std::memory_order_acquire)) {
+        auto job=std::move(m_resolveJob);const auto* group=selectedGroup();
+        if(!job->cancel.load(std::memory_order_relaxed)&&m_result==job->trace&&group&&group->groupId==job->groupId) {
+            m_symbols=std::move(job->symbols);m_symbolGroupId=job->groupId;if(isVisible())showStack();
+        }
+        retirePoolValue(std::move(job));
+    }
+    if(!m_readJob&&!m_resolveJob&&(!m_projectionJob||m_projectionJob->done.load(std::memory_order_acquire))&&
+        (!isVisible()||m_publishedVersion==m_projectionVersion))m_poll->stop();
+    updateControls();updateSummary();
 }
+void PoolAllocationAnalysisWidget::requestProjection(bool rebuild) {
+    ++m_projectionVersion;m_rebuildProjection=m_rebuildProjection||rebuild;m_projectionFailed=false;
+    if(!m_result)m_publishedVersion=m_projectionVersion;
+    if(m_projectionJob)m_projectionJob->cancel.store(true,std::memory_order_relaxed);
+    m_table->setEnabled(!m_result);m_stacks->setEnabled(!m_result);m_projectionDebounce->start();m_poll->start();
+}
+void PoolAllocationAnalysisWidget::rebuildRows(){requestProjection();}
 void PoolAllocationAnalysisWidget::setResultForTesting(TraceReadResult result) {
-    cancelJobs(); m_readJob.reset(); m_resolveJob.reset(); m_symbols.clear(); m_symbolGroupId = 0;
-    clearStackModel(); m_result = std::make_shared<const TraceReadResult>(std::move(result)); indexResult(); rebuildRows(); updateSummary(); updateControls();
+    cancelJobs();retirePoolValue(std::move(m_readJob));retirePoolValue(std::move(m_resolveJob));
+    const QPointer<PoolAllocationAnalysisWidget> guard(this);clearProjection();if(!guard)return;m_symbols.clear();m_symbolGroupId=0;m_result=std::make_shared<const TraceReadResult>(std::move(result));requestProjection(true);updateSummary();updateControls();
 }
 void PoolAllocationAnalysisWidget::clearStackModel() {
-    const QSignalBlocker blocked(m_stacks);
-    m_stackModel->replace({}, &m_images, &m_kernelImages);
+    const QPointer<PoolAllocationAnalysisWidget> guard(this);QSignalBlocker blocked(m_stacks);m_stackModel->replace({},nullptr);if(!guard)blocked.dismiss();
 }
-void PoolAllocationAnalysisWidget::indexResult() {
-    m_images.clear(); m_kernelImages.clear(); m_groups.clear();
-    if (!m_result) return;
-    for (const auto& image : m_result->images) {
-        m_images.emplace(image.id, &image);
-        auto path = QString::fromStdWString(image.path); path.replace(QChar('\\'), QChar('/'));
-        const auto name = path.section(QChar('/'), -1).toLower();
-        if (name == QStringLiteral("ntoskrnl.exe") || name == QStringLiteral("ntkrnlmp.exe")
-            || name == QStringLiteral("ntkrnlpa.exe") || name == QStringLiteral("ntkrpamp.exe")
-            || name == QStringLiteral("ntkrla57.exe") || name == QStringLiteral("hal.dll")) m_kernelImages.insert(image.id);
-    }
-    for (const auto& group : m_result->analysis.groups) m_groups.emplace(group.groupId, &group);
-}
-void PoolAllocationAnalysisWidget::rebuildRows() {
-    std::vector<PoolAllocationTableModel::Row> rows;
-    std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, std::size_t> rowByKey;
-    std::vector<std::unordered_set<std::uint64_t>> rowImages;
-    if (m_result) {
-        const auto mode = m_grouping->currentIndex();
-        for (const auto& group : m_result->analysis.groups) {
-            const auto* image = sourceImage(m_images, m_kernelImages, group);
-            const auto key = mode == 0 ? std::make_tuple(static_cast<std::uint64_t>(group.tag), static_cast<std::uint64_t>(group.poolType), static_cast<std::uint64_t>(group.sessionId))
-                : mode == 1 ? std::make_tuple(group.groupId, std::uint64_t{0}, std::uint64_t{0})
-                : std::make_tuple(image ? image->id : std::uint64_t{0}, std::uint64_t{0}, std::uint64_t{0});
-            auto found = rowByKey.find(key);
-            if (found == rowByKey.end()) {
-                PoolAllocationTableModel::Row row;
-                row.source = mode == 0 ? L("Tag %1 | pool %2 | %3").arg(tagText(group.tag), N(group.poolType), sessionText(group.sessionId))
-                    : mode == 1 ? groupLabel(m_images, m_kernelImages, group)
-                    : L("Historical stack source: %1 | image %2").arg(imageLabel(image), N(image ? image->id : 0));
-                row.search = row.source + QChar(' ');
-                found = rowByKey.emplace(key, rows.size()).first; rows.push_back(std::move(row)); rowImages.emplace_back();
-            }
-            auto& row = rows[found->second]; row.groupIds.push_back(group.groupId);
-            const std::array<std::uint64_t, 8> counters{group.allocatedBytes, group.allocatedCount,
-                group.pairedFreedBytes, group.pairedFreedCount, group.outstandingBytes,
-                group.outstandingCount, group.uncertainBytes, group.uncertainCount};
-            for (std::size_t column = 0; column < counters.size(); ++column) {
-                row.saturated[column] = row.saturated[column]
-                    || counters[column] > (std::numeric_limits<std::uint64_t>::max)() - row.counters[column];
-                row.counters[column] = addSaturated(row.counters[column], counters[column]);
-            }
-            row.search += tagText(group.tag) + QChar(' ') + sessionText(group.sessionId) + QChar(' ');
-            // Keep the table projection bounded to groups and unique historical
-            // module names. The full million-frame budget is formatted only for
-            // a selected stack, avoiding a giant synchronous item/string fill.
-            for (const auto id : group.frameImageIds)
-                if (rowImages[found->second].insert(id).second)
-                    if (const auto* frameImage = imageForId(m_images, id))
-                        row.search += QString::fromStdWString(frameImage->path) + QChar(' ');
-        }
-    }
-    m_model->replace(std::move(rows));
-    if (m_proxy->rowCount() != 0) m_table->selectRow(0); else selectRow();
-    updateControls();
+void PoolAllocationAnalysisWidget::clearProjection() {
+    ++m_projectionVersion;m_publishedVersion=m_projectionVersion;
+    if(m_projectionJob)m_projectionJob->cancel.store(true,std::memory_order_relaxed);
+    const QPointer<PoolAllocationAnalysisWidget> guard(this);clearStackModel();if(!guard)return;
+    m_model->replace({});if(!guard)return;retirePoolValue(std::move(m_prepared));retirePoolValue(std::move(m_result));
+    m_modulePath.clear();m_frames->setDocument({});if(!guard)return;
+    m_rebuildProjection=false;m_projectionFailed=false;m_table->setEnabled(true);
 }
 void PoolAllocationAnalysisWidget::selectRow() {
-    const QSignalBlocker blocked(m_stacks);
-    std::vector<const Group*> groups;
-    const auto selected = m_table->selectionModel()->selectedRows();
-    if (m_result && !selected.isEmpty()) {
-        const auto ids = selected.front().data(groupIdsRole).toList();
-        for (const auto& id : ids) {
-            const auto groupId = id.toULongLong();
-            const auto it = m_groups.find(groupId);
-            if (it != m_groups.end()) groups.push_back(it->second);
-        }
-    }
-    m_stackModel->replace(std::move(groups), &m_images, &m_kernelImages);
-    selectStack();
+    const QPointer<PoolAllocationAnalysisWidget> guard(this);
+    QSignalBlocker blocked(m_stacks);
+    const auto selected=m_table->selectionModel()->selectedRows();
+    const auto* row=selected.isEmpty()?nullptr:m_model->row(selected.front().row());
+    m_stackModel->replace(m_model->view,row);if(!guard){blocked.dismiss();return;}
+    if(row&&!row->groups.empty())m_stacks->setCurrentIndex(m_model->view->selected==selected.front().row()?m_model->view->selectedStack:0);
+    selectStack();if(!guard)blocked.dismiss();
 }
-const Group* PoolAllocationAnalysisWidget::selectedGroup() const {
-    if (!m_result || m_stacks->currentIndex() < 0) return nullptr;
-    const auto id = m_stacks->currentData().toULongLong();
-    const auto it = m_groups.find(id);
-    return it == m_groups.end() ? nullptr : it->second;
+const Group* PoolAllocationAnalysisWidget::selectedGroup()const {
+    return m_stackModel->group(m_stacks->currentIndex());
 }
 void PoolAllocationAnalysisWidget::selectStack() {
     if (m_resolveJob) m_resolveJob->cancel.store(true, std::memory_order_relaxed);
-    m_symbols.clear(); m_symbolGroupId = 0; showStack(); updateControls();
+    m_symbols.clear(); m_symbolGroupId = 0; const QPointer<PoolAllocationAnalysisWidget> guard(this); showStack(); if(guard)updateControls();
 }
 void PoolAllocationAnalysisWidget::showStack() {
     m_modulePath.clear();
     const auto* group = selectedGroup();
     if (!group) { m_frames->setDocument({}); return; }
     ks::ui::FieldDocument lines;
-    lines.section(groupLabel(m_images, m_kernelImages, *group));
+    lines.section(groupLabel(m_prepared->images, m_prepared->kernelImages, *group));
     lines.field(QStringLiteral("Observed bytes / allocations"), QStringLiteral("%1 / %2").arg(N(group->allocatedBytes), N(group->allocatedCount)));
     lines.field(QStringLiteral("Paired release bytes / allocations"), QStringLiteral("%1 / %2").arg(N(group->pairedFreedBytes), N(group->pairedFreedCount)));
     lines.field(QStringLiteral("No observed free bytes / allocations"), QStringLiteral("%1 / %2").arg(N(group->outstandingBytes), N(group->outstandingCount)));
@@ -444,7 +525,7 @@ void PoolAllocationAnalysisWidget::showStack() {
     lines.field(QStringLiteral("Historical timestamp"), N(group->representativeTimestamp));
     lines.field(QStringLiteral("Event PID / TID"), QStringLiteral("%1 / %2").arg(N(group->representativePid), N(group->representativeTid)));
     if (group->stack.empty()) lines.note(L("No allocation stack was recorded for this group."));
-    if (const auto* source = sourceImage(m_images, m_kernelImages, *group)) {
+    if (const auto* source = sourceImage(m_prepared->images, m_prepared->kernelImages, *group)) {
         const auto path = QString::fromStdWString(source->path);
         if (isLocalFixedPath(path)) {
             const QFileInfo file(path);
@@ -453,7 +534,7 @@ void PoolAllocationAnalysisWidget::showStack() {
     }
     for (std::size_t frame = 0; frame < group->stack.size(); ++frame) {
         const auto address = group->stack[frame];
-        const auto* image = frame < group->frameImageIds.size() ? imageForId(m_images, group->frameImageIds[frame]) : nullptr;
+        const auto* image = frame < group->frameImageIds.size() ? imageForId(m_prepared->images, group->frameImageIds[frame]) : nullptr;
         QString origin = L("Unknown historical module");
         if (image && address >= image->base && address - image->base < image->size) {
             origin = L("%1 + %2 [image %3]").arg(QString::fromStdWString(image->path), H(address - image->base), N(image->id));
@@ -480,17 +561,19 @@ void PoolAllocationAnalysisWidget::resolveStack() {
     m_poll->start(); updateSummary(); updateControls();
 }
 void PoolAllocationAnalysisWidget::updateControls() {
-    const bool busy = m_readJob || m_resolveJob;
+    const bool busy = m_readJob || m_resolveJob || m_publishedVersion != m_projectionVersion;
     m_open->setEnabled(!m_readJob);
-    m_cancel->setEnabled(busy);
+    m_cancel->setEnabled(m_readJob || m_resolveJob);
     m_resolve->setEnabled(!busy && selectedGroup() && !selectedGroup()->stack.empty());
     m_module->setEnabled(!m_readJob && m_openModuleDetails && !m_modulePath.isEmpty());
     m_module->setToolTip(m_modulePath.isEmpty() ? L("No reliable local module path is available.") : m_modulePath);
-    m_stacks->setEnabled(m_stacks->count() > 0);
+    m_stacks->setEnabled(m_stacks->count() > 0 && m_publishedVersion == m_projectionVersion);
 }
 void PoolAllocationAnalysisWidget::updateSummary() {
-    if (m_readJob) m_status->setText(m_readJob->cancel.load() ? L("Cancelling pool trace analysis...") : L("Analyzing pool trace: %1").arg(m_path));
+    if (m_projectionFailed) m_status->setText(L("Pool table projection failed."));
+    else if (m_readJob) m_status->setText(m_readJob->cancel.load() ? L("Cancelling pool trace analysis...") : L("Analyzing pool trace: %1").arg(m_path));
     else if (m_resolveJob) m_status->setText(m_resolveJob->cancel.load() ? L("Cancelling local symbol lookup...") : L("Resolving the selected stack with local symbols only..."));
+    else if (m_result && m_publishedVersion != m_projectionVersion) m_status->setText(L("Updating pool allocation table..."));
     else if (!m_result) m_status->setText(L("Open an ETL or finish a pool allocation capture to analyze it."));
     else if (!m_result->completed || m_result->status != 0 || m_result->cancelled || m_result->timedOut)
         m_status->setText(L("Pool trace analysis is incomplete. Win32 status: %1.").arg(N(m_result->status)));
@@ -520,9 +603,15 @@ void PoolAllocationAnalysisWidget::retranslate() {
     m_grouping->setToolTip(L("Module grouping uses the first mapped stack module outside ntoskrnl and HAL, falling back to the kernel image or unknown. Every underlying stack remains available below."));
     m_filter->setPlaceholderText(L("Filter tag or historical module"));
     m_resolve->setText(L("Resolve local symbols")); m_module->setText(L("Open module details"));
-    m_model->retranslate(); rebuildRows(); updateSummary(); updateControls();
+    m_model->retranslate(); requestProjection(true); updateSummary(); updateControls();
 }
 void PoolAllocationAnalysisWidget::changeEvent(QEvent* event) {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::LanguageChange) retranslate();
+}
+
+void PoolAllocationAnalysisWidget::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    m_poll->start(); pollJobs();
+    if (m_publishedVersion == m_projectionVersion) showStack();
 }

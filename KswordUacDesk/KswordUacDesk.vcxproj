@@ -47,9 +47,11 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="UacDesk.cpp" />
+    <ClCompile Include="UacScanWorker.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="UacDesk.h" />
+    <ClInclude Include="UacScanWorker.h" />
   </ItemGroup>
   <ItemGroup>
     <QtRcc Include="KswordUacDesk.qrc" />

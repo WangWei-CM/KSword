@@ -5,6 +5,8 @@
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 
 #include <memory>
 #include "../UI/VisibleTableWidget.h"
@@ -40,6 +42,7 @@
 #include <QIODevice>
 #include <QLabel>
 #include <QLineEdit>
+#include <QTimer>
 #include <QList>
 #include <QMenu>
 #include <QMessageBox>
@@ -951,22 +954,22 @@ namespace
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_READ_FAILED ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_PARSE_FAILED)
         {
-            return KswordTheme::ErrorColor();
+            return ksword::kernel_dock_internal::ResultColors::current().ErrorColor();
         }
         if (status == KSWORD_ARK_KERNEL_HOOK_STATUS_INTERNAL_BRANCH ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
         {
-            return KswordTheme::WarningColor();
+            return ksword::kernel_dock_internal::ResultColors::current().WarningColor();
         }
         if (status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ||
             status == KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN)
         {
-            return KswordTheme::SuccessColor();
+            return ksword::kernel_dock_internal::ResultColors::current().SuccessColor();
         }
-        return KswordTheme::TextSecondaryColor();
+        return ksword::kernel_dock_internal::ResultColors::current().TextSecondaryColor();
     }
 
-    void prepareTable(QTableWidget* tableWidget)
+    void prepareTable(KernelResultTable* tableWidget)
     {
         // 作用：统一三张 Hook 表格的基础交互行为。
         // 返回：无；Qt 控件由调用方持有。
@@ -983,6 +986,11 @@ namespace
         tableWidget->setCornerButtonEnabled(false);
         tableWidget->verticalHeader()->setVisible(false);
         tableWidget->horizontalHeader()->setStyleSheet(kernelHookHeaderStyle());
+        // ResizeToContents otherwise scans every populated row on each layout.
+        // Kernel hook snapshots can contain hundreds of entries; cap the
+        // measurement sample so a tab switch cannot turn into an O(rows)
+        // synchronous relayout while retaining content-aware widths.
+        tableWidget->horizontalHeader()->setResizeContentsPrecision(100);
         tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     }
 
@@ -1294,8 +1302,8 @@ namespace
 
     template <typename RowType>
     std::vector<std::size_t> selectedSourceIndices(
-        const QTableWidget* tableWidget,
-        const std::vector<RowType>& rows,
+        const KernelResultTable* tableWidget,
+        const KernelSnapshotRows<RowType>& rows,
         const int fallbackRow)
     {
         // 作用：读取表格选中行映射的源缓存索引，支持 Ctrl 多选。
@@ -1312,7 +1320,7 @@ namespace
         for (const QModelIndex& modelIndex : selectedRows)
         {
             const QTableWidgetItem* item = tableWidget->item(modelIndex.row(), 0);
-            if (item == nullptr)
+            if (item == nullptr || ks::ui::IsTableRowExcludedByFilter(tableWidget, modelIndex.row()))
             {
                 continue;
             }
@@ -1323,7 +1331,8 @@ namespace
             }
         }
 
-        if (result.empty() && fallbackRow >= 0)
+        if (result.empty() && fallbackRow >= 0
+            && !ks::ui::IsTableRowExcludedByFilter(tableWidget, fallbackRow))
         {
             const QTableWidgetItem* item = tableWidget->item(fallbackRow, 0);
             if (item != nullptr)
@@ -1624,7 +1633,7 @@ namespace
         return row;
     }
 
-    void setTableItem(QTableWidget* tableWidget, const int row, const int column, QTableWidgetItem* item)
+    void setTableItem(KernelResultValues* tableWidget, const int row, const int column, QTableWidgetItem* item)
     {
         // 作用：统一设置不可编辑 item，降低表格构建处重复代码。
         // 返回：无；空 table/item 时直接忽略。
@@ -1675,7 +1684,13 @@ void KernelDock::initializeShadowSsdtTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_shadowSsdtPage);
     m_shadowSsdtLayout->addWidget(splitter, 1);
 
-    m_shadowSsdtTable = new ks::ui::VisibleTableWidget(splitter);
+    m_shadowSsdtTable = new KernelResultTable(splitter);
+    m_shadowSsdtTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_shadowSsdtRefreshRunning.store(false);
+        m_refreshShadowSsdtButton->setEnabled(true);
+        if (owner) m_shadowSsdtStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // Shadow SSDT 是地址完整性现场，保留快照对比。
     ks::ui::SetTableActionBarMode(m_shadowSsdtTable, ks::ui::TableActionBarMode::Full);
     m_shadowSsdtTable->setColumnCount(static_cast<int>(ShadowSsdtColumn::Count));
@@ -1701,15 +1716,19 @@ void KernelDock::initializeShadowSsdtTab()
         m_shadowSsdtTable, m_shadowSsdtDetailEditor, m_shadowSsdtPage);
 
     connect(m_refreshShadowSsdtButton, &QPushButton::clicked, this, [this]() {
+        if (m_kernelActionOperations[3] && m_kernelActionOperations[3]->isBusy()) return;
         refreshShadowSsdtAsync();
     });
-    connect(m_shadowSsdtFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildShadowSsdtTable(filterText.trimmed());
-    });
-    connect(m_shadowSsdtTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    auto* shadowSsdtFilterTimer = new QTimer(m_shadowSsdtFilterEdit);
+    shadowSsdtFilterTimer->setSingleShot(true);
+    shadowSsdtFilterTimer->setInterval(120);
+    connect(m_shadowSsdtFilterEdit, &QLineEdit::textChanged, shadowSsdtFilterTimer,
+        [shadowSsdtFilterTimer]() { shadowSsdtFilterTimer->start(); });
+    connect(shadowSsdtFilterTimer, &QTimer::timeout, this, [this]() { rebuildShadowSsdtTable(); });
+    connect(m_shadowSsdtTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showShadowSsdtDetailByCurrentRow();
     });
-    connect(m_shadowSsdtTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_shadowSsdtTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showShadowSsdtContextMenu(position);
     });
 }
@@ -1771,7 +1790,13 @@ void KernelDock::initializeInlineHookTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_inlineHookPage);
     m_inlineHookLayout->addWidget(splitter, 1);
 
-    m_inlineHookTable = new ks::ui::VisibleTableWidget(splitter);
+    m_inlineHookTable = new KernelResultTable(splitter);
+    m_inlineHookTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_inlineHookRefreshRunning.store(false);
+        m_refreshInlineHookButton->setEnabled(true);
+        if (owner) m_inlineHookStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 代码字节及目标跳转变化需要保留完整扫描快照。
     ks::ui::SetTableActionBarMode(m_inlineHookTable, ks::ui::TableActionBarMode::Full);
     m_inlineHookTable->setColumnCount(static_cast<int>(InlineHookColumn::Count));
@@ -1801,18 +1826,23 @@ void KernelDock::initializeInlineHookTab()
         m_inlineHookTable, m_inlineHookDetailEditor, m_inlineHookPage);
 
     connect(m_refreshInlineHookButton, &QPushButton::clicked, this, [this]() {
+        if (m_kernelActionOperations[4] && (m_kernelActionOperations[4]->isBusy()
+            || m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool())) return;
         refreshInlineHooksAsync();
     });
     connect(m_patchInlineHookButton, &QPushButton::clicked, this, [this]() {
         patchSelectedInlineHookWithNop();
     });
-    connect(m_inlineHookFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildInlineHookTable(filterText.trimmed());
-    });
-    connect(m_inlineHookTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    auto* inlineHookFilterTimer = new QTimer(m_inlineHookFilterEdit);
+    inlineHookFilterTimer->setSingleShot(true);
+    inlineHookFilterTimer->setInterval(120);
+    connect(m_inlineHookFilterEdit, &QLineEdit::textChanged, inlineHookFilterTimer,
+        [inlineHookFilterTimer]() { inlineHookFilterTimer->start(); });
+    connect(inlineHookFilterTimer, &QTimer::timeout, this, [this]() { rebuildInlineHookTable(); });
+    connect(m_inlineHookTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showInlineHookDetailByCurrentRow();
     });
-    connect(m_inlineHookTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_inlineHookTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showInlineHookContextMenu(position);
     });
 }
@@ -1869,7 +1899,13 @@ void KernelDock::initializeIatEatHookTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_iatEatHookPage);
     m_iatEatHookLayout->addWidget(splitter, 1);
 
-    m_iatEatHookTable = new ks::ui::VisibleTableWidget(splitter);
+    m_iatEatHookTable = new KernelResultTable(splitter);
+    m_iatEatHookTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_iatEatHookRefreshRunning.store(false);
+        m_refreshIatEatHookButton->setEnabled(true);
+        if (owner) m_iatEatHookStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 导入/导出目标地址需要对比多次扫描，保留完整工具条。
     ks::ui::SetTableActionBarMode(m_iatEatHookTable, ks::ui::TableActionBarMode::Full);
     m_iatEatHookTable->setColumnCount(static_cast<int>(IatEatHookColumn::Count));
@@ -1900,13 +1936,16 @@ void KernelDock::initializeIatEatHookTab()
     connect(m_refreshIatEatHookButton, &QPushButton::clicked, this, [this]() {
         refreshIatEatHooksAsync();
     });
-    connect(m_iatEatHookFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildIatEatHookTable(filterText.trimmed());
-    });
-    connect(m_iatEatHookTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    auto* iatEatHookFilterTimer = new QTimer(m_iatEatHookFilterEdit);
+    iatEatHookFilterTimer->setSingleShot(true);
+    iatEatHookFilterTimer->setInterval(120);
+    connect(m_iatEatHookFilterEdit, &QLineEdit::textChanged, iatEatHookFilterTimer,
+        [iatEatHookFilterTimer]() { iatEatHookFilterTimer->start(); });
+    connect(iatEatHookFilterTimer, &QTimer::timeout, this, [this]() { rebuildIatEatHookTable(); });
+    connect(m_iatEatHookTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showIatEatHookDetailByCurrentRow();
     });
-    connect(m_iatEatHookTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_iatEatHookTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showIatEatHookContextMenu(position);
     });
 }
@@ -1946,7 +1985,13 @@ void KernelDock::initializeTimerDpcTab()
 
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_timerDpcPage);
     m_timerDpcLayout->addWidget(splitter, 1);
-    m_timerDpcTable = new ks::ui::VisibleTableWidget(splitter);
+    m_timerDpcTable = new KernelResultTable(splitter);
+    m_timerDpcTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_timerDpcRefreshRunning.store(false);
+        m_refreshTimerDpcButton->setEnabled(true);
+        if (owner) m_timerDpcStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 每 CPU 定时器/DPC 是动态现场，保留完整快照比较。
     ks::ui::SetTableActionBarMode(m_timerDpcTable, ks::ui::TableActionBarMode::Full);
     m_timerDpcTable->setColumnCount(static_cast<int>(TimerDpcColumn::Count));
@@ -1969,9 +2014,14 @@ void KernelDock::initializeTimerDpcTab()
         m_timerDpcTable, m_timerDpcDetailEditor, m_timerDpcPage);
 
     connect(m_refreshTimerDpcButton, &QPushButton::clicked, this, [this]() { refreshTimerDpcAfterDynDataAsync(); });
-    connect(m_timerDpcFilterEdit, &QLineEdit::textChanged, this, [this](const QString& text) { rebuildTimerDpcTable(text.trimmed()); });
-    connect(m_timerDpcTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) { showTimerDpcDetailByCurrentRow(); });
-    connect(m_timerDpcTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showTimerDpcContextMenu(position); });
+    auto* timerDpcFilterTimer = new QTimer(m_timerDpcFilterEdit);
+    timerDpcFilterTimer->setSingleShot(true);
+    timerDpcFilterTimer->setInterval(120);
+    connect(m_timerDpcFilterEdit, &QLineEdit::textChanged, timerDpcFilterTimer,
+        [timerDpcFilterTimer]() { timerDpcFilterTimer->start(); });
+    connect(timerDpcFilterTimer, &QTimer::timeout, this, [this]() { rebuildTimerDpcTable(); });
+    connect(m_timerDpcTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() { showTimerDpcDetailByCurrentRow(); });
+    connect(m_timerDpcTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) { showTimerDpcContextMenu(position); });
 }
 
 void KernelDock::refreshShadowSsdtAsync()
@@ -2069,14 +2119,14 @@ void KernelDock::refreshShadowSsdtAsync()
                 return;
             }
 
-            guardThis->m_shadowSsdtRefreshRunning.store(false);
-            if (guardThis->m_refreshShadowSsdtButton != nullptr)
-            {
-                guardThis->m_refreshShadowSsdtButton->setEnabled(true);
-            }
-
             if (!success)
             {
+                guardThis->m_shadowSsdtRefreshRunning.store(false);
+                if (guardThis->m_refreshShadowSsdtButton != nullptr)
+                {
+                    guardThis->m_refreshShadowSsdtButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[3] || !guardThis->m_kernelActionOperations[3]->isBusy());
+                }
                 guardThis->m_shadowSsdtStatusLabel->setText(kernelText("kernel.hooks.shadow.status.failed", QStringLiteral("状态：解析失败")));
                 guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_shadowSsdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -2084,22 +2134,32 @@ void KernelDock::refreshShadowSsdtAsync()
             }
 
             guardThis->m_shadowSsdtRows = std::move(resultRows);
-            guardThis->rebuildShadowSsdtTable(guardThis->m_shadowSsdtFilterEdit->text().trimmed());
-            guardThis->m_shadowSsdtStatusLabel->setText(
-                kernelText("kernel.hooks.shadow.status.summary", QStringLiteral("状态：已解析 %1/%2 项，显示 %3 项"))
-                .arg(returnedCount)
-                .arg(totalCount)
-                .arg(guardThis->m_shadowSsdtRows.size()));
-            guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::SuccessHex()));
+            guardThis->rebuildShadowSsdtTable(true, [=]() {
+                if (!guardThis) return;
+                guardThis->m_shadowSsdtRefreshRunning.store(false);
+                if (guardThis->m_refreshShadowSsdtButton != nullptr)
+                {
+                    guardThis->m_refreshShadowSsdtButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[3] || !guardThis->m_kernelActionOperations[3]->isBusy());
+                }
 
-            if (guardThis->m_shadowSsdtTable->rowCount() > 0)
-            {
-                guardThis->m_shadowSsdtTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_shadowSsdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.shadow.empty", QStringLiteral("当前环境未返回 SSSDT stub 解析结果。"))));
-            }
+                guardThis->m_shadowSsdtStatusLabel->setText(
+                    kernelText("kernel.hooks.shadow.status.summary", QStringLiteral("状态：已解析 %1/%2 项，显示 %3 项"))
+                    .arg(returnedCount)
+                    .arg(totalCount)
+                    .arg(guardThis->m_shadowSsdtRows.size()));
+                guardThis->m_shadowSsdtStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::SuccessHex()));
+
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_shadowSsdtTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_shadowSsdtTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_shadowSsdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.shadow.empty", QStringLiteral("当前环境未返回 SSSDT stub 解析结果。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -2130,6 +2190,7 @@ void KernelDock::refreshInlineHooksAsync()
     {
         m_refreshInlineHookButton->setEnabled(false);
     }
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(false);
     if (m_inlineHookStatusLabel != nullptr)
     {
         m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.status.scanning", QStringLiteral("状态：Inline Hook 扫描中...")));
@@ -2191,14 +2252,17 @@ void KernelDock::refreshInlineHooksAsync()
                 return;
             }
 
-            guardThis->m_inlineHookRefreshRunning.store(false);
-            if (guardThis->m_refreshInlineHookButton != nullptr)
-            {
-                guardThis->m_refreshInlineHookButton->setEnabled(true);
-            }
-
             if (!success)
             {
+                guardThis->m_inlineHookRefreshRunning.store(false);
+                if (guardThis->m_patchInlineHookButton)
+                    guardThis->m_patchInlineHookButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
+                if (guardThis->m_refreshInlineHookButton != nullptr)
+                {
+                    guardThis->m_refreshInlineHookButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
+                }
                 guardThis->m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.status.failed", QStringLiteral("状态：扫描失败")));
                 guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -2220,26 +2284,39 @@ void KernelDock::refreshInlineHooksAsync()
             }
 
             guardThis->m_inlineHookRows = std::move(resultRows);
-            guardThis->rebuildInlineHookTable(guardThis->m_inlineHookFilterEdit->text().trimmed());
-            guardThis->m_inlineHookStatusLabel->setText(
-                kernelText("kernel.hooks.inline.status.summary", QStringLiteral("状态：模块=%1，总命中=%2，返回=%3，可疑=%4，内部跳转=%5，Last=%6"))
-                .arg(moduleCount)
-                .arg(totalCount)
-                .arg(guardThis->m_inlineHookRows.size())
-                .arg(suspiciousCount)
-                .arg(internalCount)
-                .arg(kernelHookFormatNtStatus(lastStatus)));
-            guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-                suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
+            guardThis->rebuildInlineHookTable(true, [=]() {
+                if (!guardThis) return;
+                guardThis->m_inlineHookRefreshRunning.store(false);
+                if (guardThis->m_patchInlineHookButton)
+                    guardThis->m_patchInlineHookButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
+                if (guardThis->m_refreshInlineHookButton != nullptr)
+                {
+                    guardThis->m_refreshInlineHookButton->setEnabled(
+                        !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
+                }
 
-            if (guardThis->m_inlineHookTable->rowCount() > 0)
-            {
-                guardThis->m_inlineHookTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.inline.empty", QStringLiteral("当前过滤条件下未返回 Inline Hook 记录。"))));
-            }
+                guardThis->m_inlineHookStatusLabel->setText(
+                    kernelText("kernel.hooks.inline.status.summary", QStringLiteral("状态：模块=%1，总命中=%2，返回=%3，可疑=%4，内部跳转=%5，Last=%6"))
+                    .arg(moduleCount)
+                    .arg(totalCount)
+                    .arg(guardThis->m_inlineHookRows.size())
+                    .arg(suspiciousCount)
+                    .arg(internalCount)
+                    .arg(kernelHookFormatNtStatus(lastStatus)));
+                guardThis->m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                    suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
+
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_inlineHookTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_inlineHookTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.inline.empty", QStringLiteral("当前过滤条件下未返回 Inline Hook 记录。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -2327,14 +2404,13 @@ void KernelDock::refreshIatEatHooksAsync()
                 return;
             }
 
-            guardThis->m_iatEatHookRefreshRunning.store(false);
-            if (guardThis->m_refreshIatEatHookButton != nullptr)
-            {
-                guardThis->m_refreshIatEatHookButton->setEnabled(true);
-            }
-
             if (!success)
             {
+                guardThis->m_iatEatHookRefreshRunning.store(false);
+                if (guardThis->m_refreshIatEatHookButton != nullptr)
+                {
+                    guardThis->m_refreshIatEatHookButton->setEnabled(true);
+                }
                 guardThis->m_iatEatHookStatusLabel->setText(kernelText("kernel.hooks.iat.status.failed", QStringLiteral("状态：扫描失败")));
                 guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_iatEatHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -2351,25 +2427,34 @@ void KernelDock::refreshIatEatHooksAsync()
             }
 
             guardThis->m_iatEatHookRows = std::move(resultRows);
-            guardThis->rebuildIatEatHookTable(guardThis->m_iatEatHookFilterEdit->text().trimmed());
-            guardThis->m_iatEatHookStatusLabel->setText(
-                kernelText("kernel.hooks.iat.status.summary", QStringLiteral("状态：模块=%1，总命中=%2，返回=%3，可疑=%4，Last=%5"))
-                .arg(moduleCount)
-                .arg(totalCount)
-                .arg(guardThis->m_iatEatHookRows.size())
-                .arg(suspiciousCount)
-                .arg(kernelHookFormatNtStatus(lastStatus)));
-            guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-                suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
+            guardThis->rebuildIatEatHookTable(true, [=]() {
+                if (!guardThis) return;
+                guardThis->m_iatEatHookRefreshRunning.store(false);
+                if (guardThis->m_refreshIatEatHookButton != nullptr)
+                {
+                    guardThis->m_refreshIatEatHookButton->setEnabled(true);
+                }
 
-            if (guardThis->m_iatEatHookTable->rowCount() > 0)
-            {
-                guardThis->m_iatEatHookTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_iatEatHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.iat.empty", QStringLiteral("当前过滤条件下未返回 IAT/EAT 记录。"))));
-            }
+                guardThis->m_iatEatHookStatusLabel->setText(
+                    kernelText("kernel.hooks.iat.status.summary", QStringLiteral("状态：模块=%1，总命中=%2，返回=%3，可疑=%4，Last=%5"))
+                    .arg(moduleCount)
+                    .arg(totalCount)
+                    .arg(guardThis->m_iatEatHookRows.size())
+                    .arg(suspiciousCount)
+                    .arg(kernelHookFormatNtStatus(lastStatus)));
+                guardThis->m_iatEatHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                    suspiciousCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
+
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_iatEatHookTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_iatEatHookTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_iatEatHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.hooks.iat.empty", QStringLiteral("当前过滤条件下未返回 IAT/EAT 记录。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -2459,13 +2544,13 @@ void KernelDock::refreshTimerDpcAsync()
             {
                 return;
             }
-            guardThis->m_timerDpcRefreshRunning.store(false);
-            if (guardThis->m_refreshTimerDpcButton != nullptr)
-            {
-                guardThis->m_refreshTimerDpcButton->setEnabled(true);
-            }
             if (!enumResult.io.ok)
             {
+                guardThis->m_timerDpcRefreshRunning.store(false);
+                if (guardThis->m_refreshTimerDpcButton != nullptr)
+                {
+                    guardThis->m_refreshTimerDpcButton->setEnabled(true);
+                }
                 guardThis->m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.failed", QStringLiteral("状态：枚举失败")));
                 guardThis->m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.error.io", QStringLiteral("KTIMER/DPC 驱动接口调用失败。\nWin32=%1\n详情=%2"))
@@ -2475,40 +2560,54 @@ void KernelDock::refreshTimerDpcAsync()
             }
 
             guardThis->m_timerDpcRows = std::move(resultRows);
-            guardThis->rebuildTimerDpcTable(guardThis->m_timerDpcFilterEdit->text().trimmed());
-            const bool complete = enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_OK && enumResult.statusFlags == 0U;
-            guardThis->m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.summary", QStringLiteral(
-                "状态：CPU=%1，Bucket=%2/%3，Timer=%4/%5，损坏=%6，读取失败=%7，重复=%8，完整性=%9"))
-                .arg(enumResult.processorCount)
-                .arg(enumResult.bucketsVisited)
-                .arg(enumResult.processorCount * enumResult.bucketCount)
-                .arg(enumResult.entries.size())
-                .arg(enumResult.totalCount)
-                .arg(enumResult.corruptBucketCount)
-                .arg(enumResult.readFailureCount)
-                .arg(enumResult.duplicateCount)
-                .arg(complete
-                    ? kernelText("kernel.timer_dpc.integrity.complete", QStringLiteral("完整"))
-                    : kernelText("kernel.timer_dpc.integrity.partial", QStringLiteral("部分"))));
-            guardThis->m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-                complete ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+            guardThis->rebuildTimerDpcTable(true, [guardThis,
+                entryCount = enumResult.entries.size(), queryStatus = enumResult.queryStatus,
+                statusFlags = enumResult.statusFlags, processorCount = enumResult.processorCount,
+                bucketsVisited = enumResult.bucketsVisited, bucketCount = enumResult.bucketCount,
+                totalCount = enumResult.totalCount, corruptBucketCount = enumResult.corruptBucketCount,
+                readFailureCount = enumResult.readFailureCount, duplicateCount = enumResult.duplicateCount]() {
+                if (!guardThis) return;
+                guardThis->m_timerDpcRefreshRunning.store(false);
+                if (guardThis->m_refreshTimerDpcButton != nullptr)
+                {
+                    guardThis->m_refreshTimerDpcButton->setEnabled(true);
+                }
 
-            if (enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_DYNDATA_MISSING)
-            {
-                guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.error.dyndata", QStringLiteral("当前 ntoskrnl 的 DynData v4 Timer/DPC 布局不可用。请确认偏移包已匹配并下发到驱动。"))));
-            }
-            else if (enumResult.queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_INVALID_LAYOUT)
-            {
-                guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.error.layout", QStringLiteral("驱动拒绝了当前 Timer/DPC 布局，未读取 TimerTable。"))));
-            }
-            else if (guardThis->m_timerDpcTable->rowCount() > 0)
-            {
-                guardThis->m_timerDpcTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.empty", QStringLiteral("当前快照未返回活动 KTIMER 记录。"))));
-            }
+                const bool complete = queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_OK && statusFlags == 0U;
+                guardThis->m_timerDpcStatusLabel->setText(kernelText("kernel.timer_dpc.status.summary", QStringLiteral(
+                    "状态：CPU=%1，Bucket=%2/%3，Timer=%4/%5，损坏=%6，读取失败=%7，重复=%8，完整性=%9"))
+                    .arg(processorCount)
+                    .arg(bucketsVisited)
+                    .arg(processorCount * bucketCount)
+                    .arg(entryCount)
+                    .arg(totalCount)
+                    .arg(corruptBucketCount)
+                    .arg(readFailureCount)
+                    .arg(duplicateCount)
+                    .arg(complete
+                        ? kernelText("kernel.timer_dpc.integrity.complete", QStringLiteral("完整"))
+                        : kernelText("kernel.timer_dpc.integrity.partial", QStringLiteral("部分"))));
+                guardThis->m_timerDpcStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                    complete ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_timerDpcTable);
+                if (queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_DYNDATA_MISSING)
+                {
+                    guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.error.dyndata", QStringLiteral("当前 ntoskrnl 的 DynData v4 Timer/DPC 布局不可用。请确认偏移包已匹配并下发到驱动。"))));
+                }
+                else if (queryStatus == KSWORD_ARK_TIMER_DPC_QUERY_STATUS_INVALID_LAYOUT)
+                {
+                    guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.error.layout", QStringLiteral("驱动拒绝了当前 Timer/DPC 布局，未读取 TimerTable。"))));
+                }
+                else if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_timerDpcTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.timer_dpc.empty", QStringLiteral("当前快照未返回活动 KTIMER 记录。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -2543,200 +2642,211 @@ void KernelDock::refreshTimerDpcAfterDynDataAsync()
     refreshDynDataAsync();
 }
 
-void KernelDock::rebuildShadowSsdtTable(const QString& filterKeyword)
+void KernelDock::rebuildShadowSsdtTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_shadowSsdtTable == nullptr)
     {
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_shadowSsdtDetailEditor);
-
-    m_shadowSsdtTable->setSortingEnabled(false);
-    m_shadowSsdtTable->setRowCount(0);
-
-    for (std::size_t sourceIndex = 0U; sourceIndex < m_shadowSsdtRows.size(); ++sourceIndex)
+    const auto searchFields = [](const KernelSsdtEntry& entry) {
+        QStringList columns;
+        for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
+            columns.push_back(shadowSsdtColumnText(entry, static_cast<ShadowSsdtColumn>(column)));
+        return QStringList{columns.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged && m_shadowSsdtTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        const KernelSsdtEntry& entry = m_shadowSsdtRows[sourceIndex];
-        QStringList matchFields;
-        for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
-        {
-            matchFields.push_back(shadowSsdtColumnText(entry, static_cast<ShadowSsdtColumn>(column)));
-        }
-        const bool matched = filterKeyword.isEmpty() || matchFields.join(' ').contains(filterKeyword, Qt::CaseInsensitive) || entry.detailDocument.toPlainText(true).contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        const int rowIndex = m_shadowSsdtTable->rowCount();
-        m_shadowSsdtTable->insertRow(rowIndex);
-        for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
-        {
-            auto* item = new QTableWidgetItem(shadowSsdtColumnText(entry, static_cast<ShadowSsdtColumn>(column)));
-            if (column == 0)
-            {
-                item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            }
-            setTableItem(m_shadowSsdtTable, rowIndex, column, item);
-        }
+        applyKernelResultFilterAsync(m_shadowSsdtTable, m_shadowSsdtFilterEdit);
+        return;
     }
 
-    m_shadowSsdtTable->setSortingEnabled(true);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_shadowSsdtDetailEditor);
+
+    publishKernelResultRows(m_shadowSsdtTable, m_shadowSsdtRows.size(),
+        [rows = m_shadowSsdtRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelSsdtEntry& entry = rows[sourceIndex];
+            QStringList matchFields;
+            for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
+            {
+                matchFields.push_back(shadowSsdtColumnText(entry, static_cast<ShadowSsdtColumn>(column)));
+            }
+            const int rowIndex = static_cast<int>(sourceIndex);
+            for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
+            {
+                auto* item = new QTableWidgetItem(matchFields.at(column));
+                if (column == 0)
+                {
+                    item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+                    item->setData(KernelSearchFieldsRole, QStringList{matchFields.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))});
+                }
+                setTableItem(&values, rowIndex, column, item);
+            }
+        }, []() {}, std::move(onReady), sourceChanged, m_shadowSsdtFilterEdit);
 }
 
-void KernelDock::rebuildInlineHookTable(const QString& filterKeyword)
+void KernelDock::rebuildInlineHookTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_inlineHookTable == nullptr)
     {
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_inlineHookDetailEditor);
-
-    m_inlineHookTable->setSortingEnabled(false);
-    m_inlineHookTable->setRowCount(0);
-
-    for (std::size_t sourceIndex = 0U; sourceIndex < m_inlineHookRows.size(); ++sourceIndex)
+    const auto searchFields = [](const KernelInlineHookEntry& entry) {
+        QStringList columns;
+        for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
+            columns.push_back(inlineHookColumnText(entry, static_cast<InlineHookColumn>(column)));
+        return QStringList{columns.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged && m_inlineHookTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        const KernelInlineHookEntry& entry = m_inlineHookRows[sourceIndex];
-        QStringList matchFields;
-        for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
-        {
-            matchFields.push_back(inlineHookColumnText(entry, static_cast<InlineHookColumn>(column)));
-        }
-        const bool matched = filterKeyword.isEmpty() || matchFields.join(' ').contains(filterKeyword, Qt::CaseInsensitive) || entry.detailDocument.toPlainText(true).contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        const int rowIndex = m_inlineHookTable->rowCount();
-        m_inlineHookTable->insertRow(rowIndex);
-        for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
-        {
-            auto* item = new QTableWidgetItem(inlineHookColumnText(entry, static_cast<InlineHookColumn>(column)));
-            if (column == 0)
-            {
-                item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            }
-            if (column == static_cast<int>(InlineHookColumn::Status))
-            {
-                item->setForeground(QBrush(statusColor(entry.status)));
-            }
-            if (column == static_cast<int>(InlineHookColumn::DiskDiff))
-            {
-                if (!entry.diskBaselineAvailable)
-                {
-                    item->setForeground(QBrush(KswordTheme::WarningColor()));
-                }
-                else
-                {
-                    item->setForeground(QBrush(entry.diskBaselineDiffers
-                        ? KswordTheme::ErrorColor()
-                        : KswordTheme::SuccessColor()));
-                }
-            }
-            setTableItem(m_inlineHookTable, rowIndex, column, item);
-        }
+        applyKernelResultFilterAsync(m_inlineHookTable, m_inlineHookFilterEdit);
+        return;
     }
 
-    m_inlineHookTable->setSortingEnabled(true);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_inlineHookDetailEditor);
+
+    publishKernelResultRows(m_inlineHookTable, m_inlineHookRows.size(),
+        [rows = m_inlineHookRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelInlineHookEntry& entry = rows[sourceIndex];
+            QStringList matchFields;
+            for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
+            {
+                matchFields.push_back(inlineHookColumnText(entry, static_cast<InlineHookColumn>(column)));
+            }
+            const int rowIndex = static_cast<int>(sourceIndex);
+            for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
+            {
+                auto* item = new QTableWidgetItem(matchFields.at(column));
+                if (column == 0)
+                {
+                    item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+                    item->setData(KernelSearchFieldsRole, QStringList{matchFields.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))});
+                }
+                if (column == static_cast<int>(InlineHookColumn::Status))
+                {
+                    item->setForeground(QBrush(statusColor(entry.status)));
+                }
+                if (column == static_cast<int>(InlineHookColumn::DiskDiff))
+                {
+                    if (!entry.diskBaselineAvailable)
+                    {
+                        item->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningColor()));
+                    }
+                    else
+                    {
+                        item->setForeground(QBrush(entry.diskBaselineDiffers
+                            ? ksword::kernel_dock_internal::ResultColors::current().ErrorColor()
+                            : ksword::kernel_dock_internal::ResultColors::current().SuccessColor()));
+                    }
+                }
+                setTableItem(&values, rowIndex, column, item);
+            }
+        }, []() {}, std::move(onReady), sourceChanged, m_inlineHookFilterEdit);
 }
 
-void KernelDock::rebuildIatEatHookTable(const QString& filterKeyword)
+void KernelDock::rebuildIatEatHookTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_iatEatHookTable == nullptr)
     {
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_iatEatHookDetailEditor);
-
-    m_iatEatHookTable->setSortingEnabled(false);
-    m_iatEatHookTable->setRowCount(0);
-
-    for (std::size_t sourceIndex = 0U; sourceIndex < m_iatEatHookRows.size(); ++sourceIndex)
+    const auto searchFields = [](const KernelIatEatHookEntry& entry) {
+        QStringList columns;
+        for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
+            columns.push_back(iatEatColumnText(entry, static_cast<IatEatHookColumn>(column)));
+        return QStringList{columns.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged && m_iatEatHookTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        const KernelIatEatHookEntry& entry = m_iatEatHookRows[sourceIndex];
-        QStringList matchFields;
-        for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
-        {
-            matchFields.push_back(iatEatColumnText(entry, static_cast<IatEatHookColumn>(column)));
-        }
-        const bool matched = filterKeyword.isEmpty() || matchFields.join(' ').contains(filterKeyword, Qt::CaseInsensitive) || entry.detailDocument.toPlainText(true).contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        const int rowIndex = m_iatEatHookTable->rowCount();
-        m_iatEatHookTable->insertRow(rowIndex);
-        for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
-        {
-            auto* item = new QTableWidgetItem(iatEatColumnText(entry, static_cast<IatEatHookColumn>(column)));
-            if (column == 0)
-            {
-                item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            }
-            if (column == static_cast<int>(IatEatHookColumn::Status))
-            {
-                item->setForeground(QBrush(statusColor(entry.status)));
-            }
-            setTableItem(m_iatEatHookTable, rowIndex, column, item);
-        }
+        applyKernelResultFilterAsync(m_iatEatHookTable, m_iatEatHookFilterEdit);
+        return;
     }
 
-    m_iatEatHookTable->setSortingEnabled(true);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_iatEatHookDetailEditor);
+
+    publishKernelResultRows(m_iatEatHookTable, m_iatEatHookRows.size(),
+        [rows = m_iatEatHookRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelIatEatHookEntry& entry = rows[sourceIndex];
+            QStringList matchFields;
+            for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
+            {
+                matchFields.push_back(iatEatColumnText(entry, static_cast<IatEatHookColumn>(column)));
+            }
+            const int rowIndex = static_cast<int>(sourceIndex);
+            for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
+            {
+                auto* item = new QTableWidgetItem(matchFields.at(column));
+                if (column == 0)
+                {
+                    item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+                    item->setData(KernelSearchFieldsRole, QStringList{matchFields.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))});
+                }
+                if (column == static_cast<int>(IatEatHookColumn::Status))
+                {
+                    item->setForeground(QBrush(statusColor(entry.status)));
+                }
+                setTableItem(&values, rowIndex, column, item);
+            }
+        }, []() {}, std::move(onReady), sourceChanged, m_iatEatHookFilterEdit);
 }
 
-void KernelDock::rebuildTimerDpcTable(const QString& filterKeyword)
+void KernelDock::rebuildTimerDpcTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_timerDpcTable == nullptr)
     {
         return;
     }
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_timerDpcDetailEditor);
-    m_timerDpcTable->setSortingEnabled(false);
-    m_timerDpcTable->setRowCount(0);
-    for (std::size_t sourceIndex = 0U; sourceIndex < m_timerDpcRows.size(); ++sourceIndex)
+    const auto searchFields = [](const KernelTimerDpcEntry& entry) {
+        QStringList columns;
+        for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+            columns.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
+        return QStringList{columns.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged && m_timerDpcTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        const KernelTimerDpcEntry& entry = m_timerDpcRows[sourceIndex];
-        QStringList fields;
-        for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
-        {
-            fields.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
-        }
-        if (!filterKeyword.isEmpty() &&
-            !fields.join(' ').contains(filterKeyword, Qt::CaseInsensitive) &&
-            !entry.detailDocument.toPlainText(true).contains(filterKeyword, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const int rowIndex = m_timerDpcTable->rowCount();
-        m_timerDpcTable->insertRow(rowIndex);
-        for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
-        {
-            auto* item = new QTableWidgetItem(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
-            if (column == 0)
-            {
-                item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            }
-            if (column == static_cast<int>(TimerDpcColumn::Status))
-            {
-                const bool partial = (entry.flags & KSWORD_ARK_TIMER_DPC_ENTRY_READ_PARTIAL) != 0U;
-                item->setForeground(QBrush(partial ? KswordTheme::WarningColor() : KswordTheme::SuccessColor()));
-            }
-            setTableItem(m_timerDpcTable, rowIndex, column, item);
-        }
+        applyKernelResultFilterAsync(m_timerDpcTable, m_timerDpcFilterEdit);
+        return;
     }
-    m_timerDpcTable->setSortingEnabled(true);
+
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_timerDpcDetailEditor);
+    publishKernelResultRows(m_timerDpcTable, m_timerDpcRows.size(),
+        [rows = m_timerDpcRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelTimerDpcEntry& entry = rows[sourceIndex];
+            QStringList fields;
+            for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+            {
+                fields.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
+            }
+            const int rowIndex = static_cast<int>(sourceIndex);
+            for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
+            {
+                auto* item = new QTableWidgetItem(fields.at(column));
+                if (column == 0)
+                {
+                    item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+                    item->setData(KernelSearchFieldsRole, QStringList{fields.join(' '), entry.detailDocument.toPlainText(std::function<QString(const QString&)>([](const QString& text) { return ksword::kernel_dock_internal::resultTexts->displayText(text); }))});
+                }
+                if (column == static_cast<int>(TimerDpcColumn::Status))
+                {
+                    const bool partial = (entry.flags & KSWORD_ARK_TIMER_DPC_ENTRY_READ_PARTIAL) != 0U;
+                    item->setForeground(QBrush(partial ? ksword::kernel_dock_internal::ResultColors::current().WarningColor() : ksword::kernel_dock_internal::ResultColors::current().SuccessColor()));
+                }
+                setTableItem(&values, rowIndex, column, item);
+            }
+        }, []() {}, std::move(onReady), sourceChanged, m_timerDpcFilterEdit);
 }
 
 bool KernelDock::currentShadowSsdtSourceIndex(std::size_t& sourceIndexOut) const
 {
     sourceIndexOut = 0U;
-    if (m_shadowSsdtTable == nullptr || m_shadowSsdtTable->currentRow() < 0)
+    if (m_shadowSsdtTable == nullptr || m_shadowSsdtTable->currentRow() < 0
+        || ks::ui::IsTableRowExcludedByFilter(m_shadowSsdtTable, m_shadowSsdtTable->currentRow()))
     {
         return false;
     }
@@ -2752,7 +2862,8 @@ bool KernelDock::currentShadowSsdtSourceIndex(std::size_t& sourceIndexOut) const
 bool KernelDock::currentInlineHookSourceIndex(std::size_t& sourceIndexOut) const
 {
     sourceIndexOut = 0U;
-    if (m_inlineHookTable == nullptr || m_inlineHookTable->currentRow() < 0)
+    if (m_inlineHookTable == nullptr || m_inlineHookTable->currentRow() < 0
+        || ks::ui::IsTableRowExcludedByFilter(m_inlineHookTable, m_inlineHookTable->currentRow()))
     {
         return false;
     }
@@ -2768,7 +2879,8 @@ bool KernelDock::currentInlineHookSourceIndex(std::size_t& sourceIndexOut) const
 bool KernelDock::currentIatEatHookSourceIndex(std::size_t& sourceIndexOut) const
 {
     sourceIndexOut = 0U;
-    if (m_iatEatHookTable == nullptr || m_iatEatHookTable->currentRow() < 0)
+    if (m_iatEatHookTable == nullptr || m_iatEatHookTable->currentRow() < 0
+        || ks::ui::IsTableRowExcludedByFilter(m_iatEatHookTable, m_iatEatHookTable->currentRow()))
     {
         return false;
     }
@@ -2823,6 +2935,19 @@ void KernelDock::showShadowSsdtDetailByCurrentRow()
 
 void KernelDock::restoreSelectedShadowSsdtBaseline()
 {
+    auto& slot = m_kernelActionOperations[3];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot] {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_shadowSsdtRefreshRunning.load();
+            if (m_refreshShadowSsdtButton) m_refreshShadowSsdtButton->setEnabled(!busy && !scanning);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation(slot);
+    if (m_shadowSsdtRefreshRunning.load() || operation->isBusy()) return;
+    const QPointer<KernelDock> owner(this);
     const KernelSsdtEntry* selected = currentShadowSsdtEntry();
     if (selected == nullptr
         || !selected->cleanBaselineAvailable
@@ -2845,19 +2970,7 @@ void KernelDock::restoreSelectedShadowSsdtBaseline()
     }
 
     const KernelSsdtEntry snapshot = *selected;
-    const ksword::ark::DriverClient client;
-    const ksword::ark::KernelInlinePatchResult preflight =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            0UL);
-    if (!preflight.io.ok
-        || preflight.status
-            != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
-    {
+    const auto showPreflightFailure = [this](const ksword::ark::KernelInlinePatchResult& preflight) {
         QMessageBox::critical(
             this,
             kernelText(
@@ -2873,97 +2986,131 @@ void KernelDock::restoreSelectedShadowSsdtBaseline()
                     8,
                     16,
                     QChar('0')));
-        return;
-    }
+    };
+    const auto applyResult = [this, owner, snapshot](const ksword::ark::KernelInlinePatchResult& applied, std::uint64_t) {
+        if (!applied.io.ok
+            || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
+            || applied.bytesPatched != snapshot.tableEntrySize)
+        {
+            QMessageBox::critical(
+                this,
+                kernelText(
+                    "kernel.hooks.shadow.restore.title",
+                    QStringLiteral("ShadowSSDT 槽位恢复")),
+                kernelText(
+                    "kernel.hooks.shadow.restore.failed",
+                    QStringLiteral(
+                        "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
+                    .arg(applied.io.win32Error)
+                    .arg(applied.status)
+                    .arg(static_cast<unsigned long>(applied.lastStatus),
+                        8,
+                        16,
+                        QChar('0'))
+                    .arg(applied.bytesPatched));
+            if (owner) refreshShadowSsdtAsync();
+            return true;
+        }
 
-    const QMessageBox::StandardButton warning =
-        QMessageBox::warning(
-            this,
-            kernelText(
-                "kernel.hooks.shadow.restore.warning.title",
-                QStringLiteral("高风险图形系统调用表恢复")),
-            kernelText(
-                "kernel.hooks.shadow.restore.warning.body",
-                QStringLiteral(
-                    "即将把 ShadowSSDT[%1] 从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
-                    "R0 写入前会再次逐字节比较当前值；任何并发变化都会拒绝操作。"
-                    "错误恢复可能立即导致图形会话或系统崩溃。\n\n映像：%4"))
-                .arg(snapshot.serviceIndex)
-                .arg(static_cast<qulonglong>(snapshot.currentTableValue),
-                    0,
-                    16)
-                .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
-                    0,
-                    16)
-                .arg(snapshot.cleanBaselinePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-    if (warning != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    bool accepted = false;
-    const QString confirmation = QInputDialog::getText(
-        this,
-        kernelText(
-            "kernel.hooks.shadow.restore.confirm.title",
-            QStringLiteral("最终确认")),
-        kernelText(
-            "kernel.hooks.shadow.restore.confirm.prompt",
-            QStringLiteral("请输入 RESTORE SHADOW SSDT 继续：")),
-        QLineEdit::Normal,
-        QString(),
-        &accepted);
-    if (!accepted
-        || confirmation.trimmed()
-            != QStringLiteral("RESTORE SHADOW SSDT"))
-    {
-        return;
-    }
-
-    const ksword::ark::KernelInlinePatchResult applied =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    if (!applied.io.ok
-        || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
-        || applied.bytesPatched != snapshot.tableEntrySize)
-    {
-        QMessageBox::critical(
+        QMessageBox::information(
             this,
             kernelText(
                 "kernel.hooks.shadow.restore.title",
                 QStringLiteral("ShadowSSDT 槽位恢复")),
             kernelText(
-                "kernel.hooks.shadow.restore.failed",
+                "kernel.hooks.shadow.restore.success",
                 QStringLiteral(
-                    "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
-                .arg(applied.io.win32Error)
-                .arg(applied.status)
-                .arg(static_cast<unsigned long>(applied.lastStatus),
-                    8,
-                    16,
-                    QChar('0'))
-                .arg(applied.bytesPatched));
-        refreshShadowSsdtAsync();
-        return;
-    }
+                    "槽位已按验证基线恢复，并已触发重新扫描。")));
+        if (owner) refreshShadowSsdtAsync();
+        return true;
+    };
+    operation->submit<KernelSsdtEntry, ksword::ark::KernelInlinePatchResult>(snapshot,
+        [](const KernelSsdtEntry& value, const ks::ui::AsyncOperationToken&) {
+            const ksword::ark::DriverClient client;
+            return client.patchInlineHook(value.tableEntryAddress,
+                KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES, value.tableEntrySize,
+                value.currentTableBytes, value.cleanTableBytes, 0UL);
+        },
+        [this, owner, operation, snapshot, showPreflightFailure, applyResult](const ksword::ark::KernelInlinePatchResult& preflight, std::uint64_t ticket) {
+            if (!preflight.io.ok || preflight.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+            {
+                showPreflightFailure(preflight);
+                return true;
+            }
+            const QMessageBox::StandardButton warning =
+                QMessageBox::warning(
+                    this,
+                    kernelText(
+                        "kernel.hooks.shadow.restore.warning.title",
+                        QStringLiteral("高风险图形系统调用表恢复")),
+                    kernelText(
+                        "kernel.hooks.shadow.restore.warning.body",
+                        QStringLiteral(
+                            "即将把 ShadowSSDT[%1] 从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
+                            "R0 写入前会再次逐字节比较当前值；任何并发变化都会拒绝操作。"
+                            "错误恢复可能立即导致图形会话或系统崩溃。\n\n映像：%4"))
+                        .arg(snapshot.serviceIndex)
+                        .arg(static_cast<qulonglong>(snapshot.currentTableValue),
+                            0,
+                            16)
+                        .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
+                            0,
+                            16)
+                        .arg(snapshot.cleanBaselinePath),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+            if (!owner || !operation || !operation->isCurrent(ticket)) return true;
+            if (warning != QMessageBox::Yes)
+            {
+                return true;
+            }
 
-    QMessageBox::information(
-        this,
-        kernelText(
-            "kernel.hooks.shadow.restore.title",
-            QStringLiteral("ShadowSSDT 槽位恢复")),
-        kernelText(
-            "kernel.hooks.shadow.restore.success",
-            QStringLiteral(
-                "槽位已按验证基线恢复，并已触发重新扫描。")));
-    refreshShadowSsdtAsync();
+            bool accepted = false;
+            const QString confirmation = QInputDialog::getText(
+                this,
+                kernelText(
+                    "kernel.hooks.shadow.restore.confirm.title",
+                    QStringLiteral("最终确认")),
+                kernelText(
+                    "kernel.hooks.shadow.restore.confirm.prompt",
+                    QStringLiteral("请输入 RESTORE SHADOW SSDT 继续：")),
+                QLineEdit::Normal,
+                QString(),
+                &accepted);
+            if (!owner || !operation || !operation->isCurrent(ticket)) return true;
+            if (!accepted
+                || confirmation.trimmed()
+                    != QStringLiteral("RESTORE SHADOW SSDT"))
+            {
+                return true;
+            }
+
+            // Keep this controller busy through both nested confirmations and the
+            // queued handoff; complete only after apply has entered awaitingCommit.
+            QTimer::singleShot(0, this, [this, owner, operation, snapshot, ticket, applyResult] {
+                if (!owner || !operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!owner || !operation || operation->isBusy()) return;
+                operation->submitTransaction<KernelSsdtEntry, ksword::ark::KernelInlinePatchResult>(snapshot,
+                    [](const KernelSsdtEntry& value) {
+                        const ksword::ark::DriverClient client;
+                        return client.patchInlineHook(value.tableEntryAddress,
+                            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES, value.tableEntrySize,
+                            value.currentTableBytes, value.cleanTableBytes, KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
+                    }, applyResult,
+                    [applyResult](std::exception_ptr) {
+                        ksword::ark::KernelInlinePatchResult failed{};
+                        failed.io.win32Error = ERROR_GEN_FAILURE;
+                        applyResult(failed, 0);
+                    });
+            });
+            return false;
+        },
+        [showPreflightFailure](std::exception_ptr) {
+            ksword::ark::KernelInlinePatchResult failed{};
+            failed.io.win32Error = ERROR_GEN_FAILURE;
+            showPreflightFailure(failed);
+        });
 }
 
 void KernelDock::showInlineHookDetailByCurrentRow()
@@ -2988,8 +3135,11 @@ void KernelDock::showIatEatHookDetailByCurrentRow()
 
 void KernelDock::showTimerDpcDetailByCurrentRow()
 {
-    if (m_timerDpcDetailEditor == nullptr || m_timerDpcTable == nullptr || m_timerDpcTable->currentRow() < 0)
+    if (m_timerDpcDetailEditor == nullptr || m_timerDpcTable == nullptr) return;
+    if (m_timerDpcTable->currentRow() < 0
+        || ks::ui::IsTableRowExcludedByFilter(m_timerDpcTable, m_timerDpcTable->currentRow()))
     {
+        m_timerDpcDetailEditor->setDocument(ks::ui::FieldDocument{});
         return;
     }
     const QTableWidgetItem* item = m_timerDpcTable->item(m_timerDpcTable->currentRow(), 0);
@@ -3011,11 +3161,11 @@ void KernelDock::showTimerDpcContextMenu(const QPoint& localPosition)
         return;
     }
     QTableWidgetItem* clickedItem = m_timerDpcTable->itemAt(localPosition);
-    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : m_timerDpcTable->currentRow();
-    if (clickedItem != nullptr && !clickedItem->isSelected())
+    const int clickedRow = clickedItem != nullptr ? m_timerDpcTable->indexAt(localPosition).row() : m_timerDpcTable->currentRow();
+    if (clickedItem != nullptr && !m_timerDpcTable->selectionModel()->isSelected(m_timerDpcTable->indexAt(localPosition)))
     {
         m_timerDpcTable->clearSelection();
-        m_timerDpcTable->setCurrentItem(clickedItem);
+        m_timerDpcTable->setCurrentCell(clickedRow, 0);
         m_timerDpcTable->selectRow(clickedRow);
     }
     const std::vector<std::size_t> selectedIndices = selectedSourceIndices(
@@ -3066,12 +3216,12 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
     }
 
     QTableWidgetItem* clickedItem = m_shadowSsdtTable->itemAt(localPosition);
-    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : -1;
+    const int clickedRow = clickedItem != nullptr ? m_shadowSsdtTable->indexAt(localPosition).row() : -1;
     const int clickedColumn = m_shadowSsdtTable->columnAt(localPosition.x());
-    if (clickedItem != nullptr && !clickedItem->isSelected())
+    if (clickedItem != nullptr && !m_shadowSsdtTable->selectionModel()->isSelected(m_shadowSsdtTable->indexAt(localPosition)))
     {
         m_shadowSsdtTable->clearSelection();
-        m_shadowSsdtTable->setCurrentItem(clickedItem);
+        m_shadowSsdtTable->setCurrentCell(clickedRow, 0);
         m_shadowSsdtTable->selectRow(clickedRow);
     }
 
@@ -3087,8 +3237,12 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
             "kernel.hooks.shadow.menu.restore",
             QStringLiteral("恢复选中槽位为磁盘基线")));
     const KernelSsdtEntry* currentEntry = currentShadowSsdtEntry();
+    refreshAction->setEnabled(!m_shadowSsdtRefreshRunning.load()
+        && (!m_kernelActionOperations[3] || !m_kernelActionOperations[3]->isBusy()));
     restoreAction->setEnabled(
-        currentEntry != nullptr
+        !m_shadowSsdtRefreshRunning.load()
+        && (!m_kernelActionOperations[3] || !m_kernelActionOperations[3]->isBusy())
+        && currentEntry != nullptr
         && currentEntry->cleanBaselineAvailable
         && currentEntry->cleanBaselineDiffers
         && selectedIndices.size() == 1U);
@@ -3139,6 +3293,7 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == refreshAction)
     {
+        if (m_kernelActionOperations[3] && m_kernelActionOperations[3]->isBusy()) return;
         refreshShadowSsdtAsync();
         return;
     }
@@ -3234,12 +3389,12 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     }
 
     QTableWidgetItem* clickedItem = m_inlineHookTable->itemAt(localPosition);
-    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : -1;
+    const int clickedRow = clickedItem != nullptr ? m_inlineHookTable->indexAt(localPosition).row() : -1;
     const int clickedColumn = m_inlineHookTable->columnAt(localPosition.x());
-    if (clickedItem != nullptr && !clickedItem->isSelected())
+    if (clickedItem != nullptr && !m_inlineHookTable->selectionModel()->isSelected(m_inlineHookTable->indexAt(localPosition)))
     {
         m_inlineHookTable->clearSelection();
-        m_inlineHookTable->setCurrentItem(clickedItem);
+        m_inlineHookTable->setCurrentCell(clickedRow, 0);
         m_inlineHookTable->selectRow(clickedRow);
     }
 
@@ -3250,7 +3405,11 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.hooks.inline.menu.rescan", QStringLiteral("重新扫描 Inline Hook")));
     QAction* patchAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), kernelText("kernel.hooks.inline.menu.patch_current", QStringLiteral("NOP 摘除当前 Hook")));
-    patchAction->setEnabled(hasSelection);
+    const bool actionReady = !m_inlineHookRefreshRunning.load()
+        && (!m_kernelActionOperations[4] || (!m_kernelActionOperations[4]->isBusy()
+            && !m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool()));
+    refreshAction->setEnabled(actionReady);
+    patchAction->setEnabled(hasSelection && actionReady);
     const bool hasSingleInlineHook = selectedIndices.size() == 1U && selectedIndices.front() < m_inlineHookRows.size();
     const QString inlineHookDiskPath = hasSingleInlineHook
         ? m_inlineHookRows[selectedIndices.front()].diskBaselinePathText.trimmed()
@@ -3311,6 +3470,8 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == refreshAction)
     {
+        if (m_kernelActionOperations[4] && (m_kernelActionOperations[4]->isBusy()
+            || m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool())) return;
         refreshInlineHooksAsync();
         return;
     }
@@ -3391,12 +3552,12 @@ void KernelDock::showIatEatHookContextMenu(const QPoint& localPosition)
     }
 
     QTableWidgetItem* clickedItem = m_iatEatHookTable->itemAt(localPosition);
-    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : -1;
+    const int clickedRow = clickedItem != nullptr ? m_iatEatHookTable->indexAt(localPosition).row() : -1;
     const int clickedColumn = m_iatEatHookTable->columnAt(localPosition.x());
-    if (clickedItem != nullptr && !clickedItem->isSelected())
+    if (clickedItem != nullptr && !m_iatEatHookTable->selectionModel()->isSelected(m_iatEatHookTable->indexAt(localPosition)))
     {
         m_iatEatHookTable->clearSelection();
-        m_iatEatHookTable->setCurrentItem(clickedItem);
+        m_iatEatHookTable->setCurrentCell(clickedRow, 0);
         m_iatEatHookTable->selectRow(clickedRow);
     }
 
@@ -3499,6 +3660,20 @@ void KernelDock::showIatEatHookContextMenu(const QPoint& localPosition)
 
 void KernelDock::patchSelectedInlineHookWithNop()
 {
+    auto& slot = m_kernelActionOperations[4];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot] {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_inlineHookRefreshRunning.load();
+            if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(!busy && !scanning);
+            if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(!busy && !scanning);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation(slot);
+    if (m_inlineHookRefreshRunning.load() || operation->isBusy() || operation->property("kernel_hook_action_confirming").toBool()) return;
+    const QPointer<KernelDock> owner(this);
     const KernelInlineHookEntry* entry = currentInlineHookEntry();
     if (entry == nullptr)
     {
@@ -3506,6 +3681,8 @@ void KernelDock::patchSelectedInlineHookWithNop()
         return;
     }
 
+    const KernelInlineHookEntry snapshot = *entry;
+    entry = &snapshot;
     const std::uint32_t patchBytes = inlineHookPatchLength(entry->hookType, entry->currentByteCount);
     if (patchBytes == 0U)
     {
@@ -3516,6 +3693,9 @@ void KernelDock::patchSelectedInlineHookWithNop()
         return;
     }
 
+    operation->setProperty("kernel_hook_action_confirming", true);
+    if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(false);
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(false);
     const QMessageBox::StandardButton firstConfirm = QMessageBox::warning(
         this,
         kernelText("kernel.hooks.inline.patch.confirm.title", QStringLiteral("Inline Hook 摘除确认")),
@@ -3527,99 +3707,132 @@ void KernelDock::patchSelectedInlineHookWithNop()
         .arg(patchBytes),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
+    if (!owner || !operation) return;
+    operation->setProperty("kernel_hook_action_confirming", false);
+    if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(!m_inlineHookRefreshRunning.load());
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(!m_inlineHookRefreshRunning.load());
     if (firstConfirm != QMessageBox::Yes)
     {
         return;
     }
 
-    ksword::ark::DriverClient driverClient;
-    ksword::ark::KernelInlinePatchResult patchResult = driverClient.patchInlineHook(
-        entry->functionAddress,
-        KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH,
-        patchBytes,
-        entry->currentBytes,
-        {},
-        0UL);
-    if (!patchResult.io.ok)
-    {
+    struct PatchRequest {
+        KernelInlineHookEntry snapshot;
+        std::uint32_t patchBytes;
+        unsigned long flags;
+    };
+    const auto worker = [](const PatchRequest& value) {
+        const ksword::ark::DriverClient client;
+        return client.patchInlineHook(value.snapshot.functionAddress,
+            KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH, value.patchBytes,
+            value.snapshot.currentBytes, {}, value.flags);
+    };
+    const auto showRequestFailure = [this](const ksword::ark::KernelInlinePatchResult& patchResult) {
         QMessageBox::warning(
             this,
             kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")),
             kernelText("kernel.hooks.inline.patch.request_failed", QStringLiteral("普通摘除请求失败：\n%1")).arg(friendlyKernelHookIoMessage(patchResult.io.message)));
-        return;
-    }
-
-    if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
-    {
-        QMessageBox warningBox(this);
-        warningBox.setIcon(QMessageBox::Warning);
-        warningBox.setWindowTitle(kernelText("kernel.hooks.inline.patch.force.title", QStringLiteral("强制 Inline Hook 摘除")));
-        warningBox.setText(kernelText("kernel.hooks.inline.patch.force.rejected", QStringLiteral("R0 已拒绝普通内核补丁请求。")));
-        warningBox.setInformativeText(
-            kernelText("kernel.hooks.inline.patch.force.message", QStringLiteral("目标函数: %1!%2\n地址: %3\n补丁长度: %4 字节\nR0状态: %5\nLastStatus: %6\n\n强制继续会修改内核代码页，只应在确认目标和字节快照无误时使用。"))
-            .arg(kernelHookSafeText(entry->moduleNameText))
-            .arg(kernelHookSafeText(entry->functionNameText))
-            .arg(kernelHookFormatAddress(entry->functionAddress))
-            .arg(patchBytes)
+    };
+    const auto applyResult = [this, owner, snapshot](const ksword::ark::KernelInlinePatchResult& patchResult, std::uint64_t) {
+        const QString resultText = kernelText("kernel.hooks.inline.patch.result", QStringLiteral(
+            "Inline Hook 摘除结果\n"
+            "函数: %1!%2\n"
+            "地址: %3\n"
+            "状态: %4\n"
+            "写入字节: %5\n"
+            "LastStatus: %6\n"
+            "R3信息: %7"))
+            .arg(kernelHookSafeText(snapshot.moduleNameText))
+            .arg(kernelHookSafeText(snapshot.functionNameText))
+            .arg(kernelHookFormatAddress(snapshot.functionAddress))
             .arg(kernelHookStatusText(patchResult.status))
-            .arg(kernelHookFormatNtStatus(patchResult.lastStatus)));
-        warningBox.setStandardButtons(QMessageBox::Cancel);
-        warningBox.setDefaultButton(QMessageBox::Cancel);
-        QPushButton* forceButton = warningBox.addButton(kernelText("kernel.hooks.inline.patch.force.continue", QStringLiteral("强制继续")), QMessageBox::DestructiveRole);
-        warningBox.exec();
-        if (warningBox.clickedButton() != forceButton)
+            .arg(patchResult.bytesPatched)
+            .arg(kernelHookFormatNtStatus(patchResult.lastStatus))
+            .arg(friendlyKernelHookIoMessage(patchResult.io.message));
+
+        if (m_inlineHookDetailEditor != nullptr)
         {
-            if (m_inlineHookStatusLabel != nullptr)
-            {
-                m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.force.cancelled", QStringLiteral("状态：用户取消强制 Inline Hook 摘除")));
-            }
-            return;
+            m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(resultText));
+        }
+        if (!owner) return true;
+        if (m_inlineHookStatusLabel != nullptr)
+        {
+            m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.status", QStringLiteral("状态：%1，写入 %2 字节"))
+                .arg(kernelHookStatusText(patchResult.status))
+                .arg(patchResult.bytesPatched));
+            if (!owner) return true;
+            m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
         }
 
-        patchResult = driverClient.patchInlineHook(
-            entry->functionAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH,
-            patchBytes,
-            entry->currentBytes,
-            {},
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    }
+        if (!owner) return true;
+        if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED)
+        {
+            refreshInlineHooksAsync();
+        }
+        else
+        {
+            QMessageBox::warning(this, kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")), resultText);
+        }
+        return true;
+    };
+    operation->submitTransaction<PatchRequest, ksword::ark::KernelInlinePatchResult>(PatchRequest{snapshot, patchBytes, 0UL}, worker,
+        [this, owner, operation, snapshot, patchBytes, worker, applyResult, showRequestFailure](const ksword::ark::KernelInlinePatchResult& patchResult, std::uint64_t ticket) {
+            if (!patchResult.io.ok) { showRequestFailure(patchResult); return true; }
+            if (patchResult.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+                return applyResult(patchResult, ticket);
+            const QPointer<QMessageBox> warningBox(new QMessageBox(this));
+            warningBox->setIcon(QMessageBox::Warning);
+            warningBox->setWindowTitle(kernelText("kernel.hooks.inline.patch.force.title", QStringLiteral("强制 Inline Hook 摘除")));
+            warningBox->setText(kernelText("kernel.hooks.inline.patch.force.rejected", QStringLiteral("R0 已拒绝普通内核补丁请求。")));
+            warningBox->setInformativeText(
+                kernelText("kernel.hooks.inline.patch.force.message", QStringLiteral("目标函数: %1!%2\n地址: %3\n补丁长度: %4 字节\nR0状态: %5\nLastStatus: %6\n\n强制继续会修改内核代码页，只应在确认目标和字节快照无误时使用。"))
+                .arg(kernelHookSafeText(snapshot.moduleNameText))
+                .arg(kernelHookSafeText(snapshot.functionNameText))
+                .arg(kernelHookFormatAddress(snapshot.functionAddress))
+                .arg(patchBytes)
+                .arg(kernelHookStatusText(patchResult.status))
+                .arg(kernelHookFormatNtStatus(patchResult.lastStatus)));
+            warningBox->setStandardButtons(QMessageBox::Cancel);
+            warningBox->setDefaultButton(QMessageBox::Cancel);
+            QPushButton* forceButton = warningBox->addButton(kernelText("kernel.hooks.inline.patch.force.continue", QStringLiteral("强制继续")), QMessageBox::DestructiveRole);
+            warningBox->exec();
+            if (!owner || !operation || !warningBox) return true;
+            const bool forceAccepted = warningBox->clickedButton() == forceButton;
+            warningBox->deleteLater();
+            if (!operation->isCurrent(ticket)) return true;
+            if (!forceAccepted)
+            {
+                if (m_inlineHookStatusLabel != nullptr)
+                {
+                    m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.force.cancelled", QStringLiteral("状态：用户取消强制 Inline Hook 摘除")));
+                }
+                return true;
+            }
 
-    const QString resultText = kernelText("kernel.hooks.inline.patch.result", QStringLiteral(
-        "Inline Hook 摘除结果\n"
-        "函数: %1!%2\n"
-        "地址: %3\n"
-        "状态: %4\n"
-        "写入字节: %5\n"
-        "LastStatus: %6\n"
-        "R3信息: %7"))
-        .arg(kernelHookSafeText(entry->moduleNameText))
-        .arg(kernelHookSafeText(entry->functionNameText))
-        .arg(kernelHookFormatAddress(entry->functionAddress))
-        .arg(kernelHookStatusText(patchResult.status))
-        .arg(patchResult.bytesPatched)
-        .arg(kernelHookFormatNtStatus(patchResult.lastStatus))
-        .arg(friendlyKernelHookIoMessage(patchResult.io.message));
-
-    if (m_inlineHookDetailEditor != nullptr)
-    {
-        m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(resultText));
-    }
-    if (m_inlineHookStatusLabel != nullptr)
-    {
-        m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.status", QStringLiteral("状态：%1，写入 %2 字节"))
-            .arg(kernelHookStatusText(patchResult.status))
-            .arg(patchResult.bytesPatched));
-        m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-            patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
-    }
-
-    if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED)
-    {
-        refreshInlineHooksAsync();
-    }
-    else
-    {
-        QMessageBox::warning(this, kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")), resultText);
-    }
+            QTimer::singleShot(0, this, [this, owner, operation, snapshot, patchBytes, ticket, worker, applyResult] {
+                if (!owner || !operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!owner || !operation || operation->isBusy()) return;
+                operation->submitTransaction<PatchRequest, ksword::ark::KernelInlinePatchResult>(
+                    PatchRequest{snapshot, patchBytes, KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE}, worker, applyResult,
+                    [applyResult](std::exception_ptr failure) {
+                        ksword::ark::KernelInlinePatchResult failed{};
+                        failed.io.win32Error = ERROR_GEN_FAILURE;
+                        try { if (failure) std::rethrow_exception(failure); }
+                        catch (const std::exception& error) { failed.io.message = error.what(); }
+                        catch (...) {}
+                        applyResult(failed, 0);
+                    });
+            });
+            return false;
+        },
+        [showRequestFailure](std::exception_ptr failure) {
+            ksword::ark::KernelInlinePatchResult failed{};
+            failed.io.win32Error = ERROR_GEN_FAILURE;
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { failed.io.message = error.what(); }
+            catch (...) {}
+            showRequestFailure(failed);
+        });
 }

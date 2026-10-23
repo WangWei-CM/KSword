@@ -11,6 +11,8 @@
 #include <shellapi.h>
 
 #include "../Internationalization/LanguageManager.h"
+#include "../UI/CoordinatedApplicationQuit.h"
+#include "../../../shared/crash/WinCrashHandler.h"
 
 namespace ks::ui
 {
@@ -104,11 +106,12 @@ namespace ks::ui
             return false;
         }
 
-        const QStringList argumentList = QCoreApplication::arguments();
+        const QStringList argumentList = ArgumentsWithRestartPredecessorWait(
+            QCoreApplication::arguments(), QCoreApplication::applicationPid());
         QStringList parameterList;
         for (int index = 1; index < argumentList.size(); ++index)
         {
-            parameterList.push_back(quoteWindowsArgument(argumentList.at(index)));
+            parameterList.push_back(QuoteCoordinatedRestartArgument(argumentList.at(index)));
         }
         if (!parameterList.contains(QStringLiteral("\"--ksword-privilege-restart\""), Qt::CaseInsensitive))
         {
@@ -117,17 +120,24 @@ namespace ks::ui
 
         const std::wstring executablePath = QCoreApplication::applicationFilePath().toStdWString();
         const std::wstring parameterText = parameterList.join(QLatin1Char(' ')).toStdWString();
-        const HINSTANCE result = ::ShellExecuteW(
-            parent != nullptr ? reinterpret_cast<HWND>(parent->winId()) : nullptr,
-            L"runas",
-            executablePath.c_str(),
-            parameterText.empty() ? nullptr : parameterText.c_str(),
-            nullptr,
-            SW_SHOWNORMAL);
-        if (reinterpret_cast<INT_PTR>(result) <= 32)
+        const QPointer<QWidget> parentGuard(parent);
+        RequestCoordinatedApplicationRestart([parentGuard, executablePath, parameterText]()
+        {
+        SHELLEXECUTEINFOW launch{};
+        launch.cbSize = sizeof(launch);
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        launch.hwnd = parentGuard ? reinterpret_cast<HWND>(parentGuard->winId()) : nullptr;
+        launch.lpVerb = L"runas";
+        launch.lpFile = executablePath.c_str();
+        launch.lpParameters = parameterText.empty() ? nullptr : parameterText.c_str();
+        launch.nShow = SW_SHOWNORMAL;
+        const bool created = ::ShellExecuteExW(&launch) != FALSE;
+        const bool validChild = created && ks::crash::ValidateRestartChildProcess(launch.hProcess);
+        if (launch.hProcess) ::CloseHandle(launch.hProcess);
+        if (!validChild)
         {
             QMessageBox::warning(
-                parent,
+                parentGuard.data(),
                 ks::i18n::text(
                     QStringLiteral("privilege.admin_required.restart_failed.title"),
                     QStringLiteral("管理员重启失败")),
@@ -136,8 +146,8 @@ namespace ks::ui
                     QStringLiteral("管理员重启未启动，可能被取消或被系统策略阻止。")));
             return false;
         }
-
-        QCoreApplication::quit();
+        return true;
+        });
         return false;
     }
 

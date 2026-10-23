@@ -86,18 +86,18 @@ namespace ksword::memwb
 
         // 第一步：收集受影响的旧块。起点 <= start 的块里只有紧邻前一个可能碰到范围；
         // 起点在 (start, endExclusive] 内的块都算（起点恰为终点即相邻）。
-        std::vector<PatchMap::iterator> affected;
-        PatchMap::iterator scan = patches_.upper_bound(start);
-        if (scan != patches_.begin())
+        std::vector<PatchMap::const_iterator> affected;
+        PatchMap::const_iterator scan = state_->patches_.upper_bound(start);
+        if (scan != state_->patches_.begin())
         {
-            PatchMap::iterator previous = std::prev(scan);
+            PatchMap::const_iterator previous = std::prev(scan);
             if (BlockEnd(previous->second) >= start)
             {
                 affected.push_back(previous);
             }
         }
 
-        while (scan != patches_.end() && scan->first <= endExclusive)
+        while (scan != state_->patches_.end() && scan->first <= endExclusive)
         {
             affected.push_back(scan);
             ++scan;
@@ -105,7 +105,7 @@ namespace ksword::memwb
 
         // 旧块总字节数，换表时要从总量里扣掉。
         std::uint64_t oldBytes = 0;
-        for (const PatchMap::iterator& entry : affected)
+        for (const PatchMap::const_iterator& entry : affected)
         {
             oldBytes += static_cast<std::uint64_t>(entry->second.after.size());
         }
@@ -169,25 +169,28 @@ namespace ksword::memwb
             newBytes += static_cast<std::uint64_t>(run.after.size());
         }
 
-        const std::uint64_t newTotal = pendingBytes_ - oldBytes + newBytes;
+        const std::uint64_t newTotal = state_->pendingBytes_ - oldBytes + newBytes;
         if (newTotal > maxTotal)
         {
             return false;
         }
 
+        Detach();
+        ++mutationSerial_;
+
         // 第六步：换表。先删旧块，再放新块，最后更新总量。
-        for (const PatchMap::iterator& entry : affected)
+        for (const PatchMap::const_iterator& entry : affected)
         {
-            patches_.erase(entry);
+            state_->patches_.erase(entry->first);
         }
 
         for (DiffBlock& run : runs)
         {
             const std::uint64_t key = run.address;
-            patches_.emplace(key, std::move(run));
+            state_->patches_.emplace(key, std::move(run));
         }
 
-        pendingBytes_ = newTotal;
+        state_->pendingBytes_ = newTotal;
         return true;
     }
 
@@ -208,28 +211,28 @@ namespace ksword::memwb
         }
 
         // 3. 必须完整落在窗口内。先比较偏移再减长度，全程不会回绕。
-        const std::uint64_t windowSize = static_cast<std::uint64_t>(baseline_.size());
-        const bool inWindow = hasBaseline_
-            && address >= baseAddress_
-            && address - baseAddress_ <= windowSize
-            && length <= windowSize - (address - baseAddress_);
+        const std::uint64_t windowSize = static_cast<std::uint64_t>(state_->baseline_.size());
+        const bool inWindow = state_->hasBaseline_
+            && address >= state_->baseAddress_
+            && address - state_->baseAddress_ <= windowSize
+            && length <= windowSize - (address - state_->baseAddress_);
         if (!inWindow)
         {
             return StageStatus::OutOfWindow;
         }
 
         // 4. 范围内每个字节都必须真实读到过：不能编辑从没读到的字节。
-        const std::size_t startIndex = static_cast<std::size_t>(address - baseAddress_);
+        const std::size_t startIndex = static_cast<std::size_t>(address - state_->baseAddress_);
         for (std::size_t offset = 0; offset < bytes.size(); ++offset)
         {
-            if (validMask_[startIndex + offset] == 0)
+            if (state_->validMask_[startIndex + offset] == 0)
             {
                 return StageStatus::UnreadBytes;
             }
         }
 
         // 5. 单次就比上限大，没必要往下拼块（也避免临时分配一大块内存）。
-        if (length > maxPendingBytes_)
+        if (length > state_->maxPendingBytes_)
         {
             return StageStatus::TooLarge;
         }
@@ -238,7 +241,7 @@ namespace ksword::memwb
         const std::uint64_t start = address;
         const ByteRule rule = [this, &bytes, start](std::uint64_t at, const ByteState& old) -> ByteState
         {
-            const std::uint8_t baselineByte = baseline_[static_cast<std::size_t>(at - baseAddress_)];
+            const std::uint8_t baselineByte = state_->baseline_[static_cast<std::size_t>(at - state_->baseAddress_)];
             const std::uint8_t incoming = bytes[static_cast<std::size_t>(at - start)];
 
             // 空操作编辑不留痕。
@@ -256,7 +259,7 @@ namespace ksword::memwb
         };
 
         // 6. 套引擎；合并后总量超限则整次拒绝。
-        if (!RewriteRange(address, address + length, rule, maxPendingBytes_))
+        if (!RewriteRange(address, address + length, rule, state_->maxPendingBytes_))
         {
             return StageStatus::TooLarge;
         }
@@ -274,14 +277,16 @@ namespace ksword::memwb
             return 0;
         }
 
+        Detach();
+        ++mutationSerial_;
         using PatchMap = std::map<std::uint64_t, DiffBlock>;
         const std::uint64_t endExclusive = address + length;
 
         // 收集与范围真正重叠的块：起点 <= address 的前一个块要看它的终点是否越过 address，
         // 起点在 (address, endExclusive) 内的块必然重叠。
         std::vector<PatchMap::iterator> hit;
-        PatchMap::iterator scan = patches_.upper_bound(address);
-        if (scan != patches_.begin())
+        PatchMap::iterator scan = state_->patches_.upper_bound(address);
+        if (scan != state_->patches_.begin())
         {
             PatchMap::iterator previous = std::prev(scan);
             if (BlockEnd(previous->second) > address)
@@ -290,7 +295,7 @@ namespace ksword::memwb
             }
         }
 
-        while (scan != patches_.end() && scan->first < endExclusive)
+        while (scan != state_->patches_.end() && scan->first < endExclusive)
         {
             hit.push_back(scan);
             ++scan;
@@ -301,7 +306,7 @@ namespace ksword::memwb
         for (const PatchMap::iterator& entry : hit)
         {
             DiffBlock block = std::move(entry->second);
-            patches_.erase(entry);
+            state_->patches_.erase(entry);
 
             // 被丢弃的交集 = [max(块起点, address), min(块终点, endExclusive))。
             const std::uint64_t blockEnd = BlockEnd(block);
@@ -314,7 +319,7 @@ namespace ksword::memwb
             {
                 DiffBlock head = SliceBlock(block, 0, address - block.address);
                 const std::uint64_t key = head.address;
-                patches_.emplace(key, std::move(head));
+                state_->patches_.emplace(key, std::move(head));
             }
 
             // 右侧残留：块终点在 endExclusive 之后。
@@ -322,19 +327,21 @@ namespace ksword::memwb
             {
                 DiffBlock tail = SliceBlock(block, endExclusive - block.address, blockEnd - endExclusive);
                 const std::uint64_t key = tail.address;
-                patches_.emplace(key, std::move(tail));
+                state_->patches_.emplace(key, std::move(tail));
             }
         }
 
-        pendingBytes_ -= removed;
+        state_->pendingBytes_ -= removed;
         return removed;
     }
 
     // 丢弃全部补丁。
     void MemoryDiffOverlay::DiscardAll()
     {
-        patches_.clear();
-        pendingBytes_ = 0;
+        Detach();
+        ++mutationSerial_;
+        state_->patches_.clear();
+        state_->pendingBytes_ = 0;
     }
 
     // 写事务确认写入并回读后调用，语义见头文件。
@@ -398,10 +405,10 @@ namespace ksword::memwb
                 continue;
             }
 
-            const std::size_t index = static_cast<std::size_t>(at - baseAddress_);
-            baseline_[index] = readBackBytes[static_cast<std::size_t>(at - start)];
-            validMask_[index] = 1;
-            selfWritten_[index] = 1;
+            const std::size_t index = static_cast<std::size_t>(at - state_->baseAddress_);
+            state_->baseline_[index] = readBackBytes[static_cast<std::size_t>(at - start)];
+            state_->validMask_[index] = 1;
+            state_->selfWritten_[index] = 1;
         }
 
         return AcceptWriteStatus::Ok;

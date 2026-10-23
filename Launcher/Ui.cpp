@@ -2,6 +2,8 @@
 
 #include <commctrl.h>
 #include <strsafe.h>
+#include <exception>
+#include <thread>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -11,6 +13,7 @@ namespace {
 #ifndef TDCBF_OK
 #define TDCBF_OK 0x0001
 #endif
+constexpr wchar_t kObserverOwner[] = L"ksword_launcher_observer_owner";
 constexpr int kMainButton = 1001;
 constexpr int kLightButton = 1002;
 constexpr int kIgnoreButton = 1003;
@@ -43,6 +46,7 @@ LRESULT CALLBACK CheckingWndProc(HWND window, UINT message, WPARAM wParam, LPARA
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams));
     }
     if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
+    if (message == WM_NCDESTROY) RemovePropW(window, kObserverOwner);
     if (message == WM_DESTROY) return 0;
     return DefWindowProcW(window, message, wParam, lParam);
 }
@@ -158,6 +162,7 @@ void ShowCheckingWindow(const std::wstring& text, HWND* output) {
     }
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"Ksword Launcher", WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 520, 150, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!window) return;
+    SetPropW(window, kObserverOwner, reinterpret_cast<HANDLE>(output));
     HWND label = CreateWindowW(L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 45, 480, 35, window, nullptr, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
     RECT work = {}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -175,6 +180,7 @@ void CloseCheckingWindow(HWND window) {
 void ShowCollectionProgress(bool chinese, CollectionProgress* progress) {
     if (!progress) return;
     *progress = {};
+    progress->state = std::make_shared<CollectionProgressState>();
     INITCOMMONCONTROLSEX init = { sizeof(init), ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&init);
     static const wchar_t kClassName[] = L"KswordLauncherCheckingWindow";
@@ -195,6 +201,7 @@ void ShowCollectionProgress(bool chinese, CollectionProgress* progress) {
         WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
         nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!window) return;
+    SetPropW(window, kObserverOwner, reinterpret_cast<HANDLE>(progress));
     HWND label = CreateWindowW(L"STATIC", chinese ? L"准备采集…" : L"Preparing collection...",
         WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 35, 480, 30, window, nullptr,
         GetModuleHandleW(nullptr), nullptr);
@@ -214,21 +221,79 @@ void ShowCollectionProgress(bool chinese, CollectionProgress* progress) {
 }
 
 void UpdateCollectionProgress(CollectionProgress* progress, int percent, const std::wstring& text) {
-    if (!progress || !progress->window) return;
-    if (progress->label) SetWindowTextW(progress->label, text.c_str());
+    // Called by the collection worker. Never read or call its GUI HWND fields.
+    if (!progress || !progress->state) return;
+    std::lock_guard<std::mutex> lock(progress->state->mutex);
     const int position = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
-    if (progress->bar) SendMessageW(progress->bar, PBM_SETPOS, static_cast<WPARAM>(position), 0);
-    UpdateWindow(progress->window);
-    MSG message = {};
-    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+    if (progress->state->percent == position && progress->state->text == text) return;
+    progress->state->percent = position;
+    progress->state->text = text;
+    ++progress->state->revision;
+}
+
+bool IsLauncherObserverAlive(HWND window, const void* owner) {
+    return !window || (IsWindow(window)
+        && GetPropW(window, kObserverOwner) == reinterpret_cast<HANDLE>(const_cast<void*>(owner)));
+}
+
+void PresentCollectionProgress(CollectionProgress* progress) {
+    if (!progress || !progress->state || !progress->window
+        || !IsLauncherObserverAlive(progress->window, progress)) return;
+    int position = 0;
+    std::wstring text;
+    {
+        std::lock_guard<std::mutex> lock(progress->state->mutex);
+        if (progress->appliedRevision == progress->state->revision) return;
+        progress->appliedRevision = progress->state->revision;
+        position = progress->state->percent;
+        text = progress->state->text;
     }
+    if (progress->label) SetWindowTextW(progress->label, text.c_str());
+    if (progress->bar) SendMessageW(progress->bar, PBM_SETPOS, static_cast<WPARAM>(position), 0);
+}
+
+bool RunLauncherValueTask(std::function<void()> work,
+    const std::function<void()>& present, const std::function<bool()>& observerAlive) {
+    std::exception_ptr failure;
+    std::thread worker([operation = std::move(work), &failure]() {
+        try { operation(); } catch (...) { failure = std::current_exception(); }
+    });
+    const HANDLE completed = worker.native_handle();
+    bool closed = false;
+    bool quit = false;
+    int exitCode = 0;
+    for (;;) {
+        if (!observerAlive()) closed = true;
+        if (!closed) present();
+        const DWORD result = MsgWaitForMultipleObjectsEx(1, &completed, 16,
+            QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (result == WAIT_OBJECT_0) break;
+        MSG message = {};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                quit = true;
+                exitCode = static_cast<int>(message.wParam);
+                closed = true;
+                continue;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    // The native thread is already signaled: join cannot wait for collection
+    // I/O or value destruction after the task body reports completion.
+    worker.join();
+    if (!observerAlive()) closed = true;
+    if (!closed) present();
+    if (quit) PostQuitMessage(exitCode);
+    if (failure) std::rethrow_exception(failure);
+    return !closed;
 }
 
 void CloseCollectionProgress(CollectionProgress* progress) {
     if (!progress) return;
-    if (progress->window) DestroyWindow(progress->window);
+    if (progress->window && IsLauncherObserverAlive(progress->window, progress))
+        DestroyWindow(progress->window);
     *progress = {};
     MSG message = {};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {

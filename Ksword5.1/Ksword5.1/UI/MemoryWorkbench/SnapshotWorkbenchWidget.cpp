@@ -1,3 +1,4 @@
+#include "../MemoryPageNavigationSchema.h"
 #include "SnapshotWorkbenchWidget.h"
 #include "../PageControlStyle.h"
 #include "../ToolbarMetrics.h"
@@ -37,6 +38,7 @@
 #include <QShortcut>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <limits>
@@ -106,7 +108,7 @@ namespace ks::ui
         m_hex = new HexView(m_tabs);
         m_hex->setBytesPerRow(16);
         m_hex->setStatusBarVisible(false);
-        m_tabs->addTab(m_hex, trText(QStringLiteral("十六进制")));
+        addNavigationTab(0, m_hex);
         auto* codePage = new QWidget(m_tabs);
         auto* codeLayout = new QVBoxLayout(codePage);
         codeLayout->setContentsMargins(0, 0, 0, 0);
@@ -126,15 +128,15 @@ namespace ks::ui
         m_disassembly = new WorkbenchDisasmView(codePage);
         m_disassembly->setObjectName(QStringLiteral("memory_instruction_canvas"));
         codeLayout->addWidget(m_disassembly, 1);
-        m_tabs->addTab(codePage, trText(QStringLiteral("反汇编")));
+        addNavigationTab(1, codePage);
         m_text = new WorkbenchTextView(m_tabs);
         m_text->setObjectName(QStringLiteral("memory_text_canvas"));
         m_text->setBytesProvider(&m_bytesProvider);
-        m_tabs->addTab(m_text, trText(QStringLiteral("文本")));
+        addNavigationTab(2, m_text);
         // 比较页复用正式虚拟模型，不再维护旧的分页 QTableWidget 副本。
         m_comparison = new WorkbenchCompareView(m_tabs);
         m_comparison->setBytesProvider(&m_bytesProvider);
-        m_tabs->addTab(m_comparison, trText(QStringLiteral("对比")));
+        addNavigationTab(3, m_comparison);
         layout->addWidget(m_tabs, 1);
         initializePseudocodeView();
 
@@ -160,7 +162,11 @@ namespace ks::ui
             m_tabs->setCurrentIndex(0);
             jumpToAddress(address);
         });
-        connect(m_hex, &HexView::byteEdited, this, [this]() { refreshFromHexEditor(); });
+        connect(m_hex, &HexView::bytesEdited, this,
+            [this](quint64 address, quint64 length, bool complete) {
+                if (complete) refreshEditedRange(address, length);
+                else refreshFromHexEditor();
+            });
         connect(m_hex, &HexView::caretMoved, this, [this](std::uint64_t address) {
             if (!m_syncing)
             {
@@ -351,6 +357,7 @@ namespace ks::ui
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         // 换源意图先领代次，再使所有比较索引失效；reset 的观察者可重入换源或销毁宿主。
         const auto previousRevision = ++m_snapshotRevision;
+        ++m_comparisonRevision;
         m_comparison->reset();
         if (!alive || previousRevision != m_snapshotRevision) return;
         invalidatePseudocode(true);
@@ -382,6 +389,7 @@ namespace ks::ui
         m_observed = bytes;
         m_base = base;
         m_original = bytes;
+        m_changeSummary = {};
         m_disassembly->reset();
         if (!alive || previousRevision != m_snapshotRevision) return;
         m_text->reset();
@@ -440,7 +448,9 @@ namespace ks::ui
         if (!alive || revision != m_snapshotRevision) return;
         m_disassembly->invalidateEditContext();
         ++m_snapshotRevision;
+        ++m_comparisonRevision;
         m_original = m_observed = data();
+        m_changeSummary = {};
         m_history.reset();
         if (m_previousRead.size() == m_original.size())
         {
@@ -462,6 +472,8 @@ namespace ks::ui
         ++m_snapshotRevision;
         m_history.reset();
         m_observed = m_original;
+        m_changeSummary = {};
+        ++m_comparisonRevision;
         m_hex->setBuffer(m_base, m_original);
         jumpToAddress(address);
         refreshFromHexEditor();
@@ -470,12 +482,14 @@ namespace ks::ui
     {
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         const auto revision = ++m_snapshotRevision; // 清空意图也要取消所有旧行和在途来源动作。
+        ++m_comparisonRevision;
         m_comparison->reset();
         if (!alive || revision != m_snapshotRevision) return;
         invalidatePseudocode(true);
         if (!alive || revision != m_snapshotRevision) return;
         m_original.clear();
         m_observed.clear();
+        m_changeSummary = {};
         m_previousRead.clear();
         m_recentChanges.clear();
         m_sourceIdentity.clear();
@@ -493,16 +507,62 @@ namespace ks::ui
     }
     void SnapshotWorkbenchWidget::refreshFromHexEditor()
     {
+        refreshFromHexEditorImpl(0, static_cast<std::size_t>(data().size()), false);
+    }
+
+    void SnapshotWorkbenchWidget::refreshEditedRange(std::uint64_t address, std::uint64_t length)
+    {
+        const auto size = static_cast<std::uint64_t>(data().size());
+        if (address < m_base || address - m_base > size || length > size - (address - m_base)
+            || m_observed.size() != data().size() || m_original.size() != data().size())
+        {
+            refreshFromHexEditor();
+            return;
+        }
+        refreshFromHexEditorImpl(static_cast<std::size_t>(address - m_base),
+            static_cast<std::size_t>(length), true);
+    }
+
+    void SnapshotWorkbenchWidget::recountChanges(const QByteArray& bytes)
+    {
+        m_changeSummary = {};
+        if (bytes.size() != m_original.size()) return;
+        const auto* baseline = reinterpret_cast<const std::uint8_t*>(m_original.constData());
+        const auto result = detail::MemoryEditHistory::updateDifferenceSummary({}, baseline, baseline,
+            reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size()),
+            0, static_cast<std::size_t>(bytes.size()));
+        if (result) m_changeSummary = *result;
+    }
+
+    void SnapshotWorkbenchWidget::refreshFromHexEditorImpl(std::size_t offset, std::size_t count, bool knownRange)
+    {
         const auto bytes = data();
-        if (bytes != m_observed)
+        const auto* before = reinterpret_cast<const std::uint8_t*>(m_observed.constData());
+        const auto* after = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        const bool changed = knownRange ? !std::equal(before + offset, before + offset + count, after + offset)
+            : bytes != m_observed;
+        if (changed)
         {
             // Snapshot sizes are invariant for staged editing. External owners
             // must use setSnapshot to load a different range.
             if (bytes.size() == m_observed.size())
-                m_history.record(reinterpret_cast<const std::uint8_t*>(m_observed.constData()),
-                    reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size()));
-            else m_history.reset();
+            {
+                m_history.recordRange(before, after, static_cast<std::size_t>(bytes.size()), offset, count);
+                const auto summary = bytes.size() == m_original.size()
+                    ? detail::MemoryEditHistory::updateDifferenceSummary(m_changeSummary,
+                        reinterpret_cast<const std::uint8_t*>(m_original.constData()), before, after,
+                        static_cast<std::size_t>(bytes.size()), offset, count)
+                    : std::nullopt;
+                if (summary) m_changeSummary = *summary;
+                else recountChanges(bytes);
+            }
+            else
+            {
+                m_history.reset();
+                recountChanges(bytes);
+            }
             m_observed = bytes;
+            ++m_comparisonRevision;
             ++m_snapshotRevision;
             const QPointer<SnapshotWorkbenchWidget> alive(this);
             invalidatePseudocode();
@@ -556,7 +616,9 @@ namespace ks::ui
         const auto address = selectedAddress();
         m_disassembly->invalidateEditContext();
         const QByteArray restored(reinterpret_cast<const char*>(result->data()), static_cast<qsizetype>(result->size()));
+        recountChanges(restored);
         m_observed = restored;
+        ++m_comparisonRevision;
         ++m_snapshotRevision;
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         invalidatePseudocode();
@@ -572,7 +634,9 @@ namespace ks::ui
         {
             if (m_tabs->currentIndex() == 1) rebuildDisassembly();
             if (m_tabs->currentIndex() == 2) rebuildText();
-            if (m_tabs->currentIndex() == 3) rebuildComparison();
+            // Comparison colors are resolved by model data() from the current theme.
+            // Repaint preserves the selected row/scroll position and never rescans bytes.
+            if (m_comparison) m_comparison->table()->viewport()->update();
         }
     }
     void SnapshotWorkbenchWidget::updateState()
@@ -590,7 +654,7 @@ namespace ks::ui
             ? (loaded ? trText(QStringLiteral("已加载 %1 字节（只读）。")).arg(m_hex->bufferSize())
                 : trText(QStringLiteral("加载文件范围后可查看十六进制、反汇编和文本。")))
             : loaded
-            ? trText(QStringLiteral("%1 字节 | %2 处差异待应用")).arg(m_hex->bufferSize()).arg(diffBlocks().size())
+            ? trText(QStringLiteral("%1 字节 | %2 处差异待应用")).arg(m_hex->bufferSize()).arg(m_changeSummary.runs)
             : trText(QStringLiteral("读取内存后可查看指令和编辑缓存。")));
     }
     std::uint64_t SnapshotWorkbenchWidget::selectedAddress() const
@@ -718,7 +782,7 @@ namespace ks::ui
         synchronizeSnapshotProvider();
         const auto size = static_cast<std::uint64_t>(data().size());
         if (!size) { m_comparison->reset(); return; }
-        m_comparison->setWindow(m_base, size);
+        m_comparison->setSnapshotWindow(m_base, size, m_comparisonRevision);
     }
 
     // 共享预览只生成冻结载荷；此宿主仍只改缓存，真实写回由外层页面确认并提交。
@@ -779,4 +843,25 @@ namespace ks::ui
         jumpToAddress(address);
         if (self) refreshFromHexEditor();
     }
+}
+
+ks::ui::PageNavigationTabDefinition ks::ui::SnapshotWorkbenchWidget::navigationDefinition(const int index)
+{
+    const auto& spec = MemoryNavigationTabs(MemoryNavigationGroup::Workbench)[static_cast<std::size_t>(index)];
+    return {spec.id, "", spec.languageKey ? spec.languageKey : "", spec.source, index == 0};
+}
+void ks::ui::SnapshotWorkbenchWidget::addNavigationTab(const int index, QWidget* page)
+{
+    m_navigationTabs.add(navigationDefinition(index), m_tabs, page);
+}
+ks::ui::PageNavigationCatalog ks::ui::SnapshotWorkbenchWidget::navigationCatalog(const SnapshotWorkbenchWidget* existing)
+{
+    PageNavigationCatalog schema;
+    for (int index = 0; index < static_cast<int>(MemoryNavigationTabs(MemoryNavigationGroup::Workbench).size()); ++index)
+        schema.append(PageNavigationTabDescriptor(navigationDefinition(index)));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::ui::SnapshotWorkbenchWidget::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
 }

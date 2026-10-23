@@ -130,7 +130,8 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
     ManualFsType& fsTypeOut,
     QString& errorTextOut,
     bool* partialOut,
-    QString* sourceDetailOut)
+    QString* sourceDetailOut,
+    const DirectoryCancellationCallback& canceled)
 {
     entriesOut.clear();
     fsTypeOut = ManualFsType::Unknown;
@@ -144,6 +145,8 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
         sourceDetailOut->clear();
     }
 
+    if (canceled && canceled()) return false;
+
     const QString driverPath = buildDriverNtPath(pathText);
     if (driverPath.isEmpty())
     {
@@ -154,6 +157,8 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
     const ksword::ark::DirectoryEnumerationResult driverResult =
         ksword::ark::DriverClient().enumerateDirectory(
             driverPath.toStdWString());
+    // A synchronous kernel call owns its request until completion. Skip all stale conversion.
+    if (canceled && canceled()) return false;
     if (!driverResult.io.ok)
     {
         errorTextOut = driverResult.unsupported
@@ -190,6 +195,7 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
     for (const ksword::ark::DirectoryEntryRecord& source :
         driverResult.entries)
     {
+        if (canceled && canceled()) return false;
         const QString name = QString::fromStdWString(source.name);
         if (name.isEmpty())
         {
@@ -218,6 +224,7 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
         }
     }
 
+    if (canceled && canceled()) return false;
     std::sort(
         entriesOut.begin(),
         entriesOut.end(),
@@ -234,6 +241,7 @@ bool ks::file::DriverFileSystemParser::enumerateDirectory(
                 Qt::CaseInsensitive) < 0;
         });
 
+    if (canceled && canceled()) return false;
     if (partialOut != nullptr)
     {
         *partialOut = partialResult;

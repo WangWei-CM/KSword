@@ -1,20 +1,35 @@
-﻿#include "PluginHost.h"
+#include "PluginHost.h"
+#include "UI/PageNavigationTabCatalog.h"
 #include "UI/FlatButtonTheme.h"
 #include "PluginHost.Upstream.h"
 #include "PluginHost.Archive.h"
 #include "../../GhidraRuntimePlugin/RuntimeProfile.h"
 #include "UI/CodeTextEdit.h"
 #include "UI/CodeEditorWidget.h"
+#include "UI/AsyncLogTextView.h"
 #include "UI/VisibleTableWidget.h"
 #include "UI/PageControlStyle.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
+#include "UI/AsyncCleanupRegistry.h"
+#include "UI/AsyncOperation.h"
+#include "UI/CompleteExport.h"
+#include "UI/TableInteractionSupport.h"
+#include "UI/TableHeaderSortingSupport.h"
+#include "UI/RetainedCleanupJob.h"
+#include <QFileSystemWatcher>
+#include <QElapsedTimer>
 
 #include "theme.h"
 #include "Internationalization/LanguageManager.h"
 #include "ksword/log/log.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QIdentityProxyModel>
+#include <QTableView>
+#include <QThreadPool>
+#include <QStringDecoder>
 #include <QBrush>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -52,6 +67,7 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -67,6 +83,12 @@
 #include <QWidget>
 
 #include <functional>
+#include <algorithm>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -83,6 +105,56 @@ namespace
     constexpr int kMaxVisualizationRows = 10000;
     constexpr int kMaxBufferedStdoutBytes = 1024 * 1024;
     constexpr char kMarketplaceCatalogUrl[] = "https://raw.githubusercontent.com/KSwordDEV/Plugins/main/catalog.json";
+
+    // QProcess stays on its event thread, independently of the page. Shutdown
+    // only sets a value flag; the event loop owns terminate/kill and observes the
+    // real NotRunning receipt before returning the accepted cleanup lease.
+    struct PluginProcessStop
+    {
+        std::atomic_bool requested{false};
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+        bool orphaned = false;
+        bool terminated = false;
+        bool killed = false;
+        int elapsed = 0;
+    };
+    std::shared_ptr<PluginProcessStop> ownPluginProcess(QProcess* process, int graceMs)
+    {
+        auto stop = std::make_shared<PluginProcessStop>();
+        const std::weak_ptr<PluginProcessStop> weak = stop;
+        stop->lease = ks::ui::AsyncCleanupRegistry::global().acquire([weak] {
+            if (const auto value = weak.lock()) value->requested.store(true);
+        });
+        if (!stop->lease) return {};
+        process->setParent(QCoreApplication::instance());
+        auto* timer = new QTimer(process);
+        timer->setInterval(50);
+        QObject::connect(timer, &QTimer::timeout, process, [process, stop, graceMs] {
+            if (!stop->requested.load() || process->state() == QProcess::NotRunning) return;
+            if (!stop->terminated) { stop->terminated = true; process->terminate(); }
+            else if (!stop->killed && (stop->elapsed += 50) >= graceMs)
+            { stop->killed = true; process->kill(); }
+            // A failed kill is not a termination acknowledgement. Keep lease.
+        });
+        const auto finished = [process, stop, timer] {
+            if (process->state() != QProcess::NotRunning) return;
+            timer->stop();
+            stop->lease.reset();
+            if (stop->orphaned) process->deleteLater();
+        };
+        QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process,
+            [finished](int, QProcess::ExitStatus) { finished(); });
+        QObject::connect(process, &QProcess::errorOccurred, process,
+            [finished](QProcess::ProcessError error) { if (error == QProcess::FailedToStart) finished(); });
+        timer->start();
+        return stop;
+    }
+    void retirePluginProcess(QProcess* process, const std::shared_ptr<PluginProcessStop>& stop)
+    {
+        if (!process) return;
+        if (stop) { stop->orphaned = true; stop->requested.store(true); }
+        if (process->state() == QProcess::NotRunning) process->deleteLater();
+    }
 
     struct VisualizationValueStyle
     {
@@ -887,7 +959,7 @@ namespace
             QDir(pluginRoot).filePath(pluginId), pluginId, descriptorOut, errorOut);
     }
 
-    bool discoverPlugins(PluginListResult* resultOut, QString* errorOut)
+    bool scanPlugins(PluginListResult* resultOut, QString* errorOut)
     {
         if (resultOut == nullptr || errorOut == nullptr)
         {
@@ -923,6 +995,98 @@ namespace
         }
         resultOut->pluginRoot = pluginRoot;
         return true;
+    }
+
+    struct PluginCatalogSnapshot
+    {
+        PluginListResult result;
+        QString error;
+        QStringList watchedPaths;
+    };
+    using PluginCatalogCallback = std::function<void(const PluginListResult&, const QString&)>;
+    struct PluginCatalogCache
+    {
+        std::shared_ptr<const PluginCatalogSnapshot> snapshot;
+        QPointer<ks::ui::AsyncOperation> operation;
+        QPointer<QFileSystemWatcher> watcher;
+        struct Listener { QPointer<QObject> owner; PluginCatalogCallback callback; };
+        QList<Listener> listeners; // GUI-only subscriptions; workers receive no QObject.
+        bool dirty = true;
+    };
+    PluginCatalogCache& pluginCatalogCache() { static PluginCatalogCache cache; return cache; }
+    void refreshPluginCatalog();
+    void invalidatePluginCatalog()
+    {
+        pluginCatalogCache().dirty = true;
+        refreshPluginCatalog();
+    }
+    void refreshPluginCatalog()
+    {
+        auto& cache = pluginCatalogCache();
+        if (!cache.dirty || !QCoreApplication::instance()) return;
+        if (!cache.operation)
+        {
+            cache.operation = new ks::ui::AsyncOperation(QCoreApplication::instance());
+            cache.watcher = new QFileSystemWatcher(QCoreApplication::instance());
+            QObject::connect(cache.watcher, &QFileSystemWatcher::directoryChanged, cache.watcher,
+                [](const QString&) { invalidatePluginCatalog(); });
+            QObject::connect(cache.watcher, &QFileSystemWatcher::fileChanged, cache.watcher,
+                [](const QString&) { invalidatePluginCatalog(); });
+        }
+        cache.dirty = false;
+        cache.operation->submit<int, std::shared_ptr<const PluginCatalogSnapshot>>(0,
+            [](int, const ks::ui::AsyncOperationToken& token) {
+                auto value = std::make_shared<PluginCatalogSnapshot>();
+                if (token.isCanceled()) return std::shared_ptr<const PluginCatalogSnapshot>(value);
+                scanPlugins(&value->result, &value->error);
+                value->watchedPaths << QCoreApplication::applicationDirPath();
+                if (!value->result.pluginRoot.isEmpty())
+                {
+                    value->watchedPaths << value->result.pluginRoot;
+                    const QDir root(value->result.pluginRoot);
+                    for (const auto& name : root.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+                    {
+                        value->watchedPaths << root.filePath(name);
+                        const auto manifest = root.filePath(name + QStringLiteral("/plugin.json"));
+                        if (QFileInfo::exists(manifest)) value->watchedPaths << manifest;
+                    }
+                }
+                const auto configured = qEnvironmentVariable("KSWORD_PLUGIN_ROOT");
+                if (!configured.isEmpty()) value->watchedPaths << QFileInfo(configured).absolutePath();
+                value->watchedPaths.removeDuplicates();
+                return std::shared_ptr<const PluginCatalogSnapshot>(value);
+            }, [](const std::shared_ptr<const PluginCatalogSnapshot>& value, std::uint64_t) {
+                auto& current = pluginCatalogCache();
+                current.snapshot = value;
+                if (current.watcher)
+                {
+                    const auto old = current.watcher->directories() + current.watcher->files();
+                    if (!old.isEmpty()) current.watcher->removePaths(old);
+                    current.watcher->addPaths(value->watchedPaths);
+                }
+                const auto listeners = current.listeners;
+                for (const auto& listener : listeners)
+                    if (listener.owner && listener.callback) listener.callback(value->result, value->error);
+                return true;
+            }, [](std::exception_ptr) { pluginCatalogCache().dirty = true; });
+    }
+    void requestPluginCatalog(QObject* owner, PluginCatalogCallback callback, bool force = false, bool deliverCached = true)
+    {
+        auto& cache = pluginCatalogCache();
+        for (auto it = cache.listeners.begin(); it != cache.listeners.end();)
+            if (!it->owner || it->owner == owner) it = cache.listeners.erase(it); else ++it;
+        cache.listeners.push_back({owner, callback});
+        if (force) cache.dirty = true;
+        if (deliverCached && cache.snapshot && !cache.dirty) callback(cache.snapshot->result, cache.snapshot->error);
+        refreshPluginCatalog();
+    }
+    bool discoverPlugins(PluginListResult* resultOut, QString* errorOut)
+    {
+        refreshPluginCatalog();
+        const auto value = pluginCatalogCache().snapshot;
+        if (!value) { *errorOut = QStringLiteral("正在扫描…"); return false; }
+        *resultOut = value->result; *errorOut = value->error;
+        return value->error.isEmpty();
     }
 
     QString targetName(const ks::plugin_host::TargetKind targetKind)
@@ -1133,6 +1297,501 @@ namespace
         return KswordTheme::TextPrimaryColor();
     }
 
+    // Pure protocol state is used by one worker at a time. Only the durable
+    // pending batch crosses the mutex, so a dropped Qt delivery can be recovered
+    // on the existing AsyncOperation idle notification without losing records.
+    struct PluginResultCell
+    {
+        QString text, tone;
+        bool numeric = false;
+        bool tooltip = false;
+    };
+    using PluginResultRow = QVector<PluginResultCell>;
+    struct PluginOutputRecord
+    {
+        QByteArray raw;
+        QJsonObject object;
+        PluginResultRow row;
+        QString text;
+        bool invalid = false;
+    };
+    struct PluginOutputBatch
+    {
+        QVector<PluginOutputRecord> records;
+        QString standardError;
+        bool more = false;
+        bool flushed = false;
+    };
+    struct PluginOutputState
+    {
+        explicit PluginOutputState(bool tab)
+            : errorDecoder(tab ? QStringConverter::Utf8 : QStringConverter::System) {}
+        QByteArray buffer; // Worker-only; no QWidget or QProcess enters this state.
+        QStringDecoder errorDecoder;
+        std::mutex mutex;
+        std::shared_ptr<const PluginOutputBatch> pending;
+    };
+    struct PluginOutputRequest
+    {
+        std::shared_ptr<PluginOutputState> state;
+        QByteArray output, error;
+        QString pluginId, resultEvent;
+        QList<VisualizationField> columns;
+        bool structured = true;
+        bool tab = false;
+        bool writeHostLog = false;
+        bool sourceDrained = false;
+        bool flush = false;
+    };
+    std::shared_ptr<const PluginOutputBatch> parsePluginOutput(
+        const PluginOutputRequest& request, const ks::ui::AsyncOperationToken& token)
+    {
+        auto batch = std::make_shared<PluginOutputBatch>();
+        auto& state = *request.state;
+        state.buffer += request.output;
+        batch->standardError = state.errorDecoder(request.error);
+        qsizetype consumed = 0;
+        QElapsedTimer budget;
+        budget.start();
+        for (int count = 0; count < 64 && (count == 0 || budget.elapsed() < 4); ++count)
+        {
+            if (token.isCanceled()) return batch;
+            const qsizetype newline = state.buffer.indexOf('\n', consumed);
+            if (newline < 0 && request.sourceDrained && state.buffer.size() - consumed > kMaxBufferedStdoutBytes) break;
+            const bool remainder = newline < 0 && request.flush && !request.tab && consumed < state.buffer.size();
+            if (newline < 0 && !remainder) break;
+            const qsizetype end = newline >= 0 ? newline : state.buffer.size();
+            PluginOutputRecord record;
+            record.raw = state.buffer.mid(consumed, end - consumed);
+            consumed = newline >= 0 ? newline + 1 : end;
+            if (record.raw.endsWith('\r')) record.raw.chop(1);
+            const QString line = QString::fromUtf8(record.raw).trimmed();
+            if (line.isEmpty()) continue;
+            if (request.tab && record.raw.size() > kMaxBufferedStdoutBytes)
+            {
+                record.invalid = true;
+                record.text = QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。");
+            }
+            else if (!request.structured) record.text = line;
+            else
+            {
+                QJsonParseError error;
+                const QJsonDocument document = QJsonDocument::fromJson(record.raw, &error);
+                if (error.error != QJsonParseError::NoError || !document.isObject())
+                {
+                    record.invalid = true;
+                    record.text = request.tab
+                        ? QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。")
+                        : QStringLiteral("无法解析插件 JSON Lines：%1\n%2").arg(error.errorString(), line);
+                }
+                else
+                {
+                    record.object = document.object();
+                    if (record.object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
+                        record.object.value(QStringLiteral("plugin_id")).toString() != request.pluginId)
+                    {
+                        record.invalid = true;
+                        record.text = request.tab
+                            ? QStringLiteral("Tab 插件协议版本或 plugin_id 与清单不匹配。")
+                            : QStringLiteral("插件输出的 protocol 或 plugin_id 与清单不一致。");
+                    }
+                }
+            }
+            if (!record.invalid && !request.tab && request.structured &&
+                record.object.value(QStringLiteral("event")).toString() == request.resultEvent) {
+                for (const auto& field : request.columns) {
+                    const auto value = record.object.value(field.field);
+                    PluginResultCell cell;
+                    cell.text = visualizationValueText(value, field.format);
+                    if (field.format == QStringLiteral("badge")) {
+                        const auto style = field.valueStyles.value(value.toString());
+                        if (!style.label.isEmpty()) cell.text = style.label;
+                        cell.tone = style.tone;
+                    }
+                    cell.numeric = field.format == QStringLiteral("integer") || field.format == QStringLiteral("number") || field.format == QStringLiteral("percent");
+                    cell.tooltip = field.format == QStringLiteral("path") || cell.text.size() > 80;
+                    record.row.push_back(std::move(cell));
+                }
+            }
+            if (request.writeHostLog && !record.invalid && record.object.value(QStringLiteral("event")).toString() == QStringLiteral("log")) {
+                const QString message = record.object.value(QStringLiteral("message")).toString();
+                if (!message.isEmpty()) info << "[PluginHost:" << request.pluginId.toStdString() << "] " << message.toStdString() << eol;
+            }
+            batch->records.push_back(std::move(record));
+            if (request.tab && (batch->records.back().invalid ||
+                batch->records.back().object.value(QStringLiteral("event")).toString() == QStringLiteral("error"))) break; // Original Tab protocol is fail-closed.
+        }
+        state.buffer.remove(0, consumed); // One compaction per bounded batch, never once per line.
+        if (!state.buffer.contains('\n') && request.sourceDrained && state.buffer.size() > kMaxBufferedStdoutBytes)
+        {
+            PluginOutputRecord record;
+            record.invalid = true;
+            record.text = request.tab
+                ? QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。")
+                : QStringLiteral("插件输出存在超过 1 MiB 的无换行记录，已拒绝解析。");
+            batch->records.push_back(std::move(record));
+            state.buffer.clear();
+        }
+        batch->more = state.buffer.contains('\n') || (request.flush && !request.tab && !state.buffer.isEmpty());
+        batch->flushed = request.flush && !batch->more;
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.pending = batch;
+        }
+        return batch;
+    }
+    std::shared_ptr<const PluginOutputBatch> takePluginOutputBatch(const std::shared_ptr<PluginOutputState>& state)
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return std::exchange(state->pending, {});
+    }
+    QByteArray readPluginChannel(QProcess* process, QProcess::ProcessChannel channel)
+    {
+        process->setReadChannel(channel);
+        QByteArray bytes = process->read(64 * 1024);
+        process->setReadChannel(QProcess::StandardOutput);
+        return bytes;
+    }
+    bool pluginChannelsDrained(QProcess* process)
+    {
+        process->setReadChannel(QProcess::StandardError);
+        const bool errorEmpty = process->bytesAvailable() == 0;
+        process->setReadChannel(QProcess::StandardOutput);
+        return errorEmpty && process->bytesAvailable() == 0;
+    }
+
+    // This is only the existing 2000-block text viewport projection, not a
+    // protocol queue: every structured record has already been interpreted.
+    // Retaining its last 2000 pending lines produces the same final visible
+    // window as QPlainTextEdit::maximumBlockCount without building hidden text.
+    void appendPluginTextProjection(std::deque<QString>& pending, const QString& text)
+    {
+        constexpr int maximumLines = 2000;
+        // Locate the retained tail before allocating lines. A multiline log
+        // record can exceed the whole viewport; its discarded prefix must not
+        // allocate one QString per line, including while the page is hidden.
+        qsizetype begin = text.size();
+        for (int count = 1; begin > 0; ++count) {
+            const qsizetype newline = text.lastIndexOf(QLatin1Char('\n'), begin - 1);
+            if (newline < 0) { begin = 0; break; }
+            if (count == maximumLines) {
+                begin = newline + 1;
+                pending.clear(); // These 2000 new lines replace the previous tail.
+                break;
+            }
+            begin = newline;
+        }
+        const QStringList lines = (begin == 0 ? text : text.mid(begin)).split(QLatin1Char('\n'));
+        for (const QString& line : lines) {
+            pending.push_back(line);
+            if (pending.size() > maximumLines) pending.pop_front();
+        }
+    }
+
+    constexpr int kPluginResultBlockRows = 256;
+    struct PluginResultValues
+    {
+        QVector<QVector<PluginResultRow>> blocks;
+        QVector<int> publicationEnds;
+        int count = 0;
+        const PluginResultCell& cell(int row, int column) const
+        { return blocks.at(row / kPluginResultBlockRows).at(row % kPluginResultBlockRows).at(column); }
+    };
+    struct PluginResultOrder
+    {
+        QVector<int> rows, inverse;
+        int column = -1;
+        Qt::SortOrder direction = Qt::AscendingOrder;
+        bool changed = false;
+    };
+    using PluginResultOrderValue = std::shared_ptr<const PluginResultOrder>;
+
+    class PluginResultModel final : public QAbstractTableModel
+    {
+    public:
+        PluginResultModel(QVector<VisualizationField> fields, QObject* parent)
+            : QAbstractTableModel(parent), m_fields(std::move(fields)) {}
+        ~PluginResultModel() override
+        {
+            auto retired = std::move(m_blocks);
+            if (!retired.isEmpty()) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_published; }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_fields.size()); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        { return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_fields.size()
+            ? QVariant(m_fields.at(section).label) : QVariant(); }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= m_published ||
+                index.column() < 0 || index.column() >= m_fields.size()) return {};
+            const int row = canonicalRow(index.row());
+            const auto& cell = m_blocks.at(row / kPluginResultBlockRows).at(row % kPluginResultBlockRows).at(index.column());
+            if (role == Qt::DisplayRole || (role == Qt::ToolTipRole && cell.tooltip)) return cell.text;
+            if (role == Qt::ForegroundRole && !cell.tone.isEmpty()) return QBrush(visualizationToneColor(cell.tone));
+            if (role == Qt::TextAlignmentRole && cell.numeric) return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
+            return {};
+        }
+        int storedCount() const { return m_stored; }
+        bool hasUnpublishedRows() const { return m_published < storedCount(); }
+        void append(const PluginResultRow& row)
+        {
+            // A worker freezes only the implicitly shared block directory. The
+            // next append detaches at most 40 block headers and one 256-row tail,
+            // never the complete row/cell array on the GUI thread.
+            if (m_stored % kPluginResultBlockRows == 0) m_blocks.push_back(QVector<PluginResultRow>{});
+            m_blocks.last().push_back(row);
+            ++m_stored;
+        }
+        std::shared_ptr<const PluginResultValues> values() const
+        {
+            auto value = std::make_shared<PluginResultValues>();
+            value->blocks = m_blocks;
+            value->publicationEnds = m_publicationEnds;
+            value->count = m_published;
+            return ks::ui::RetainCompleteExportSnapshot<PluginResultValues>(value);
+        }
+        PluginResultOrderValue order() const { return m_order; }
+        void applyOrder(PluginResultOrderValue next)
+        {
+            if (!next->changed) { m_order = std::move(next); return; }
+            const QPointer<PluginResultModel> alive(this);
+            emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+            if (!alive) return;
+            // Capture after aboutTo: proxy, selection and shared row filters may
+            // create persistent source identities while receiving that signal.
+            try {
+                const auto before = persistentIndexList();
+                QModelIndexList after;
+                after.reserve(before.size());
+                for (const auto& index : before) {
+                    const int canonical = canonicalRow(index.row());
+                    // A notification receiver may publish a new tail reentrantly.
+                    // That tail retains canonical identity until the new sort.
+                    after.push_back(this->index(canonical < next->inverse.size()
+                        ? next->inverse.at(canonical) : canonical, index.column()));
+                }
+                m_order = std::move(next); // Both old and new complete values retire off GUI.
+                changePersistentIndexList(before, after);
+            } catch (...) {
+                if (alive) emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+                throw;
+            }
+            emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+        }
+        void publish()
+        {
+            // A hidden run may have accumulated all 10000 rows. Keep each
+            // source/proxy/header notification bounded when it becomes visible.
+            const int count = qMin(storedCount(), m_published + 256);
+            if (count == m_published) return;
+            beginInsertRows({}, m_published, count - 1);
+            m_published = count;
+            m_publicationEnds.push_back(count);
+            endInsertRows();
+        }
+    private:
+        QVector<VisualizationField> m_fields;
+        int canonicalRow(int row) const
+        { return m_order && row < m_order->rows.size() ? m_order->rows.at(row) : row; }
+        QVector<QVector<PluginResultRow>> m_blocks;
+        QVector<int> m_publicationEnds;
+        PluginResultOrderValue m_order;
+        int m_stored = 0, m_published = 0;
+    };
+
+    class PluginResultProxyModel final : public QIdentityProxyModel
+    {
+    public:
+        PluginResultProxyModel(PluginResultModel* source, QTableView* table)
+            : QIdentityProxyModel(table), m_source(source), m_table(table), m_operation(this)
+        {
+            setSourceModel(source);
+            // The existing proxy remains an identity projection. Reordering its
+            // source with real layout/persistent-index notifications preserves
+            // both models, selections/current and shared filter identities,
+            // without a QSortFilterProxyModel GUI mapping/sort pass. The shared
+            // table search/filter layers already track persistent row identities.
+            connect(source, &QAbstractItemModel::rowsInserted, this, [this]() {
+                if (!m_requested) return;
+                m_preparing = true;
+                ++m_revision;
+                m_operation.cancel();
+                const QPointer<PluginResultProxyModel> alive(this);
+                if (presentationChanged) presentationChanged();
+                if (alive) scheduleSort();
+            });
+        }
+        ~PluginResultProxyModel() override { close(); }
+        void close() { m_closed = true; m_operation.close(); }
+        bool isPreparingSort() const { return m_preparing; }
+        std::function<void()> presentationChanged;
+        std::function<void()> preparationFailed;
+        void sort(int column, Qt::SortOrder direction = Qt::AscendingOrder) override
+        {
+            if (m_closed || !m_source || column < -1 || column >= m_source->columnCount()) return;
+            m_column = column;
+            m_direction = direction;
+            m_requested = true;
+            m_explicitSort = true;
+            m_preparing = true;
+            ++m_revision;
+            m_operation.cancel();
+            const QPointer<PluginResultProxyModel> alive(this);
+            if (presentationChanged) presentationChanged();
+            if (alive) scheduleSort();
+        }
+    private:
+        void scheduleSort()
+        {
+            if (m_closed || m_scheduled) return;
+            m_scheduled = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_scheduled = false;
+                if (m_closed || !m_source || m_source->hasUnpublishedRows() || m_applying) return;
+                const QPointer<PluginResultProxyModel> alive(this);
+                const auto revision = m_revision;
+                try { prepareSort(); }
+                catch (...) { if (alive) failSort(revision); }
+            });
+        }
+        void prepareSort()
+        {
+            struct Request
+            {
+                std::shared_ptr<const PluginResultValues> values;
+                PluginResultOrderValue previous;
+                int column;
+                Qt::SortOrder direction;
+                bool fullSort;
+            };
+            const auto revision = m_revision;
+            const QPointer<PluginResultProxyModel> alive(this);
+            Request request{m_source->values(), m_source->order(), m_column, m_direction, m_explicitSort};
+            const auto ticket = m_operation.submit<Request, PluginResultOrderValue>(std::move(request),
+                [](const Request& request, const ks::ui::AsyncOperationToken& token) -> PluginResultOrderValue {
+                    auto result = std::make_shared<PluginResultOrder>();
+                    result->column = request.column;
+                    result->direction = request.direction;
+                    result->rows.reserve(request.values->count);
+                    // Equal QStrings retain the actual preceding display order,
+                    // including across column/direction changes and appended rows.
+                    for (int row = 0; row < request.values->count; ++row) {
+                        if ((row & 127) == 0 && token.isCanceled()) return {};
+                        result->rows.push_back(request.previous && row < request.previous->rows.size()
+                            ? request.previous->rows.at(row) : row);
+                    }
+                    {
+                        struct SortCanceled {};
+                        unsigned comparisons = 0;
+                        try {
+                            const auto less = [&](int left, int right) {
+                                if ((++comparisons & 127) == 0 && token.isCanceled()) throw SortCanceled{};
+                                if (request.column < 0) return request.direction == Qt::AscendingOrder ? left < right : left > right;
+                                const auto& a = request.values->cell(left, request.column).text;
+                                const auto& b = request.values->cell(right, request.column).text;
+                                // Preserve the original proxy's DisplayRole,
+                                // case-sensitive, non-locale QString ordering.
+                                const int compare = QString::compare(a, b, Qt::CaseSensitive);
+                                return request.direction == Qt::AscendingOrder ? compare < 0 : compare > 0;
+                            };
+                            if (request.fullSort) {
+                                std::stable_sort(result->rows.begin(), result->rows.end(), less);
+                            } else {
+                                // The original proxy has dynamicSortFilter=false:
+                                // each newly published batch is sorted on its own,
+                                // then appended. Never silently re-sort old rows.
+                                int first = request.previous ? static_cast<int>(request.previous->rows.size()) : 0;
+                                for (int end : request.values->publicationEnds) {
+                                    if (end <= first) continue;
+                                    std::stable_sort(result->rows.begin() + first, result->rows.begin() + end, less);
+                                    first = end;
+                                }
+                            }
+                        } catch (const SortCanceled&) { return {}; }
+                    }
+                    if (token.isCanceled()) return {};
+                    result->inverse.resize(result->rows.size());
+                    for (int row = 0; row < result->rows.size(); ++row) {
+                        if ((row & 127) == 0 && token.isCanceled()) return {};
+                        result->inverse[result->rows.at(row)] = row;
+                        const int previous = request.previous && row < request.previous->rows.size()
+                            ? request.previous->rows.at(row) : row;
+                        result->changed = result->changed || previous != result->rows.at(row);
+                    }
+                    return ks::ui::RetainCompleteExportSnapshot<PluginResultOrder>(result);
+                }, [this, revision](const PluginResultOrderValue& result, std::uint64_t ticket) {
+                    return acceptSort(result, revision, ticket);
+                }, [this, revision](std::exception_ptr) { failSort(revision); });
+            if (alive && !ticket) alive->failSort(revision);
+        }
+        void failSort(quint64 revision)
+        {
+            if (m_closed || revision != m_revision) return;
+            m_preparing = false;
+            m_applying = false;
+            m_explicitSort = false;
+            const QPointer<PluginResultProxyModel> alive(this);
+            const auto previous = m_source ? m_source->order() : PluginResultOrderValue{};
+            m_column = previous ? previous->column : -1;
+            m_direction = previous ? previous->direction : Qt::AscendingOrder;
+            // Keep the complete preceding order usable; a header click can
+            // retry. Do not claim that a failed sort was applied.
+            if (m_table && m_table->horizontalHeader()) {
+                const QPointer<QHeaderView> header(m_table->horizontalHeader());
+                QSignalBlocker blocker(header);
+                header->setSortIndicator(previous ? previous->column : -1,
+                    previous ? previous->direction : Qt::AscendingOrder);
+                if (!header) blocker.dismiss();
+            }
+            if (!alive) return;
+            if (presentationChanged) presentationChanged();
+            if (alive && preparationFailed) preparationFailed();
+        }
+        bool acceptSort(const PluginResultOrderValue& result, quint64 revision, std::uint64_t ticket)
+        {
+            if (m_closed || !result || revision != m_revision || !m_source) return true;
+            if (m_source->rowCount() != result->rows.size() || m_source->hasUnpublishedRows()) {
+                scheduleSort();
+                return true;
+            }
+            const QPointer<PluginResultProxyModel> alive(this);
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this, QStringLiteral("plugin-result-sort"), {m_table},
+                [alive, result, revision, ticket]() {
+                    if (!alive || !alive->m_operation.isCurrent(ticket)) return;
+                    bool committed = true;
+                    try { committed = alive->acceptSort(result, revision, ticket); }
+                    catch (...) { if (alive) alive->failSort(revision); }
+                    if (alive && committed) alive->m_operation.completeDeferred(ticket);
+                })) return false;
+            if (!alive || revision != m_revision) return true;
+            m_applying = true;
+            try { m_source->applyOrder(result); }
+            catch (...) {
+                if (alive) {
+                    m_applying = false;
+                    if (revision != m_revision) scheduleSort();
+                }
+                throw;
+            }
+            if (!alive) return true;
+            m_applying = false;
+            if (revision != m_revision) { scheduleSort(); return true; }
+            m_preparing = false;
+            m_explicitSort = false;
+            if (presentationChanged) presentationChanged();
+            return true;
+        }
+        QPointer<PluginResultModel> m_source;
+        QPointer<QTableView> m_table;
+        ks::ui::AsyncOperation m_operation;
+        quint64 m_revision = 0;
+        int m_column = -1;
+        Qt::SortOrder m_direction = Qt::AscendingOrder;
+        bool m_requested = false, m_preparing = false, m_scheduled = false, m_applying = false, m_closed = false;
+        bool m_explicitSort = false;
+    };
+
     class PluginRunDialog final : public QDialog
     {
     public:
@@ -1145,6 +1804,14 @@ namespace
             : QDialog(parent),
               m_descriptor(descriptor)
         {
+            m_parserState = std::make_shared<PluginOutputState>(false);
+            m_parseOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_outputTimer = new QTimer(this);
+            m_outputTimer->setSingleShot(true);
+            connect(m_outputTimer, &QTimer::timeout, this, [this]() { drainProcessOutput(); });
+            m_parseOperation->setStateChangedCallback([this]() {
+                if (!m_parseOperation->isBusy()) { consumeParsedOutput(); m_outputTimer->start(0); }
+            });
             setAttribute(Qt::WA_DeleteOnClose, true);
             setWindowTitle(descriptor.visualization.enabled
                 ? descriptor.visualization.title
@@ -1226,13 +1893,21 @@ namespace
             ks::ui::StyleJoinedResultTabs(m_tabs, resultsHeader); // 结果和页签使用相同宽度。
             if (descriptor.visualization.enabled)
             {
-                m_resultTable = new ks::ui::VisibleTableWidget(m_tabs);
+                m_resultTable = new ks::ui::TableActionTableView(m_tabs);
+                m_resultModel = new PluginResultModel(descriptor.visualization.columns, m_resultTable);
+                m_resultProxy = new PluginResultProxyModel(m_resultModel, m_resultTable);
+                m_resultProxy->presentationChanged = [this]() {
+                    const QPointer<PluginRunDialog> alive(this);
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty,
+                        m_resultModel->hasUnpublishedRows() || m_resultProxy->isPreparingSort());
+                    if (alive) schedulePresentation();
+                };
+                m_resultProxy->preparationFailed = [this]() {
+                    appendDiagnostic(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+                };
+                m_resultTable->setModel(m_resultProxy);
                 // 一次插件扫描结果保留复制/导出，避免通用快照栏挤占插件内容。
                 ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::Compact);
-                m_resultTable->setColumnCount(descriptor.visualization.columns.size());
-                QStringList labels;
-                for (const VisualizationField& field : descriptor.visualization.columns) labels.push_back(field.label);
-                m_resultTable->setHorizontalHeaderLabels(labels);
                 m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
                 m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1242,6 +1917,7 @@ namespace
                 m_resultTable->verticalHeader()->setVisible(false);
                 QHeaderView* header = m_resultTable->horizontalHeader();
                 header->setStretchLastSection(false);
+                header->setResizeContentsPrecision(64);
                 for (int column = 0; column < descriptor.visualization.columns.size(); ++column)
                 {
                     const QString format = descriptor.visualization.columns.at(column).format;
@@ -1263,20 +1939,17 @@ namespace
             }
             else
             {
-                m_plainOutput = new CodeTextEdit(m_tabs);
-                static_cast<CodeTextEdit*>(m_plainOutput)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-                m_plainOutput->setReadOnly(true);
+                m_plainOutput = new ks::ui::AsyncLogTextView(m_tabs);
                 m_plainOutput->setMaximumBlockCount(2000);
                 m_tabs->addTab(m_plainOutput, QStringLiteral("插件输出"));
             }
 
-            m_diagnostics = new CodeTextEdit(m_tabs);
-            static_cast<CodeTextEdit*>(m_diagnostics)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-            m_diagnostics->setReadOnly(true);
+            m_diagnostics = new ks::ui::AsyncLogTextView(m_tabs);
             m_diagnostics->setMaximumBlockCount(2000);
             m_diagnostics->setPlaceholderText(QStringLiteral("插件错误和协议诊断会显示在这里。"));
             m_tabs->addTab(m_diagnostics, QStringLiteral("诊断"));
             resultsLayout->addWidget(m_tabs, 1);
+            connect(m_tabs, &QTabWidget::currentChanged, this, [this]() { presentVisibleOutput(); });
 
             auto* footer = new QHBoxLayout();
             m_status = new QLabel(QStringLiteral("正在启动…"), this);
@@ -1297,17 +1970,17 @@ namespace
             m_process->setProcessEnvironment(environment);
 
             connect(m_closeButton, &QPushButton::clicked, this, [this]() {
-                if (m_process->state() == QProcess::NotRunning) close();
+                if (m_finished) close();
                 else cancelRun();
             });
             connect(m_process, &QProcess::started, this, [this]() {
                 setStatus(QStringLiteral("正在扫描…"), QStringLiteral("info"));
             });
             connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
-                consumeStandardOutput(false);
+                m_outputTimer->start(0);
             });
             connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
-                consumeStandardError();
+                m_outputTimer->start(0);
             });
             connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
                 if (error != QProcess::FailedToStart || m_finished) return;
@@ -1322,58 +1995,42 @@ namespace
             });
             connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
-                    if (m_finished) return;
-                    m_finished = true;
-                    consumeStandardOutput(true);
-                    consumeStandardError();
-                    const bool protocolComplete = !m_descriptor.visualization.enabled || m_completeSeen;
-                    const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0 &&
-                        !m_protocolError && protocolComplete && !m_cancelRequested;
-                    if (m_cancelRequested)
-                    {
-                        setStatus(QStringLiteral("扫描已取消"), QStringLiteral("warning"));
-                    }
-                    else if (succeeded)
-                    {
-                        if (m_totalItems > 0)
-                        {
-                            m_progress->setRange(0, m_totalItems);
-                            m_progress->setValue(qMin(m_completedItems, m_totalItems));
-                        }
-                        else
-                        {
-                            m_progress->setRange(0, 1);
-                            m_progress->setValue(1);
-                        }
-                        setStatus(QStringLiteral("扫描完成，共处理 %1 项").arg(m_completedItems),
-                            QStringLiteral("success"));
-                    }
-                    else
-                    {
-                        if (!protocolComplete)
-                        {
-                            appendDiagnostic(QStringLiteral("插件未发送声明的完成事件：%1")
-                                .arg(m_descriptor.visualization.completeEvent));
-                        }
-                        setStatus(QStringLiteral("扫描失败（退出码 %1）").arg(exitCode),
-                            QStringLiteral("danger"));
-                        if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
-                    }
-                    m_closeButton->setText(QStringLiteral("关闭"));
-                    m_closeButton->setEnabled(true);
-                    if (m_resultTable != nullptr) m_resultTable->setSortingEnabled(true);
+                    m_processExited = true;
+                    m_exitCode = exitCode;
+                    m_exitStatus = exitStatus;
+                    m_outputTimer->start(0); // Final status follows every stdout/error record, including the last unterminated line.
                 });
         }
 
         void start()
         {
+            m_processStop = ownPluginProcess(m_process, 2000);
+            if (!m_processStop) { m_finished = true; setStatus(QStringLiteral("启动失败"), QStringLiteral("danger")); return; }
             m_process->start();
         }
 
+        ~PluginRunDialog() override
+        {
+            if (m_resultProxy) m_resultProxy->close();
+            m_parseOperation->close();
+            retirePluginProcess(m_process, m_processStop);
+        }
+
     protected:
+        void showEvent(QShowEvent* event) override
+        {
+            QDialog::showEvent(event);
+            presentVisibleOutput();
+        }
+        void changeEvent(QEvent* event) override
+        {
+            QDialog::changeEvent(event);
+            if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)
+                schedulePresentation();
+        }
         void closeEvent(QCloseEvent* event) override
         {
-            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
+            if (!m_finished)
             {
                 cancelRun();
                 event->ignore();
@@ -1397,74 +2054,172 @@ namespace
 
         void setStatus(const QString& text, const QString& tone)
         {
-            m_status->setText(text);
-            m_status->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
-                .arg(visualizationToneColor(tone).name()));
+            if (m_statusText == text && m_statusTone == tone) return;
+            m_statusText = text;
+            m_statusTone = tone;
+            schedulePresentation();
         }
-
+        void setProgress(int total, int value, QString format = {})
+        {
+            m_progressTotal = total;
+            m_progressValue = value;
+            if (!format.isEmpty()) m_progressFormat = std::move(format);
+            m_progressDirty = true;
+            schedulePresentation();
+        }
         void appendDiagnostic(const QString& text)
         {
-            if (!text.trimmed().isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
+            if (!text.trimmed().isEmpty()) { appendPluginTextProjection(m_pendingDiagnostics, text); schedulePresentation(); }
         }
-
-        void consumeStandardError()
+        void schedulePresentation()
         {
-            const QString text = QString::fromLocal8Bit(m_process->readAllStandardError());
-            appendDiagnostic(text);
+            // showEvent/currentChanged project retained state on return.
+            if (!isVisible() || m_presentationScheduled) return;
+            m_presentationScheduled = true;
+            QTimer::singleShot(0, this, [this]() { m_presentationScheduled = false; presentVisibleOutput(); });
         }
-
-        void consumeStandardOutput(const bool flushRemainder)
+        void presentVisibleOutput()
         {
-            m_stdoutBuffer += m_process->readAllStandardOutput();
-            int newlineIndex = -1;
-            while ((newlineIndex = m_stdoutBuffer.indexOf('\n')) >= 0)
-            {
-                QByteArray line = m_stdoutBuffer.left(newlineIndex);
-                m_stdoutBuffer.remove(0, newlineIndex + 1);
-                if (line.endsWith('\r')) line.chop(1);
-                processOutputLine(line);
+            if (!isVisible()) return; // Parsing/counts continue; hidden widgets have no projection work.
+            const QPointer<PluginRunDialog> guard(this);
+            if (m_status->text() != m_statusText && !m_statusText.isEmpty()) m_status->setText(m_statusText);
+            if (!guard) return;
+            const QString style = QStringLiteral("font-weight:600;color:%1;").arg(visualizationToneColor(m_statusTone).name());
+            if (m_statusStyle != style) { m_statusStyle = style; m_status->setStyleSheet(style); }
+            if (!guard) return;
+            if (m_progressDirty) {
+                m_progressDirty = false;
+                m_progress->setRange(0, m_progressTotal);
+                if (!guard) return;
+                m_progress->setValue(m_progressValue);
+                if (!guard) return;
+                if (!m_progressFormat.isEmpty()) m_progress->setFormat(m_progressFormat);
             }
-            if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes)
-            {
-                appendDiagnostic(QStringLiteral("插件输出存在超过 1 MiB 的无换行记录，已拒绝解析。"));
-                m_stdoutBuffer.clear();
-                m_protocolError = true;
+            if (!guard) return;
+            if (m_resultTable && m_resultTable->isVisible()) {
+                if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this, QStringLiteral("plugin-result-projection"), {m_resultTable},
+                    [guard]() { if (guard) guard->schedulePresentation(); })) return;
+                if (m_resultModel->hasUnpublishedRows() &&
+                    !m_resultTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) {
+                    // Existing complete-value actions must not capture a
+                    // temporary prefix while these row slices are pending.
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+                    if (!guard) return;
+                    ks::ui::SetTableHeaderClickSortingEnabled(m_resultTable, false);
+                    if (!guard) return;
+                }
+                m_resultModel->publish(); // At most 256 rows; existing complete-value capture is protected above.
+                if (!guard) return;
+                if (!m_resultModel->hasUnpublishedRows()) {
+                    if (m_finished && !m_sortingActivated) { m_sortingActivated = true; m_resultTable->setSortingEnabled(true); }
+                    if (!guard) return;
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, m_resultProxy->isPreparingSort());
+                    if (!guard) return;
+                    ks::ui::SetTableHeaderClickSortingEnabled(m_resultTable, true);
+                }
             }
-            if (flushRemainder && !m_stdoutBuffer.isEmpty())
-            {
-                processOutputLine(m_stdoutBuffer);
-                m_stdoutBuffer.clear();
-            }
+            if (!guard) return;
+            if (m_summaryDirty) { m_summaryDirty = false; presentSummary(m_pendingSummary); }
+            if (!guard) return;
+            QElapsedTimer budget;
+            budget.start();
+            int units = 0;
+            const auto project = [&](ks::ui::AsyncLogTextView* editor, std::deque<QString>& pending) {
+                if (!editor || !editor->isVisible()) return;
+                while (!pending.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
+                    const QString text = std::move(pending.front());
+                    pending.pop_front();
+                    ++units;
+                    editor->appendPlainText(text);
+                    if (!guard) return;
+                }
+            };
+            project(m_plainOutput, m_pendingPlainOutput);
+            if (!guard) return;
+            project(m_diagnostics, m_pendingDiagnostics);
+            if (!guard) return;
+            if ((m_resultTable && m_resultTable->isVisible() && m_resultModel->hasUnpublishedRows()) ||
+                (m_plainOutput && m_plainOutput->isVisible() && !m_pendingPlainOutput.empty()) ||
+                (m_diagnostics->isVisible() && !m_pendingDiagnostics.empty())) schedulePresentation();
         }
-
-        void processOutputLine(const QByteArray& lineBytes)
+        void consumeParsedOutput()
         {
-            const QString line = QString::fromUtf8(lineBytes).trimmed();
-            if (line.isEmpty()) return;
-            if (!m_descriptor.visualization.enabled)
-            {
-                m_plainOutput->appendPlainText(line);
+            const auto batch = takePluginOutputBatch(m_parserState);
+            if (!batch) return;
+            for (const auto& record : batch->records) {
+                if (record.invalid) { m_protocolError = true; appendDiagnostic(record.text); }
+                else if (!m_descriptor.visualization.enabled) { appendPluginTextProjection(m_pendingPlainOutput, record.text); schedulePresentation(); }
+                else processOutputObject(record.object, record.row);
+            }
+            appendDiagnostic(batch->standardError);
+            m_parsePending = batch->more;
+            m_outputFlushed = batch->flushed;
+        }
+        void drainProcessOutput()
+        {
+            if (m_finished || !m_process) return;
+            consumeParsedOutput();
+            if (m_parseOperation->isBusy()) return;
+            if (m_processExited && (m_outputUnavailable || (m_outputFlushed && !m_parsePending && pluginChannelsDrained(m_process)))) {
+                finalizeOutput();
                 return;
             }
-
-            QJsonParseError parseError;
-            const QJsonDocument document = QJsonDocument::fromJson(lineBytes, &parseError);
-            if (parseError.error != QJsonParseError::NoError || !document.isObject())
-            {
-                appendDiagnostic(QStringLiteral("无法解析插件 JSON Lines：%1\n%2")
-                    .arg(parseError.errorString(), line));
-                m_protocolError = true;
-                return;
+            if (m_outputUnavailable) return;
+            PluginOutputRequest request;
+            request.state = m_parserState;
+            request.pluginId = m_descriptor.id;
+            request.structured = m_descriptor.visualization.enabled;
+            request.resultEvent = m_descriptor.visualization.resultEvent;
+            request.columns = m_descriptor.visualization.columns;
+            if (!m_parsePending) {
+                request.output = readPluginChannel(m_process, QProcess::StandardOutput);
+                request.error = readPluginChannel(m_process, QProcess::StandardError);
             }
-            const QJsonObject object = document.object();
-            if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
-                object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
-            {
-                appendDiagnostic(QStringLiteral("插件输出的 protocol 或 plugin_id 与清单不一致。"));
+            request.sourceDrained = m_process->bytesAvailable() == 0; // readPluginChannel restores stdout.
+            request.flush = m_processExited && pluginChannelsDrained(m_process);
+            if (request.output.isEmpty() && request.error.isEmpty() && !m_parsePending && !request.flush) return;
+            const auto ticket = m_parseOperation->submit<PluginOutputRequest, std::shared_ptr<const PluginOutputBatch>>(
+                std::move(request), parsePluginOutput,
+                [this](const std::shared_ptr<const PluginOutputBatch>&, std::uint64_t) { consumeParsedOutput(); return true; },
+                [this](std::exception_ptr) {
+                    m_protocolError = true;
+                    m_outputUnavailable = true;
+                    appendDiagnostic(QStringLiteral("插件输出处理失败；本次结果不完整。"));
+                    const bool userCanceled = m_cancelRequested;
+                    cancelRun();
+                    m_cancelRequested = userCanceled;
+                });
+            if (!ticket) {
                 m_protocolError = true;
-                return;
+                m_outputUnavailable = true;
+                appendDiagnostic(QStringLiteral("插件输出处理失败；本次结果不完整。"));
+                const bool userCanceled = m_cancelRequested;
+                cancelRun();
+                m_cancelRequested = userCanceled;
             }
+        }
+        void finalizeOutput()
+        {
+            m_finished = true;
+            const bool protocolComplete = !m_descriptor.visualization.enabled || m_completeSeen;
+            const bool succeeded = m_exitStatus == QProcess::NormalExit && m_exitCode == 0 &&
+                !m_protocolError && protocolComplete && !m_cancelRequested;
+            if (m_cancelRequested) setStatus(QStringLiteral("扫描已取消"), QStringLiteral("warning"));
+            else if (succeeded) {
+                setProgress(m_totalItems > 0 ? m_totalItems : 1, m_totalItems > 0 ? qMin(m_completedItems, m_totalItems) : 1);
+                setStatus(QStringLiteral("扫描完成，共处理 %1 项").arg(m_completedItems), QStringLiteral("success"));
+            } else {
+                if (!protocolComplete) appendDiagnostic(QStringLiteral("插件未发送声明的完成事件：%1").arg(m_descriptor.visualization.completeEvent));
+                setStatus(QStringLiteral("扫描失败（退出码 %1）").arg(m_exitCode), QStringLiteral("danger"));
+                if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
+            }
+            m_closeButton->setText(QStringLiteral("关闭"));
+            m_closeButton->setEnabled(true);
+            schedulePresentation();
+        }
 
+        void processOutputObject(const QJsonObject& object, const PluginResultRow& row)
+        {
             const QString event = object.value(QStringLiteral("event")).toString();
             if (event == QStringLiteral("error"))
             {
@@ -1480,9 +2235,7 @@ namespace
                 m_totalItems = qMax(0, object.value(m_descriptor.visualization.totalField).toInt());
                 if (m_totalItems > 0)
                 {
-                    m_progress->setRange(0, m_totalItems);
-                    m_progress->setValue(0);
-                    m_progress->setFormat(QStringLiteral("%v / %m"));
+                    setProgress(m_totalItems, 0, QStringLiteral("%v / %m"));
                 }
                 setStatus(m_totalItems > 0
                     ? QStringLiteral("正在扫描 0 / %1").arg(m_totalItems)
@@ -1491,11 +2244,11 @@ namespace
             }
             if (event == m_descriptor.visualization.resultEvent)
             {
-                appendResult(object);
+                appendResult(row);
                 ++m_completedItems;
                 if (m_totalItems > 0)
                 {
-                    m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                    setProgress(m_totalItems, qMin(m_completedItems, m_totalItems));
                     setStatus(QStringLiteral("正在扫描 %1 / %2").arg(m_completedItems).arg(m_totalItems),
                         QStringLiteral("info"));
                 }
@@ -1509,53 +2262,32 @@ namespace
             {
                 m_completeSeen = true;
                 updateSummary(object);
-                if (m_totalItems > 0) m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                if (m_totalItems > 0) setProgress(m_totalItems, qMin(m_completedItems, m_totalItems));
                 setStatus(QStringLiteral("正在完成扫描…"), QStringLiteral("info"));
             }
         }
 
-        void appendResult(const QJsonObject& object)
+        void appendResult(const PluginResultRow& row)
         {
-            if (m_resultTable == nullptr) return;
-            if (m_resultTable->rowCount() >= kMaxVisualizationRows)
-            {
-                if (!m_rowLimitReported)
-                {
-                    appendDiagnostic(QStringLiteral("扫描结果超过 %1 行，后续结果不再显示。")
-                        .arg(kMaxVisualizationRows));
+            if (!m_resultModel) return;
+            if (m_resultModel->storedCount() >= kMaxVisualizationRows) {
+                if (!m_rowLimitReported) {
+                    appendDiagnostic(QStringLiteral("扫描结果超过 %1 行，后续结果不再显示。").arg(kMaxVisualizationRows));
                     m_rowLimitReported = true;
                 }
                 return;
             }
-
-            const int row = m_resultTable->rowCount();
-            m_resultTable->insertRow(row);
-            for (int column = 0; column < m_descriptor.visualization.columns.size(); ++column)
-            {
-                const VisualizationField& field = m_descriptor.visualization.columns.at(column);
-                const QJsonValue value = object.value(field.field);
-                QString text = visualizationValueText(value, field.format);
-                QString tone;
-                if (field.format == QStringLiteral("badge"))
-                {
-                    const VisualizationValueStyle style = field.valueStyles.value(value.toString());
-                    if (!style.label.isEmpty()) text = style.label;
-                    tone = style.tone;
-                }
-                auto* item = new QTableWidgetItem(text);
-                if (!tone.isEmpty()) item->setForeground(QBrush(visualizationToneColor(tone)));
-                if (field.format == QStringLiteral("path") || text.size() > 80) item->setToolTip(text);
-                if (field.format == QStringLiteral("integer") ||
-                    field.format == QStringLiteral("number") ||
-                    field.format == QStringLiteral("percent"))
-                {
-                    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-                }
-                m_resultTable->setItem(row, column, item);
-            }
+            m_resultModel->append(row);
+            schedulePresentation();
+        }
+        void updateSummary(const QJsonObject& object)
+        {
+            m_pendingSummary = object;
+            m_summaryDirty = true;
+            schedulePresentation();
         }
 
-        void updateSummary(const QJsonObject& object)
+        void presentSummary(const QJsonObject& object)
         {
             for (const VisualizationField& field : m_descriptor.visualization.summary)
             {
@@ -1570,25 +2302,38 @@ namespace
                     if (!style.label.isEmpty()) text = style.label;
                     tone = style.tone;
                 }
-                label->setText(QStringLiteral("%1：%2").arg(field.label, text));
-                label->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
-                    .arg(tone.isEmpty()
-                        ? KswordTheme::TextPrimaryColorHex()
-                        : visualizationToneColor(tone).name()));
+                const QString labelText = QStringLiteral("%1：%2").arg(field.label, text);
+                if (label->text() != labelText) label->setText(labelText);
+                const QString style = QStringLiteral("font-weight:600;color:%1;").arg(tone.isEmpty()
+                    ? KswordTheme::TextPrimaryColorHex() : visualizationToneColor(tone).name());
+                if (label->styleSheet() != style) label->setStyleSheet(style);
             }
         }
 
         PluginDescriptor m_descriptor;
-        QProcess* m_process = nullptr;
+        QPointer<QProcess> m_process;
+        std::shared_ptr<PluginProcessStop> m_processStop;
         QProgressBar* m_progress = nullptr;
         QTabWidget* m_tabs = nullptr;
-        QTableWidget* m_resultTable = nullptr;
-        QPlainTextEdit* m_plainOutput = nullptr;
-        QPlainTextEdit* m_diagnostics = nullptr;
+        QTableView* m_resultTable = nullptr;
+        PluginResultModel* m_resultModel = nullptr;
+        PluginResultProxyModel* m_resultProxy = nullptr;
+        std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
+        std::shared_ptr<PluginOutputState> m_parserState;
+        QTimer* m_outputTimer = nullptr;
+        std::deque<QString> m_pendingDiagnostics, m_pendingPlainOutput;
+        QString m_statusText, m_statusTone, m_statusStyle, m_progressFormat;
+        QJsonObject m_pendingSummary;
+        int m_progressTotal = 0, m_progressValue = 0;
+        int m_exitCode = 0;
+        QProcess::ExitStatus m_exitStatus = QProcess::NormalExit;
+        bool m_processExited = false, m_parsePending = false, m_outputFlushed = false, m_outputUnavailable = false;
+        bool m_presentationScheduled = false, m_progressDirty = false, m_summaryDirty = false, m_sortingActivated = false;
+        ks::ui::AsyncLogTextView* m_plainOutput = nullptr;
+        ks::ui::AsyncLogTextView* m_diagnostics = nullptr;
         QLabel* m_status = nullptr;
         QPushButton* m_closeButton = nullptr;
         QHash<QString, QLabel*> m_summaryLabels;
-        QByteArray m_stdoutBuffer;
         int m_totalItems = 0;
         int m_completedItems = 0;
         bool m_completeSeen = false;
@@ -1630,6 +2375,14 @@ namespace
         PluginTabPage(QWidget* parent, const PluginDescriptor& descriptor)
             : QWidget(parent), m_descriptor(descriptor)
         {
+            m_parserState = std::make_shared<PluginOutputState>(true);
+            m_parseOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_outputTimer = new QTimer(this);
+            m_outputTimer->setSingleShot(true);
+            connect(m_outputTimer, &QTimer::timeout, this, [this]() { drainTabOutput(); });
+            m_parseOperation->setStateChangedCallback([this]() {
+                if (!m_parseOperation->isBusy()) { consumeParsedTabOutput(); m_outputTimer->start(0); }
+            });
             setObjectName(QStringLiteral("ksExternalPluginTab_%1").arg(descriptor.id));
             auto* rootLayout = new QVBoxLayout(this);
             rootLayout->setContentsMargins(4, 4, 4, 4);
@@ -1656,16 +2409,15 @@ namespace
             m_surface->installEventFilter(this);
             rootLayout->addWidget(m_surface, 1);
 
-            m_diagnostics = new CodeTextEdit(this);
-            static_cast<CodeTextEdit*>(m_diagnostics)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-            m_diagnostics->setReadOnly(true);
+            m_diagnostics = new ks::ui::AsyncLogTextView(this);
             m_diagnostics->setMaximumHeight(180);
-            m_diagnostics->document()->setMaximumBlockCount(2000);
+            m_diagnostics->setMaximumBlockCount(2000);
             m_diagnostics->setVisible(false);
             rootLayout->addWidget(m_diagnostics);
 
             connect(m_diagnosticsButton, &QPushButton::clicked, this, [this]() {
                 m_diagnostics->setVisible(!m_diagnostics->isVisible());
+                scheduleTabDiagnostics();
             });
             connect(m_retryButton, &QPushButton::clicked, this, [this]() { start(); });
         }
@@ -1673,19 +2425,16 @@ namespace
         ~PluginTabPage() override
         {
             m_stopping = true;
-            if (::IsWindow(m_pluginWindow))
+            m_parseOperation->close();
+            DWORD windowPid = 0;
+            if (::IsWindow(m_pluginWindow)) ::GetWindowThreadProcessId(m_pluginWindow, &windowPid);
+            if (m_process && windowPid == static_cast<DWORD>(m_process->processId())
+                && ::GetParent(m_pluginWindow) == reinterpret_cast<HWND>(m_surface->winId()))
             {
                 ::PostMessageW(m_pluginWindow, WM_CLOSE, 0, 0);
             }
-            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
-            {
-                m_process->terminate();
-                if (!m_process->waitForFinished(1200))
-                {
-                    m_process->kill();
-                    m_process->waitForFinished(800);
-                }
-            }
+            m_pluginWindow = nullptr;
+            retirePluginProcess(m_process, m_processStop);
         }
 
     protected:
@@ -1703,6 +2452,7 @@ namespace
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
+            scheduleTabDiagnostics();
             if (!m_startScheduled)
             {
                 m_startScheduled = true;
@@ -1732,10 +2482,14 @@ namespace
             {
                 return;
             }
+            ++m_runGeneration;
             m_failed = false;
             m_ready = false;
             m_pluginWindow = nullptr;
-            m_stdoutBuffer.clear();
+            m_parseOperation->cancel();
+            m_parserState = std::make_shared<PluginOutputState>(true);
+            m_parsePending = m_outputFlushed = m_processExited = m_outputUnavailable = false;
+            m_exitReported = false;
             m_retryButton->setVisible(false);
             m_statusLabel->setText(QStringLiteral("正在启动外部 Tab 插件…"));
             m_statusLabel->setStyleSheet({});
@@ -1789,10 +2543,7 @@ namespace
                 m_statusLabel->setText(QStringLiteral("插件进程已启动，等待窗口握手…"));
             });
             connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() { consumeStdout(); });
-            connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
-                const QString text = QString::fromUtf8(m_process->readAllStandardError());
-                if (!text.isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
-            });
+            connect(m_process, &QProcess::readyReadStandardError, this, [this]() { m_outputTimer->start(0); });
             connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
                 if (error == QProcess::FailedToStart)
                 {
@@ -1802,18 +2553,19 @@ namespace
             connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
                     if (m_stopping) return;
-                    m_pluginWindow = nullptr;
-                    const QString exitText = QStringLiteral("插件进程已退出：exit=%1, status=%2")
-                        .arg(exitCode)
-                        .arg(exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crashed"));
-                    m_diagnostics->appendPlainText(exitText);
-                    if (!m_failed) fail(exitText, false);
+                    m_processExited = true;
+                    m_exitCode = exitCode;
+                    m_exitStatus = exitStatus;
+                    m_outputTimer->start(0);
                 });
+            m_processStop = ownPluginProcess(m_process, 1200);
+            if (!m_processStop)
+            { fail(QStringLiteral("Tab 插件启动失败：%1").arg(QString::number(ERROR_OPERATION_ABORTED)), false); return; }
             m_process->start();
 
             QPointer<PluginTabPage> guard(this);
-            QTimer::singleShot(m_descriptor.tabPresentation.startupTimeoutMs, this, [guard]() {
-                if (guard != nullptr && !guard->m_ready && !guard->m_failed)
+            QTimer::singleShot(m_descriptor.tabPresentation.startupTimeoutMs, this, [guard, generation = m_runGeneration]() {
+                if (guard != nullptr && guard->m_runGeneration == generation && !guard->m_ready && !guard->m_failed)
                 {
                     guard->fail(QStringLiteral("Tab 插件启动超时，未收到有效的窗口握手。"), true);
                 }
@@ -1821,76 +2573,122 @@ namespace
         }
 
         void consumeStdout();
-        void processProtocolLine(const QByteArray& line);
+        void processProtocolLine(const QByteArray& line, const QJsonObject& object);
+        void drainTabOutput();
+        void consumeParsedTabOutput();
+        void appendTabDiagnostic(const QString& text)
+        {
+            if (text.isEmpty()) return;
+            appendPluginTextProjection(m_pendingDiagnostics, text);
+            scheduleTabDiagnostics();
+        }
+        void scheduleTabDiagnostics()
+        {
+            // Parent Show and the existing diagnostic toggle resume this tail.
+            if (m_diagnosticsScheduled || !m_diagnostics->isVisible() || m_pendingDiagnostics.empty()) return;
+            m_diagnosticsScheduled = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_diagnosticsScheduled = false;
+                if (!m_diagnostics->isVisible()) return;
+                QElapsedTimer budget; budget.start();
+                const QPointer<PluginTabPage> guard(this);
+                int units = 0;
+                while (!m_pendingDiagnostics.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
+                    const QString text = std::move(m_pendingDiagnostics.front());
+                    m_pendingDiagnostics.pop_front();
+                    ++units;
+                    m_diagnostics->appendPlainText(text);
+                    if (!guard) return;
+                }
+                if (!m_pendingDiagnostics.empty()) scheduleTabDiagnostics();
+            });
+        }
         void resizePluginWindow();
         void schedulePluginThemeUpdate();
         void fail(const QString& message, bool stopProcess);
 
         PluginDescriptor m_descriptor;
-        QProcess* m_process = nullptr;
+        QPointer<QProcess> m_process;
+        std::shared_ptr<PluginProcessStop> m_processStop;
         QWidget* m_surface = nullptr;
         QLabel* m_statusLabel = nullptr;
         QPushButton* m_diagnosticsButton = nullptr;
         QPushButton* m_retryButton = nullptr;
-        QPlainTextEdit* m_diagnostics = nullptr;
-        QByteArray m_stdoutBuffer;
+        ks::ui::AsyncLogTextView* m_diagnostics = nullptr;
+        std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
+        std::shared_ptr<PluginOutputState> m_parserState;
+        QTimer* m_outputTimer = nullptr;
+        std::deque<QString> m_pendingDiagnostics;
+        int m_exitCode = 0;
+        QProcess::ExitStatus m_exitStatus = QProcess::NormalExit;
+        quint64 m_runGeneration = 0;
+        bool m_parsePending = false, m_outputFlushed = false, m_processExited = false;
+        bool m_outputUnavailable = false, m_exitReported = false, m_diagnosticsScheduled = false;
         HWND m_pluginWindow = nullptr;
         bool m_ready = false;
+        bool m_asyncResize = false;
         bool m_failed = false;
         bool m_stopping = false;
         bool m_startScheduled = false;
         bool m_themeUpdatePending = false; // 合并同一轮外观事件，生命周期由this约束。
     };
 
-    void PluginTabPage::consumeStdout()
+    void PluginTabPage::consumeStdout() { m_outputTimer->start(0); }
+
+    void PluginTabPage::consumeParsedTabOutput()
     {
-        if (m_process == nullptr)
-        {
-            return;
-        }
-        m_stdoutBuffer += m_process->readAllStandardOutput();
-        if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes && !m_stdoutBuffer.contains('\n'))
-        {
-            fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
-            return;
-        }
-        while (true)
-        {
-            const qsizetype newlineIndex = m_stdoutBuffer.indexOf('\n');
-            if (newlineIndex < 0)
-            {
+        const auto batch = takePluginOutputBatch(m_parserState);
+        if (!batch) return;
+        appendTabDiagnostic(batch->standardError);
+        for (const auto& record : batch->records) {
+            if (m_failed) break;
+            if (record.invalid) {
+                if (record.text == QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。"))
+                    appendTabDiagnostic(QString::fromUtf8(record.raw));
+                fail(record.text, true);
                 break;
             }
-            if (newlineIndex > kMaxBufferedStdoutBytes)
-            {
-                fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
-                return;
-            }
-            QByteArray line = m_stdoutBuffer.left(newlineIndex);
-            m_stdoutBuffer.remove(0, newlineIndex + 1);
-            if (line.endsWith('\r')) line.chop(1);
-            if (!line.trimmed().isEmpty()) processProtocolLine(line);
-            if (m_failed) return;
+            processProtocolLine(record.raw, record.object);
         }
+        m_parsePending = batch->more;
+        m_outputFlushed = batch->flushed;
+    }
+    void PluginTabPage::drainTabOutput()
+    {
+        if (m_stopping || !m_process || m_exitReported) return;
+        consumeParsedTabOutput();
+        if (m_parseOperation->isBusy()) return;
+        if (m_processExited && (m_outputUnavailable || (m_outputFlushed && !m_parsePending && pluginChannelsDrained(m_process)))) {
+            m_exitReported = true;
+            m_pluginWindow = nullptr;
+            const QString text = QStringLiteral("插件进程已退出：exit=%1, status=%2").arg(m_exitCode)
+                .arg(m_exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crashed"));
+            appendTabDiagnostic(text);
+            if (!m_failed) fail(text, false);
+            return;
+        }
+        if (m_outputUnavailable) return;
+        PluginOutputRequest request;
+        request.state = m_parserState;
+        request.pluginId = m_descriptor.id;
+        request.tab = true;
+        request.writeHostLog = !m_failed;
+        if (!m_parsePending) {
+            request.output = readPluginChannel(m_process, QProcess::StandardOutput);
+            request.error = readPluginChannel(m_process, QProcess::StandardError);
+        }
+        request.sourceDrained = m_process->bytesAvailable() == 0;
+        request.flush = m_processExited && pluginChannelsDrained(m_process);
+        if (request.output.isEmpty() && request.error.isEmpty() && !m_parsePending && !request.flush) return;
+        const auto ticket = m_parseOperation->submit<PluginOutputRequest, std::shared_ptr<const PluginOutputBatch>>(
+            std::move(request), parsePluginOutput,
+            [this](const std::shared_ptr<const PluginOutputBatch>&, std::uint64_t) { consumeParsedTabOutput(); return true; },
+            [this](std::exception_ptr) { m_outputUnavailable = true; fail(QStringLiteral("插件输出处理失败；本次结果不完整。"), true); });
+        if (!ticket) { m_outputUnavailable = true; fail(QStringLiteral("插件输出处理失败；本次结果不完整。"), true); }
     }
 
-    void PluginTabPage::processProtocolLine(const QByteArray& line)
+    void PluginTabPage::processProtocolLine(const QByteArray& line, const QJsonObject& object)
     {
-        QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
-        if (parseError.error != QJsonParseError::NoError || !document.isObject())
-        {
-            m_diagnostics->appendPlainText(QString::fromUtf8(line));
-            fail(QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。"), true);
-            return;
-        }
-        const QJsonObject object = document.object();
-        if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
-            object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
-        {
-            fail(QStringLiteral("Tab 插件协议版本或 plugin_id 与清单不匹配。"), true);
-            return;
-        }
         const QString event = object.value(QStringLiteral("event")).toString();
         if (event == QStringLiteral("error"))
         {
@@ -1903,15 +2701,13 @@ namespace
             const QString message = object.value(QStringLiteral("message")).toString();
             if (!message.isEmpty())
             {
-                m_diagnostics->appendPlainText(message);
-                info << "[PluginHost:" << m_descriptor.id.toStdString() << "] "
-                    << message.toStdString() << eol;
+                appendTabDiagnostic(message);
             }
             return;
         }
         if (event != m_descriptor.tabPresentation.readyEvent)
         {
-            m_diagnostics->appendPlainText(QString::fromUtf8(line));
+            appendTabDiagnostic(QString::fromUtf8(line));
             return;
         }
 
@@ -1952,13 +2748,15 @@ namespace
         }
 
         m_pluginWindow = candidateWindow;
+        m_asyncResize = object.value(QStringLiteral("resize_async")).toString()
+            == QStringLiteral("parent_client_v1");
         m_ready = true;
         m_failed = false;
         m_retryButton->setVisible(false);
         m_statusLabel->setStyleSheet({});
         m_statusLabel->setText(QStringLiteral("Tab 插件已连接（外部进程 PID %1）。")
             .arg(owningProcessId));
-        ::ShowWindow(m_pluginWindow, SW_SHOW);
+        ::ShowWindowAsync(m_pluginWindow, SW_SHOW);
         resizePluginWindow();
         // 启动环境快照之后可能已换主题；握手完成时立即补当前色。
         schedulePluginThemeUpdate();
@@ -2018,6 +2816,18 @@ namespace
         {
             return;
         }
+        DWORD ownerPid = 0;
+        ::GetWindowThreadProcessId(m_pluginWindow, &ownerPid);
+        const HWND expectedParent = reinterpret_cast<HWND>(m_surface->winId());
+        if (m_process == nullptr || ownerPid != static_cast<DWORD>(m_process->processId())
+            || ::GetParent(m_pluginWindow) != expectedParent
+            || (::GetWindowLongPtrW(m_pluginWindow, GWL_STYLE) & WS_CHILD) == 0) return;
+        if (m_asyncResize)
+        {
+            static const UINT resizeMessage = ::RegisterWindowMessageW(L"KSword.PluginTab.ResizeParentClient.v1");
+            if (resizeMessage != 0) ::PostMessageW(m_pluginWindow, resizeMessage, 0, 0);
+            return;
+        }
         const QSize size = m_surface->size();
         ::MoveWindow(m_pluginWindow, 0, 0, qMax(1, size.width()), qMax(1, size.height()), TRUE);
     }
@@ -2035,7 +2845,7 @@ namespace
         m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;")
             .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         m_retryButton->setVisible(true);
-        m_diagnostics->appendPlainText(message);
+        appendTabDiagnostic(message);
         if (stopProcess && m_process != nullptr && m_process->state() != QProcess::NotRunning)
         {
             m_process->terminate();
@@ -2053,7 +2863,8 @@ namespace
         const MarketplacePlugin& plugin,
         const QString& pluginRoot,
         const QString& stagingDirectory,
-        QString* errorOut)
+        QString* errorOut,
+        QStringList* cleanupRoots = nullptr)
     {
         if (errorOut == nullptr)
         {
@@ -2121,9 +2932,93 @@ namespace
         {
             // 新版本已经就位后，清理失败不应把一次成功安装报告为失败；
             // 遗留备份不会被发现为有效插件（名称不符合插件 ID 规则）。
-            QDir(rootDirectory.filePath(backupName)).removeRecursively();
+            if (cleanupRoots) cleanupRoots->append(rootDirectory.filePath(backupName));
+            else QDir(rootDirectory.filePath(backupName)).removeRecursively();
         }
         return true;
+    }
+
+    struct PluginDownloadValue
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::deque<QByteArray> chunks;
+        qint64 queued = 0;
+        bool eof = false;
+        QString networkError;
+        std::atomic_bool physicallyFinished{true};
+        QString archivePath, stagingPath; // Generated paths only, published by physicallyFinished.
+        QStringList backupPaths;
+    };
+    struct PluginInstallResult { bool installed = false; QString root, error; };
+    PluginInstallResult installDownloadedPlugin(const MarketplacePlugin& plugin,
+        const std::shared_ptr<PluginDownloadValue>& value)
+    {
+        PluginInstallResult result;
+        result.root = resolvePluginInstallRoot();
+        if (!QDir().mkpath(result.root))
+        { result.error = QStringLiteral("无法创建插件目录：%1").arg(result.root); return result; }
+        value->archivePath = QDir(result.root).filePath(QStringLiteral(".ksword-plugin-download-%1.zip")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        QSaveFile output(value->archivePath); output.setDirectWriteFallback(false);
+        if (!output.open(QIODevice::WriteOnly))
+        { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        qint64 total = 0;
+        for (;;)
+        {
+            QByteArray chunk; QString error; bool eof = false;
+            {
+                std::unique_lock lock(value->mutex);
+                value->changed.wait(lock, [&] { return value->eof || !value->chunks.empty(); });
+                if (!value->chunks.empty())
+                { chunk = std::move(value->chunks.front()); value->chunks.pop_front(); value->queued -= chunk.size(); }
+                else { eof = value->eof; error = value->networkError; }
+            }
+            if (eof)
+            {
+                if (!error.isEmpty()) { result.error = error; return result; }
+                break;
+            }
+            total += chunk.size();
+            if (total > kMaxMarketplaceArchiveBytes)
+            { result.error = QStringLiteral("插件包为空或超过 256 MiB 限制。"); return result; }
+            hash.addData(chunk);
+            qint64 at = 0;
+            while (at < chunk.size())
+            {
+                const auto written = output.write(chunk.constData() + at, chunk.size() - at);
+                if (written <= 0) { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+                at += written;
+            }
+        }
+        if (total == 0) { result.error = QStringLiteral("插件包为空或超过 256 MiB 限制。"); return result; }
+        if (QString::fromLatin1(hash.result().toHex()).compare(plugin.sha256, Qt::CaseInsensitive) != 0)
+        { result.error = QStringLiteral("SHA-256 校验失败，已拒绝安装插件。"); return result; }
+        if (!output.commit())
+        { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+        value->stagingPath = QDir(result.root).filePath(QStringLiteral(".ksword-plugin-stage-%1-%2")
+            .arg(plugin.installDirectory, QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        if (!QDir().mkpath(value->stagingPath))
+        { result.error = QStringLiteral("无法创建插件安装暂存目录。"); return result; }
+        const auto powerShell = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+        if (powerShell.isEmpty())
+        { result.error = QStringLiteral("未找到 Windows PowerShell，无法解压插件包。"); return result; }
+        const auto command = ks::plugin_host::buildArchiveExtractionScript(value->archivePath, value->stagingPath,
+            ks::plugin_host::ArchiveLayout{plugin.installDirectory, true});
+        if (command.isEmpty()) { result.error = QStringLiteral("archive_policy_invalid"); return result; }
+        QProcess extractor;
+        extractor.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) { args->flags |= CREATE_NO_WINDOW; });
+        extractor.start(powerShell, {QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"),
+            QStringLiteral("-NonInteractive"), QStringLiteral("-Command"), command});
+        if (!extractor.waitForStarted(-1))
+        { result.error = QStringLiteral("无法启动插件解压器：%1").arg(extractor.errorString()); return result; }
+        while (extractor.state() != QProcess::NotRunning) extractor.waitForFinished(50);
+        if (extractor.exitStatus() != QProcess::NormalExit || extractor.exitCode() != 0)
+        { result.error = QStringLiteral("插件包解压失败（退出码 %1）。").arg(extractor.exitCode())
+            + QString::fromLocal8Bit(extractor.readAllStandardError()); return result; }
+        result.installed = promoteExtractedPlugin(plugin, result.root, value->stagingPath, &result.error, &value->backupPaths);
+        return result;
     }
 
     class PluginManagerDialog final : public QDialog
@@ -2249,7 +3144,7 @@ namespace
             ks::ui::NormalizeToolbarRow(footer);
             ks::ui::StyleSecondaryFooter(footerWidget);
             layout->addWidget(footerWidget);
-            connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshPlugins(); });
+            connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshPlugins(true); });
             connect(refreshMarketplaceButton, &QPushButton::clicked, this, [this]() { refreshMarketplace(); });
             connect(checkUpdatesButton, &QPushButton::clicked, this, [this]() { checkForUpdates(); });
             connect(detailButton, &QPushButton::clicked, this, [this]() { showSelectedDetails(); });
@@ -2273,15 +3168,20 @@ namespace
     private:
         using InstallCompletion = std::function<void(bool, const QString&)>;
 
-        void refreshPlugins()
+        void refreshPlugins(bool force = false)
         {
-            PluginListResult result;
-            QString errorText;
+            const QPointer<PluginManagerDialog> self(this);
+            requestPluginCatalog(this, [self](const PluginListResult& result, const QString& error) {
+                if (self) self->applyPluginCatalog(result, error);
+            }, force);
+        }
+        void applyPluginCatalog(const PluginListResult& result, const QString& errorText)
+        {
             m_table->setRowCount(0);
             m_plugins.clear();
             m_installedPluginsById.clear();
             m_pluginRoot.clear();
-            if (!discoverPlugins(&result, &errorText))
+            if (!errorText.isEmpty())
             {
                 m_status->setText(
                     QStringLiteral("插件目录不可用；详情已写入日志。"));
@@ -2309,7 +3209,7 @@ namespace
                 m_table->setItem(row, 3, new QTableWidgetItem(descriptor.description));
             }
             if (!m_plugins.isEmpty()) m_table->selectRow(0);
-            m_openFolderButton->setEnabled(QDir(m_pluginRoot).exists());
+            m_openFolderButton->setEnabled(!m_pluginRoot.isEmpty());
             QString status = QStringLiteral("已发现 %1 个有效插件。插件目录：%2")
                 .arg(m_plugins.size())
                 .arg(QDir::toNativeSeparators(m_pluginRoot));
@@ -2889,51 +3789,116 @@ namespace
             }
         }
 
+        ~PluginManagerDialog() override { if (m_archiveOperation) m_archiveOperation->close(); }
+
         void downloadMarketplaceArchive(
             const MarketplacePlugin& plugin,
             InstallCompletion completion = {})
         {
-            if (plugin.upstreamAssets)
-            {
-                installUpstreamAssets(plugin, completion);
-                return;
-            }
+            if (m_archiveOperation && m_archiveOperation->isBusy())
+            { completeMarketplaceInstall(completion, false, QStringLiteral("上游插件安装已在进行。")); return; }
+            if (plugin.upstreamAssets) { installUpstreamAssets(plugin, completion); return; }
+            if (!m_archiveOperation) m_archiveOperation = new ks::ui::AsyncOperation(this);
+            if (m_archiveOperation->isBusy())
+            { completeMarketplaceInstall(completion, false, QStringLiteral("上游插件安装已在进行。")); return; }
+            const auto value = std::make_shared<PluginDownloadValue>();
+            auto cleanup = ks::ui::RetainedCleanupJob::create([value]() {
+                bool clean = true;
+                if (!value->archivePath.isEmpty() && QFileInfo::exists(value->archivePath))
+                    clean = QFile::remove(value->archivePath) && clean;
+                if (!value->stagingPath.isEmpty() && QFileInfo::exists(value->stagingPath))
+                    clean = QDir(value->stagingPath).removeRecursively() && clean;
+                for (const auto& path : value->backupPaths)
+                    if (QFileInfo::exists(path)) clean = QDir(path).removeRecursively() && clean;
+                return clean;
+            }, 0, [value]() {
+                { std::lock_guard lock(value->mutex);
+                  if (!value->eof) { value->networkError = QStringLiteral("操作已取消"); value->eof = true; } }
+                value->changed.notify_all();
+            }, [value]() { return value->physicallyFinished.load(std::memory_order_acquire); });
+            if (!cleanup) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            bool closing = false;
+            { std::lock_guard lock(value->mutex); closing = value->eof;
+              if (!closing) value->physicallyFinished.store(false, std::memory_order_release); }
+            if (closing) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            struct Request { MarketplacePlugin plugin; std::shared_ptr<PluginDownloadValue> value;
+                std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup; };
+            const auto accepted = m_archiveOperation->submitTransaction<Request, PluginInstallResult>(
+                {plugin, value, cleanup}, [](const Request& request) {
+                    struct Finished { const Request& request; ~Finished() {
+                        request.value->physicallyFinished.store(true, std::memory_order_release);
+                        request.cleanup->notifyReadyToAttempt();
+                    }} finished{request};
+                    return installDownloadedPlugin(request.plugin, request.value);
+                }, [this, plugin, completion](const PluginInstallResult& result, std::uint64_t) {
+                    QTimer::singleShot(0, this, [this, plugin, completion, result]() {
+                        if (!result.installed) { completeMarketplaceInstall(completion, false, result.error); return; }
+                        refreshPlugins(true);
+                        const auto message = QStringLiteral("已一键安装并验证 %1 到 %2。")
+                            .arg(plugin.name, QDir::toNativeSeparators(QDir(result.root).filePath(plugin.installDirectory)));
+                        m_status->setText(message);
+                        updateInstallProgress(QStringLiteral("%1 安装完成").arg(plugin.name), 100);
+                        const QPointer<PluginManagerDialog> self(this);
+                        if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"),
+                            QStringLiteral("%1 已安装，可立即从“插件”菜单调用。").arg(plugin.name));
+                        if (self) completeMarketplaceInstall(completion, true, message);
+                    });
+                    return true;
+                }, [this, completion](std::exception_ptr) {
+                    QTimer::singleShot(0, this, [this, completion]() {
+                        completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。"));
+                    });
+                }, [value, cleanup](ks::ui::AsyncOperationOutcome outcome) {
+                    if (outcome == ks::ui::AsyncOperationOutcome::BusyRejected) {
+                        value->physicallyFinished.store(true, std::memory_order_release);
+                        cleanup->notifyReadyToAttempt();
+                    }
+                });
+            if (!accepted) { value->physicallyFinished.store(true, std::memory_order_release);
+                cleanup->notifyReadyToAttempt(); completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
             m_status->setText(QStringLiteral("正在下载 %1；将校验 SHA-256 后一键安装。").arg(plugin.name));
             updateInstallProgress(QStringLiteral("正在下载 %1").arg(plugin.name), 0);
             QNetworkRequest request(plugin.archiveUrl);
             request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("KSword-PluginMarketplace/1"));
             QNetworkReply* reply = m_networkManager->get(request);
+            reply->setReadBufferSize(4 * 1024 * 1024);
+            auto* pumpTimer = new QTimer(reply); pumpTimer->setInterval(20);
+            const auto sourceDone = std::make_shared<bool>(false);
+            const auto sourceError = std::make_shared<QString>();
+            const auto pump = [reply, pumpTimer, value, sourceDone, sourceError]() {
+                if (value->physicallyFinished.load(std::memory_order_acquire)) {
+                    pumpTimer->stop(); reply->abort(); reply->deleteLater(); return;
+                }
+                QElapsedTimer budget; budget.start();
+                while (reply->bytesAvailable() > 0 && budget.elapsed() < 4) {
+                    { std::lock_guard lock(value->mutex); if (value->queued >= 4 * 1024 * 1024) break; }
+                    auto bytes = reply->read(64 * 1024);
+                    if (bytes.isEmpty()) break;
+                    { std::lock_guard lock(value->mutex); value->queued += bytes.size(); value->chunks.push_back(std::move(bytes)); }
+                    value->changed.notify_one();
+                }
+                if (*sourceDone && reply->bytesAvailable() == 0) {
+                    { std::lock_guard lock(value->mutex); value->eof = true; value->networkError = *sourceError; }
+                    value->changed.notify_all(); pumpTimer->stop(); reply->deleteLater();
+                }
+            };
             connect(reply, &QNetworkReply::downloadProgress, this,
-                [this, plugin](const qint64 received, const qint64 total) {
-                    updateDownloadProgress(plugin, received, total);
-                });
-            connect(reply, &QNetworkReply::finished, this, [this, reply, plugin, completion]() {
-                const QByteArray archiveBytes = reply->readAll();
-                const bool networkOk = reply->error() == QNetworkReply::NoError;
-                const QString networkError = networkOk ? QString() : networkReplyErrorText(reply);
-                reply->deleteLater();
-                if (!networkOk)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("插件下载失败：%1").arg(networkError));
-                    return;
-                }
-                if (archiveBytes.isEmpty() || archiveBytes.size() > kMaxMarketplaceArchiveBytes)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("插件包为空或超过 256 MiB 限制。"));
-                    return;
-                }
-                updateInstallProgress(QStringLiteral("正在校验 %1 的 SHA-256").arg(plugin.name), 75);
-                const QString actualSha256 = QString::fromLatin1(QCryptographicHash::hash(archiveBytes, QCryptographicHash::Sha256).toHex());
-                if (actualSha256.compare(plugin.sha256, Qt::CaseInsensitive) != 0)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("SHA-256 校验失败，已拒绝安装插件。"));
-                    return;
-                }
-                updateInstallProgress(QStringLiteral("SHA-256 校验通过"), 80);
-                installMarketplaceArchive(plugin, archiveBytes, completion);
+                [this, plugin](qint64 received, qint64 total) { updateDownloadProgress(plugin, received, total); });
+            connect(reply, &QIODevice::readyRead, reply, pump);
+            connect(pumpTimer, &QTimer::timeout, reply, pump);
+            connect(reply, &QNetworkReply::finished, reply, [reply, sourceDone, sourceError, pump]() {
+                *sourceDone = true;
+                if (reply->error() != QNetworkReply::NoError)
+                    *sourceError = QStringLiteral("插件下载失败：%1").arg(networkReplyErrorText(reply));
+                pump();
             });
+            connect(reply, &QObject::destroyed, QCoreApplication::instance(), [value]() {
+                { std::lock_guard lock(value->mutex); if (!value->eof) {
+                    value->eof = true; value->networkError = QStringLiteral("操作已取消"); } }
+                value->changed.notify_all();
+            });
+            pumpTimer->start();
         }
-
         void installUpstreamAssets(const MarketplacePlugin& plugin, const InstallCompletion& completion)
         {
             if (m_upstreamInstaller)
@@ -2964,164 +3929,68 @@ namespace
                         completeMarketplaceInstall(completion, false, error);
                         return;
                     }
-                    QString installError;
-                    const bool promoted = promoteExtractedPlugin(plugin, pluginRoot, stage, &installError);
-                    // Stage is a generated sibling below this exact plugin root;
-                    // successful root-layout promotion has already renamed it.
-                    if (QFileInfo::exists(stage))
-                    {
-                        const auto canonicalRoot = QFileInfo(pluginRoot).canonicalFilePath();
-                        const auto canonicalStage = QFileInfo(stage).canonicalFilePath();
-                        if (!canonicalRoot.isEmpty() && canonicalStage.startsWith(canonicalRoot + QLatin1Char('/'), Qt::CaseInsensitive) &&
-                            QFileInfo(stage).fileName().startsWith(QStringLiteral(".ksword-plugin-stage-%1-").arg(plugin.id)) && !QFileInfo(stage).isSymLink())
-                            QDir(canonicalStage).removeRecursively();
-                    }
-                    if (!promoted)
-                    {
-                        completeMarketplaceInstall(completion, false, installError);
-                        return;
-                    }
-                    refreshPlugins();
-                    populateMarketplaceTable();
-                    selectMarketplaceEntry();
-                    const auto message = QStringLiteral("上游插件 %1 已安装到：%2").arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
-                    m_status->setText(message);
-                    updateInstallProgress(QStringLiteral("上游插件安装完成"), 100);
-                    const QPointer<PluginManagerDialog> self(this);
-                    if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"), message);
-                    if (!self) return;
-                    completeMarketplaceInstall(completion, true, message);
-                });
+                    promoteUpstreamStage(plugin, pluginRoot, stage, completion);                });
         }
 
-        void installMarketplaceArchive(
-            const MarketplacePlugin& plugin,
-            const QByteArray& archiveBytes,
-            const InstallCompletion& completion)
+        void promoteUpstreamStage(const MarketplacePlugin& plugin, const QString& root,
+            const QString& stage, const InstallCompletion& completion)
         {
-            const QString pluginRoot = resolvePluginInstallRoot();
-            if (!QDir().mkpath(pluginRoot))
-            {
-                completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件目录：%1")
-                    .arg(QDir::toNativeSeparators(pluginRoot)));
-                return;
-            }
-
-            {
-                updateInstallProgress(QStringLiteral("正在准备 %1 的已验证安装包").arg(plugin.name), 84);
-                const QString archivePath = QDir(pluginRoot).filePath(
-                    QStringLiteral(".ksword-plugin-download-%1.zip")
-                        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
-                QSaveFile archiveFile(archivePath);
-                if (!archiveFile.open(QIODevice::WriteOnly) ||
-                    archiveFile.write(archiveBytes) != archiveBytes.size() ||
-                    !archiveFile.commit())
-                {
-                    QFile::remove(archivePath);
-                    completeMarketplaceInstall(completion, false,
-                        QStringLiteral("无法准备已验证的插件包：%1").arg(archiveFile.errorString()));
-                    return;
+            if (!m_archiveOperation) m_archiveOperation = new ks::ui::AsyncOperation(this);
+            const auto value = std::make_shared<PluginDownloadValue>();
+            value->stagingPath = stage;
+            const auto cleanup = ks::ui::RetainedCleanupJob::create([value, root, plugin]() {
+                bool clean = true;
+                if (QFileInfo::exists(value->stagingPath)) {
+                    const auto canonicalRoot = QFileInfo(root).canonicalFilePath();
+                    const auto canonicalStage = QFileInfo(value->stagingPath).canonicalFilePath();
+                    if (canonicalRoot.isEmpty() || !canonicalStage.startsWith(canonicalRoot + QLatin1Char('/'), Qt::CaseInsensitive) ||
+                        !QFileInfo(value->stagingPath).fileName().startsWith(QStringLiteral(".ksword-plugin-stage-%1-").arg(plugin.id)) ||
+                        QFileInfo(value->stagingPath).isSymLink()) return false;
+                    clean = QDir(canonicalStage).removeRecursively();
                 }
-                installVerifiedMarketplaceArchive(plugin, pluginRoot, archivePath, completion);
-            }
-        }
-
-        void installVerifiedMarketplaceArchive(
-            const MarketplacePlugin& plugin,
-            const QString& pluginRoot,
-            const QString& archivePath,
-            const InstallCompletion& completion)
-        {
-            const QString stagingName = QStringLiteral(".ksword-plugin-stage-%1-%2")
-                .arg(plugin.installDirectory, QUuid::createUuid().toString(QUuid::WithoutBraces));
-            const QString stagingPath = QDir(pluginRoot).filePath(stagingName);
-            if (!QDir().mkpath(stagingPath))
-            {
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。"));
-                return;
-            }
-
-            const QString powerShell = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
-            if (powerShell.isEmpty())
-            {
-                QDir(stagingPath).removeRecursively();
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false, QStringLiteral("未找到 Windows PowerShell，无法解压插件包。"));
-                return;
-            }
-
-            // 普通 ZIP 与官方资产采用同一预检/有界提取；promotion 仍验证真实清单。
-            const ks::plugin_host::ArchiveLayout layout{plugin.installDirectory, true};
-            const QString command = ks::plugin_host::buildArchiveExtractionScript(archivePath, stagingPath, layout);
-            if (command.isEmpty())
-            {
-                QDir(stagingPath).removeRecursively();
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false,
-                    QStringLiteral("插件包已验证，但安装被拒绝：%1").arg(QStringLiteral("archive_policy_invalid")));
-                return;
-            }
-            auto* extractor = new QProcess(this);
-            extractor->setProcessChannelMode(QProcess::SeparateChannels);
-            extractor->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* arguments)
-            {
-                arguments->flags |= CREATE_NO_WINDOW;
-            });
-            extractor->setProgram(powerShell);
-            extractor->setArguments(QStringList{
-                QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"),
-                QStringLiteral("-Command"), command });
-            m_status->setText(QStringLiteral("已验证 %1，正在安全解压并安装…").arg(plugin.name));
-            updateInstallProgress(QStringLiteral("正在安全解压 %1").arg(plugin.name), 90);
-            connect(extractor, &QProcess::errorOccurred, this,
-                [this, extractor, archivePath, stagingPath, completion](const QProcess::ProcessError error) {
-                    if (error != QProcess::FailedToStart) return;
-                    QDir(stagingPath).removeRecursively();
-                    QFile::remove(archivePath);
-                    completeMarketplaceInstall(completion, false, QStringLiteral("无法启动插件解压器：%1")
-                        .arg(extractor->errorString()));
-                    extractor->deleteLater();
+                for (const auto& path : value->backupPaths)
+                    if (QFileInfo::exists(path)) clean = QDir(path).removeRecursively() && clean;
+                return clean;
+            }, 0, [value]() { std::lock_guard lock(value->mutex); value->eof = true; },
+                [value]() { return value->physicallyFinished.load(std::memory_order_acquire); });
+            if (!cleanup) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            bool closing = false;
+            { std::lock_guard lock(value->mutex); closing = value->eof;
+              if (!closing) value->physicallyFinished.store(false, std::memory_order_release); }
+            if (closing) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            struct Request { MarketplacePlugin plugin; QString root; std::shared_ptr<PluginDownloadValue> value;
+                std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup; };
+            const auto accepted = m_archiveOperation->submitTransaction<Request, PluginInstallResult>(
+                {plugin, root, value, cleanup}, [](const Request& request) {
+                    struct Finished { const Request& request; ~Finished() {
+                        request.value->physicallyFinished.store(true, std::memory_order_release);
+                        request.cleanup->notifyReadyToAttempt();
+                    }} finished{request};
+                    PluginInstallResult result; result.root = request.root;
+                    result.installed = promoteExtractedPlugin(request.plugin, request.root,
+                        request.value->stagingPath, &result.error, &request.value->backupPaths);
+                    return result;
+                }, [this, plugin, completion](const PluginInstallResult& result, std::uint64_t) {
+                    QTimer::singleShot(0, this, [this, plugin, completion, result]() {
+                        if (!result.installed) { completeMarketplaceInstall(completion, false, result.error); return; }
+                        refreshPlugins(true); populateMarketplaceTable(); selectMarketplaceEntry();
+                        const auto message = QStringLiteral("上游插件 %1 已安装到：%2").arg(plugin.name,
+                            QDir::toNativeSeparators(QDir(result.root).filePath(plugin.installDirectory)));
+                        m_status->setText(message); updateInstallProgress(QStringLiteral("上游插件安装完成"), 100);
+                        const QPointer<PluginManagerDialog> self(this);
+                        if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"), message);
+                        if (self) completeMarketplaceInstall(completion, true, message);
+                    }); return true;
+                }, [this, completion](std::exception_ptr) {
+                    QTimer::singleShot(0, this, [this, completion]() {
+                        completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。")); });
+                }, [value, cleanup](ks::ui::AsyncOperationOutcome outcome) {
+                    if (outcome == ks::ui::AsyncOperationOutcome::BusyRejected) {
+                        value->physicallyFinished.store(true, std::memory_order_release); cleanup->notifyReadyToAttempt(); }
                 });
-            connect(extractor, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-                [this, extractor, archivePath, plugin, pluginRoot, stagingPath, completion](const int exitCode, const QProcess::ExitStatus exitStatus) {
-                    const QString details = QString::fromLocal8Bit(extractor->readAllStandardError()).trimmed();
-                    extractor->deleteLater();
-                    QFile::remove(archivePath);
-                    if (exitStatus != QProcess::NormalExit || exitCode != 0)
-                    {
-                        QDir(stagingPath).removeRecursively();
-                        QString message = QStringLiteral("插件包解压失败（退出码 %1）。").arg(exitCode);
-                        if (!details.isEmpty()) message += QStringLiteral("\n%1").arg(details);
-                        completeMarketplaceInstall(completion, false, message);
-                        return;
-                    }
-
-                    updateInstallProgress(QStringLiteral("正在验证并替换 %1").arg(plugin.name), 95);
-                    QString installError;
-                    const bool installed = promoteExtractedPlugin(plugin, pluginRoot, stagingPath, &installError);
-                    QDir(stagingPath).removeRecursively();
-                    if (!installed)
-                    {
-                        completeMarketplaceInstall(completion, false,
-                            QStringLiteral("插件包已验证，但安装被拒绝：%1").arg(installError));
-                        return;
-                    }
-                    refreshPlugins();
-                    const QString message = QStringLiteral("已一键安装并验证 %1 到 %2。")
-                        .arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
-                    m_status->setText(message);
-                    updateInstallProgress(QStringLiteral("%1 安装完成").arg(plugin.name), 100);
-                    if (!completion)
-                    {
-                        QMessageBox::information(this, QStringLiteral("插件商城"), QStringLiteral("%1 已安装，可立即从“插件”菜单调用。")
-                            .arg(plugin.name));
-                    }
-                    completeMarketplaceInstall(completion, true, message);
-                });
-            extractor->start();
+            if (!accepted) { value->physicallyFinished.store(true, std::memory_order_release); cleanup->notifyReadyToAttempt();
+                completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); }
         }
-
         QTableWidget* m_table = nullptr;
         QTabWidget* m_mainTabs = nullptr;
         QTableWidget* m_marketplaceTable = nullptr;
@@ -3129,6 +3998,7 @@ namespace
         QProgressBar* m_installProgress = nullptr;
         QCheckBox* m_autoUpdateCheck = nullptr;
         QPushButton* m_openFolderButton = nullptr;
+        ks::ui::AsyncOperation* m_archiveOperation = nullptr;
         QNetworkAccessManager* m_networkManager = nullptr;
         QPointer<ks::plugin_host::UpstreamAssetInstaller> m_upstreamInstaller;
         QList<PluginDescriptor> m_plugins;
@@ -3149,6 +4019,11 @@ namespace
 void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const InvocationContext& context)
 {
     if (menu == nullptr || owner == nullptr) return;
+    const QPointer<QMenu> catalogMenu(menu);
+    const QPointer<QWidget> catalogOwner(owner);
+    requestPluginCatalog(menu, [catalogMenu, catalogOwner, context](const PluginListResult&, const QString&) {
+        if (catalogMenu && catalogOwner) ks::plugin_host::populateTargetMenu(catalogMenu, catalogOwner, context);
+    }, false, false);
     menu->clear();
     menu->setToolTipsVisible(true);
     QString contextError;
@@ -3218,12 +4093,54 @@ void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const Invo
     }
 }
 
+namespace
+{
+    bool isTabNavigationPlugin(const PluginDescriptor& descriptor)
+    {
+        return (descriptor.pluginType == QStringLiteral("tab") || descriptor.pluginType == QStringLiteral("hybrid"))
+            && descriptor.tabPresentation.enabled && descriptor.targets.contains(QStringLiteral("tab"));
+    }
+    ks::ui::PageNavigationDescriptor tabPluginNavigationDescriptor(const PluginDescriptor& descriptor, bool current)
+    {
+        return {QStringLiteral("plugin:") + descriptor.id, {}, descriptor.tabPresentation.title, {}, true, true, current};
+    }
+    const ks::ui::PageNavigationTabDefinition kEmptyPluginNavigation =
+        {"overview", "", "plugin.tab.empty.overview", "概览", true};
+    class TabPluginCatalogContainer final : public QWidget
+    {
+    public:
+        using QWidget::QWidget;
+        ks::ui::PageNavigationTabCatalog navigation;
+        ks::ui::PageNavigationCatalog schema;
+        void addPlugin(QTabWidget* tabs, QWidget* page, const PluginDescriptor& descriptor)
+        {
+            auto entry = tabPluginNavigationDescriptor(descriptor, schema.isEmpty());
+            const QByteArray id = entry.id.toUtf8();
+            const QByteArray title = entry.title.toUtf8();
+            navigation.add({id.constData(), "", "", title.constData(), entry.current}, tabs, page,
+                QIcon(QStringLiteral(":/Icon/process_start.svg")));
+            tabs->setTabText(tabs->indexOf(page), entry.title); // manifest自定义标题沿用原工厂原文，不按应用翻译别名改写。
+            schema.append(std::move(entry));
+        }
+        void addEmpty(QTabWidget* tabs, QWidget* page)
+        {
+            navigation.add(kEmptyPluginNavigation, tabs, page);
+            schema.append(ks::ui::PageNavigationTabDescriptor(kEmptyPluginNavigation));
+        }
+    };
+}
+
 int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
 {
     if (tabWidget == nullptr || owner == nullptr)
     {
         return 0;
     }
+    const QPointer<QTabWidget> catalogTabs(tabWidget);
+    const QPointer<QWidget> catalogOwner(owner);
+    requestPluginCatalog(tabWidget, [catalogTabs, catalogOwner](const PluginListResult&, const QString&) {
+        if (catalogTabs && catalogOwner) ks::plugin_host::populateTabPlugins(catalogTabs, catalogOwner);
+    }, false, false);
     PluginListResult result;
     QString errorText;
     if (!discoverPlugins(&result, &errorText))
@@ -3231,23 +4148,36 @@ int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
         return 0;
     }
     int addedTabs = 0;
+    QStringList existingIds;
+    for (int index = 0; index < tabWidget->count(); ++index)
+        existingIds << tabWidget->widget(index)->property("kswordPluginId").toString();
     for (const PluginDescriptor& descriptor : result.plugins)
     {
-        if ((descriptor.pluginType != QStringLiteral("tab") &&
-             descriptor.pluginType != QStringLiteral("hybrid")) ||
-            !descriptor.tabPresentation.enabled ||
-            !descriptor.targets.contains(QStringLiteral("tab")))
+        if (!isTabNavigationPlugin(descriptor))
         {
             continue;
         }
+        if (existingIds.contains(descriptor.id)) continue;
         auto* page = new PluginTabPage(tabWidget, descriptor);
         page->setProperty("kswordPluginId", descriptor.id);
-        tabWidget->addTab(
-            page,
-            QIcon(QStringLiteral(":/Icon/process_start.svg")),
-            descriptor.tabPresentation.title);
+        if (auto* catalog = dynamic_cast<TabPluginCatalogContainer*>(owner))
+            catalog->addPlugin(tabWidget, page, descriptor);
+        else
+            tabWidget->addTab(page, QIcon(QStringLiteral(":/Icon/process_start.svg")), descriptor.tabPresentation.title);
         tabWidget->setTabToolTip(tabWidget->indexOf(page), descriptor.description);
         ++addedTabs;
+    }
+    if (addedTabs > 0)
+    {
+        for (int index = tabWidget->count() - 1; index >= 0; --index)
+        {
+            auto* page = tabWidget->widget(index);
+            if (page->objectName() != QStringLiteral("ksTabPluginEmptyState")) continue;
+            tabWidget->removeTab(index); page->deleteLater();
+        }
+        if (auto* catalog = dynamic_cast<TabPluginCatalogContainer*>(owner))
+            catalog->schema.erase(std::remove_if(catalog->schema.begin(), catalog->schema.end(),
+                [](const auto& page) { return page.id == QStringLiteral("overview"); }), catalog->schema.end());
     }
     return addedTabs;
 }
@@ -3313,7 +4243,7 @@ namespace
 
 QWidget* ks::plugin_host::createTabPluginContainer(QWidget* parent)
 {
-    auto* container = new QWidget(parent);
+    auto* container = new TabPluginCatalogContainer(parent);
     container->setObjectName(QStringLiteral("ksTabPluginContainer"));
 
     auto* rootLayout = new QVBoxLayout(container);
@@ -3434,9 +4364,7 @@ QWidget* ks::plugin_host::createTabPluginContainer(QWidget* parent)
         QObject::connect(manageButton, &QPushButton::clicked, emptyPage, [emptyPage]() {
             ks::plugin_host::showPluginManager(emptyPage);
         });
-        tabWidget->addTab(
-            emptyPage,
-            ks::i18n::text(QStringLiteral("plugin.tab.empty.overview"), QStringLiteral("概览")));
+        container->addEmpty(tabWidget, emptyPage);
     }
 
     return container;
@@ -3448,3 +4376,26 @@ void ks::plugin_host::showPluginManager(QWidget* owner, const QString& preselect
     dialog->raise();
     dialog->activateWindow();
 }
+
+ks::ui::PageNavigationCatalog ks::plugin_host::tabNavigationCatalog(QWidget* existing)
+{
+    if (auto* container = dynamic_cast<TabPluginCatalogContainer*>(existing))
+        return container->navigation.describe(container->schema);
+    // 只读取与真实工厂相同的manifest元数据；此路径没有PluginTabPage、QProcess或原生窗口构造。
+    PluginListResult plugins;
+    QString error;
+    ks::ui::PageNavigationCatalog schema;
+    if (discoverPlugins(&plugins, &error))
+        for (const auto& descriptor : plugins.plugins)
+            if (isTabNavigationPlugin(descriptor))
+                schema.append(tabPluginNavigationDescriptor(descriptor, schema.isEmpty()));
+    if (schema.isEmpty()) schema.append(ks::ui::PageNavigationTabDescriptor(kEmptyPluginNavigation));
+    return schema;
+}
+QWidget* ks::plugin_host::activateTabNavigationDescriptor(QWidget* existing, const QString& id)
+{
+    auto* container = dynamic_cast<TabPluginCatalogContainer*>(existing);
+    return container ? container->navigation.activate(id, tabNavigationCatalog(container)) : nullptr;
+}
+namespace { const bool kTabPluginNavigationRegistered = ks::ui::RegisterPageNavigationCatalog(QStringLiteral("misc.plugin"),
+    ks::plugin_host::tabNavigationCatalog, ks::plugin_host::activateTabNavigationDescriptor); }

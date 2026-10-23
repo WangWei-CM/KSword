@@ -178,6 +178,7 @@ namespace ks::minidump
         rangesOut->reserve(rangesOut->size() + m_ranges.size());
         for (const Range& range : m_ranges)
         {
+            CheckDumpCancellation();
             DumpMemoryRange entry{};
             entry.virtualAddress = range.virtualAddress;
             entry.fileOffset = range.fileOffset;

@@ -391,7 +391,9 @@ namespace ks::ui
     {
         const QPointer<MemoryWorkbenchView> self(this);
         // 隐藏的 C 页也必须撤销被重读/编辑改变的输入票据，不能回切后看到旧结果。
-        if (pseudocodeView_) pseudocodeView_->refreshView();
+        const bool visiblePseudocode = subTabStack_ && subTabStack_->currentIndex() == kPseudocodeTab
+            && !subPageFollowBusy_;
+        if (!visiblePseudocode && pseudocodeView_) pseudocodeView_->refreshView();
         if (!self) return;
         for (SubPageFollowState& state : subPageFollow_)
         {

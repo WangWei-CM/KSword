@@ -23,7 +23,7 @@ code=r'''
 #include <cstdio>
 NORMALIZER
 class WinAPIDock{public:
- QString m_currentConfigPath,m_currentPipeName,m_currentStopFlagPath,m_currentSessionId;
+ QString m_currentConfigPath,m_currentPipeName,m_currentStopFlagPath,m_currentSessionId; std::uint32_t m_currentSessionPid=0;
  QLineEdit* m_agentDllPathEdit=nullptr;
  QCheckBox *m_hookFileCheck=nullptr,*m_hookRegistryCheck=nullptr,*m_hookNetworkCheck=nullptr,*m_hookProcessCheck=nullptr,
   *m_hookLoaderCheck=nullptr,*m_hookClipboardCheck=nullptr,*m_autoInjectChildCheck=nullptr,*m_rawFallbackCheck=nullptr,
@@ -41,7 +41,7 @@ CLIP_WRITER
 int main(int argc,char** argv){
  QApplication app(argc,argv);using namespace ks::winapi_monitor;
  const auto pid=GetCurrentProcessId();QDir().mkpath(QString::fromStdWString(buildSessionDirectory()));
- WinAPIDock dock;dock.m_currentConfigPath=QString::fromStdWString(buildConfigPathForPid(pid));
+ WinAPIDock dock;dock.m_currentSessionPid=pid;dock.m_currentConfigPath=QString::fromStdWString(buildConfigPathForPid(pid));
  dock.m_currentStopFlagPath=QString::fromStdWString(buildStopFlagPathForPid(pid));
  dock.m_currentPipeName=QString::fromStdWString(buildPipeNameForPid(pid));dock.m_currentSessionId="unicode-broker-test";
  QLineEdit dll;dll.setText(QStringLiteral("C:/测试 目录/APIMonitor_x64.dll"));dock.m_agentDllPathEdit=&dll;

@@ -4,6 +4,10 @@
 #include <QString>
 
 #include <cstdint>
+#include <string>
+
+namespace ks::ui { class AsyncOperation; }
+namespace ksword::ark { struct DriverObjectQueryResult; struct DriverDispatchControlResult; }
 
 class QLabel;
 class QLineEdit;
@@ -18,11 +22,23 @@ public:
     explicit KernelDriverDispatchEditorDialog(
         const QString& driverObjectName,
         QWidget* parent = nullptr);
+    ~KernelDriverDispatchEditorDialog() override;
 
 private:
     void initializeUi();
     void refreshDriverSnapshot();
     bool refreshSelectedTransaction();
+    void refreshSelectedTransactionAsync();
+    void applyDriverSnapshot(const ksword::ark::DriverObjectQueryResult& result);
+    bool applyTransactionResult(const ksword::ark::DriverDispatchControlResult& result);
+    struct SlotQuery
+    {
+        std::uint64_t moduleBase = 0;
+        std::uint64_t driverObject = 0;
+        std::uint32_t major = 0;
+        std::wstring driverName;
+    };
+    bool isCurrentReadTarget(const SlotQuery& request) const;
     void applySelectedDispatch();
     void restoreSelectedDispatch();
     void abandonSelectedRecord();
@@ -37,6 +53,9 @@ private:
     static QString majorFunctionName(std::uint32_t majorFunction);
     static bool parsePointer(const QString& text, std::uint64_t& addressOut);
 
+    ks::ui::AsyncOperation* m_readOperation = nullptr;
+    bool m_identityRefreshPending = false;
+    bool m_mutationBusy = false;
     QString m_requestedDriverName;
     QString m_canonicalDriverName;
     QLabel* m_riskLabel = nullptr;

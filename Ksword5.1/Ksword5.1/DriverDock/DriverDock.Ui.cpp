@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -6,6 +7,7 @@
 #include "DriverDock.Internal.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../KernelDock/KernelThreadAuditTab.h"
+#include "../KernelDock/KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/DetailLayoutRegistry.h"
@@ -14,6 +16,9 @@
 
 #include <QAction>
 #include <QMenu>
+
+#include <functional>
+#include <utility>
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -161,6 +166,34 @@ namespace ksword::driver_dock_internal
 
 namespace
 {
+    // 只观察对象页宿主；隐藏期间保留 dirty，重新显示时在首帧前消费当前子页。
+    class DriverObjectEvidenceShowObserver final : public QObject
+    {
+    public:
+        DriverObjectEvidenceShowObserver(QWidget* page, std::function<void()> refresh)
+            : QObject(page), m_refresh(std::move(refresh))
+        {
+            page->installEventFilter(this);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event != nullptr && event->type() == QEvent::Show)
+            {
+                const QPointer<QObject> guardWatched(watched);
+                const auto refresh = m_refresh;
+                refresh();
+                // 回调可能触发宿主销毁，此时不能再把 Show 送给已销毁对象。
+                return guardWatched.isNull();
+            }
+            return false;
+        }
+
+    private:
+        std::function<void()> m_refresh;
+    };
+
     QString driverTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
     {
         // driverTableCellText：
@@ -237,6 +270,145 @@ namespace
     }
 }
 
+namespace
+{
+    struct DriverNavigationEntry { const char* id; const char* parent; const char* key; const char* source; };
+    constexpr DriverNavigationEntry DriverNavigationEntries[] = {
+        {"services","","driver.tab.services","驱动服务"},
+        {"kernel_modules","","driver.tab.kernel_modules","内核模块"},
+        {"operations","","driver.tab.operations","驱动操作"},
+        {"debug_output","","driver.tab.debug_output","调试输出"},
+        {"objects","","driver.tab.object_info","对象信息"},
+        {"objects.driver","objects","","DriverObject"},
+        {"objects.device","objects","","DeviceObject"},
+        {"objects.extension","objects","","DriverExtension"},
+        {"objects.major","objects","","MajorFunction"},
+        {"objects.fastio","objects","","FastIo"},
+        {"module_cross_view","","driver.tab.module_cross_view","Module Cross-View"},
+        {"integrity","","driver.tab.integrity","驱动完整性"},
+        {"unloaded","","driver.tab.unloaded_piddb","已卸载驱动"},
+        {"system_threads","","driver.tab.system_threads","系统线程"},
+        {"self_driver","","driver.tab.self_driver","Ksword自身驱动"}
+    };
+}
+
+QString DriverDock::navigationTitle(const char* id)
+{
+    for (const auto& entry : DriverNavigationEntries)
+        if (QString::fromLatin1(entry.id) == QString::fromLatin1(id))
+            return *entry.key ? driverText(entry.key,QString::fromUtf8(entry.source)) : QString::fromUtf8(entry.source);
+    return {};
+}
+
+int DriverDock::addNavigationPage(QTabWidget* tabs,QWidget* page,const char* id,const QIcon& icon)
+{
+    const auto title=navigationTitle(id);
+    if (!tabs || !page || title.isEmpty()) return -1;
+    page->setProperty("ksword_driver_navigation_id",QString::fromLatin1(id));
+    return tabs->addTab(page,icon,title);
+}
+
+QWidget* DriverDock::navigationPage(const QString& id) const
+{
+    QWidget* const pages[] = {m_servicePage,m_kernelModulePage,m_operatePage,m_debugOutputPage,m_objectInfoPage,
+        m_driverObjectPage,m_deviceObjectPage,m_driverExtensionPage,m_majorFunctionPage,m_fastIoPage,
+        m_moduleCrossViewPage,m_integrityPage,m_unloadedPiddbPage,m_systemThreadAuditTab,m_kswordSelfDriverPage};
+    static_assert(std::size(pages)==std::size(DriverNavigationEntries));
+    for (std::size_t index=0;index<std::size(pages);++index)
+        if (QString::fromLatin1(DriverNavigationEntries[index].id)==id) return pages[index];
+    return nullptr;
+}
+
+ks::ui::PageNavigationCatalog DriverDock::navigationCatalog(const DriverDock* existing)
+{
+    ks::ui::PageNavigationCatalog result;
+    for (const auto& entry : DriverNavigationEntries)
+    {
+        ks::ui::PageNavigationDescriptor page;
+        page.id=QString::fromLatin1(entry.id);page.parentId=QString::fromLatin1(entry.parent);
+        page.title=navigationTitle(entry.id);page.searchTexts={page.title,QString::fromUtf8(entry.source),page.id};
+        // MainWindow already owns KernelDock and attaches its page immediately
+        // after accepted DriverDock creation; standalone warm docks use real flags.
+        if (existing)
+        {
+            auto* tabs=*entry.parent?existing->m_objectDetailTabWidget:existing->m_tabWidget;
+            auto* widget=existing->navigationPage(page.id);
+            const int index=tabs && widget?tabs->indexOf(widget):-1;
+            page.visible=index>=0 && tabs->isTabVisible(index);page.enabled=index>=0 && tabs->isTabEnabled(index);
+            page.current=index>=0 && tabs->currentIndex()==index;
+            if (index>=0) {page.title=tabs->tabText(index);page.searchTexts.append(tabs->tabToolTip(index));}
+        }
+        result.push_back(std::move(page));
+    }
+    const auto* source = existing ? dynamic_cast<KernelDock*>(existing->m_kswordSelfDriverFallbackOwner.data()) : nullptr;
+    const bool attached = existing && source && source->kswordSelfDriverPage() == existing->m_kswordSelfDriverPage;
+    for (auto child : KernelDock::selfDriverNavigationCatalog(source))
+    {
+        child.id = QStringLiteral("self_driver.") + child.id;
+        child.parentId = QStringLiteral("self_driver");
+        if (existing && !attached) { child.visible=false;child.enabled=false;child.current=false; }
+        result.push_back(std::move(child));
+    }
+    return result;
+}
+
+QWidget* DriverDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto allowed=[this,&id]() {
+        const auto catalog=ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this),QStringLiteral("DriverDock"));
+        if (!catalog) return false;
+        for (const auto& entry:*catalog) if(entry.page.id==id) return entry.page.visible && entry.page.enabled;
+        return false;
+    };
+    if (!allowed()) return nullptr;
+    if (id.startsWith(QStringLiteral("self_driver.")))
+    {
+        const QPointer<DriverDock> alive(this);
+        const QPointer<KernelDock> source(dynamic_cast<KernelDock*>(m_kswordSelfDriverFallbackOwner.data()));
+        const QPointer<QWidget> root(m_kswordSelfDriverPage);
+        const QPointer<QTabWidget> tabs(m_tabWidget);
+        const auto currentOwner = [&]() {
+            return alive && source && root && tabs && m_tabWidget==tabs.data()
+                && m_kswordSelfDriverFallbackOwner.data()==source.data() && m_kswordSelfDriverPage==root.data()
+                && source->kswordSelfDriverPage()==root.data();
+        };
+        if (!currentOwner()) return nullptr;
+        const int rootIndex=tabs->indexOf(root);
+        if (rootIndex<0) return nullptr;
+        tabs->setCurrentIndex(rootIndex);
+        if (!currentOwner() || !allowed() || tabs->currentWidget()!=root.data()) return nullptr;
+        const QPointer<QWidget> target(source->activateSelfDriverNavigationDescriptor(id.mid(12)));
+        if (!currentOwner() || !target || !allowed() || tabs->currentWidget()!=root.data()) return nullptr;
+        const auto fresh=ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this),QStringLiteral("DriverDock"));
+        if (fresh) for (const auto& entry:*fresh) if(entry.page.id==id && entry.page.current)return target.data();
+        return nullptr;
+    }
+    const QPointer<DriverDock> guard(this);const QPointer<QWidget> target(navigationPage(id));
+    const QPointer<QTabWidget> mainTabs(m_tabWidget),objectTabs(m_objectDetailTabWidget);
+    if (!target) return nullptr;
+    if (id.startsWith(QStringLiteral("objects.")))
+    {
+        const int parent=m_tabWidget->indexOf(m_objectInfoPage);if(parent<0)return nullptr;
+        m_tabWidget->setCurrentIndex(parent);
+        if (!guard || !target || !mainTabs || !objectTabs || !allowed() || navigationPage(id)!=target.data()) return nullptr;
+    }
+    auto* tabs=id.startsWith(QStringLiteral("objects."))?m_objectDetailTabWidget:m_tabWidget;
+    const int index=tabs?tabs->indexOf(target):-1;if(index<0)return nullptr;
+    tabs->setCurrentIndex(index);
+    if (!guard || !target || !mainTabs || !objectTabs || !allowed() || navigationPage(id)!=target.data()) return nullptr;
+    auto* currentTabs=id.startsWith(QStringLiteral("objects."))?m_objectDetailTabWidget:m_tabWidget;
+    if (!currentTabs || currentTabs->currentWidget()!=target.data()) return nullptr;
+    const auto fresh=ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this),QStringLiteral("DriverDock"));
+    if (fresh) for(const auto& entry:*fresh)if(entry.page.id==id && entry.page.current)return target.data();
+    return nullptr;
+}
+
+namespace
+{
+    [[maybe_unused]] const bool DriverNavigationRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<DriverDock>(QStringLiteral("driver"));
+}
+
 void DriverDock::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
@@ -248,6 +420,14 @@ void DriverDock::changeEvent(QEvent* event)
         // 签名缓存只保存语义；切换语言时同步重建行文本、筛选结果、详情和摘要。
         rebuildLoadedModuleTable();
         updateLoadedModuleEvidenceStatusText();
+        ++m_driverObjectLanguageRevision;
+        refreshDriverObjectQueryPresentation();
+        rebuildDriverObjectEvidenceViews();
+    }
+    else if (event != nullptr &&
+        (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange))
+    {
+        refreshFastIoEvidenceTheme();
     }
 }
 
@@ -395,10 +575,7 @@ void DriverDock::initializeSystemThreadTab()
     m_systemThreadAuditTab = new KernelThreadAuditTab(
         KernelThreadAuditTab::Mode::SystemThreads,
         m_tabWidget);
-    const int tabIndex = m_tabWidget->addTab(
-        m_systemThreadAuditTab,
-        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        driverText("driver.tab.system_threads", QStringLiteral("系统线程")));
+    const int tabIndex = addNavigationPage(m_tabWidget,m_systemThreadAuditTab,"system_threads",QIcon(QStringLiteral(":/Icon/process_threads.svg")));
     m_tabWidget->setTabToolTip(
         tabIndex,
         driverText(
@@ -446,6 +623,8 @@ void DriverDock::initializeServiceTab()
     m_serviceLayout->addLayout(m_overviewToolLayout);
 
     m_serviceTable = new ks::ui::VisibleTableWidget(m_servicePage);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_serviceTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 驱动服务清单的安装、卸载和状态变化需要跨次对比。
     ks::ui::SetTableActionBarMode(m_serviceTable, ks::ui::TableActionBarMode::Full);
     m_serviceTable->setColumnCount(7);
@@ -461,8 +640,7 @@ void DriverDock::initializeServiceTab()
     m_serviceTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
     m_serviceLayout->addWidget(m_serviceTable, 1);
 
-    m_tabWidget->addTab(m_servicePage, QIcon(":/Icon/process_list.svg"), driverText(
-        "driver.tab.services", QStringLiteral("驱动服务")));
+    addNavigationPage(m_tabWidget,m_servicePage,"services",QIcon(":/Icon/process_list.svg"));
 }
 
 void DriverDock::initializeKernelModuleTab()
@@ -508,6 +686,8 @@ void DriverDock::initializeKernelModuleTab()
     m_kernelModuleLayout->addLayout(m_kernelModuleToolLayout);
 
     m_moduleTable = new ks::ui::VisibleTableWidget(m_kernelModulePage);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_moduleTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 加载模块证据需要保留新增/消失与来源变化的快照。
     ks::ui::SetTableActionBarMode(m_moduleTable, ks::ui::TableActionBarMode::Full);
     m_moduleTable->setColumnCount(ModuleTableColumnCount);
@@ -529,8 +709,7 @@ void DriverDock::initializeKernelModuleTab()
     m_kernelModuleLayout->addWidget(m_moduleEvidenceDetailEditor, 2);
     ks::ui::DetailLayoutRegistry::registerStructuredHost(
         m_moduleTable, m_moduleEvidenceDetailEditor, m_kernelModulePage);
-    m_tabWidget->addTab(m_kernelModulePage, QIcon(":/Icon/process_list.svg"), driverText(
-        "driver.tab.kernel_modules", QStringLiteral("内核模块")));
+    addNavigationPage(m_tabWidget,m_kernelModulePage,"kernel_modules",QIcon(":/Icon/process_list.svg"));
 }
 
 void DriverDock::initializeOperateTab()
@@ -699,10 +878,7 @@ void DriverDock::initializeOperateTab()
         driverText("driver.form.operation_log.placeholder", QStringLiteral("驱动操作日志显示在这里。")));
     m_operateLayout->addWidget(m_operateLogOutput, 1);
 
-    m_tabWidget->addTab(
-        m_operatePage,
-        QIcon(":/Icon/process_main.svg"),
-        driverText("driver.tab.operations", QStringLiteral("驱动操作")));
+    addNavigationPage(m_tabWidget,m_operatePage,"operations",QIcon(":/Icon/process_main.svg"));
 }
 
 void DriverDock::initializeDebugOutputTab()
@@ -766,16 +942,14 @@ void DriverDock::initializeDebugOutputTab()
     m_debugOutputLayout->addLayout(m_debugToolLayout);
 
     m_debugOutputEdit = new CodeEditorWidget(m_debugOutputPage);
+    m_debugOutputEdit->installEventFilter(this);
     m_debugOutputEdit->setReadOnly(true);
     m_debugOutputEdit->setMaximumBlockCount(2000);
     m_debugOutputEdit->setPlaceholderText(
         driverText("driver.debug.output.placeholder", QStringLiteral("调试输出会实时显示在这里。")));
     m_debugOutputLayout->addWidget(m_debugOutputEdit, 1);
 
-    m_tabWidget->addTab(
-        m_debugOutputPage,
-        QIcon(":/Icon/log_track.svg"),
-        driverText("driver.tab.debug_output", QStringLiteral("调试输出")));
+    addNavigationPage(m_tabWidget,m_debugOutputPage,"debug_output",QIcon(":/Icon/log_track.svg"));
 }
 
 void DriverDock::initializeObjectInfoTab()
@@ -903,7 +1077,7 @@ void DriverDock::initializeObjectInfoTab()
     configureReadOnlyTable(m_driverObjectEvidenceTable);
     m_driverObjectEvidenceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     driverObjectLayout->addWidget(m_driverObjectEvidenceTable, 1);
-    m_objectDetailTabWidget->addTab(m_driverObjectPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("DriverObject"));
+    addNavigationPage(m_objectDetailTabWidget,m_driverObjectPage,"objects.driver",QIcon(":/Icon/process_details.svg"));
 
     // DeviceObject 诊断页：展示 DriverObject 下挂载的设备链。
     m_deviceObjectPage = new QWidget(m_objectDetailTabWidget);
@@ -924,7 +1098,7 @@ void DriverDock::initializeObjectInfoTab()
     configureReadOnlyTable(m_deviceObjectTable);
     m_deviceObjectTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     deviceLayout->addWidget(m_deviceObjectTable, 1);
-    m_objectDetailTabWidget->addTab(m_deviceObjectPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("DeviceObject"));
+    addNavigationPage(m_objectDetailTabWidget,m_deviceObjectPage,"objects.device",QIcon(":/Icon/process_list.svg"));
 
     // DriverExtension 诊断页：当前协议不直接暴露 DriverExtension 指针，因此展示关联证据。
     m_driverExtensionPage = new QWidget(m_objectDetailTabWidget);
@@ -947,7 +1121,7 @@ void DriverDock::initializeObjectInfoTab()
     m_driverExtensionEvidenceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_driverExtensionEvidenceTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
     driverExtensionLayout->addWidget(m_driverExtensionEvidenceTable, 1);
-    m_objectDetailTabWidget->addTab(m_driverExtensionPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("DriverExtension"));
+    addNavigationPage(m_objectDetailTabWidget,m_driverExtensionPage,"objects.extension",QIcon(":/Icon/process_critical.svg"));
 
     // MajorFunction 诊断页：展示 IRP 分发入口及其模块归属。
     m_majorFunctionPage = new QWidget(m_objectDetailTabWidget);
@@ -1103,7 +1277,7 @@ void DriverDock::initializeObjectInfoTab()
             }
         });
     majorLayout->addWidget(m_majorFunctionTable, 1);
-    m_objectDetailTabWidget->addTab(m_majorFunctionPage, QIcon(":/Icon/process_threads.svg"), QStringLiteral("MajorFunction"));
+    addNavigationPage(m_objectDetailTabWidget,m_majorFunctionPage,"objects.major",QIcon(":/Icon/process_threads.svg"));
 
     // FastIo 诊断页：当前协议只回填完整性侧证据，因此以证据表方式展示。
     m_fastIoPage = new QWidget(m_objectDetailTabWidget);
@@ -1223,19 +1397,24 @@ void DriverDock::initializeObjectInfoTab()
             }
         });
     fastIoLayout->addWidget(m_fastIoEvidenceTable, 1);
-    m_objectDetailTabWidget->addTab(m_fastIoPage, QIcon(":/Icon/process_pause.svg"), QStringLiteral("FastIo"));
+    addNavigationPage(m_objectDetailTabWidget,m_fastIoPage,"objects.fastio",QIcon(":/Icon/process_pause.svg"));
 
     if (m_objectDetailTabWidget != nullptr)
     {
         m_objectDetailTabWidget->setCurrentIndex(0);
     }
 
+    const QPointer<DriverDock> guardThis(this);
+    new DriverObjectEvidenceShowObserver(m_objectInfoPage, [guardThis]()
+        {
+            if (guardThis != nullptr)
+            {
+                guardThis->rebuildDriverObjectEvidenceViews();
+            }
+        });
     rebuildDriverObjectEvidenceViews();
 
-    m_tabWidget->addTab(
-        m_objectInfoPage,
-        QIcon(":/Icon/process_details.svg"),
-        driverText("driver.tab.object_info", QStringLiteral("对象信息")));
+    addNavigationPage(m_tabWidget,m_objectInfoPage,"objects",QIcon(":/Icon/process_details.svg"));
 }
 
 void DriverDock::initializeModuleCrossViewTab()
@@ -1287,10 +1466,7 @@ void DriverDock::initializeModuleCrossViewTab()
     installDriverTableCopyMenu(m_moduleCrossViewTable);
     m_moduleCrossViewLayout->addWidget(m_moduleCrossViewTable, 1);
 
-    m_tabWidget->addTab(
-        m_moduleCrossViewPage,
-        QIcon(":/Icon/process_list.svg"),
-        driverText("driver.tab.module_cross_view", QStringLiteral("Module Cross-View")));
+    addNavigationPage(m_tabWidget,m_moduleCrossViewPage,"module_cross_view",QIcon(":/Icon/process_list.svg"));
     rebuildModuleCrossViewTable();
 }
 
@@ -1311,11 +1487,11 @@ void DriverDock::initializeConnections()
         });
     connect(m_serviceFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
-            rebuildDriverServiceTableByFilter();
+            queueDriverTableFilter(TableFilterTarget::Services);
         });
     connect(m_moduleFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
-            rebuildLoadedModuleTable();
+            queueDriverTableFilter(TableFilterTarget::Modules);
         });
 
     // 内核模块页：刷新、过滤和统一详情布局连接。
@@ -1343,6 +1519,19 @@ void DriverDock::initializeConnections()
         {
             showSelectedModuleEvidenceDetail();
         });
+
+    // Revisions identify the exact form submitted, including programmatic selection fills.
+    for (QLineEdit* edit : { m_serviceNameEdit, m_displayNameEdit,
+             m_binaryPathEdit, m_descriptionEdit })
+    {
+        connect(edit, &QLineEdit::textChanged, this,
+            [this]() { ++m_serviceFormRevision; });
+    }
+    for (QComboBox* combo : { m_startTypeCombo, m_errorControlCombo })
+    {
+        connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this]() { ++m_serviceFormRevision; });
+    }
 
     // 操作页：浏览路径、注册更新、挂载卸载、删除、状态查询。
     connect(m_browsePathButton, &QPushButton::clicked, this, [this]()
@@ -1415,6 +1604,8 @@ void DriverDock::initializeConnections()
         });
     connect(m_objectEvidenceRefreshButton, &QPushButton::clicked, this, [this]()
         {
+            // 显式刷新继续重新投影完整缓存；隐藏子页在首次可见时消费同一最新代次。
+            ++m_driverObjectEvidenceRevision;
             rebuildDriverObjectEvidenceViews();
         });
     connect(m_objectDetailTabWidget, &QTabWidget::currentChanged, this, [this](int)
@@ -1497,11 +1688,7 @@ void DriverDock::initializeConnections()
             &QTableWidget::currentCellChanged,
             this,
             [this](int, int, int, int) {
-                if (m_unloadedPiddbDeleteButton != nullptr)
-                {
-                    m_unloadedPiddbDeleteButton->setEnabled(
-                        selectedPiDdbEntryIdentity(nullptr));
-                }
+                updatePiDdbDeleteButtonState();
             });
         connect(
             m_unloadedPiddbRefreshButton,

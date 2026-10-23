@@ -160,6 +160,8 @@ namespace ks::ui
         for (QWidget* child : m_structuredView->findChildren<QWidget*>()) child->installEventFilter(this);
         layout->addWidget(m_viewStack, 1);
         connect(m_structureCombo, &QComboBox::currentIndexChanged, this, [this](const int index) {
+            // Parse lazily on actual structure selection; raw browsing leaves it dirty.
+            if (index == 1) updateStructuredView(m_structureComplete);
             m_viewStack->setCurrentWidget(index == 1 && !m_structuredView->document().isEmpty()
                 ? static_cast<QWidget*>(m_structuredView) : static_cast<QWidget*>(m_canvas));
         });
@@ -183,7 +185,7 @@ namespace ks::ui
     }
     void WorkbenchTextView::setBytesProvider(IWorkbenchBytesProvider* provider)
     {
-        if (m_provider != provider) { m_canvas->cancelPendingNavigation(); m_requestedAddress.reset(); m_requestOutstanding = false; m_browseBackStack.clear(); }
+        if (m_provider != provider) { m_textCacheValid = false; m_canvas->cancelPendingNavigation(); m_requestedAddress.reset(); m_requestOutstanding = false; m_browseBackStack.clear(); }
         m_provider = provider;
         rebuildText();
     }
@@ -212,7 +214,7 @@ namespace ks::ui
         m_canvas->cancelPendingNavigation();
         m_browseBackStack.clear();
         m_address = 0; m_length = 0; m_decodeOrigin = 0;
-        m_hasWindow = false; m_requestOutstanding = false; m_bomDetected = false;
+        m_hasWindow = false; m_requestOutstanding = false; m_bomDetected = false; m_textCacheValid = false;
         m_keepBrowseViewport = false;
         m_requestedAddress.reset();
         rebuildText();
@@ -285,10 +287,15 @@ namespace ks::ui
 
     void WorkbenchTextView::rebuildText()
     {
+        const QPointer<WorkbenchTextView> self(this);
+        const auto generation = ++m_renderGeneration;
         if (m_provider == nullptr || !m_hasWindow)
         {
+            m_textCacheValid = false;
             m_renderedText.clear(); m_flatText.clear(); m_searchSpans.clear(); m_canvas->setRows({}, false);
+            if (!self || generation != m_renderGeneration) return;
             updateStructuredView(false);
+            if (!self || generation != m_renderGeneration) return;
             setStatus(m_provider == nullptr ? QStringLiteral("尚未接入数据源。") : QStringLiteral("尚未定位；跟随十六进制页的当前窗口。"));
             return;
         }
@@ -303,13 +310,16 @@ namespace ks::ui
         const std::uint64_t desiredLength = m_length + back + 4U;
         const std::uint64_t distance = std::numeric_limits<std::uint64_t>::max() - fetchAddress;
         const std::uint64_t fetchLength = desiredLength - 1 <= distance ? desiredLength : distance + 1;
-        const WorkbenchByteWindow window = m_provider->FetchWindow(fetchAddress, fetchLength);
+        WorkbenchByteWindow window = m_provider->FetchWindow(fetchAddress, fetchLength);
         if (!window.ok || window.bytes.empty())
         {
+            m_textCacheValid = false;
             m_requestOutstanding = false;
             m_requestedAddress.reset();
             m_renderedText.clear(); m_flatText.clear(); m_searchSpans.clear(); m_canvas->setRows({}, true);
+            if (!self || generation != m_renderGeneration) return;
             updateStructuredView(false);
+            if (!self || generation != m_renderGeneration) return;
             setStatus(ks::i18n::sourceText(QStringLiteral("0x%1 超出已读取窗口。"))
                 .arg(QString::number(m_address, 16).toUpper().rightJustified(16, QLatin1Char('0'))));
             return;
@@ -322,6 +332,13 @@ namespace ks::ui
             m_requestOutstanding = false;
             m_requestedAddress.reset();
         }
+        if (m_textCacheValid && m_cachedAddress == m_address && m_cachedLength == m_length
+            && m_cachedOrigin == m_decodeOrigin && m_cachedFetchAddress == fetchAddress
+            && m_cachedBounds == m_addressBounds && m_cachedEncoding == m_encoding
+            && m_cachedEffectiveEncoding == m_effectiveEncoding && m_cachedBytesPerRow == m_bytesPerRow
+            && m_cachedControls == m_controlToggle->isChecked()
+            && m_cachedWindow.bytes == window.bytes && m_cachedWindow.validMask == window.validMask
+            && m_cachedWindow.changeKinds == window.changeKinds) return;
         ksword::memwb::TextDecodeOptions options;
         options.encoding = m_encoding == Encoding::Auto && m_address != m_decodeOrigin ? m_effectiveEncoding : m_encoding;
         options.codePageDecoder = DecodeWorkbenchCodePage;
@@ -387,7 +404,19 @@ namespace ks::ui
         m_flatText = std::move(flat);
         m_searchSpans = std::move(searchSpans);
         m_canvas->setRows(std::move(rows), preserve);
+        if (!self || generation != m_renderGeneration) return;
+        // Retain only fields consumed by text rendering; baseline/previous copies
+        // are transient and must not inflate the persistent bounded cache.
+        m_cachedWindow.bytes = std::move(window.bytes);
+        m_cachedWindow.validMask = std::move(window.validMask);
+        m_cachedWindow.changeKinds = std::move(window.changeKinds);
+        m_cachedAddress = m_address; m_cachedLength = m_length; m_cachedOrigin = m_decodeOrigin;
+        m_cachedFetchAddress = fetchAddress; m_cachedBounds = m_addressBounds;
+        m_cachedEncoding = m_encoding; m_cachedEffectiveEncoding = m_effectiveEncoding;
+        m_cachedBytesPerRow = m_bytesPerRow; m_cachedControls = m_controlToggle->isChecked();
+        m_textCacheValid = true;
         updateStructuredView(completeDecode);
+        if (!self || generation != m_renderGeneration) return;
         setStatus(ks::i18n::sourceText(QStringLiteral("0x%1 起 %2 字节（%3）；字符选择对应完整原始字节。"))
             .arg(QString::number(m_address, 16).toUpper().rightJustified(16, QLatin1Char('0')))
             .arg(displayLength >= displayStart ? displayLength - displayStart : 0).arg(EncodingName(m_effectiveEncoding)));
@@ -395,13 +424,25 @@ namespace ks::ui
 
     void WorkbenchTextView::updateStructuredView(const bool completeDecode)
     {
-        const auto parsed = completeDecode ? ParseTypedSyntaxDocument(m_flatText) : std::nullopt;
-        const bool structured = parsed.has_value();
-        m_structuredView->setDocument(structured ? parsed->fields : FieldDocument{});
-        if (!structured)
+        if (m_structureInput != m_flatText || m_structureComplete != completeDecode)
         {
-            activateOriginalView();
+            m_structureInput = m_flatText;
+            m_structureComplete = completeDecode;
+            m_structureDirty = true;
         }
+        if (!m_structureDirty) return;
+        if (completeDecode && m_structureCombo->currentIndex() != 1)
+        {
+            m_structureCombo->setEnabled(true);
+            m_structureCombo->setToolTip(ks::i18n::sourceText(QStringLiteral("结构视图仅解析当前已完整读取窗口中的 JSON 或 XML；不修改原始字节。")));
+            return;
+        }
+        const auto parsed = completeDecode ? ParseTypedSyntaxDocument(m_structureInput) : std::nullopt;
+        const bool structured = parsed.has_value();
+        // Mark clean before widget signals can reenter the selection handler.
+        m_structureDirty = false;
+        m_structuredView->setDocument(structured ? parsed->fields : FieldDocument{});
+        if (!structured) activateOriginalView();
         m_structureCombo->setEnabled(structured);
         m_structureCombo->setToolTip(ks::i18n::sourceText(structured
             ? QStringLiteral("结构视图仅解析当前已完整读取窗口中的 JSON 或 XML；不修改原始字节。")

@@ -12,6 +12,8 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QHash>
+#include <functional>
 #include <QLayout>
 #include <QEvent>
 #include <QFile>
@@ -29,6 +31,83 @@ namespace ks::ui
     {
         constexpr int kWheelStepPixels = 48;
         constexpr const char* kInstalledProperty = "ksword_dock_tab_scrolling_installed";
+
+        // 所有 Dock 区域共用一个应用级分派器，事件只沿实际宿主父链定位一次。
+        class DockTabEventRouter final : public QObject
+        {
+        public:
+            explicit DockTabEventRouter(QObject* parent) : QObject(parent) {}
+            using Handler = std::function<bool(QObject*, QEvent*)>;
+            void registerHost(QObject* host, QObject* owner, Handler handler)
+            {
+                if (host == nullptr)
+                {
+                    return;
+                }
+                const bool newHost = !m_hosts.contains(host);
+                m_hosts.insert(host, Registration{owner, std::move(handler)});
+                if (newHost)
+                {
+                    connect(host, &QObject::destroyed, this, [this, host]() { m_hosts.remove(host); });
+                }
+            }
+            void unregisterHost(QObject* host, QObject* owner)
+            {
+                const auto found = m_hosts.find(host);
+                if (found != m_hosts.end() && found->owner == owner)
+                {
+                    m_hosts.erase(found);
+                }
+            }
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override
+            {
+                if (event == nullptr)
+                {
+                    return false;
+                }
+                QObject* host = watched;
+                while (host != nullptr)
+                {
+                    const auto found = m_hosts.constFind(host);
+                    if (found != m_hosts.cend())
+                    {
+                        // 回调允许销毁区域或修改登记，先复制弱owner和函数再调用。
+                        const Registration registration = *found;
+                        return registration.owner != nullptr && registration.handler(watched, event);
+                    }
+                    if (event->type() != QEvent::Wheel)
+                    {
+                        break; // 普通事件只对六个明确宿主进行 O(1) 查询。
+                    }
+                    auto* widget = qobject_cast<QWidget*>(host);
+                    if (widget == nullptr || widget->isWindow())
+                    {
+                        break;
+                    }
+                    host = widget->parentWidget();
+                }
+                return false;
+            }
+        private:
+            struct Registration
+            {
+                QPointer<QObject> owner;
+                Handler handler;
+            };
+            QHash<QObject*, Registration> m_hosts;
+        };
+
+        DockTabEventRouter* eventRouter()
+        {
+            static QPointer<DockTabEventRouter> router;
+            if (router == nullptr && qApp != nullptr)
+            {
+                router = new DockTabEventRouter(qApp);
+                qApp->installEventFilter(router);
+            }
+            return router.data();
+        }
 
         class DockTabScroller final : public QObject
         {
@@ -84,17 +163,27 @@ namespace ks::ui
                         scheduleButtons();
                     });
 
-                // 在 viewportEvent 转发前捕获滚轮，覆盖文字、图标和动态子控件。
-                // QApplication 过滤器只接管本标签栏的后代。
-                qApp->installEventFilter(this);
+                // 在 viewportEvent 转发前捕获滚轮；动态文字/图标沿父链归属本栏。
+                m_router = eventRouter();
+                if (m_router != nullptr)
+                {
+                    for (QObject* host : eventHosts())
+                    {
+                        m_router->registerHost(host, this,
+                            [this](QObject* watched, QEvent* event) { return handleEvent(watched, event); });
+                    }
+                }
                 scheduleButtons();
             }
 
             ~DockTabScroller() override
             {
-                if (qApp != nullptr)
+                if (m_router != nullptr)
                 {
-                    qApp->removeEventFilter(this);
+                    for (QObject* host : eventHosts())
+                    {
+                        m_router->unregisterHost(host, this);
+                    }
                 }
                 // 箭头属于标题栏；单独销毁/替换标签栏时也要移除其附属按钮。
                 for (QToolButton* button : { m_left.data(), m_right.data() })
@@ -106,8 +195,14 @@ namespace ks::ui
                 }
             }
 
-        protected:
-            bool eventFilter(QObject* watched, QEvent* event) override
+        private:
+            QList<QObject*> eventHosts() const
+            {
+                return {m_tabBar.data(), m_titleBar.data(), m_viewport.data(),
+                    m_tabsContainer.data(), m_left.data(), m_right.data()};
+            }
+
+            bool handleEvent(QObject* watched, QEvent* event)
             {
                 if (event == nullptr || !m_tabBar || !m_titleBar || !m_viewport)
                 {
@@ -289,6 +384,7 @@ namespace ks::ui
                     });
             }
 
+            QPointer<DockTabEventRouter> m_router;
             QPointer<ads::CDockAreaTabBar> m_tabBar;
             QPointer<ads::CDockAreaTitleBar> m_titleBar;
             QPointer<QWidget> m_viewport;

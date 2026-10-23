@@ -34,12 +34,12 @@ void NetworkDock::openPacketDetailWindowBySequenceId(const std::uint64_t sequenc
     }
 
     // 详情窗口通过统一辅助函数弹出，保证行为与旧结构一致。
-    showPacketDetailWindow(iterator->second);
+    showPacketDetailWindow(*iterator->second);
 
     kLogEvent detailWindowEvent;
     info << detailWindowEvent
         << "[NetworkDock] 打开报文详情窗口, sequenceId=" << sequenceId
-        << ", pid=" << iterator->second.processId
+        << ", pid=" << iterator->second->processId
         << eol;
 }
 

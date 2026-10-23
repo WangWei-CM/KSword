@@ -5,6 +5,7 @@
 #include "../DebuggerBackend/KswordPluginTheme.h"
 #include "../TitanEnginePlugin/ControlProtocol.h"
 #include <algorithm>
+#include <array>
 #include <cwchar>
 #include <fstream>
 
@@ -17,7 +18,7 @@ namespace ksword::x96_log
         constexpr int kContextId = 4105, kSuspendId = 4106, kPagesId = 4107;
         HWND gToggle = nullptr, gMode = nullptr, gShadow = nullptr, gFallback = nullptr;
         HWND gContext = nullptr, gSuspend = nullptr, gPages = nullptr, gPagesLabel = nullptr;
-        HWND gStatus = nullptr, gLog = nullptr;
+        HWND gParent = nullptr, gStatus = nullptr, gLog = nullptr;
         HFONT gFont = nullptr;
         HBRUSH gWindowBrush = nullptr, gSurfaceBrush = nullptr;
         COLORREF gWindow = RGB(16, 24, 34), gSurface = RGB(20, 30, 42);
@@ -28,7 +29,10 @@ namespace ksword::x96_log
         KSWORD_DEBUGGER_OPTIONS gOptions = wire::defaults();
         std::uint32_t gNormalShadowWrites = 0;
         std::wstring gControlPath, gStatePath, gPreferencesPath;
-        std::string gSessionId;
+        std::string gSessionId, gLastAckPacket;
+        std::wstring gDesiredStatus;
+        bool gStatusPending = false, gHaveProjectedChecks = false;
+        std::array<bool, 5> gProjectedChecks{};
 
         const wchar_t* text(const wchar_t* zh, const wchar_t* en) { return gEnglish ? en : zh; }
         COLORREF color(const wchar_t* name, COLORREF fallback)
@@ -39,14 +43,40 @@ namespace ksword::x96_log
             if (end == nullptr || *end != 0 || rgb > 0xFFFFFFUL) return fallback;
             return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
         }
+        bool checked(int id);
         void refresh()
         {
+            // Keep consuming state while hidden; visual work waits until the
+            // surface is shown/painted, and uses the newest confirmed values.
+            if (gParent == nullptr || !IsWindowVisible(gParent)) return;
+            const bool enabled = gAvailable && gCanChange && !gPending;
             for (const HWND child : {gToggle, gMode, gShadow, gFallback, gContext, gSuspend, gPages})
-                EnableWindow(child, gAvailable && gCanChange && !gPending);
-            if (gOptions.mode == KSWORD_DEBUGGER_MODE_STEALTH) EnableWindow(gShadow, FALSE);
-            SendMessageW(gMode, CB_SETCURSEL, gOptions.mode, 0);
-            SendMessageW(gPages, CB_SETCURSEL, gOptions.maxShadowPages - 1, 0);
-            for (const HWND child : {gToggle, gShadow, gFallback, gContext, gSuspend}) InvalidateRect(child, nullptr, TRUE);
+            {
+                const bool childEnabled = enabled && !(child == gShadow && gOptions.mode == KSWORD_DEBUGGER_MODE_STEALTH);
+                if ((IsWindowEnabled(child) != FALSE) != childEnabled)
+                    EnableWindow(child, childEnabled ? TRUE : FALSE);
+            }
+            const auto mode = static_cast<LRESULT>(gOptions.mode);
+            const auto pages = static_cast<LRESULT>(gOptions.maxShadowPages - 1);
+            if (SendMessageW(gMode, CB_GETCURSEL, 0, 0) != mode)
+                SendMessageW(gMode, CB_SETCURSEL, static_cast<WPARAM>(mode), 0);
+            if (SendMessageW(gPages, CB_GETCURSEL, 0, 0) != pages)
+                SendMessageW(gPages, CB_SETCURSEL, static_cast<WPARAM>(pages), 0);
+            const std::array<HWND, 5> toggles{gToggle, gShadow, gFallback, gContext, gSuspend};
+            const std::array<int, 5> ids{kToggleId, kShadowId, kFallbackId, kContextId, kSuspendId};
+            for (std::size_t index = 0; index < toggles.size(); ++index)
+            {
+                const bool value = checked(ids[index]);
+                if (!gHaveProjectedChecks || gProjectedChecks[index] != value)
+                    InvalidateRect(toggles[index], nullptr, TRUE);
+                gProjectedChecks[index] = value;
+            }
+            gHaveProjectedChecks = true;
+            if (gStatusPending && gStatus != nullptr)
+            {
+                SetWindowTextW(gStatus, gDesiredStatus.c_str());
+                gStatusPending = false;
+            }
         }
         const wchar_t* label(int id)
         {
@@ -103,6 +133,7 @@ namespace ksword::x96_log
         }
         void request(bool selected, const KSWORD_DEBUGGER_OPTIONS& options)
         {
+            gLastAckPacket.clear();
             if (gControlPath.empty() || gPending || !gAvailable || !gCanChange) { refresh(); return; }
             if (gRevision == UINT64_MAX) { setStatus(text(L"请求序号已耗尽，请重新打开页面。", L"Request sequence exhausted; reopen the Tab.")); refresh(); return; }
             const auto revision = gRevision + 1;
@@ -130,6 +161,9 @@ namespace ksword::x96_log
     }
     HWND create(HWND parent)
     {
+        gParent = parent;
+        gLastAckPacket.clear();
+        gHaveProjectedChecks = false;
         wchar_t language[32]{}; (void)GetEnvironmentVariableW(L"KSWORD_PLUGIN_LANGUAGE", language, _countof(language));
         gEnglish = std::wcsncmp(language, L"en", 2) == 0;
         gWindow = color(L"KSWORD_PLUGIN_COLOR_WINDOW", gWindow); gSurface = color(L"KSWORD_PLUGIN_COLOR_SURFACE", gSurface);
@@ -148,7 +182,9 @@ namespace ksword::x96_log
         for (int i = 1; i <= 32; ++i) { const auto value = std::to_wstring(i); SendMessageW(gPages, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value.c_str())); }
         gPagesLabel = CreateWindowExW(0, L"STATIC", text(L"Shadow 页上限（1–32）", L"Shadow page limit (1–32)"), WS_CHILD | WS_VISIBLE | SS_LEFT,
             0, 0, 1, 1, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
-        gStatus = CreateWindowExW(0, L"STATIC", text(L"等待 TitanEngine 后端…", L"Waiting for the TitanEngine backend..."), WS_CHILD | WS_VISIBLE | SS_LEFT,
+        gDesiredStatus = text(L"等待 TitanEngine 后端…", L"Waiting for the TitanEngine backend...");
+        gStatusPending = false;
+        gStatus = CreateWindowExW(0, L"STATIC", gDesiredStatus.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT,
             0, 0, 1, 1, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
         gLog = CreateWindowExW(0, L"EDIT", text(L"x64dbg 保持独立窗口。隐蔽模式优先隐藏执行视图，不代表完全隐身。fallback 始终记录。\r\n", L"x64dbg runs independently. Stealth mode prefers a hidden execution view; it does not guarantee invisibility. Fallback is always logged.\r\n"),
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 1, 1, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -204,9 +240,12 @@ namespace ksword::x96_log
             result = TRUE;
             return true;
         }
+        if (messageId == WM_SHOWWINDOW || messageId == WM_PAINT || messageId == WM_DRAWITEM)
+            refresh();
         const int id = LOWORD(wParam);
         if (messageId == WM_COMMAND && id >= kToggleId && id <= kPagesId)
         {
+            gLastAckPacket.clear();
             auto options = gOptions; bool selected = gUseHvm;
             if (HIWORD(wParam) == BN_CLICKED)
             {
@@ -249,6 +288,7 @@ namespace ksword::x96_log
     }
     void setSession(const std::wstring& logPath, const std::string& sessionId, const std::wstring& preferencesPath)
     {
+        gLastAckPacket.clear();
         gControlPath = logPath.empty() ? L"" : logPath + L".control"; gStatePath = logPath.empty() ? L"" : logPath + L".state";
         gPreferencesPath = preferencesPath; gSessionId = sessionId;
         // The launcher writes revision 1 before starting the debugger. HVM remains
@@ -261,8 +301,13 @@ namespace ksword::x96_log
     {
         if (gStatePath.empty()) return;
         std::string packet; wire::Ack ack;
-        if (!debugger::readControlPacket(gStatePath, packet) || !wire::parseAck(packet, ack) ||
-            ack.session != gSessionId || ack.revision < gRevision) { timeout(); return; }
+        if (!debugger::readControlPacket(gStatePath, packet)) { timeout(); refresh(); return; }
+        // Same revision can publish different counts/capability. Only an exact
+        // repeat of the last successfully validated/consumed packet is skipped.
+        if (!gPending && !gLastAckPacket.empty() && packet == gLastAckPacket)
+        { refresh(); return; }
+        if (!wire::parseAck(packet, ack) || ack.session != gSessionId || ack.revision < gRevision)
+        { timeout(); refresh(); return; }
         const bool acknowledged = gPending;
         gRevision = ack.revision; gPending = false; gUseHvm = ack.selected != 0;
         gAvailable = ack.extended; gCanChange = ack.extended && ack.policy.canChangeOptions != 0;
@@ -301,8 +346,17 @@ namespace ksword::x96_log
             if (!gCanChange) status += text(L" | 暂停并清除断点/Shadow 写入后可修改", L" | Pause and clear breakpoints/Shadow writes to change");
         }
         setStatus(status); refresh();
+        gLastAckPacket = packet;
     }
-    void setStatus(const std::wstring& value) { if (IsWindow(gStatus)) SetWindowTextW(gStatus, value.c_str()); }
+    void setStatus(const std::wstring& value)
+    {
+        if (gDesiredStatus != value)
+        {
+            gDesiredStatus = value;
+            gStatusPending = true;
+        }
+        refresh();
+    }
     void append(const std::wstring& value)
     {
         if (!IsWindow(gLog)) return;
@@ -315,5 +369,7 @@ namespace ksword::x96_log
         if (gFont != nullptr) DeleteObject(gFont); if (gWindowBrush != nullptr) DeleteObject(gWindowBrush); if (gSurfaceBrush != nullptr) DeleteObject(gSurfaceBrush);
         gFont = nullptr; gWindowBrush = nullptr; gSurfaceBrush = nullptr;
         gToggle = gMode = gShadow = gFallback = gContext = gSuspend = gPages = gPagesLabel = gStatus = gLog = nullptr;
+        gParent = nullptr; gLastAckPacket.clear(); gDesiredStatus.clear();
+        gStatusPending = false; gHaveProjectedChecks = false;
     }
 }

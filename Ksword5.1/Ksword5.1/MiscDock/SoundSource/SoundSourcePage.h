@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 #include "SoundSourceDetector.h"
 
 #include <QHash>
@@ -35,6 +36,9 @@ namespace ks::misc
         Q_OBJECT
 
     public:
+        // Cold initial body for the global (processIdFilter=0) navigation page.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
         // 构造函数：
         // - processIdFilter=0 时显示系统全部输出音频会话；
         // - processIdFilter!=0 时只显示进程详情页对应 PID；
@@ -105,6 +109,8 @@ namespace ks::misc
         QTimer* m_refreshTimer = nullptr;               // 页面可见时的自动刷新计时器。
         std::vector<SoundSourceRecord> m_records;       // 最近一次会话与历史合并缓存。
         QHash<QString, SoundSourceRecord> m_recentRecords; // 最近确认出声的记录。
+        bool m_tableDirty = false;                     // Hidden results retain values until next show.
+        bool m_columnsSized = false;                   // Measure initially or after a font change, not every sample.
         bool m_refreshing = false;                      // 防止并发重入刷新。
         bool m_autoKernelProbeEnabled = true;           // R0 不可用后自动刷新只做 R3。
         std::uint64_t m_refreshTicket = 0;              // 防止旧后台结果覆盖新页面状态。

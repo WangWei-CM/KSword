@@ -1,5 +1,6 @@
 #include "CodeTextEdit.h"
 #include "../theme.h"
+#include "CodeTextSurfaceColors.h"
 
 #include <QEvent>
 #include <QApplication>
@@ -14,6 +15,7 @@
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QSyntaxHighlighter>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -93,14 +95,8 @@ namespace
         bool fullyScanned = true;
     };
 
-    struct EditorColors
+    struct EditorColors : ks::ui::CodeTextSurfaceColors
     {
-        QColor base;
-        QColor gutter;
-        QColor gutterText;
-        QColor currentNumber;
-        QColor divider;
-        QColor currentLine;
         QColor bracket;
         QColor bracketError;
         QTextCharFormat keyword;
@@ -110,19 +106,23 @@ namespace
         QTextCharFormat tag;
         QTextCharFormat attribute;
         QTextCharFormat directive;
+
+        bool operator==(const EditorColors& other) const
+        {
+            return base == other.base && gutter == other.gutter && gutterText == other.gutterText
+                && currentNumber == other.currentNumber && divider == other.divider
+                && currentLine == other.currentLine && bracket == other.bracket && bracketError == other.bracketError
+                && keyword == other.keyword && string == other.string && number == other.number
+                && comment == other.comment && tag == other.tag && attribute == other.attribute && directive == other.directive;
+        }
     };
 
     EditorColors colorsFor(const QPalette& palette)
     {
         EditorColors colors;
-        colors.base = palette.color(QPalette::Base);
+        static_cast<ks::ui::CodeTextSurfaceColors&>(colors) = ks::ui::CodeTextSurfaceColorsFor(palette);
         const QColor text = palette.color(QPalette::Text);
         const QColor accent = palette.color(QPalette::Highlight);
-        colors.gutter = KswordTheme::BlendColors(colors.base, palette.color(QPalette::Window), 100);
-        colors.gutterText = KswordTheme::EnsureTextContrast(KswordTheme::BlendColors(text, colors.gutter, 110), colors.gutter);
-        colors.currentNumber = KswordTheme::EnsureTextContrast(accent, colors.gutter);
-        colors.divider = KswordTheme::BlendColors(text, colors.gutter, 218);
-        colors.currentLine = KswordTheme::BlendColors(colors.base, accent, 18);
         colors.bracket = KswordTheme::BlendColors(colors.base, accent, 65);
         colors.bracketError = KswordTheme::BlendColors(colors.base, KswordTheme::ErrorColor(), 65);
         const std::array<QColor, 2> backgrounds{colors.base, colors.currentLine};
@@ -141,14 +141,76 @@ namespace
     }
 }
 
+// One application observer serves every editor, including hidden documents.
+// Ordinary paint, wheel and input events no longer visit each editor instance.
+class CodeTextEditApplicationFontHub final : public QObject
+{
+public:
+    static void subscribe(CodeTextEdit* editor)
+    {
+        static QPointer<CodeTextEditApplicationFontHub> hub;
+        if (!hub) hub = new CodeTextEditApplicationFontHub(qApp);
+        hub->m_editors.append(editor);
+        QObject::connect(editor, &QObject::destroyed, hub.data(), [observer = hub.data(), editor] {
+            observer->m_editors.removeIf([editor](const QPointer<CodeTextEdit>& candidate) {
+                return !candidate || candidate.data() == editor;
+            });
+        });
+    }
+
+protected:
+    bool eventFilter(QObject* source, QEvent* event) override
+    {
+        if (source == qApp && event && (event->type() == QEvent::ApplicationFontChange
+            || event->type() == QEvent::FontChange))
+        {
+            const QFont application = QApplication::font();
+            if (application != m_lastFont)
+            {
+                m_lastFont = application;
+                const auto editors = m_editors;
+                for (const auto& editor : editors)
+                    if (editor) editor->scheduleApplicationFontRefresh();
+            }
+        }
+        return QObject::eventFilter(source, event);
+    }
+
+private:
+    explicit CodeTextEditApplicationFontHub(QObject* parent)
+        : QObject(parent), m_lastFont(QApplication::font())
+    {
+        qApp->installEventFilter(this);
+    }
+    QList<QPointer<CodeTextEdit>> m_editors;
+    QFont m_lastFont;
+};
+
 // A lexical painter, not a parser. Very long logical lines have bounded work;
 // unknown tails stay ordinary text and never supply guessed bracket matches.
 class CodeSyntaxHighlighter final : public QSyntaxHighlighter
 {
 public:
     explicit CodeSyntaxHighlighter(QTextDocument* document) : QSyntaxHighlighter(document) {}
-    void setLanguage(Language language) { m_language = language; }
-    void setColors(const EditorColors& colors) { m_colors = colors; }
+    void setLanguage(Language language)
+    {
+        if (m_language == language) return;
+        m_language = language;
+        m_fullRefreshRequired = true;
+    }
+    void setColors(const EditorColors& colors)
+    {
+        if (m_colors == colors) return;
+        m_colors = colors;
+        m_fullRefreshRequired = true;
+    }
+    const EditorColors& colors() const { return m_colors; }
+    bool takeFullRefreshRequired()
+    {
+        const bool required = m_fullRefreshRequired;
+        m_fullRefreshRequired = false;
+        return required;
+    }
 
 protected:
     void highlightBlock(const QString& text) override
@@ -271,6 +333,7 @@ protected:
 private:
     Language m_language = Language::PlainText;
     EditorColors m_colors;
+    bool m_fullRefreshRequired = true;
 };
 
 class CodeLineNumberArea final : public QWidget
@@ -309,8 +372,14 @@ CodeTextEdit::CodeTextEdit(QWidget* parent) : QPlainTextEdit(parent)
     connect(m_extraSelectionTimer, &QTimer::timeout, this, [this] { refreshExtraSelections(); });
     connect(this, &QPlainTextEdit::blockCountChanged, this, [this](int) { updateGutterGeometry(); });
     connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect& rect, int deltaY) {
-        if (deltaY) m_lineNumberArea->update();
-        else m_lineNumberArea->update(0, rect.y() + (m_compactMode ? 2 : 10), m_lineNumberArea->width(), rect.height());
+        const int inset = m_compactMode ? 2 : 10;
+        if (deltaY)
+        {
+            // Reuse stable line-number pixels. QWidget invalidates only the
+            // exposed strip; the fixed top/bottom padding does not move.
+            m_lineNumberArea->scroll(0, deltaY, m_lineNumberArea->rect().adjusted(0, inset, 0, -inset));
+        }
+        else m_lineNumberArea->update(0, rect.y() + inset, m_lineNumberArea->width(), rect.height());
         if (rect.contains(viewport()->rect())) updateGutterGeometry();
     });
     connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
@@ -324,7 +393,7 @@ CodeTextEdit::CodeTextEdit(QWidget* parent) : QPlainTextEdit(parent)
     refreshThemeColors();
     m_fontSizeScale = fontSizeScale(font(), m_applicationFont);
     m_fontTrackingReady = true;
-    qApp->installEventFilter(this);
+    CodeTextEditApplicationFontHub::subscribe(this);
     // No real content exists yet. Discard only decoration setup history here;
     // subsequent language/theme/compact changes never clear user undo history.
     document()->clearUndoRedoStacks();
@@ -395,10 +464,15 @@ void CodeTextEdit::refreshThemeColors()
 {
     m_themeRefreshPending = false;
     if (!m_syntaxHighlighter) return;
+    auto* highlighter = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter);
+    highlighter->setColors(colorsFor(palette()));
+    // Retain the latest colors while hidden; the first Show applies pending
+    // formats synchronously before painting. Ordinary text edits still use
+    // QSyntaxHighlighter's incremental document notifications.
+    if (!isVisible() || !highlighter->takeFullRefreshRequired()) return;
     const bool modified = document()->isModified();
     const QSignalBlocker editorSignals(this);
     const QSignalBlocker documentSignals(document());
-    static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->setColors(colorsFor(palette()));
     m_syntaxHighlighter->rehighlight();
     document()->setModified(modified);
     refreshExtraSelections();
@@ -460,7 +534,7 @@ void CodeTextEdit::updateGutterGeometry()
 
 void CodeTextEdit::paintLineNumberArea(QPaintEvent* event)
 {
-    const auto colors = colorsFor(palette());
+    const auto& colors = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->colors();
     QPainter painter(m_lineNumberArea);
     painter.fillRect(event->rect(), colors.gutter);
     painter.setPen(colors.divider);
@@ -504,6 +578,12 @@ void CodeTextEdit::setExternalExtraSelections(const QList<QTextEdit::ExtraSelect
     m_externalExtraSelections = selections; scheduleRefreshExtraSelections();
 }
 
+void CodeTextEdit::showEvent(QShowEvent* event)
+{
+    refreshThemeColors();
+    QPlainTextEdit::showEvent(event);
+}
+
 void CodeTextEdit::resizeEvent(QResizeEvent* event)
 {
     QPlainTextEdit::resizeEvent(event); updateGutterGeometry();
@@ -532,14 +612,6 @@ void CodeTextEdit::changeEvent(QEvent* event)
             if (m_themeRefreshPending) refreshThemeColors();
         });
     }
-}
-
-bool CodeTextEdit::eventFilter(QObject* source, QEvent* event)
-{
-    if (source == qApp && event != nullptr &&
-        (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange))
-        scheduleApplicationFontRefresh();
-    return QPlainTextEdit::eventFilter(source, event);
 }
 
 void CodeTextEdit::scheduleApplicationFontRefresh()
@@ -627,7 +699,7 @@ int CodeTextEdit::findBracketPair(int bracketPos, QChar bracketCh) const
 
 void CodeTextEdit::refreshExtraSelections()
 {
-    const auto colors = colorsFor(palette());
+    const auto& colors = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->colors();
     QList<QTextEdit::ExtraSelection> selections;
     QTextEdit::ExtraSelection line;
     line.cursor = textCursor(); line.cursor.clearSelection();

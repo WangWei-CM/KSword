@@ -15,7 +15,8 @@
 
 #include <atomic>   // std::atomic_bool/std::atomic_uint64_t：异步查询互斥与票据。
 #include <cstdint>  // std::uint32_t/std::uint64_t：协议字段与地址展示。
-#include <vector>   // std::vector：保存 R0 evidence 缓存。
+#include <vector>
+#include <memory>   // std::vector：保存 R0 evidence 缓存。
 
 class CodeEditorWidget;
 class QCheckBox;
@@ -23,7 +24,12 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
-class QTableWidget;
+class QTableView;
+class QAbstractTableModel;
+class QSortFilterProxyModel;
+class QTimer;
+struct HardwareEvidenceSnapshot;
+namespace ks::ui { class AsyncUiDispatcher; }
 class QVBoxLayout;
 
 // HardwareR0EvidencePage 说明：
@@ -41,7 +47,10 @@ public:
     // 析构函数：
     // - 不持有裸线程句柄；
     // - QRunnable 回投通过 QPointer 防止对象销毁后访问。
-    ~HardwareR0EvidencePage() override = default;
+    ~HardwareR0EvidencePage() override;
+
+protected:
+    void changeEvent(QEvent* event) override;
 
 private:
     // initializeUi 作用：
@@ -69,7 +78,8 @@ private:
         std::uint64_t ticket,
         ksword::ark::DriverCapabilitiesQueryResult capabilityResult,
         ksword::ark::DynDataCapabilitiesResult dynDataResult,
-        ksword::ark::DriverIntegrityResult integrityResult);
+        ksword::ark::DriverIntegrityResult integrityResult,
+        std::shared_ptr<const HardwareEvidenceSnapshot> snapshot);
 
     // rebuildEvidenceTable 作用：
     // - 输入：无，读取 m_evidenceCache 与过滤控件；
@@ -97,13 +107,17 @@ private:
     QSpinBox* m_maxRowsSpin = nullptr;         // m_maxRowsSpin：单次最大 evidence 行数。
     QSpinBox* m_idtVectorsSpin = nullptr;      // m_idtVectorsSpin：每 CPU 展开的 IDT 向量数量。
     QLabel* m_statusLabel = nullptr;           // m_statusLabel：展示 R0 查询状态摘要。
-    QTableWidget* m_evidenceTable = nullptr;   // m_evidenceTable：CPU/MSR/IDT/GDT 证据表。
+    QTableView* m_evidenceTable = nullptr;   // m_evidenceTable：CPU/MSR/IDT/GDT 证据表。
     ks::ui::StructuredFieldView* m_detailEditor = nullptr;// m_detailEditor：证据详情文本编辑器。
 
     ksword::ark::DriverCapabilitiesQueryResult m_lastCapabilityResult; // m_lastCapabilityResult：最近一次驱动能力快照。
     ksword::ark::DynDataCapabilitiesResult m_lastDynDataResult; // m_lastDynDataResult：最近一次 DynData 能力快照。
     ksword::ark::DriverIntegrityResult m_lastIntegrityResult; // m_lastIntegrityResult：最近一次完整响应摘要。
-    std::vector<ksword::ark::DriverIntegrityEvidenceEntry> m_evidenceCache; // m_evidenceCache：最近一次 R0 evidence 行缓存。
+    std::shared_ptr<const HardwareEvidenceSnapshot> m_evidenceSnapshot;
+    QAbstractTableModel* m_evidenceModel = nullptr;
+    QSortFilterProxyModel* m_filterModel = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
     std::atomic_bool m_refreshing{ false };    // m_refreshing：避免并发刷新。
     std::atomic<std::uint64_t> m_refreshTicket{ 0 }; // m_refreshTicket：丢弃过期后台结果。
 };

@@ -31,7 +31,7 @@ namespace network_dock_detail
     // packetSourceDisplayText 作用：
     // - 把内部数据源和 WFP event flags 转成可本地化的明确来源文本；
     // - R0 事件始终声明无 packet payload，避免被误认成逐包抓包。
-    static QString packetSourceDisplayText(const ks::network::PacketRecord& packetRecord)
+    QString packetSourceDisplayText(const ks::network::PacketRecord& packetRecord)
     {
         if (!packetRecord.wfpAleEventNoPayload)
         {

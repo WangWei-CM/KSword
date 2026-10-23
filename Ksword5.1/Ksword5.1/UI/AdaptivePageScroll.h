@@ -16,11 +16,18 @@
 //   只做第 2 步而页面没包壳，超高页的底部会被静默裁掉，比原来更糟，
 //   所以调用方必须先包壳、后去外层滚动。
 //
-// 本文件是 header-only：离屏夹具不需要链接任何生产对象就能直接编译它。
+// 本文件保留 header-only 布局入口；主题与主表面策略复用生产共享实现。
 // 本文件没有任何用户可见文本，因此不涉及语言包；objectName 使用蛇形小写，
 // 不会被 i18n 审计当成待翻译串。
 
+#include "./MainSurfaceStyle.h"
+#include "./ThemeBinding.h"
+#include "../theme.h"
 #include <QFrame>
+#include <QEvent>
+#include <QPainter>
+#include <QPaintEvent>
+#include <QPointer>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QString>
@@ -29,6 +36,62 @@
 
 namespace ks::ui
 {
+    // 普通主工作区的滚动正文原本透出同一canvas实色；这里显式全矩形填充，
+    // 使Qt能够复用backingstore移动。真正透明宿主与未登记角色的独立窗保持原策略。
+    class AdaptivePageCanvas final : public QWidget
+    {
+    public:
+        explicit AdaptivePageCanvas(QWidget* parent) : QWidget(parent) {}
+        void prepareSurface()
+        {
+            // DetailDialogChrome明确将所有QScrollArea/viewport设为WindowColor实底；
+            // 仅识别当前顶层的共享shell标记，不沿祖先跨进其它独立窗口猜测颜色。
+            const bool detailSurface = window()->property("ksword_detail_shell").toBool();
+            const QColor color = detailSurface ? KswordTheme::WindowColor() : MainWindowSurfaceColors().canvas;
+            const bool solid = (UsesMainSurfaceHierarchy(this) || detailSurface) && color.alpha() == 255;
+            const bool changed = m_solid != solid || m_surface != color;
+            m_solid = solid;
+            m_surface = color;
+            if (testAttribute(Qt::WA_OpaquePaintEvent) != m_solid)
+            {
+                setAttribute(Qt::WA_OpaquePaintEvent, m_solid);
+            }
+            if (changed) update();
+        }
+    protected:
+        bool event(QEvent* event) override
+        {
+            const bool handled = QWidget::event(event);
+            switch (event->type())
+            {
+            case QEvent::Show:
+            case QEvent::ParentChange:
+            case QEvent::StyleChange:
+            case QEvent::Polish:
+            case QEvent::ApplicationPaletteChange:
+            case QEvent::PaletteChange:
+                prepareSurface(); // 宿主/背景策略建立后、首绘前维护局部opaque契约。
+                break;
+            default:
+                break;
+            }
+            return handled;
+        }
+        void paintEvent(QPaintEvent* event) override
+        {
+            if (m_solid)
+            {
+                QPainter painter(this);
+                painter.fillRect(rect(), m_surface); // 每个像素实填，包括局部QSS的圆角区域。
+                return;
+            }
+            QWidget::paintEvent(event);
+        }
+    private:
+        QColor m_surface;
+        bool m_solid = false;
+    };
+
     // kAdaptivePageScrollObjectName：页面内部滚动壳（QScrollArea）的 objectName。
     // 测试与静态门禁靠它定位壳，所以名字必须稳定。
     inline constexpr char kAdaptivePageScrollObjectName[] = "ks_adaptive_page_scroll";
@@ -112,7 +175,7 @@ namespace ks::ui
         IsolateMinimumSize(scrollArea);
 
         // 内容容器：调用方的真实布局建在它上面。
-        QWidget* const contentWidget = new QWidget(scrollArea);
+        auto* const contentWidget = new AdaptivePageCanvas(scrollArea);
         contentWidget->setObjectName(QString::fromLatin1(kAdaptivePageContentObjectName));
         scrollArea->setWidget(contentWidget);
 
@@ -121,6 +184,13 @@ namespace ks::ui
         // 里盖出一块实色，所以必须关回去。注意要在 setWidget 之后关，否则会被它改回来。
         contentWidget->setAutoFillBackground(false);
         scrollArea->viewport()->setAutoFillBackground(false);
+        // 绑定放在独立滚动壳上，业务对content调用StyleWorkspacePage不会替换此策略。
+        // 普通主宿主canvas各层同色；内容全矩形实填不改变外部卡片/页根的8px外观。
+        const QPointer<AdaptivePageCanvas> canvas(contentWidget);
+        BindWidgetTheme(scrollArea, [canvas]()
+        {
+            if (canvas != nullptr) canvas->prepareSurface();
+        });
 
         // 滚动壳占满页面的全部空间。
         outerLayout->addWidget(scrollArea, 1);

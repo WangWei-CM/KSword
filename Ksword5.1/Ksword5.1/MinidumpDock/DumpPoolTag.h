@@ -40,5 +40,6 @@ namespace ks::minidump
     // ApplyPoolTagAttribution 作用：识别池标记候选并就地写入 result.poolTags。
     // 传入 result 解析结果（就地修改）；命中时同时向 analysis.findings 追加一条结论。
     // 只在停止码或寄存器里确实出现了像池标记的值时才产出，不制造噪声。
-    void ApplyPoolTagAttribution(DumpParseResult& result);
+    void ApplyPoolTagAttribution(
+        DumpParseResult& result, const DumpCancellationToken& cancellation = {});
 }

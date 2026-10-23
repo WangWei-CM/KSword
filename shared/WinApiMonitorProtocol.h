@@ -13,6 +13,7 @@
 #include <iterator>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -21,6 +22,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#include <Aclapi.h>
+#include <Sddl.h>
 
 namespace ks::winapi_monitor
 {
@@ -244,19 +247,21 @@ namespace ks::winapi_monitor
     }
 
     // queryTempDirectory：
-    // - 作用：返回当前用户临时目录；
+    // - 作用：返回所有账户都能解析到的机器临时目录；
     // - 调用：UI 写配置和停止标记文件、Agent 读取会话配置时复用。
+    // - 说明：不能使用调用者自己的 GetTempPathW。注入到 SYSTEM、DWM
+    //   或服务账户后，目标进程会得到另一套 TEMP，Agent 将永远找不到 UI 写的 INI。
     inline std::wstring queryTempDirectory()
     {
-        wchar_t tempBuffer[4096] = {};
-        const DWORD charCount = ::GetTempPathW(
-            static_cast<DWORD>(std::size(tempBuffer)),
-            tempBuffer);
-        if (charCount == 0 || charCount >= std::size(tempBuffer))
+        wchar_t windowsBuffer[4096] = {};
+        const DWORD charCount = ::GetWindowsDirectoryW(
+            windowsBuffer,
+            static_cast<DWORD>(std::size(windowsBuffer)));
+        if (charCount == 0 || charCount >= std::size(windowsBuffer))
         {
             return std::wstring(L".");
         }
-        return trimTrailingSlash(std::wstring(tempBuffer, charCount));
+        return joinPath(trimTrailingSlash(std::wstring(windowsBuffer, charCount)), L"Temp");
     }
 
     // buildSessionDirectory：
@@ -265,6 +270,177 @@ namespace ks::winapi_monitor
     inline std::wstring buildSessionDirectory()
     {
         return joinPath(queryTempDirectory(), L"KswordApiMon");
+    }
+
+    inline bool queryProcessUserSid(
+        const std::uint32_t pidValue,
+        std::vector<unsigned char>* const sidOut,
+        std::wstring* const errorTextOut = nullptr)
+    {
+        if (sidOut == nullptr || pidValue == 0)
+        {
+            if (errorTextOut) *errorTextOut = L"invalid process SID query arguments.";
+            return false;
+        }
+        sidOut->clear();
+        const HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pidValue);
+        if (!process)
+        {
+            if (errorTextOut) *errorTextOut = L"OpenProcess for session SID failed. error=" + std::to_wstring(::GetLastError());
+            return false;
+        }
+        HANDLE token = nullptr;
+        bool ok = ::OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE;
+        DWORD error = ok ? ERROR_SUCCESS : ::GetLastError();
+        if (ok)
+        {
+            DWORD bytes = 0;
+            (void)::GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+            if (bytes == 0)
+            {
+                error = ::GetLastError();
+                ok = false;
+            }
+            else
+            {
+                std::vector<unsigned char> buffer(bytes);
+                if (!::GetTokenInformation(token, TokenUser, buffer.data(), bytes, &bytes))
+                {
+                    error = ::GetLastError();
+                    ok = false;
+                }
+                else
+                {
+                    const auto* const user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+                    if (!::IsValidSid(user->User.Sid))
+                    {
+                        error = ERROR_INVALID_SID;
+                        ok = false;
+                    }
+                    else
+                    {
+                        const DWORD sidBytes = ::GetLengthSid(user->User.Sid);
+                        sidOut->resize(sidBytes);
+                        ok = ::CopySid(sidBytes, sidOut->data(), user->User.Sid) != FALSE;
+                        error = ok ? ERROR_SUCCESS : ::GetLastError();
+                    }
+                }
+            }
+        }
+        if (token) ::CloseHandle(token);
+        ::CloseHandle(process);
+        if (!ok && errorTextOut) *errorTextOut = L"query target process SID failed. error=" + std::to_wstring(error);
+        ::SetLastError(error);
+        return ok;
+    }
+
+    inline bool currentProcessUserSidString(std::wstring* const sidTextOut)
+    {
+        if (sidTextOut == nullptr) return false;
+        sidTextOut->clear();
+        HANDLE token = nullptr;
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+        DWORD bytes = 0;
+        (void)::GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+        std::vector<unsigned char> buffer(bytes);
+        const bool queried = bytes != 0 && ::GetTokenInformation(token, TokenUser, buffer.data(), bytes, &bytes) != FALSE;
+        bool converted = false;
+        if (queried)
+        {
+            const auto* const user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+            LPWSTR text = nullptr;
+            if (::ConvertSidToStringSidW(user->User.Sid, &text))
+            {
+                *sidTextOut = text;
+                ::LocalFree(text);
+                converted = true;
+            }
+        }
+        ::CloseHandle(token);
+        return converted;
+    }
+
+    inline bool addSessionDirectoryReader(const std::uint32_t pidValue, std::wstring* const errorTextOut = nullptr)
+    {
+        std::vector<unsigned char> sid;
+        if (!queryProcessUserSid(pidValue, &sid, errorTextOut)) return false;
+        const std::wstring root = buildSessionDirectory();
+        if (!::CreateDirectoryW(root.c_str(), nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            if (errorTextOut) *errorTextOut = L"create monitor session directory failed. error=" + std::to_wstring(::GetLastError());
+            return false;
+        }
+        EXPLICIT_ACCESSW access{};
+        access.grfAccessPermissions = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE;
+        access.grfAccessMode = GRANT_ACCESS;
+        access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid.data());
+        PACL existing = nullptr;
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        DWORD aclError = ::GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(root.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, &existing, nullptr, &descriptor);
+        if (aclError == ERROR_SUCCESS)
+        {
+            PACL updated = nullptr;
+            aclError = ::SetEntriesInAclW(1, &access, existing, &updated);
+            if (aclError == ERROR_SUCCESS)
+            {
+                const DWORD setError = ::SetNamedSecurityInfoW(
+                    const_cast<LPWSTR>(root.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                    nullptr, nullptr, updated, nullptr);
+                aclError = setError;
+            }
+            if (updated) ::LocalFree(updated);
+        }
+        if (descriptor) ::LocalFree(descriptor);
+        if (aclError != ERROR_SUCCESS)
+        {
+            if (errorTextOut) *errorTextOut = L"build monitor session ACL failed. error=" + std::to_wstring(aclError);
+            return false;
+        }
+        return true;
+    }
+
+    inline bool grantSessionFileRead(const std::wstring& path, const std::uint32_t pidValue,
+        std::wstring* const errorTextOut = nullptr)
+    {
+        std::vector<unsigned char> sid;
+        if (!queryProcessUserSid(pidValue, &sid, errorTextOut)) return false;
+        EXPLICIT_ACCESSW access{};
+        access.grfAccessPermissions = FILE_GENERIC_READ | SYNCHRONIZE;
+        access.grfAccessMode = GRANT_ACCESS;
+        access.grfInheritance = NO_INHERITANCE;
+        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid.data());
+        PACL existing = nullptr;
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        DWORD aclError = ::GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, &existing, nullptr, &descriptor);
+        PACL updated = nullptr;
+        if (aclError == ERROR_SUCCESS)
+            aclError = ::SetEntriesInAclW(1, &access, existing, &updated);
+        if (aclError != ERROR_SUCCESS)
+        {
+            if (descriptor) ::LocalFree(descriptor);
+            if (errorTextOut) *errorTextOut = L"build monitor file ACL failed. error=" + std::to_wstring(aclError);
+            return false;
+        }
+        const DWORD setError = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, updated, nullptr);
+        if (updated) ::LocalFree(updated);
+        if (descriptor) ::LocalFree(descriptor);
+        if (setError != ERROR_SUCCESS)
+        {
+            if (errorTextOut) *errorTextOut = L"set monitor file ACL failed. error=" + std::to_wstring(setError);
+            return false;
+        }
+        return true;
     }
 
     // buildPipeNameForPid：

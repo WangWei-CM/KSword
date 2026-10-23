@@ -1,5 +1,7 @@
+#include "MonitorEventFilterProjection.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/TableContextMenu.h"
+#include "../UI/TableSearchSupport.h"
 #include "../UI/SecondaryPageLayout.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../theme.h"
@@ -31,6 +33,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -39,6 +42,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSet>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -512,7 +516,7 @@ void ProcessTraceMonitorWidget::initializeConnections()
     if (m_pauseButton != nullptr)
     {
         connect(m_pauseButton, &QPushButton::clicked, this, [this]() {
-            if (!m_capturePaused.load())
+            if (!m_capture->m_capturePaused.load())
             {
                 setMonitoringPaused(true);
             }
@@ -720,6 +724,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
         : QString();
 
     int visibleRowCount = 0;
+    QSet<QPersistentModelIndex> excluded;
     for (int row = 0; row < m_availableTable->rowCount(); ++row)
     {
         QStringList rowTextList;
@@ -732,7 +737,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
         const QString mergedText = rowTextList.join(QStringLiteral(" | "));
         const bool visible = keywordText.isEmpty()
             || mergedText.contains(keywordText, Qt::CaseInsensitive);
-        m_availableTable->setRowHidden(row, !visible);
+        if (!visible) excluded.insert(QPersistentModelIndex(m_availableTable->model()->index(row, 0, m_availableTable->rootIndex())));
         if (visible)
         {
             ++visibleRowCount;
@@ -747,6 +752,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
             .arg(m_availableTable->rowCount()));
         ks::ui::ApplyStatusRole(m_availableStatusLabel, ks::ui::StatusRole::Idle);
     }
+    ks::ui::ApplyTableRowFilterIncrementally(m_availableTable, excluded);
 }
 
 void ProcessTraceMonitorWidget::addSelectedAvailableProcesses()
@@ -818,7 +824,7 @@ void ProcessTraceMonitorWidget::addManualProcessByPid()
 void ProcessTraceMonitorWidget::createSuspendedTargetProcess()
 {
     // 运行期不接受修改根目标集合，和现有“手动添加 / 批量添加”保持同一约束。
-    if (m_captureRunning.load())
+    if (m_capture->m_captureRunning.load())
     {
         return;
     }
@@ -1109,26 +1115,36 @@ void ProcessTraceMonitorWidget::addTargetProcessByPid(const std::uint32_t pidVal
     }
     else
     {
-        ks::process::ProcessRecord detailRecord = buildLightweightMonitorProcessRecord(pidValue);
-        targetEntry.processName = QString::fromStdString(detailRecord.processName);
-        targetEntry.imagePath = QString::fromStdString(detailRecord.imagePath);
-        targetEntry.userName = QString::fromStdString(detailRecord.userName);
-        targetEntry.creationTime100ns = detailRecord.creationTime100ns;
-        targetEntry.alive = !detailRecord.imagePath.empty()
-            || !detailRecord.userName.empty()
-            || detailRecord.creationTime100ns != 0;
-
-        if (!targetEntry.alive)
-        {
-            targetEntry.processName = targetEntry.processName.trimmed().isEmpty()
-                ? QStringLiteral("<Unknown>")
-                : targetEntry.processName;
-            targetEntry.remarkText += QStringLiteral("；无法读取静态详情");
-        }
+        if (!m_targetLookup) m_targetLookup = new ks::ui::AsyncOperation(this);
+        const auto epoch = m_capture;
+        const auto ticket = m_targetLookup->submitTransaction<TargetProcessEntry, TargetProcessEntry>(targetEntry,
+            [](const TargetProcessEntry& input)
+            {
+                auto result = input;
+                const auto detail = buildLightweightMonitorProcessRecord(input.pid);
+                result.processName = QString::fromStdString(detail.processName);
+                result.imagePath = QString::fromStdString(detail.imagePath);
+                result.userName = QString::fromStdString(detail.userName);
+                result.creationTime100ns = detail.creationTime100ns;
+                result.alive = !detail.imagePath.empty() || !detail.userName.empty() || detail.creationTime100ns != 0;
+                if (!result.alive) result.remarkText += QStringLiteral("；无法读取静态详情");
+                return result;
+            },
+            [this, epoch](const TargetProcessEntry& result, std::uint64_t)
+            {
+                QTimer::singleShot(0, this, [this]() { updateActionState(); updateStatusLabel(); });
+                if (m_capture != epoch || m_capture->m_captureRunning.load()) return true;
+                const auto found = std::find_if(m_targetProcessList.begin(), m_targetProcessList.end(), [&result](const auto& value) { return value.pid == result.pid; });
+                if (found == m_targetProcessList.end()) m_targetProcessList.push_back(result);
+                syncTargetEditsToCapture(); refreshTargetTable(); updateActionState(); updateStatusLabel();
+                return true;
+            }, [this](std::exception_ptr) { QTimer::singleShot(0, this, [this]() { updateActionState(); updateStatusLabel(); }); });
+        if (ticket) updateActionState();
+        return;
     }
 
     m_targetProcessList.push_back(targetEntry);
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
@@ -1157,117 +1173,9 @@ void ProcessTraceMonitorWidget::updateTargetProcessRemarkByPid(
     }
 
     found->remarkText = remarkText;
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
-}
-
-void ProcessTraceMonitorWidget::upsertAutoTrackedProcessInTargetList(
-    const std::uint32_t pidValue,
-    const std::uint32_t parentPidValue,
-    const QString& processNameText,
-    const QString& processPathText,
-    const std::uint64_t creationTime100ns)
-{
-    if (pidValue == 0)
-    {
-        return;
-    }
-
-    // normalizedProcessName/normalizedProcessPath：清理 ETW 事件中可能携带的空白文本。
-    const QString normalizedProcessName = processNameText.trimmed();
-    const QString normalizedProcessPath = processPathText.trimmed();
-    // autoRemarkText：用于明确标记“该条目是 ETW 自动加入”。
-    const QString autoRemarkText = QStringLiteral("ETW 自动加入（父PID=%1）").arg(parentPidValue);
-
-    auto targetIt = std::find_if(
-        m_targetProcessList.begin(),
-        m_targetProcessList.end(),
-        [pidValue](const TargetProcessEntry& entry) {
-            return entry.pid == pidValue;
-        });
-
-    bool targetAdded = false;
-    if (targetIt == m_targetProcessList.end())
-    {
-        TargetProcessEntry targetEntry;
-        targetEntry.pid = pidValue;
-        targetEntry.processName = normalizedProcessName;
-        targetEntry.imagePath = normalizedProcessPath;
-        targetEntry.creationTime100ns = creationTime100ns;
-        targetEntry.alive = true;
-        targetEntry.remarkText = autoRemarkText;
-        m_targetProcessList.push_back(targetEntry);
-        targetIt = std::prev(m_targetProcessList.end());
-        targetAdded = true;
-    }
-    else
-    {
-        targetIt->alive = true;
-        if (!normalizedProcessName.isEmpty())
-        {
-            targetIt->processName = normalizedProcessName;
-        }
-        if (!normalizedProcessPath.isEmpty())
-        {
-            targetIt->imagePath = normalizedProcessPath;
-        }
-        if (creationTime100ns != 0)
-        {
-            targetIt->creationTime100ns = creationTime100ns;
-        }
-
-        const bool canRewriteRemark = targetIt->remarkText.trimmed().isEmpty()
-            || targetIt->remarkText.contains(QStringLiteral("ETW 自动加入"), Qt::CaseInsensitive);
-        if (canRewriteRemark)
-        {
-            targetIt->remarkText = autoRemarkText;
-        }
-    }
-
-    // needDetailLookup：当 ETW 没带全字段时，按 PID 补一轮轻量静态详情。
-    const bool needDetailLookup = targetIt->processName.trimmed().isEmpty()
-        || targetIt->imagePath.trimmed().isEmpty()
-        || targetIt->userName.trimmed().isEmpty()
-        || targetIt->creationTime100ns == 0;
-    if (needDetailLookup)
-    {
-        const ks::process::ProcessRecord detailRecord = buildLightweightMonitorProcessRecord(pidValue);
-        if (targetIt->processName.trimmed().isEmpty())
-        {
-            targetIt->processName = QString::fromStdString(detailRecord.processName);
-        }
-        if (targetIt->imagePath.trimmed().isEmpty())
-        {
-            targetIt->imagePath = QString::fromStdString(detailRecord.imagePath);
-        }
-        if (targetIt->userName.trimmed().isEmpty())
-        {
-            targetIt->userName = QString::fromStdString(detailRecord.userName);
-        }
-        if (targetIt->creationTime100ns == 0)
-        {
-            targetIt->creationTime100ns = detailRecord.creationTime100ns;
-        }
-
-        // 这里保持 alive=true：
-        // - 触发来源是“ETW 进程创建事件”，说明该 PID 在事件时刻可达；
-        // - 即便轻量详情补全失败，也不应把其误判成已退出。
-        targetIt->alive = true;
-    }
-
-    refreshTargetTable();
-    updateStatusLabel();
-
-    kLogEvent autoAddEvent;
-    info << autoAddEvent
-        << "[ProcessTraceMonitorWidget] ETW自动同步监控目标, pid="
-        << pidValue
-        << ", parentPid="
-        << parentPidValue
-        << ", action="
-        << (targetAdded ? "add" : "update")
-        << eol;
 }
 
 void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
@@ -1294,7 +1202,7 @@ void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
     const std::size_t removedCount = static_cast<std::size_t>(m_targetProcessList.end() - removeBegin);
     m_targetProcessList.erase(removeBegin, m_targetProcessList.end());
 
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateStatusLabel();
 
     kLogEvent autoRemoveEvent;
@@ -1310,40 +1218,59 @@ void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
 
 void ProcessTraceMonitorWidget::refreshTargetTable()
 {
-    if (m_targetTable == nullptr)
+    if (!m_targetTable) return;
+    if (!m_targetTable->isVisible()) { m_targetProjectionDirty = true; return; }
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("process-trace-target-projection"), { m_targetTable }, [this]() { refreshTargetTable(); }))
+    { m_targetProjectionDirty = true; return; }
+    m_targetProjectionDirty = false;
+    constexpr int identityRole = Qt::UserRole + 42;
+    const auto identity = [](const TargetProcessEntry& entry) { return QStringLiteral("%1:%2").arg(entry.pid).arg(entry.creationTime100ns); };
+    QSet<QString> selectedIdentities;
+    for (const auto* item : m_targetTable->selectedItems())
+        if (const auto* first = m_targetTable->item(item->row(), 0)) selectedIdentities.insert(first->data(identityRole).toString());
+    const bool sorting = m_targetTable->isSortingEnabled();
+    m_targetTable->setSortingEnabled(false);
+    QSet<QString> retainedKeys;
+    for (const auto& entry : m_targetProcessList) retainedKeys.insert(identity(entry));
+    // Remove obsolete identities first. A single exit must not move every survivor row.
+    for (int row = m_targetTable->rowCount() - 1; row >= 0; --row)
     {
-        return;
+        const auto* first = m_targetTable->item(row, 0);
+        if (!first || !retainedKeys.contains(first->data(identityRole).toString())) m_targetTable->removeRow(row);
     }
-
-    m_targetTable->clearContents();
-    m_targetTable->setRowCount(static_cast<int>(m_targetProcessList.size()));
-
     int aliveCount = 0;
     for (int row = 0; row < static_cast<int>(m_targetProcessList.size()); ++row)
     {
-        const TargetProcessEntry& entry = m_targetProcessList[static_cast<std::size_t>(row)];
-
-        QTableWidgetItem* stateItem = createReadOnlyItem(entry.alive
-            ? QStringLiteral("运行中")
-            : QStringLiteral("未知/已退出"));
-        if (entry.alive)
+        const auto& entry = m_targetProcessList[static_cast<std::size_t>(row)];
+        const QString key = identity(entry);
+        if (row >= m_targetTable->rowCount() || !m_targetTable->item(row, 0) || m_targetTable->item(row, 0)->data(identityRole).toString() != key)
         {
-            ++aliveCount;
-            stateItem->setForeground(QBrush(KswordTheme::SuccessColor()));
+            int sourceRow = row;
+            while (sourceRow < m_targetTable->rowCount() && (!m_targetTable->item(sourceRow, 0) || m_targetTable->item(sourceRow, 0)->data(identityRole).toString() != key)) ++sourceRow;
+            m_targetTable->insertRow(row);
+            if (sourceRow + 1 < m_targetTable->rowCount())
+            {
+                for (int column = 0; column < TargetProcessColumnCount; ++column)
+                    m_targetTable->setItem(row, column, m_targetTable->takeItem(sourceRow + 1, column));
+                m_targetTable->removeRow(sourceRow + 1);
+            }
         }
-        else
+        const QStringList cells{ (entry.identityLookupPending || entry.identityLookupInFlight) ? QStringLiteral("核验中") : (entry.alive ? QStringLiteral("运行中") : QStringLiteral("未知/已退出")), QString::number(entry.pid), entry.processName, entry.imagePath, entry.userName, entry.remarkText };
+        for (int column = 0; column < TargetProcessColumnCount; ++column)
         {
-            stateItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
+            auto* item = m_targetTable->item(row, column);
+            if (!item) { item = createReadOnlyItem(cells[column]); m_targetTable->setItem(row, column, item); }
+            else if (item->text() != cells[column]) item->setText(cells[column]);
+            if (selectedIdentities.contains(key)) item->setSelected(true);
         }
-
-        m_targetTable->setItem(row, TargetProcessColumnState, stateItem);
-        m_targetTable->setItem(row, TargetProcessColumnPid, createReadOnlyItem(QString::number(entry.pid)));
-        m_targetTable->setItem(row, TargetProcessColumnName, createReadOnlyItem(entry.processName));
-        m_targetTable->setItem(row, TargetProcessColumnPath, createReadOnlyItem(entry.imagePath));
-        m_targetTable->setItem(row, TargetProcessColumnUser, createReadOnlyItem(entry.userName));
-        m_targetTable->setItem(row, TargetProcessColumnRemark, createReadOnlyItem(entry.remarkText));
+        auto* first = m_targetTable->item(row, 0);
+        first->setData(identityRole, key);
+        const QBrush foreground(entry.alive ? KswordTheme::SuccessColor() : KswordTheme::TextSecondaryColor());
+        if (first->foreground() != foreground) first->setForeground(foreground);
+        if (entry.alive) ++aliveCount;
     }
-
+    while (m_targetTable->rowCount() > static_cast<int>(m_targetProcessList.size())) m_targetTable->removeRow(m_targetTable->rowCount()-1);
+    m_targetTable->setSortingEnabled(sorting);
     if (m_targetStatusLabel != nullptr)
     {
         m_targetStatusLabel->setText(
@@ -1364,37 +1291,23 @@ void ProcessTraceMonitorWidget::removeSelectedTargetProcesses()
         return;
     }
 
-    std::set<int, std::greater<int>> selectedRowSet;
-    const QList<QTableWidgetItem*> itemList = m_targetTable->selectedItems();
-    for (QTableWidgetItem* itemPointer : itemList)
-    {
-        if (itemPointer != nullptr)
-        {
-            selectedRowSet.insert(itemPointer->row());
-        }
-    }
+    QSet<QString> selectedKeys;
+    for (const auto* item : m_targetTable->selectedItems())
+        if (const auto* first = m_targetTable->item(item->row(), 0)) selectedKeys.insert(first->data(Qt::UserRole + 42).toString());
+    if (selectedKeys.isEmpty()) return;
+    const auto oldSize = m_targetProcessList.size();
+    m_targetProcessList.erase(std::remove_if(m_targetProcessList.begin(), m_targetProcessList.end(), [&selectedKeys](const auto& entry)
+    { return selectedKeys.contains(QStringLiteral("%1:%2").arg(entry.pid).arg(entry.creationTime100ns)); }), m_targetProcessList.end());
+    const auto removedCount = oldSize - m_targetProcessList.size();
 
-    if (selectedRowSet.empty())
-    {
-        return;
-    }
-
-    for (const int row : selectedRowSet)
-    {
-        if (row >= 0 && row < static_cast<int>(m_targetProcessList.size()))
-        {
-            m_targetProcessList.erase(m_targetProcessList.begin() + row);
-        }
-    }
-
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
     kLogEvent event;
     info << event
         << "[ProcessTraceMonitorWidget] 已移除选中监控目标, removedCount="
-        << selectedRowSet.size()
+        << removedCount
         << eol;
 }
 
@@ -1406,7 +1319,7 @@ void ProcessTraceMonitorWidget::clearTargetProcesses()
     }
 
     m_targetProcessList.clear();
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
@@ -1443,7 +1356,7 @@ void ProcessTraceMonitorWidget::showAvailableContextMenu(const QPoint& position)
 
     const std::vector<int> selectedRows = selectedTableRows(m_availableTable);
     const int currentRow = m_availableTable->currentRow();
-    const bool running = m_captureRunning.load();
+    const bool running = m_capture->m_captureRunning.load();
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -1536,7 +1449,7 @@ void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
         QIcon(":/Icon/process_terminate.svg"),
         QStringLiteral("清空全部目标"));
 
-    const bool running = m_captureRunning.load();
+    const bool running = m_capture->m_captureRunning.load();
     copyCurrentAction->setEnabled(currentRow >= 0);
     copySelectedAction->setEnabled(!selectedRows.empty());
     removeSelectedAction->setEnabled(!running && !m_targetTable->selectedItems().isEmpty());
@@ -1645,13 +1558,14 @@ void ProcessTraceMonitorWidget::applyTimelineSelection(
     // 这里存储绝对时间戳，确保图形选区与表格行通过数据关联，而不是通过屏幕坐标关联。
     m_timelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_timelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_timelineUserSelectionActive = true;
+    m_timelineUserSelectionActive = m_eventTimelineWidget != nullptr
+        && m_eventTimelineWidget->hasUserAdjustedSelection();
     applyEventFilter();
 }
 
 void ProcessTraceMonitorWidget::refreshTimelineRange(const bool captureFinished)
 {
-    if (m_eventTimelineWidget == nullptr || m_captureStartTime100ns == 0)
+    if (!m_eventTable || !m_eventTable->isVisible() || m_eventTimelineWidget == nullptr || m_captureStartTime100ns == 0)
     {
         return;
     }
@@ -1675,12 +1589,20 @@ void ProcessTraceMonitorWidget::refreshTimelineRange(const bool captureFinished)
 
 void ProcessTraceMonitorWidget::refreshTimelinePoints()
 {
-    if (m_eventTimelineWidget == nullptr)
+    if (!m_eventTable || !m_eventTable->isVisible() || !m_eventTimelineWidget
+        || !m_eventTimelineWidget->isVisible() || m_timelineArchiveRevision == m_eventArchive.revision()) return;
+    std::vector<ProcessTraceTimelineEventPoint> points;
+    points.reserve(m_eventArchive.size());
+    for (const auto& record : m_eventArchive.snapshot())
     {
-        return;
+        ProcessTraceTimelineEventPoint point;
+        point.time100ns = record->value.time100ns;
+        point.typeText = record->value.typeText;
+        point.categoryId = ks::ui::TimelineCategoryForEtwProvider(record->value.providerText, record->value.eventName);
+        points.push_back(std::move(point));
     }
-
-    m_eventTimelineWidget->setEventPoints(m_timelineEventPoints);
+    m_eventTimelineWidget->setEventPoints(points);
+    m_timelineArchiveRevision = m_eventArchive.revision();
 }
 
 bool ProcessTraceMonitorWidget::isTimelineFilterActive() const
@@ -1709,103 +1631,39 @@ bool ProcessTraceMonitorWidget::isTimelineFilterActive() const
 
 void ProcessTraceMonitorWidget::applyEventFilter()
 {
-    if (m_eventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString typeText = m_eventTypeCombo != nullptr ? m_eventTypeCombo->currentText().trimmed() : QString();
-    const QString providerText = m_eventProviderFilterEdit != nullptr ? m_eventProviderFilterEdit->text() : QString();
-    const QString processText = m_eventProcessFilterEdit != nullptr ? m_eventProcessFilterEdit->text() : QString();
-    const QString eventNameText = m_eventNameFilterEdit != nullptr ? m_eventNameFilterEdit->text() : QString();
-    const QString detailText = m_eventDetailFilterEdit != nullptr ? m_eventDetailFilterEdit->text() : QString();
-    const QString globalText = m_eventGlobalFilterEdit != nullptr ? m_eventGlobalFilterEdit->text() : QString();
-    const bool useRegex = m_eventRegexCheck != nullptr && m_eventRegexCheck->isChecked();
-    const bool invertMatch = m_eventInvertCheck != nullptr && m_eventInvertCheck->isChecked();
-    const bool timelineFilterActive = isTimelineFilterActive();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_eventCaseCheck != nullptr && m_eventCaseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    const bool anyFilterActive = hasAnyEventFilterActive();
-    if (!anyFilterActive)
-    {
-        for (int row = 0; row < m_eventTable->rowCount(); ++row)
-        {
-            m_eventTable->setRowHidden(row, false);
-        }
-        updateEventFilterStatusText(m_eventTable->rowCount(), m_eventTable->rowCount());
-        updateActionState();
-        updateStatusLabel();
-        return;
-    }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        QTableWidgetItem* timeItem = m_eventTable->item(row, EventColumnTime100ns);
-        const QString rowType = m_eventTable->item(row, EventColumnType) != nullptr
-            ? m_eventTable->item(row, EventColumnType)->text()
-            : QString();
-        const QString rowProvider = m_eventTable->item(row, EventColumnProvider) != nullptr
-            ? m_eventTable->item(row, EventColumnProvider)->text()
-            : QString();
-        const QString rowDetail = m_eventTable->item(row, EventColumnDetail) != nullptr
-            ? m_eventTable->item(row, EventColumnDetail)->text()
-            : QString();
-        const QString processMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleProcessSearchText).toString()
-            : QString();
-        const QString eventMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleEventSearchText).toString()
-            : QString();
-        const QString globalMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleGlobalSearchText).toString()
-            : QString();
-
-        // timelineMatched：
-        // - 时间窗口始终是外层约束；
-        // - 现有“反向”选项不能把它反转为“时间框外”，否则会破坏框选时间的语义。
-        bool timelineMatched = true;
-        if (timelineFilterActive)
-        {
-            const std::uint64_t rowTime100ns = timeItem != nullptr
-                ? timeItem->data(kEventRoleTime100nsValue).toULongLong()
-                : 0;
-            timelineMatched = rowTime100ns >= m_timelineSelectionStart100ns
-                && rowTime100ns <= m_timelineSelectionEnd100ns;
-        }
-
-        bool matched = true;
-        if (!typeText.isEmpty() && typeText != QStringLiteral("全部类型"))
-        {
-            matched = matched && (QString::compare(rowType, typeText, Qt::CaseInsensitive) == 0);
-        }
-
-        matched = matched && textMatch(rowProvider, providerText, useRegex, caseSensitivity);
-        matched = matched && textMatch(processMergedText, processText, useRegex, caseSensitivity);
-        matched = matched && textMatch(eventMergedText, eventNameText, useRegex, caseSensitivity);
-        matched = matched && textMatch(rowDetail, detailText, useRegex, caseSensitivity);
-        matched = matched && textMatch(globalMergedText, globalText, useRegex, caseSensitivity);
-
-        if (invertMatch)
-        {
-            matched = !matched;
-        }
-        matched = matched && timelineMatched;
-
-        m_eventTable->setRowHidden(row, !matched);
-        if (matched)
-        {
-            ++visibleCount;
-        }
-    }
-
-    updateEventFilterStatusText(visibleCount, m_eventTable->rowCount());
-
-    updateActionState();
-    updateStatusLabel();
+    if (!m_eventTable) return;
+    if (!m_eventFilterProjection)
+        m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                const auto* time = m_eventTable->item(row, EventColumnTime100ns);
+                auto text = [this, row](int column) { const auto* item = m_eventTable->item(row,column); return item ? item->text() : QString(); };
+                values.fields = {text(EventColumnProvider),time ? time->data(kEventRoleProcessSearchText).toString() : QString(),
+                    time ? time->data(kEventRoleEventSearchText).toString() : QString(),text(EventColumnDetail),
+                    time ? time->data(kEventRoleGlobalSearchText).toString() : QString()};
+                values.type = text(EventColumnType);
+                values.time100ns = time ? time->data(kEventRoleTime100nsValue).toULongLong() : 0;
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                updateEventFilterStatusText(visible,total);
+                if (pending && m_eventFilterStatusLabel) ks::ui::ApplyStatusRole(m_eventFilterStatusLabel,ks::ui::StatusRole::Info);
+                updateActionState();
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_eventProviderFilterEdit ? m_eventProviderFilterEdit->text() : QString(),
+        m_eventProcessFilterEdit ? m_eventProcessFilterEdit->text() : QString(),m_eventNameFilterEdit ? m_eventNameFilterEdit->text() : QString(),
+        m_eventDetailFilterEdit ? m_eventDetailFilterEdit->text() : QString(),m_eventGlobalFilterEdit ? m_eventGlobalFilterEdit->text() : QString()};
+    spec.fieldIndexes = {0,1,2,3,4};
+    spec.type = m_eventTypeCombo ? m_eventTypeCombo->currentText().trimmed() : QString();
+    if (spec.type == QStringLiteral("全部类型")) spec.type.clear();
+    spec.regex = m_eventRegexCheck && m_eventRegexCheck->isChecked();
+    spec.invert = m_eventInvertCheck && m_eventInvertCheck->isChecked();
+    spec.sensitivity = m_eventCaseCheck && m_eventCaseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    spec.timeline = isTimelineFilterActive();
+    if (spec.timeline) { spec.start100ns = m_timelineSelectionStart100ns; spec.end100ns = m_timelineSelectionEnd100ns; }
+    m_eventFilterProjection->setSuspended(!m_eventTable->isVisible());
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void ProcessTraceMonitorWidget::clearEventFilter()
@@ -1870,179 +1728,226 @@ void ProcessTraceMonitorWidget::clearEventFilter()
     info << event << "[ProcessTraceMonitorWidget] 已清空事件筛选条件。" << eol;
 }
 
+void ProcessTraceMonitorWidget::acceptPendingEventRows()
+{
+    std::deque<EventRef> accepted;
+    { const std::lock_guard<std::mutex> lock(m_capture->m_pendingMutex); accepted.swap(m_capture->m_pendingRows); }
+    const bool visible = m_eventTable && m_eventTable->isVisible();
+    if (!visible) { m_eventProjectionStale = true; m_eventProjectionQueue.clear(); m_expiredEventProjection.clear(); }
+    const auto language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    for (auto& record : accepted)
+    {
+        // Hidden acceptance moves refs and binds a frozen language value only.
+        // It never formats a document, creates table items or evaluates a filter.
+        record->prepareForArchive(language);
+        auto evicted = m_eventArchive.append(record);
+        if (evicted && visible && !m_eventProjectionStale && m_projectedEvents.contains(evicted.get()))
+            m_expiredEventProjection.push_back(std::move(evicted));
+        if (visible && !m_eventProjectionStale) m_eventProjectionQueue.push_back(std::move(record));
+    }
+    // Coalesce only obsolete display plans; the canonical window is unchanged.
+    if (m_eventProjectionQueue.size() > ks::monitor::ProcessTraceEventArchive::capacity)
+    { m_eventProjectionStale = true; m_eventProjectionQueue.clear(); m_expiredEventProjection.clear(); }
+}
+
+ProcessTraceMonitorWidget::EventRef ProcessTraceMonitorWidget::eventRecordAt(const int row) const
+{
+    if (!m_eventTable || row < 0) return {};
+    const auto* item = m_eventTable->item(row, EventColumnTime100ns);
+    if (!item) return {};
+    const auto key = reinterpret_cast<const ks::monitor::ProcessTraceEventRecord*>(item->data(Qt::UserRole + 5).value<quintptr>());
+    const auto found = m_projectedEvents.find(key);
+    return found != m_projectedEvents.end() ? found->second.record : EventRef{};
+}
+
+bool ProcessTraceMonitorWidget::eventProjectionPending() const
+{
+    return !m_eventTable || !m_eventTable->isVisible() || m_eventProjectionStale
+        || !m_eventProjectionQueue.empty() || !m_expiredEventProjection.empty();
+}
+
 void ProcessTraceMonitorWidget::flushPendingRows()
 {
-    if (m_eventTable == nullptr)
+    pollCaptureState();
+    acceptPendingEventRows(); // Canonical admission precedes visibility/menu barriers.
+    const bool visible = m_eventTable && m_eventTable->isVisible();
+    if (m_eventFilterProjection) m_eventFilterProjection->setSuspended(!visible);
+    m_eventProjectionWasVisible = visible;
+    if (!visible)
     {
-        return;
-    }
-
-    // 在 drain 前延后整个 UI 提交；同键 timeout 只保留一次重试，原始事件仍留在
-    // m_pendingRows 中，因此菜单关闭后不会丢批次，也不会让头部裁剪改变动作目标。
-    const QPointer<ProcessTraceMonitorWidget> guardThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("process-trace-event-flush"),
-        { m_eventTable },
-        [guardThis]()
-        {
-            if (!guardThis.isNull())
-            {
-                guardThis->flushPendingRows();
-            }
-        }))
-    {
-        return;
-    }
-
-    std::vector<CapturedEventRow> rowList;
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
-        rowList.reserve(takeCount);
-        for (std::size_t index = 0; index < takeCount; ++index)
-        {
-            rowList.push_back(std::move(m_pendingRows.front()));
-            m_pendingRows.pop_front();
-        }
-    }
-
-    if (rowList.empty())
-    {
-        refreshTimelineRange(false);
-        if (!m_captureRunning.load() && m_uiUpdateTimer != nullptr)
-        {
+        updateActionState(); updateStatusLabel();
+        if (!m_capture->m_captureRunning.load() && (!m_captureCleanup || m_captureCleanup->isComplete()) && m_uiUpdateTimer)
             m_uiUpdateTimer->stop();
-        }
         return;
     }
-
-    const bool updatesEnabled = m_eventTable->updatesEnabled();
-    m_eventTable->setUpdatesEnabled(false);
-    QElapsedTimer budgetTimer;
-    budgetTimer.start();
-    std::size_t renderedCount = 0;
-    for (const CapturedEventRow& rowValue : rowList)
-    {
-        appendEventRow(rowValue);
-        ++renderedCount;
-        if (budgetTimer.elapsed() >= kUiFlushBudgetMs)
-        {
-            break;
-        }
-    }
-
-    const int removeCount = std::max(0, m_eventTable->rowCount() - 12000);
-    if (removeCount > 0 && m_eventTable->model() != nullptr)
-    {
-        m_eventTable->model()->removeRows(0, removeCount);
-        const std::size_t timelineEraseCount = std::min(
-            static_cast<std::size_t>(removeCount),
-            m_timelineEventPoints.size());
-        m_timelineEventPoints.erase(
-            m_timelineEventPoints.begin(),
-            m_timelineEventPoints.begin() + static_cast<std::ptrdiff_t>(timelineEraseCount));
-    }
-
-    m_eventTable->setUpdatesEnabled(updatesEnabled);
-    if (updatesEnabled && m_eventTable->viewport() != nullptr)
-    {
-        m_eventTable->viewport()->update();
-    }
-
-    if (renderedCount < rowList.size())
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        for (std::size_t index = rowList.size(); index > renderedCount; --index)
-        {
-            m_pendingRows.push_front(std::move(rowList[index - 1]));
-        }
-        while (m_pendingRows.size() > kPendingRowCapacity)
-        {
-            m_pendingRows.pop_back();
-            ++m_pendingDroppedRows;
-        }
-    }
-
-    refreshTimelineRange(false);
+    const QPointer<ProcessTraceMonitorWidget> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("process-trace-event-flush"), {m_eventTable},
+        [guard]() { if (guard) guard->flushPendingRows(); }))
+    { m_eventProjectionStale = true; m_eventProjectionQueue.clear(); m_expiredEventProjection.clear(); return; }
+    projectEventRows();
+    refreshTimelineRange(!m_capture->m_captureRunning.load());
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (!m_captureRunning.load() || (nowMs - m_lastTimelineRefreshMs) >= 250)
-    {
-        refreshTimelinePoints();
-        m_lastTimelineRefreshMs = nowMs;
-    }
+    if (!m_capture->m_captureRunning.load() || nowMs - m_lastTimelineRefreshMs >= 250)
+    { refreshTimelinePoints(); m_lastTimelineRefreshMs = nowMs; }
+    if (hasAnyEventFilterActive()) applyEventFilter();
+    else updateEventFilterStatusText(m_eventTable->rowCount(), m_eventTable->rowCount());
+    updateActionState(); updateStatusLabel();
+    if (!m_capture->m_captureRunning.load() && (!m_captureCleanup || m_captureCleanup->isComplete())
+        && !eventProjectionPending() && m_uiUpdateTimer) m_uiUpdateTimer->stop();
+}
 
-    if (hasAnyEventFilterActive())
+void ProcessTraceMonitorWidget::projectEventRows()
+{
+    if (!m_eventTable || !m_eventTable->isVisible()) return;
+    if (m_eventProjectionStale)
     {
-        applyEventFilter();
+        m_eventProjectionQueue.clear(); m_expiredEventProjection.clear();
+        for (const auto& [key, projected] : m_projectedEvents)
+            if (!m_eventArchive.contains(projected.record)) m_expiredEventProjection.push_back(projected.record);
+        for (const auto& record : m_eventArchive.snapshot())
+            if (!m_projectedEvents.contains(record.get())) m_eventProjectionQueue.push_back(record);
+        m_eventProjectionStale = false;
     }
-    else
+    if (m_expiredEventProjection.empty() && m_eventProjectionQueue.empty()
+        && m_restoreSelectedEvents.empty() && !m_restoreCurrentEvent && !m_restoreTopEvent) return;
+    QElapsedTimer budget; budget.start();
+    const bool updates = m_eventTable->updatesEnabled(); m_eventTable->setUpdatesEnabled(false);
+    const bool sorting = m_eventTable->isSortingEnabled();
+    if (sorting) m_eventTable->setSortingEnabled(false);
+    const auto top = m_restoreTopEvent ? m_restoreTopEvent : eventRecordAt(m_eventTable->indexAt(QPoint(0,0)).row());
+    std::vector<int> removed;
+    std::size_t mutations = 0;
+    while (!m_expiredEventProjection.empty() && mutations < kUiFlushRowLimit && budget.elapsed() < kUiFlushBudgetMs)
     {
-        updateEventFilterStatusText(m_eventTable->rowCount(), m_eventTable->rowCount());
+        auto record = std::move(m_expiredEventProjection.front()); m_expiredEventProjection.pop_front();
+        const auto found = m_projectedEvents.find(record.get());
+        if (found == m_projectedEvents.end()) continue;
+        if (found->second.index.isValid()) { removed.push_back(found->second.index.row()); ++mutations; }
+        m_projectedEvents.erase(found);
     }
-    updateActionState();
-    updateStatusLabel();
-
-    if (m_eventKeepBottomCheck != nullptr
-        && m_eventKeepBottomCheck->isChecked()
-        && m_eventTable != nullptr)
+    std::sort(removed.begin(), removed.end(), std::greater<int>());
+    removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+    for (std::size_t i = 0; i < removed.size();)
     {
-        m_eventTable->scrollToBottom();
+        const int last = removed[i]; int first = last;
+        while (++i < removed.size() && removed[i] == first - 1) first = removed[i];
+        m_eventTable->model()->removeRows(first, last-first+1);
+    }
+    std::size_t appended = 0;
+    while (!m_eventProjectionQueue.empty() && mutations < kUiFlushRowLimit && budget.elapsed() < kUiFlushBudgetMs)
+    {
+        auto record = std::move(m_eventProjectionQueue.front()); m_eventProjectionQueue.pop_front();
+        if (!m_eventArchive.contains(record) || m_projectedEvents.contains(record.get())) continue;
+        materializeEventRow(record); ++appended; ++mutations;
+    }
+    if (sorting) m_eventTable->setSortingEnabled(true);
+    for (auto it = m_restoreSelectedEvents.begin(); it != m_restoreSelectedEvents.end();)
+    {
+        const auto found = m_projectedEvents.find(it->get());
+        if (!m_eventArchive.contains(*it)) it = m_restoreSelectedEvents.erase(it);
+        else if (found != m_projectedEvents.end() && found->second.index.isValid())
+        {
+            m_eventTable->selectionModel()->select(found->second.index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+            it = m_restoreSelectedEvents.erase(it);
+        }
+        else ++it;
+    }
+    if (m_restoreCurrentEvent)
+    {
+        const auto found = m_projectedEvents.find(m_restoreCurrentEvent.get());
+        if (!m_eventArchive.contains(m_restoreCurrentEvent)) m_restoreCurrentEvent.reset();
+        else if (found != m_projectedEvents.end() && found->second.index.isValid())
+        { m_eventTable->selectionModel()->setCurrentIndex(found->second.index, QItemSelectionModel::NoUpdate); m_restoreCurrentEvent.reset(); }
+    }
+    if (m_eventKeepBottomCheck && m_eventKeepBottomCheck->isChecked())
+    { m_eventTable->scrollToBottom(); m_restoreTopEvent.reset(); }
+    else if ((m_restoreTopEvent || !removed.empty()) && top && m_eventArchive.contains(top))
+    {
+        const auto found = m_projectedEvents.find(top.get());
+        if (found != m_projectedEvents.end() && found->second.index.isValid())
+        { m_eventTable->scrollTo(found->second.index, QAbstractItemView::PositionAtTop); m_restoreTopEvent.reset(); }
+    }
+    if (top && !m_eventArchive.contains(top)) m_restoreTopEvent.reset();
+    m_eventTable->setUpdatesEnabled(updates);
+    if (updates && (appended || !removed.empty())) m_eventTable->viewport()->update();
+    if ((!m_eventProjectionQueue.empty() || !m_expiredEventProjection.empty()) && !m_eventProjectionPumpScheduled)
+    {
+        m_eventProjectionPumpScheduled = true;
+        QTimer::singleShot(0, this, [this]() { m_eventProjectionPumpScheduled = false; flushPendingRows(); });
     }
 }
 
-void ProcessTraceMonitorWidget::appendEventRow(const CapturedEventRow& rowValue)
+void ProcessTraceMonitorWidget::materializeEventRow(const EventRef& record)
 {
-    if (m_eventTable == nullptr)
+    if (!m_eventTable || !record) return;
+    const auto& value = record->value;
+    const auto& cache = record->searchCache();
+    const int row = m_eventTable->rowCount(); m_eventTable->insertRow(row);
+    const auto cells = record->rawCells();
+    for (int column = 0; column < EventColumnCount; ++column)
+        m_eventTable->setItem(row, column, createReadOnlyItem(cells.value(column)));
+    auto* time = m_eventTable->item(row, EventColumnTime100ns);
+    time->setData(Qt::UserRole + 4, QVariant::fromValue(value.detailDocument));
+    time->setData(kEventRoleTime100nsValue, QVariant::fromValue<qulonglong>(value.time100ns));
+    time->setData(kEventRoleProcessSearchText, cache.processText);
+    time->setData(kEventRoleEventSearchText, cache.eventText);
+    time->setData(kEventRoleGlobalSearchText, cache.globalText);
+    time->setData(Qt::UserRole + 5, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(record.get())));
+    const QPersistentModelIndex identity(m_eventTable->model()->index(row, 0));
+    m_projectedEvents.emplace(record.get(), ProjectedEvent{record, identity});
+    if (!m_eventFilterProjection) applyEventFilter();
+    if (identity.isValid()) m_eventFilterProjection->trackRow(identity.row());
+}
+
+void ProcessTraceMonitorWidget::clearCanonicalEvents()
+{
+    m_eventArchive.clear(); m_eventProjectionQueue.clear(); m_expiredEventProjection.clear(); m_projectedEvents.clear();
+    m_restoreSelectedEvents.clear(); m_restoreCurrentEvent.reset(); m_restoreTopEvent.reset();
+    m_eventProjectionStale = true; ++m_eventSessionGeneration; m_timelineArchiveRevision = 0;
+    if (m_eventTable) { m_eventTable->clearContents(); m_eventTable->setRowCount(0); }
+}
+
+ProcessTraceMonitorWidget::EventExportSnapshot ProcessTraceMonitorWidget::freezeVisibleEventRowsForExport()
+{
+    acceptPendingEventRows(); // Freeze accepted values even if the widget projection is hidden or behind.
+    applyEventFilter(); // Publishes a condition; regex evaluation remains in the value worker.
+    EventExportSnapshot snapshot;
+    const auto canonical = m_eventArchive.snapshot();
+    std::vector<EventRef> projected(m_eventTable ? m_eventTable->rowCount() : 0);
+    std::unordered_set<const ks::monitor::ProcessTraceEventRecord*> represented;
+    for (const auto& [key, row] : m_projectedEvents)
     {
-        return;
+        if (!row.index.isValid() || !m_eventArchive.contains(row.record)) continue;
+        const int index = row.index.row();
+        if (index >= 0 && static_cast<std::size_t>(index) < projected.size())
+        { projected[static_cast<std::size_t>(index)] = row.record; represented.insert(key); }
     }
+    snapshot.rows.reserve(canonical.size());
+    for (auto& row : projected) if (row) snapshot.rows.push_back(std::move(row));
+    for (const auto& row : canonical) if (!represented.contains(row.get())) snapshot.rows.push_back(row);
+    snapshot.businessFilter = m_eventFilterProjection ? m_eventFilterProjection->currentCompiledFilter() : nullptr;
+    snapshot.search = ks::ui::CaptureTableSearchResultFilterSpec(m_eventTable);
+    snapshot.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    snapshot.sessionGeneration = m_eventSessionGeneration; snapshot.archiveRevision = m_eventArchive.revision();
+    snapshot.evictedRows = m_eventArchive.evicted();
+    { const std::lock_guard<std::mutex> lock(m_capture->m_pendingMutex); snapshot.pendingDroppedRows = m_capture->m_pendingDroppedRows; }
+    if (m_eventTable && m_eventTable->horizontalHeader())
+    {
+        snapshot.continuousSort = m_eventTable->isSortingEnabled();
+        snapshot.sortColumn = m_eventTable->horizontalHeader()->sortIndicatorSection();
+        snapshot.sortOrder = m_eventTable->horizontalHeader()->sortIndicatorOrder();
+    }
+    for (int column = 0; column < EventColumnCount; ++column)
+    {
+        const auto* header = m_eventTable ? m_eventTable->horizontalHeaderItem(column) : nullptr;
+        snapshot.headers.push_back(header ? snapshot.language.displayText(header->text()) : QString());
+    }
+    return snapshot;
+}
 
-    const int row = m_eventTable->rowCount();
-    m_eventTable->insertRow(row);
-
-    QTableWidgetItem* timeItem = createReadOnlyItem(rowValue.time100nsText);
-    timeItem->setData(Qt::UserRole + 4, QVariant::fromValue(rowValue.detailDocument));
-    timeItem->setData(kEventRoleTime100nsValue, QVariant::fromValue<qulonglong>(
-        static_cast<qulonglong>(rowValue.time100ns)));
-    timeItem->setData(
-        kEventRoleProcessSearchText,
-        QStringLiteral("%1 | %2 | %3 | %4")
-        .arg(rowValue.pidText, rowValue.processText, rowValue.rootPidText, rowValue.relationText));
-    timeItem->setData(
-        kEventRoleEventSearchText,
-        QStringLiteral("%1 | %2").arg(rowValue.eventName, QString::number(rowValue.eventId)));
-    timeItem->setData(
-        kEventRoleGlobalSearchText,
-        QStringLiteral("%1 | %2 | %3 | %4 | %5 | %6 | %7 | %8 | %9 | %10")
-        .arg(
-            rowValue.typeText,
-            rowValue.providerText,
-            QString::number(rowValue.eventId),
-            rowValue.eventName,
-            rowValue.pidText,
-            rowValue.processText,
-            rowValue.rootPidText,
-            rowValue.relationText,
-            rowValue.detailDocument.toPlainText(true).simplified().left(6000),
-            rowValue.activityIdText));
-
-    m_eventTable->setItem(row, EventColumnTime100ns, timeItem);
-    m_eventTable->setItem(row, EventColumnType, createReadOnlyItem(rowValue.typeText));
-    m_eventTable->setItem(row, EventColumnProvider, createReadOnlyItem(rowValue.providerText));
-    m_eventTable->setItem(row, EventColumnEventId, createReadOnlyItem(QString::number(rowValue.eventId)));
-    m_eventTable->setItem(row, EventColumnEventName, createReadOnlyItem(rowValue.eventName));
-    m_eventTable->setItem(row, EventColumnPidTid, createReadOnlyItem(rowValue.pidText));
-    m_eventTable->setItem(row, EventColumnProcess, createReadOnlyItem(rowValue.processText));
-    m_eventTable->setItem(row, EventColumnRootPid, createReadOnlyItem(rowValue.rootPidText));
-    m_eventTable->setItem(row, EventColumnRelation, createReadOnlyItem(rowValue.relationText));
-    m_eventTable->setItem(row, EventColumnDetail, createReadOnlyItem(rowValue.detailDocument.toPlainText(true).simplified().left(6000)));
-    m_eventTable->setItem(row, EventColumnActivityId, createReadOnlyItem(rowValue.activityIdText));
-
-    ProcessTraceTimelineEventPoint pointValue;
-    pointValue.time100ns = rowValue.time100ns;
-    pointValue.typeText = rowValue.typeText;
-    // Provider 是未翻译的 ETW 机器身份；类别标签换语言不会改变事件所在轨道。
-    pointValue.categoryId = ks::ui::TimelineCategoryForEtwProvider(rowValue.providerText, rowValue.eventName);
-    m_timelineEventPoints.push_back(std::move(pointValue));
+void ProcessTraceMonitorWidget::syncTargetEditsToCapture()
+{
+    std::lock_guard<std::mutex> lock(m_capture->m_runtimeMutex);
+    m_capture->targets = m_targetProcessList;
+    m_appliedTargetVersion = ++m_capture->targetVersion;
 }

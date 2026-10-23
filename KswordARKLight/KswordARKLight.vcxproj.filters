@@ -863,6 +863,15 @@
     <ClInclude Include="Features\Kernel\KernelObjectTypeMatrixFeature.h">
       <Filter>Features\Kernel</Filter>
     </ClInclude>
+    <ClInclude Include="Features\Kernel\KernelDynamicProjection.h">
+      <Filter>Features\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.h">
+      <Filter>Features\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.inl">
+      <Filter>Features\Kernel</Filter>
+    </ClInclude>
     <ClInclude Include="Features\Kernel\KernelPage.h">
       <Filter>Features\Kernel</Filter>
     </ClInclude>
@@ -1167,6 +1176,15 @@
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="Ui\ExportUtil.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\BackgroundWork.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\ImmutableTextRows.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
+    <ClInclude Include="Ui\AsyncShellIconLoader.h">
       <Filter>Ui</Filter>
     </ClInclude>
     <ClInclude Include="Ui\AsyncTask.h">

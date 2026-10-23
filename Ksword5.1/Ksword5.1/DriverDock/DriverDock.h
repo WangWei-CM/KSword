@@ -14,19 +14,32 @@
 
 #include "../Framework.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QPointer>
+#include <QPersistentModelIndex>
+#include <QStringList>
 #include <QWidget>
 
+#include <array>    // std::array：五个对象投影各自记录已消费的快照与语言代次。
+#include <exception>
+namespace ks::ui { class AsyncOperation; }
+
 #include <atomic>   // std::atomic_bool：调试捕获线程运行标记。
+#include <deque>    // 最近调试记录按固定容量保留，避免头删搬移。
+#include <mutex>    // 捕获线程只接纳值数据，文档仍由 GUI 线程拥有。
 #include <cstdint>  // std::uint32_t/std::uint64_t：状态值与地址值。
-#include <memory>   // std::unique_ptr：线程对象托管。
+#include <memory>   // std::shared_ptr：独立捕获会话及规范缓冲生命周期。
 #include <string>   // std::string：错误文本桥接与日志输出。
 #include <thread>   // std::thread：后台调试输出捕获线程。
 #include <vector>   // std::vector：驱动服务与模块快照容器。
 
+namespace ks::ui { class AsyncOperation; class AsyncOperationToken; }
+
 // Qt 前置声明：减少头文件编译耦合。
 class QCheckBox;
+class QIcon;
 class QButtonGroup;
 class QComboBox;
 class CodeEditorWidget;
@@ -44,6 +57,7 @@ class QTableWidget;
 class QTabWidget;
 class QVBoxLayout;
 class KernelThreadAuditTab;
+namespace ks::ui { class AsyncOperation; }
 
 // DriverDock：
 // - 驱动页主控件；
@@ -60,7 +74,7 @@ public:
     explicit DriverDock(QWidget* parent = nullptr);
 
     // 析构函数：
-    // - 作用：停止调试捕获线程并回收资源。
+    // - 作用：断开 GUI 回投并请求独立捕获会话异步清理。
     ~DriverDock() override;
 
     // attachKswordSelfDriverPage：
@@ -69,6 +83,8 @@ public:
     // - 处理：将动态偏移/驱动状态作为驱动 Dock 一级页展示，不复制业务逻辑；
     // - 输出：无，重复调用同一页面时保持幂等。
     void attachKswordSelfDriverPage(QWidget* page, QWidget* fallbackOwner);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const DriverDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 protected:
     // showEvent：
@@ -81,8 +97,13 @@ protected:
     // - 处理：控件文本由 LanguageManager 绑定更新，表头由本类集中重建；
     // - 返回：无。
     void changeEvent(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    static QString navigationTitle(const char* id);
+    QWidget* navigationPage(const QString& id) const;
+    int addNavigationPage(QTabWidget* tabs, QWidget* page, const char* id, const QIcon& icon);
+
     // DriverServiceRecord：
     // - 作用：描述一条驱动服务记录的展示字段。
     struct DriverServiceRecord
@@ -179,6 +200,35 @@ private:
         QString sourceText;
         QString localizedSuffixSource;
         bool translateSourceText = false;
+        std::uint64_t sequence = 0;
+    };
+
+    struct DebugOutputSnapshot
+    {
+        std::vector<DebugOutputLineRecord> records;
+        std::uint64_t lastSequence = 0;
+        bool visible = false;
+        bool replace = false;
+    };
+
+    // 规范源仍按原策略保留最近 2000 条；隐藏只延后文档投影，不停止读取。
+    class DebugOutputBuffer final
+    {
+    public:
+        bool append(std::vector<DebugOutputLineRecord> records);
+        void setVisible(bool visible);
+        void deliveryDropped(bool projectionWake);
+        bool takeDroppedDelivery();
+        DebugOutputSnapshot snapshot(std::uint64_t afterSequence, bool force, bool clearWake);
+        std::uint64_t clear();
+
+    private:
+        std::mutex m_mutex;
+        std::deque<DebugOutputLineRecord> m_records;
+        std::uint64_t m_nextSequence = 1;
+        bool m_visible = false;
+        bool m_wakePending = false;
+        bool m_deliveryDropped = false;
     };
 
 private:
@@ -253,6 +303,9 @@ private:
     // - 返回：无；结果写入 m_loadedModuleEvidenceCache。
     void refreshLoadedModuleEvidenceAsync();
 
+    // 使旧只读采集失效，但由共享控制器等待实际 worker 退出后再启动最新请求。
+    void cancelLoadedModuleEvidenceQuery();
+
     // rebuildLoadedModuleEvidenceViews：
     // - 作用：把当前证据缓存回填到模块表格和详情区；
     // - 处理逻辑：逐行按源索引更新证据列，并刷新当前选中模块详情；
@@ -285,6 +338,12 @@ private:
     // - 处理逻辑：只做本地表格投影，不重新访问驱动；
     // - 返回：无。
     void rebuildDriverObjectEvidenceViews();
+
+    // refreshDriverObjectQueryPresentation：只更新已接受快照的查询状态与公共摘要，不改变查询生命周期。
+    void refreshDriverObjectQueryPresentation();
+
+    // refreshFastIoEvidenceTheme：保留表项和地址身份，只在真实主题变化后更新已存在行的风险刷子。
+    void refreshFastIoEvidenceTheme(bool freshlyProjected = false);
 
     // fillObjectDriverNameFromSelection：
     // - 从概览页当前选中服务名推导 \Driver\Name；
@@ -328,6 +387,7 @@ private:
     // - 处理逻辑：只做本地过滤，不重新访问驱动；
     // - 返回：无。
     void rebuildUnloadedPiddbTable();
+    void refreshUnloadedFilterStatus();
 
     // selectedPiDdbEntryIdentity：
     // - 作用：把截图页当前选中的 PiDDB 统一行转换为删除协议所需的精确身份；
@@ -340,6 +400,16 @@ private:
     // - 处理逻辑：复用 R0 preflight、固定短语确认和删除后同锁复核；
     // - 返回：无；成功后重新查询当前 PiDDB 来源。
     void deleteSelectedPiDdbEntry();
+    void confirmPiDdbDelete(const ksword::ark::PiDdbEntry& expected,
+        const ksword::ark::PiDdbDeleteResult& preflight);
+    void updatePiDdbDeleteButtonState();
+    void showPiDdbDeleteException(const ksword::ark::PiDdbEntry& expected, std::exception_ptr failure);
+    static ksword::ark::PiDdbDeleteResult executePiDdbRequest(
+        const ksword::ark::PiDdbEntry& expected, bool commit);
+    enum class PiDdbDeletePhase { Idle, Preflighting, WaitingConfirmation, Committing };
+    PiDdbDeletePhase m_piDdbDeletePhase = PiDdbDeletePhase::Idle;
+    std::unique_ptr<ks::ui::AsyncOperation> m_piDdbPreflightOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_piDdbCommitOperation;
 
     // showSelectedDriverIntegrityDetail：
     // - 展示当前选中完整性证据行的详情文本；
@@ -439,20 +509,23 @@ private:
     static bool queryDriverObjectForModuleEvidence(
         const LoadedKernelModuleRecord& moduleRecord,
         ksword::ark::DriverObjectQueryResult& resultOut,
-        QString& attemptedNamesTextOut);
+        QString& attemptedNamesTextOut,
+        const ks::ui::AsyncOperationToken& token);
 
     // collectEvidenceForLoadedModules：
     // - 作用：批量收集一轮模块证据；
     // - 处理逻辑：复用 ArkDriverClient 现有接口，不新增 R0 协议；
     // - 返回：每个模块对应一个 LoadedModuleEvidenceRecord。
     static std::vector<LoadedModuleEvidenceRecord> collectEvidenceForLoadedModules(
-        const std::vector<LoadedKernelModuleRecord>& moduleRecords);
+        const std::vector<LoadedKernelModuleRecord>& moduleRecords,
+        const ks::ui::AsyncOperationToken& token);
 
     // verifyLoadedModuleSignature：
     // - 先验证 embedded Authenticode，再用系统 Catalog 进行 catalog-only fallback；
     // - 仅完整链与 whole-chain revocation 都成功时标记可信，离线/未知均保持无效。
     static LoadedModuleSignatureEvidence verifyLoadedModuleSignature(
-        const QString& rawImagePath);
+        const QString& rawImagePath,
+        const ks::ui::AsyncOperationToken& token);
 
     // buildPendingModuleEvidenceRecord：
     // - 作用：构造尚未聚合证据时的占位记录；
@@ -477,8 +550,16 @@ private:
         const LoadedModuleEvidenceRecord& evidence);
     static QString localizedModuleEvidenceText(const QString& sourceText);
 
+    // 输入仅排队计算缓存文本的匹配掩码；发布新数据才生成表项。
+    enum class TableFilterTarget { Services, Modules, Unloaded };
+    using TableFilterRows = std::vector<QStringList>;
+    void queueDriverTableFilter(TableFilterTarget target, bool debounce = true);
+    void applyDriverTableFilterResult(TableFilterTarget target, std::uint64_t ticket,
+        std::shared_ptr<const std::vector<std::uint8_t>> matches, const QString& error);
+    void updateDriverOverviewFilteredCounts();
+
     // rebuildDriverServiceTableByFilter：
-    // - 作用：按过滤关键词重建驱动服务表格。
+    // - 作用：发布服务缓存表项并排队更新过滤投影。
     void rebuildDriverServiceTableByFilter();
 
     // rebuildLoadedModuleTable：
@@ -492,6 +573,7 @@ private:
     // refreshSelectedServiceStateToForm：
     // - 作用：按表单服务名回查 SCM 并刷新状态日志。
     void refreshSelectedServiceStateToForm();
+    void recoverServiceFormDeliveryState();
 
     // ========================= 驱动操作 =========================
     // registerOrUpdateDriverService：
@@ -516,12 +598,13 @@ private:
     void startDebugOutputCapture();
 
     // stopDebugOutputCapture：
-    // - 作用：停止 R0 内核调试输出捕获线程。
+    // - 作用：请求停止并立即返回；会话异步完成 R0 STOP 与句柄回收。
     void stopDebugOutputCapture();
 
-    // runKernelDebugOutputCaptureLoop：
-    // - 作用：线程函数，通过 ArkDriverClient 增量读取 R0 环形缓冲区。
-    void runKernelDebugOutputCaptureLoop();
+    struct DebugCaptureSession;
+    // 析构前先断开共享回投门禁，再请求独立会话异步完成 STOP。
+    void releaseDebugOutputCapture();
+    void scheduleDebugOutputFlush();
 
     // updateDebugCaptureButtonState：
     // - 作用：刷新调试捕获按钮启用状态与提示文本。
@@ -544,6 +627,9 @@ private:
 
     // refreshDebugOutputLines：按当前语言重建应用提示，驱动原始消息保持不变。
     void refreshDebugOutputLines();
+    void enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records);
+    void flushDebugOutputLines(bool clearWake = true);
+    void reconcileDebugOutputDelivery();
 
     // clearDebugOutputLines：同步清空界面与用于重翻译的记录。
     void clearDebugOutputLines();
@@ -621,7 +707,8 @@ private:
     QTableWidget* m_moduleTable = nullptr;            // 已加载模块表格。
     ks::ui::StructuredFieldView* m_moduleEvidenceDetailEditor = nullptr; // 模块证据详情编辑器。
     QLabel* m_moduleEvidenceStatusLabel = nullptr;   // 模块证据聚合状态标签。
-    bool m_moduleEvidenceQuerying = false;           // 模块证据后台查询中标记。
+    std::unique_ptr<ks::ui::AsyncOperation> m_moduleEvidenceOperation; // 单个活动采集和最新待处理快照。
+    bool m_moduleEvidenceQuerying = false;           // 仅为 UI 状态；实际单飞由控制器拥有。
     std::uint64_t m_moduleEvidenceQueryTicket = 0;   // 模块证据查询序号。
     std::uint64_t m_moduleSignatureQueryTicket = 0;  // 签名详情查询序号，拒绝过期回填。
     bool m_moduleDumpRunning = false;                // 模块 R0 Dump 后台任务运行标记。
@@ -637,6 +724,11 @@ private:
     QComboBox* m_startTypeCombo = nullptr;            // 启动类型下拉框。
     QComboBox* m_errorControlCombo = nullptr;         // 错误控制下拉框。
     QPushButton* m_browsePathButton = nullptr;        // 浏览路径按钮。
+    ks::ui::AsyncOperation* m_serviceStatusOperation = nullptr; // Replaceable status reads only.
+    ks::ui::AsyncOperation* m_serviceRegistrationOperation = nullptr; // Accepted writes, never cancel on edit/hide.
+    std::uint64_t m_serviceFormRevision = 0;
+    bool m_serviceFormOwnsBusy = false;
+    QString m_serviceFormSubmittedName;
     QPushButton* m_registerOrUpdateButton = nullptr;  // 注册/更新按钮。
     QPushButton* m_loadDriverButton = nullptr;        // 挂载按钮。
     QPushButton* m_unloadDriverButton = nullptr;      // 卸载按钮。
@@ -654,7 +746,10 @@ private:
     QPushButton* m_copyDebugOutputButton = nullptr;   // 复制输出按钮。
     QLabel* m_debugCaptureStatusLabel = nullptr;      // 捕获状态标签。
     CodeEditorWidget* m_debugOutputEdit = nullptr;      // 调试输出文本框。
-    std::vector<DebugOutputLineRecord> m_debugOutputLines; // 调试输出原始记录，最多保留 2000 行。
+    std::shared_ptr<DebugOutputBuffer> m_debugOutputBuffer = std::make_shared<DebugOutputBuffer>();
+    std::uint64_t m_debugOutputRenderedSequence = 0;
+    bool m_debugOutputTranslationDirty = false;
+    bool m_debugOutputFlushScheduled = false; // GUI-only: recovery and normal wakes share the existing 50ms timer.
 
     // ========================= 页签4：对象信息 =========================
     QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。
@@ -682,6 +777,22 @@ private:
     QLabel* m_fastIoStatusLabel = nullptr;            // FastIo 页状态标签。
     bool m_objectInfoQuerying = false;                // 查询中标记。
     std::uint64_t m_objectInfoQueryTicket = 0;        // 查询序号。
+
+    struct DriverObjectProjectionRevision
+    {
+        std::uint64_t object = 0;
+        std::uint64_t integrity = 0;
+        std::uint64_t language = 0;
+    };
+    // 顺序与现有五个页面指针映射对应；只消费当前可见页，不替换原表格或其模型。
+    std::array<DriverObjectProjectionRevision, 5> m_driverObjectProjectionRevisions{};
+    std::uint64_t m_driverObjectEvidenceRevision = 1;
+    std::uint64_t m_driverIntegrityEvidenceRevision = 1;
+    std::uint64_t m_driverObjectLanguageRevision = 1;
+    bool m_driverObjectEvidenceProjecting = false;
+    std::array<std::uint32_t, 4> m_fastIoRiskThemeColors{};
+    bool m_fastIoRiskThemeDarkMode = false;
+    bool m_hasFastIoRiskTheme = false;
 
     // ========================= 页签5：模块 Cross-View =========================
     QWidget* m_moduleCrossViewPage = nullptr;         // 模块 Cross-View 页容器。
@@ -731,6 +842,19 @@ private:
     std::uint64_t m_unloadedDriverQueryTicket = 0;    // 来源切换/查询序号。
 
     // ========================= 数据缓存 =========================
+    // 不可变展示文本快照只在数据/语言发布时替换，后台搜索不访问 QWidget。
+    std::shared_ptr<const TableFilterRows> m_serviceFilterRows;
+    std::shared_ptr<const TableFilterRows> m_moduleFilterRows;
+    std::shared_ptr<const TableFilterRows> m_unloadedFilterRows;
+    std::shared_ptr<std::atomic_uint64_t> m_serviceFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    std::shared_ptr<std::atomic_uint64_t> m_moduleFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    std::shared_ptr<std::atomic_uint64_t> m_unloadedFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    int m_visibleServiceCount = 0;
+    int m_visibleModuleCount = 0;
+    bool m_serviceEnumerationFailed = false;
+    bool m_moduleEnumerationFailed = false;
+    QPersistentModelIndex m_moduleFilterRestoreIndex;
+    bool m_selectFirstFilteredModule = false;
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
     std::vector<LoadedModuleEvidenceRecord> m_loadedModuleEvidenceCache; // 模块证据缓存。
@@ -741,6 +865,6 @@ private:
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================
-    std::atomic_bool m_kernelDebugCaptureRunning{ false };   // R0 捕获线程运行标记。
-    std::unique_ptr<std::thread> m_kernelDebugCaptureThread; // R0 捕获线程对象。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_debugCaptureDispatcher;
+    std::shared_ptr<DebugCaptureSession> m_debugCaptureSession; // STOP 和句柄关闭完成前不替换。
 };

@@ -32,10 +32,13 @@
 #include "../../../shared/evidence/MemoryTamperCrossView.h"
 
 #include <QString>
+#include <QHash>
+#include <memory>
 #include <QWidget>
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QCheckBox;
@@ -45,7 +48,11 @@ class QLineEdit;
 class CodeEditorWidget;
 class QPushButton;
 class QSpinBox;
+class QShowEvent;
+class QHideEvent;
 class QTableWidget;
+
+namespace ks::memory_detail { class CoreListModel; }
 
 namespace ks::ui
 {
@@ -107,12 +114,29 @@ namespace ksword::memory_dock
             std::uint64_t baseAddress = 0;
             std::uint64_t sizeBytes = 0;
         };
-        void setModuleCandidates(const std::vector<ModuleCandidate>& candidates);
+        struct ModuleCandidateSnapshot {
+            std::vector<ModuleCandidate> entries;
+            QHash<QString, int> rowsByKey;
+            static QString identity(const ModuleCandidate& entry) {
+                return QString::number(entry.baseAddress) + QLatin1Char(':') + QString::number(entry.sizeBytes)
+                    + QLatin1Char(':') + QString::number(entry.filePath.size()) + QLatin1Char(':') + entry.filePath;
+            }
+        };
+        void setModuleCandidates(const std::shared_ptr<const ModuleCandidateSnapshot>& candidates);
 
         // refreshChannelAvailability：DDMA 会话变化时由 MemoryDock 调用。
         void refreshChannelAvailability();
+        void setHvmAvailabilityRequester(std::function<void()> request);
+        std::uint64_t hvmAvailabilityEpoch() const { return m_channelQueryVersion; }
+        void invalidateHvmAvailability();
+        void applyHvmAvailability(std::uint64_t epoch, bool usable, const QString& reason);
 
     private:
+        void showEvent(QShowEvent* event) override;
+        void hideEvent(QHideEvent* event) override;
+        void requestHvmAvailability();
+        std::function<void()> m_requestHvmAvailability;
+        std::uint64_t m_channelQueryVersion = 0, m_channelPublishedVersion = 0;
         void buildUi();
         void wireSignals();
         void startScan();
@@ -123,7 +147,9 @@ namespace ksword::memory_dock
 
         std::uint32_t m_attachedPid = 0;
         QString m_attachedProcessName;
-        std::vector<ModuleCandidate> m_moduleCandidates;
+        std::shared_ptr<const ModuleCandidateSnapshot> m_moduleCandidates = std::make_shared<ModuleCandidateSnapshot>();
+        ks::memory_detail::CoreListModel* m_candidateModel = nullptr;
+        std::uint64_t m_candidateContextGeneration = 0;
         std::vector<TamperPageResult> m_results;
         bool m_scanInFlight = false;
         std::uint64_t m_scanGeneration = 0;

@@ -4,6 +4,8 @@
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
@@ -26,6 +28,7 @@
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
+#include <QPointer>
 #include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -134,13 +137,22 @@ HardwareHwidDispatchPage::HardwareHwidDispatchPage(QWidget* parent)
     initializeUi();
     initializeConnections();
     updatePlanPreview();
+    m_operation = new ks::ui::AsyncOperation(this);
+    m_operation->setStateChangedCallback([this]() { updateOperationControls(); });
+}
+
+HardwareHwidDispatchPage::~HardwareHwidDispatchPage()
+{
+    m_operation->close(); // close the delivery gate before QWidget members/children are destroyed
 }
 
 void HardwareHwidDispatchPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    const QPointer<HardwareHwidDispatchPage> guard(this);
     showBlueScreenWarningOnce();
-    refreshStatus();
+    if (guard == nullptr) return;
+    if (!m_hasStatus || m_statusAge.elapsed() >= 5000) refreshStatus();
 }
 
 void HardwareHwidDispatchPage::initializeUi()
@@ -361,22 +373,112 @@ void HardwareHwidDispatchPage::showBlueScreenWarningOnce()
         QStringLiteral("本页会接触内核驱动派遣函数 MajorFunction。启用或卸载 Dispatch hook 可能立即蓝屏，继续前请确认已保存工作、准备好 WinDbg 或恢复方案。"));
 }
 
+void HardwareHwidDispatchPage::updateOperationControls()
+{
+    const bool busy = m_operation->isBusy();
+    if (m_requestPending && !busy)
+    {
+        m_requestPending = false;
+        m_hasStatus = false;
+        m_statusLabel->setText(m_pendingControl
+            ? QStringLiteral("状态：HWID Dispatch 请求已结束，但未收到可显示的回执；请查询状态，勿自动重发操作。")
+            : QStringLiteral("状态：HWID Dispatch 查询已结束，但未收到结果；请重新查询。"));
+    }
+    const bool enabled = !m_confirming && !busy;
+    const QList<QWidget*> controls{ m_refreshButton, m_dryRunButton, m_enableButton, m_disableButton,
+        m_diskCheck, m_partMgrCheck, m_mountMgrCheck, m_nvidiaCheck, m_nsiProxyCheck,
+        m_diskGuidCheck, m_volumeCleanCheck, m_arpCleanCheck, m_diskModeCombo, m_macModeCombo,
+        m_diskSerialEdit, m_diskProductEdit, m_diskRevisionEdit, m_gpuSerialEdit,
+        m_permanentMacEdit, m_currentMacEdit };
+    for (QWidget* const control : controls)
+        if (control != nullptr) control->setEnabled(enabled);
+}
+
+void HardwareHwidDispatchPage::consumeResponse(const ksword::ark::HwidDispatchResult& result)
+{
+    m_requestPending = false;
+    m_hasStatus = true;
+    m_statusAge.start();
+    applyResponseToUi(result);
+}
+
+void HardwareHwidDispatchPage::submitRequest(const bool control,
+    const KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST request)
+{
+    if (m_confirming || m_operation->isBusy()) return;
+    struct Request
+    {
+        bool control;
+        KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST value;
+    };
+    Request work{ control, request };
+    const auto execute = [](const Request& work) {
+        const ksword::ark::DriverClient client;
+        return work.control ? client.controlHwidDispatch(work.value) : client.queryHwidDispatchState();
+    };
+    const auto apply = [this](const ksword::ark::HwidDispatchResult& result, std::uint64_t ticket) {
+        const QPointer<HardwareHwidDispatchPage> guard(this);
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("hwid-dispatch-response"),
+            {m_statusTable}, [guard, result, ticket]() {
+                if (guard == nullptr || !guard->m_operation->isCurrent(ticket)) return;
+                guard->consumeResponse(result);
+                guard->m_operation->completeDeferred(ticket);
+            })) return false;
+        consumeResponse(result);
+        return true;
+    };
+    const auto failed = [this](std::exception_ptr failure) {
+        m_requestPending = false;
+        m_hasStatus = false;
+        m_statusLabel->setText(QStringLiteral("状态：HWID Dispatch 后台请求失败。"));
+        try { if (failure) std::rethrow_exception(failure); }
+        catch (const std::exception& error) { appendLogLine(QString::fromUtf8(error.what())); }
+        catch (...) {}
+    };
+    m_statusLabel->setText(control
+        ? QStringLiteral("状态：正在提交 HWID Dispatch 请求并等待驱动完成…")
+        : QStringLiteral("状态：正在查询 HWID Dispatch 状态…"));
+    m_requestPending = true;
+    m_pendingControl = control;
+    std::uint64_t accepted = 0;
+    if (control)
+        accepted = m_operation->submitTransaction<Request, ksword::ark::HwidDispatchResult>(
+            std::move(work), execute, apply, failed);
+    else
+        accepted = m_operation->submit<Request, ksword::ark::HwidDispatchResult>(std::move(work),
+            [execute](const Request& value, const ks::ui::AsyncOperationToken&) { return execute(value); },
+            apply, failed);
+    if (accepted == 0)
+    {
+        m_requestPending = false;
+        m_statusLabel->setText(QStringLiteral("状态：当前忙碌或正在退出，未接受新的 HWID Dispatch 请求。"));
+        updateOperationControls();
+    }
+}
+
 void HardwareHwidDispatchPage::refreshStatus()
 {
-    const ksword::ark::DriverClient client;
-    applyResponseToUi(client.queryHwidDispatchState());
+    submitRequest(false);
 }
 
 void HardwareHwidDispatchPage::sendControlRequest(const unsigned long action, const bool dryRun)
 {
+    if (m_confirming || m_operation->isBusy()) return;
+    const auto request = buildControlRequest(action, dryRun); // immutable values before any nested modal loop
     if (!dryRun)
     {
+        m_confirming = true;
+        updateOperationControls();
+        const QPointer<HardwareHwidDispatchPage> guard(this);
         const QMessageBox::StandardButton answer = QMessageBox::warning(
             this,
             QStringLiteral("二次确认"),
             QStringLiteral("即将修改或恢复目标驱动的 IRP_MJ_DEVICE_CONTROL 派遣函数，存在蓝屏风险。是否继续？"),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
+        if (guard == nullptr) return;
+        m_confirming = false;
+        updateOperationControls();
         if (answer != QMessageBox::Yes)
         {
             appendLogLine(QStringLiteral("[%1] 用户取消真实 Dispatch 操作。")
@@ -384,9 +486,7 @@ void HardwareHwidDispatchPage::sendControlRequest(const unsigned long action, co
             return;
         }
     }
-
-    const ksword::ark::DriverClient client;
-    applyResponseToUi(client.controlHwidDispatch(buildControlRequest(action, dryRun)));
+    submitRequest(true, request);
 }
 
 KSWORD_ARK_HWID_DISPATCH_CONTROL_REQUEST HardwareHwidDispatchPage::buildControlRequest(

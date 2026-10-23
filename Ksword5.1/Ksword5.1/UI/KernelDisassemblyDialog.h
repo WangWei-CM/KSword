@@ -7,12 +7,14 @@
 
 #include <cstdint>
 #include <optional>
+#include <memory>
 
 class QLabel;
 
 namespace ks::ui
 {
     class SnapshotWorkbenchWidget;
+    class AsyncOperation;
     enum class DisassemblyArchitecture : int
     {
         X86 = 0,
@@ -52,6 +54,12 @@ namespace ks::ui
             std::uint64_t baseAddress,
             DisassemblyArchitecture architecture,
             std::uint32_t maximumInstructions = 4096U);
+        // Exact legacy backend diagnostics, without materializing discarded row projections.
+        static DisassemblyResult describe(const QByteArray& bytes, std::uint64_t baseAddress,
+            DisassemblyArchitecture architecture, std::uint32_t maximumInstructions = 4096U);
+    private:
+        static DisassemblyResult decodeImpl(const QByteArray& bytes, std::uint64_t baseAddress,
+            DisassemblyArchitecture architecture, std::uint32_t maximumInstructions, bool collectRows);
     };
 
     class KernelDisassemblyDialog final : public QDialog
@@ -60,6 +68,7 @@ namespace ks::ui
 
     public:
         explicit KernelDisassemblyDialog(QWidget* parent = nullptr);
+        ~KernelDisassemblyDialog() override;
 
         static void openKernelAddress(
             QWidget* parent,
@@ -86,6 +95,13 @@ namespace ks::ui
 
     private:
         void rebuildRows();
+        void updateDecodeDescription();
+        void readKernelSnapshot(std::uint64_t address, std::uint32_t length, QString sourceDescription);
+        std::unique_ptr<AsyncOperation> m_readOperation;
+        std::unique_ptr<AsyncOperation> m_descriptionOperation;
+        std::uint64_t m_descriptionRevision = 0;
+        bool m_readPending = false;
+        std::uint64_t m_readRevision = 0;
         void executeKernelMutation(
             std::uint64_t address,
             QByteArray originalBytes);

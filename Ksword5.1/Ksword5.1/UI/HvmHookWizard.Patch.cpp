@@ -601,6 +601,8 @@ namespace ks::ui
             return;
         }
 
+        std::shared_ptr<HvmRehearsalResource::Reservation> rehearsalAccess;
+        if (!retainRehearsalAccess(rehearsalAccess)) return;
         m_baselineInFlight = true;
         const quint64 sequence = ++m_baselineSequence;
         const quint64 pageBase = m_plan.pageBasePhysical;
@@ -614,7 +616,7 @@ namespace ks::ui
         }
 
         QPointer<HvmHookWizard> safeThis(this);
-        std::thread([safeThis, sequence, pageBase]() {
+        std::thread([safeThis, sequence, pageBase, rehearsalAccess]() {
             QString failure;
             const QByteArray page = readTargetPage(pageBase, &failure);
             if (safeThis == nullptr)

@@ -6,5 +6,6 @@
 - Agent 先连接管道、后安装 Hook。页面只有收到内部 `HooksInstalled` 事件才可把进程计入“当前受保护进程”；规则命中或 DLL 注入成功本身不等于监控生效。管道线程退出后应允许下一轮扫描重建会话。
 - DLL 的 worker 在停止当前会话后仍常驻。重连同一进程时按 PID 加创建时间复用它，避免每次断线都 `LoadLibraryW` 增加模块引用计数；PID 复用或进程退出时丢弃缓存。
 - 当前 `shared/WinApiMonitorProtocol.h::buildSessionDirectory` 依赖调用进程的 `GetTempPathW`。跨用户或 SYSTEM 目标可能看到不同的临时目录，不能把同一用户普通进程上的验证外推为跨账户全局覆盖。
+- 该跨账户路径问题已修复：会话文件统一放在 Windows 机器 Temp，配置/停止文件按目标进程 SID 授权，配置携带控制端 SID 并由 Agent 用显式 ACL 创建事件管道；自动子进程继承同一控制端身份与根停止链路。
 
 - API Monitor 新增独立32位 Agent 后，剪贴板保护按进程架构选择同目录的 APIMonitor_x86.dll/APIMonitor_x64.dll，由64位主程序直接注入；会话 INI 同样写入选择后的路径。两个位数仍共享协议、PID租约与驻留/停止规则。发行时携带主程序与两个 DLL；独立注入助手已移除。会话 INI 使用 UTF-16LE BOM，保持中文路径与 Win32 配置读取一致。

@@ -3,6 +3,7 @@
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/AsyncOperation.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/ToolbarMetrics.h"
@@ -15,6 +16,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -34,7 +36,15 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include <thread>
+#include <utility>
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kCksPageNavigation[] = {
+    {"official", "", "misc.cks.official.tab", "微软现行流程", true},
+    {"ssde", "", "misc.cks.ssde.tab", "SSDE 实验流程", false},
+    {"research", "", "misc.cks.research.tab", "免重置研究", false}
+};
+}
 
 namespace
 {
@@ -57,27 +67,25 @@ namespace
             : T(QStringLiteral("misc.cks.state.off"), QStringLiteral("关闭"));
     }
 
-    // FileLabel：选中后显示路径与本地 SHA-256，不读取或保存证书私钥。
-    QString FileLabel(const QString& path)
+    // Cached file evidence only; language changes never reopen or hash the selected file.
+    QString FileLabel(const QString& path, const QByteArray& digest = {}, const bool pending = false)
     {
         if (path.isEmpty())
         {
             return T(QStringLiteral("misc.cks.file.none"), QStringLiteral("尚未选择文件"));
         }
-        QFile file(path); // file：仅在用户选择文件后只读计算哈希。
-        if (!file.open(QIODevice::ReadOnly))
+        if (pending)
         {
             return path + QLatin1Char('\n')
-                + T(QStringLiteral("misc.cks.file.unreadable"), QStringLiteral("文件已无法读取"));
+                + T(QStringLiteral("misc.cks.file.hashing"), QStringLiteral("正在计算 SHA-256…"));
         }
-        QCryptographicHash hash(QCryptographicHash::Sha256);
-        if (!hash.addData(&file))
+        if (digest.isEmpty())
         {
             return path + QLatin1Char('\n')
                 + T(QStringLiteral("misc.cks.file.unreadable"), QStringLiteral("文件已无法读取"));
         }
         return T(QStringLiteral("misc.cks.file.hash"), QStringLiteral("%1\nSHA-256：%2"))
-            .arg(path, QString::fromLatin1(hash.result().toHex()));
+            .arg(path, QString::fromLatin1(digest.toHex()));
     }
 
     // DetailText：后台只传原始回执；UI 线程再按当前语言显示。
@@ -117,14 +125,15 @@ namespace
     }
 
     // AddRoutePage：只建普通子页；参数滚动与执行区由共享工作区统一拥有。
-    QVBoxLayout* AddRoutePage(QTabWidget* tabs, const QString& title)
+    QVBoxLayout* AddRoutePage(QTabWidget* tabs, const ks::ui::PageNavigationTabDefinition& definition,
+        ks::ui::PageNavigationTabCatalog& navigationTabs)
     {
         auto* content = new QWidget(tabs); // content：当前路径的参数正文。
         auto* layout = new QVBoxLayout(content); // layout：保持业务说明与文件选择顺序。
         layout->setContentsMargins(0, 0, 0, 0);
         ks::ui::StyleParameterCanvas(content); // 子页沿用参数卡片色，不再铺页根黑色底板。
         layout->setSpacing(12);
-        tabs->addTab(content, title);
+        navigationTabs.add(definition, tabs, content);
         return layout;
     }
 }
@@ -134,19 +143,44 @@ namespace ks::misc
     CksPage::CksPage(QWidget* parent)
         : QWidget(parent)
     {
+        for (auto& operation : m_fileHashOperations)
+        {
+            operation = new ks::ui::AsyncOperation(this);
+        }
+        m_backendOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
+        m_backendOperation->setStateChangedCallback([this]() {
+            if (!m_backendOperation->isInFlight() && m_busy)
+            {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            }
+        });
+        for (int slot = 0; slot < static_cast<int>(m_fileHashOperations.size()); ++slot)
+        {
+            m_fileHashOperations[slot]->setStateChangedCallback([this, slot]() {
+                if (!m_fileHashOperations[slot]->isInFlight() && m_fileHashPending[slot])
+                {
+                    m_fileHashPending[slot] = false;
+                    m_fileDigests[slot].clear();
+                    showSelectedFiles();
+                }
+            });
+        }
         updateButtons();
     }
 
     CksPage::~CksPage()
     {
-        // CksBackend 的系统调用没有 stop_token 入口；先设置发布门禁，再等待有限的
-        // 查询/操作返回，保证页面和 QObject 树销毁后没有 detached 线程继续回投。
-        m_cancelRequested->store(true, std::memory_order_release);
-        if (m_worker.joinable())
+        for (auto* operation : m_fileHashOperations)
         {
-            m_worker.join();
+            operation->close();
         }
+        // Accepted tool work owns an exit lease; closing the page only revokes GUI delivery.
+        // The value worker completes its tool wait, readback and cleanup without borrowing this page.
+        m_backendOperation->close();
     }
 
     void CksPage::showEvent(QShowEvent* event)
@@ -161,9 +195,7 @@ namespace ks::misc
         if (event != nullptr && event->type() == QEvent::LanguageChange)
         {
             showSnapshot();
-            m_policyFile->setText(FileLabel(m_policyPath));
-            m_helperFile->setText(FileLabel(m_helperPath));
-            m_driverFile->setText(FileLabel(m_driverPath));
+            showSelectedFiles();
             if (m_researchPlan != nullptr)
             {
                 m_researchPlan->setRawText(CksResearchVerificationTemplate());
@@ -221,18 +253,9 @@ namespace ks::misc
         routes->setObjectName(QStringLiteral("ksCksRoutes"));
         ks::ui::StylePageTabsContentFrame(routes);
         workspace->parameters()->addWidget(routes);
-        auto* official = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.official.tab"), QStringLiteral("微软现行流程")));
-        auto* experimental = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.ssde.tab"), QStringLiteral("SSDE 实验流程")));
-        auto* research = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.research.tab"), QStringLiteral("免重置研究")));
-        language.bindTab(routes, routes->widget(0), QStringLiteral("misc.cks.official.tab"),
-            QStringLiteral("微软现行流程"));
-        language.bindTab(routes, routes->widget(1), QStringLiteral("misc.cks.ssde.tab"),
-            QStringLiteral("SSDE 实验流程"));
-        language.bindTab(routes, routes->widget(2), QStringLiteral("misc.cks.research.tab"),
-            QStringLiteral("免重置研究"));
+        auto* official = AddRoutePage(routes, kCksPageNavigation[0], m_navigationTabs);
+        auto* experimental = AddRoutePage(routes, kCksPageNavigation[1], m_navigationTabs);
+        auto* research = AddRoutePage(routes, kCksPageNavigation[2], m_navigationTabs);
         m_researchPlan = PopulateCksResearchPage(routes->widget(2), research, workspace);
         workspace->results()->addWidget(m_researchPlan, 1);
         m_researchPlan->hide();
@@ -453,32 +476,34 @@ namespace ks::misc
 
     void CksPage::refresh()
     {
-        if (m_busy)
-        {
-            return;
-        }
+        if (m_busy) return;
         m_busy = true;
         updateButtons();
-        QPointer<CksPage> page(this); // page：窗口关闭后阻止后台结果写入已析构对象。
-        startWorker([page](const std::shared_ptr<std::atomic_bool>& cancel) {
-            const cks::Snapshot snapshot = cks::QuerySnapshot(); // snapshot：工作线程独立采集。
-            if (cancel->load(std::memory_order_acquire))
-            {
-                return;
-            }
-            if (QCoreApplication* app = QCoreApplication::instance())
-            {
-                QMetaObject::invokeMethod(app, [page, snapshot, cancel]() {
-                    if (cancel->load(std::memory_order_acquire)) return;
-                    if (!page) return;
-                    page->m_snapshot = snapshot;
-                    page->m_hasSnapshot = true;
-                    page->m_busy = false;
-                    page->showSnapshot();
-                    page->updateButtons();
-                }, Qt::QueuedConnection);
-            }
-        });
+        // QuerySnapshot owns a CiTool process. Use a transaction lease so application exit
+        // waits asynchronously for the bounded tool cleanup even after this page closes.
+        const auto accepted = m_backendOperation->submitTransaction<int, cks::Snapshot>(0,
+            [](const int&) { return cks::QuerySnapshot(); },
+            [this](const cks::Snapshot& snapshot, std::uint64_t) {
+                m_snapshot = snapshot;
+                m_hasSnapshot = true;
+                m_busy = false;
+                showSnapshot();
+                updateButtons();
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            });
+        if (accepted == 0)
+        {
+            m_busy = false;
+            showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+            updateButtons();
+        }
     }
 
     void CksPage::showSnapshot()
@@ -636,66 +661,109 @@ namespace ks::misc
         if (policy)
         {
             m_policyPath = file.absoluteFilePath();
-            m_policyFile->setText(FileLabel(m_policyPath));
+            queueFileHash(0, m_policyPath);
         }
         else if (helper)
         {
             m_helperPath = file.absoluteFilePath();
-            m_helperFile->setText(FileLabel(m_helperPath));
+            queueFileHash(1, m_helperPath);
         }
         else
         {
             m_driverPath = file.absoluteFilePath();
-            m_driverFile->setText(FileLabel(m_driverPath));
+            queueFileHash(2, m_driverPath);
         }
         updateButtons();
+    }
+
+    void CksPage::showSelectedFiles()
+    {
+        m_policyFile->setText(FileLabel(m_policyPath, m_fileDigests[0], m_fileHashPending[0]));
+        m_helperFile->setText(FileLabel(m_helperPath, m_fileDigests[1], m_fileHashPending[1]));
+        m_driverFile->setText(FileLabel(m_driverPath, m_fileDigests[2], m_fileHashPending[2]));
+    }
+
+    void CksPage::queueFileHash(const int slot, const QString& path)
+    {
+        m_fileDigests[slot].clear();
+        m_fileHashPending[slot] = true;
+        showSelectedFiles();
+        m_fileHashOperations[slot]->submit<QString, QByteArray>(path,
+            [](const QString& selectedPath, const ks::ui::AsyncOperationToken& token) {
+                if (token.isCanceled()) return QByteArray();
+                QFile file(selectedPath);
+                if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+                const QFileInfo before(file);
+                const qint64 expectedSize = before.size();
+                const QDateTime expectedModified = before.lastModified();
+                QCryptographicHash hash(QCryptographicHash::Sha256);
+                qint64 bytesRead = 0;
+                while (!file.atEnd())
+                {
+                    if (token.isCanceled()) return QByteArray();
+                    const QByteArray chunk = file.read(1024 * 1024);
+                    if (chunk.isEmpty()) return QByteArray();
+                    bytesRead += chunk.size();
+                    hash.addData(chunk);
+                }
+                const QFileInfo after(file);
+                if (file.error() != QFileDevice::NoError || bytesRead != expectedSize
+                    || after.size() != expectedSize || after.lastModified() != expectedModified)
+                {
+                    return QByteArray();
+                }
+                return hash.result();
+            },
+            [this, slot](const QByteArray& digest, std::uint64_t) {
+                m_fileDigests[slot] = digest;
+                m_fileHashPending[slot] = false;
+                showSelectedFiles();
+                return true;
+            },
+            [this, slot](std::exception_ptr) {
+                m_fileDigests[slot].clear();
+                m_fileHashPending[slot] = false;
+                showSelectedFiles();
+            });
     }
 
     void CksPage::runOperation(const std::function<bool(QString*)>& operation)
     {
-        if (m_busy)
-        {
-            return;
-        }
+        if (m_busy) return;
         m_busy = true;
         updateButtons();
-        QPointer<CksPage> page(this); // page：后台完成时只在存活页面上更新 UI。
-        startWorker([page, operation](const std::shared_ptr<std::atomic_bool>& cancel) {
-            QString detail; // detail：后端动作的原始回执。
-            const bool success = operation(&detail);
-            if (cancel->load(std::memory_order_acquire))
-            {
-                return;
-            }
-            if (QCoreApplication* app = QCoreApplication::instance())
-            {
-                QMetaObject::invokeMethod(app, [page, detail, success, cancel]() {
-                    if (cancel->load(std::memory_order_acquire)) return;
-                    if (!page) return;
-                    page->m_busy = false;
-                    page->showResult(detail, success);
-                    page->refresh();
-                }, Qt::QueuedConnection);
-            }
-        });
-    }
-
-    void CksPage::startWorker(std::function<void(const std::shared_ptr<std::atomic_bool>&)> task)
-    {
-        // m_busy 保证这里只有 UI 线程串行调用；回收已完成的上一个线程后再替换句柄。
-        m_cancelRequested->store(true, std::memory_order_release);
-        if (m_worker.joinable())
+        using Operation = std::function<bool(QString*)>;
+        using Receipt = std::pair<std::pair<bool, QString>, cks::Snapshot>;
+        // Existing callers capture only their frozen path or no state. Once accepted,
+        // the operation and its final system readback complete regardless of page lifetime.
+        const auto accepted = m_backendOperation->submitTransaction<Operation, Receipt>(operation,
+            [](const Operation& execute) {
+                QString detail;
+                const bool success = execute(&detail);
+                return Receipt{{success, std::move(detail)}, cks::QuerySnapshot()};
+            },
+            [this](const Receipt& receipt, std::uint64_t) {
+                m_snapshot = receipt.second;
+                m_hasSnapshot = true;
+                m_busy = false;
+                showResult(receipt.first.second, receipt.first.first);
+                showSnapshot();
+                updateButtons();
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_busy = false;
+                showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                    QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+                updateButtons();
+            });
+        if (accepted == 0)
         {
-            m_worker.join();
+            m_busy = false;
+            showResult(T(QStringLiteral("misc.cks.detail.task_failed"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")), false);
+            updateButtons();
         }
-        const auto cancel = std::make_shared<std::atomic_bool>(false);
-        m_cancelRequested = cancel;
-        m_worker = std::thread([task = std::move(task), cancel]() mutable {
-            if (task)
-            {
-                task(cancel);
-            }
-        });
     }
 
     bool CksPage::confirm(const QString& text)
@@ -723,3 +791,17 @@ namespace ks::misc
             .arg(DetailText(text)));
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::CksPage::navigationCatalog(const CksPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kCksPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::CksPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kCksPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::CksPage>(QStringLiteral("misc.cks")); }

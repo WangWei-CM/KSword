@@ -1,9 +1,11 @@
 #pragma once
 #include "ApiMonitorInjectionProtocol.h"
 #include <memory>
+#include <vector>
 
 namespace ks::winapi_monitor
 {
+    struct InjectionParticipant { DWORD pid = 0; std::uint64_t creation = 0; };
     // Hosted by the x64 main program, independent of Qt and the event queue.
     class InjectionBroker {
     public:
@@ -14,6 +16,9 @@ namespace ks::winapi_monitor
         bool start(DWORD rootPid, const std::wstring& agentPath, const std::wstring& session,
             const std::wstring& rootStopPath, std::wstring* error);
         void stop();
+        // Stops and joins first, then transfers every accepted load identity,
+        // including a canceled load whose remote thread may still finish.
+        std::vector<InjectionParticipant> stopAndTakeParticipants();
         InjectionEndpoint endpoint() const;
     private:
         struct State;

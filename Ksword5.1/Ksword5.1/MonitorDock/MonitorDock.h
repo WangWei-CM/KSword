@@ -1,3 +1,4 @@
+namespace ks::monitor { class MonitorCanonicalExport; }
 #include "../UI/StructuredFieldView.h"
 #pragma once
 
@@ -10,6 +11,10 @@
 // ============================================================
 
 #include "ProcessTraceTimelineWidget.h"
+#include "WmiEventArchive.h"
+#include "EtwArchiveMetadata.h"
+#include "../UI/PageNavigationCatalog.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../Framework.h"
 
 // F-05：ARK 风险中心的每行进程身份都要带一份采集结果（成功 / 权限不足 / 其它失败
@@ -39,6 +44,7 @@
 #include <vector>      // std::vector：Provider/事件快照容器。
 
 // Qt 前置声明：减少头文件编译依赖。
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QHBoxLayout;
@@ -66,6 +72,7 @@ class QChartView;
 class QLineSeries;
 class QValueAxis;
 class CodeEditorWidget;
+namespace ks::ui { class CompleteExportOperation; }
 class WinAPIDock;
 class ProcessTraceMonitorWidget;
 class DirectKernelCallMonitorWidget;
@@ -96,6 +103,8 @@ public:
     // - 作用：把监控页内部子页切到指定 tab；
     // - 调用：MainWindow 需要把启动默认页或跳转目标定位到“WinAPI / WMI / ETW / 进程定向”时调用。
     void activateMonitorTab(const QString& tabKey);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MonitorDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 protected:
     // event：
@@ -108,6 +117,7 @@ protected:
     // - 首次显示时再触发 WMI/ETW Provider 枚举；
     // - 避免主窗口启动阶段并发拉起多路后台发现任务。
     void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // WmiProviderEntry：
@@ -572,6 +582,7 @@ public:
         QString riskScoreText;
         double riskScore = 0.0;
         QJsonObject payload;
+        QStringList searchFields; // Prepared once after the complete payload/identity is frozen.
 
         // ---- F-09 / F-12：导航所需的身份与证据 id，在采集瞬间固定下来 ----
 
@@ -658,6 +669,8 @@ private:
     // - 若缓存为空则提示未集成或无结果；
     // - 返回值：无。
     void exportArkRiskCenterAsJson() const;
+    void startArkRiskCenterExport(bool asCsv);
+    void updateArkRiskExportActions();
     void exportArkRiskCenterAsCsv() const;
     void refreshPerformanceCharts();
     bool sampleCpuUsage(double* cpuUsageOut);
@@ -669,6 +682,7 @@ private:
         QValueAxis* axisY,
         double value);
 
+    QWidget* monitorNavigationPage(const QString& key) const;
     // ========================= WMI 功能 ==========================
     void refreshWmiProvidersAsync();
     void refreshWmiEventClassesAsync();
@@ -682,6 +696,7 @@ private:
     void stopWmiSubscription();
     void setWmiSubscriptionPaused(bool paused);
     struct WmiEventSnapshot {
+        quint64 sequence = 0;
         QString timestamp;
         QString provider;
         QString className;
@@ -702,6 +717,7 @@ private:
         const QString& pidAndName,
         const ks::ui::FieldDocument& document);
     void exportWmiRowsToTsv();
+    void updateWmiExportAction();
     void openWmiEventDetailViewerForRow(int row) const;
     void showWmiEventContextMenu(const QPoint& position);
 
@@ -775,6 +791,19 @@ private:
         std::uint64_t totalMatchCount,
         std::uint64_t scannedRowCount,
         std::uint64_t scannedMaxSequence);
+    void scheduleEtwSnapshotProjection();
+    void continueEtwSnapshotProjection();
+    struct EtwSnapshotProjection
+    {
+        std::deque<EtwCapturedEventRow> rows;
+        std::deque<EtwCapturedEventRow> retiredRows;
+        std::deque<ProcessTraceTimelineEventPoint> points;
+        std::size_t liveCursor = 0, pointCursor = 0;
+        std::uint64_t totalMatchCount = 0, scannedRowCount = 0, scannedMaxSequence = 0;
+        std::uint64_t ticket = 0, generation = 0;
+    };
+    std::shared_ptr<EtwSnapshotProjection> m_etwSnapshotProjection;
+    bool m_etwSnapshotWakeScheduled = false;
     // updateEtwCollapseHeight：
     // - 作用：触发 ETW 独立折叠区重新计算几何尺寸；
     // - 说明：当前折叠区不再使用 QToolBox，因此不会强制保留一个展开页。
@@ -889,7 +918,7 @@ private:
     QLineEdit* m_arkRiskFilterEdit = nullptr; // 风险中心全字段过滤框。
     QCheckBox* m_arkRiskHighOnlyCheck = nullptr; // 仅显示高风险记录。
     QLabel* m_arkRiskStatusLabel = nullptr; // 风险中心状态标签。
-    QTableWidget* m_arkRiskTable = nullptr; // 风险中心结果表。
+    QTableView* m_arkRiskTable = nullptr; // 风险中心结果表。
     ks::ui::StructuredFieldView* m_arkRiskDetailEdit = nullptr; // 风险中心详情文本，使用统一只读代码编辑器。
 
     QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
@@ -947,7 +976,8 @@ private:
     QPushButton* m_wmiStartSubscribeButton = nullptr; // 开始订阅按钮。
     QPushButton* m_wmiStopSubscribeButton = nullptr;  // 停止订阅按钮。
     QPushButton* m_wmiPauseSubscribeButton = nullptr; // 暂停/继续按钮。
-    QPushButton* m_wmiExportButton = nullptr;         // 导出结果按钮。
+    QPushButton* m_wmiExportButton = nullptr;
+    ks::monitor::MonitorCanonicalExport* m_wmiTableExport = nullptr;         // 导出结果按钮。
     QLabel* m_wmiSubscribeStatusLabel = nullptr;    // 订阅状态文本。
     QLineEdit* m_wmiEventGlobalFilterEdit = nullptr; // WMI 全字段筛选框。
     QLineEdit* m_wmiEventProviderFilterEdit = nullptr; // WMI Provider筛选框。
@@ -960,17 +990,25 @@ private:
     QCheckBox* m_wmiEventKeepBottomCheck = nullptr; // WMI 表格是否保持贴底滚动。
     QPushButton* m_wmiEventFilterClearButton = nullptr; // WMI 筛选清空按钮。
     QLabel* m_wmiEventFilterStatusLabel = nullptr; // WMI 筛选结果状态文本。
+    ks::monitor::EventFilterProjection* m_wmiFilterProjection = nullptr;
     QTableWidget* m_wmiEventTable = nullptr;        // WMI 事件结果表。
 
     std::vector<WmiProviderEntry> m_wmiProviders; // Provider 缓存。
     std::atomic_bool m_wmiSubscribeRunning{ false }; // 订阅运行状态。
     std::atomic_bool m_wmiSubscribePaused{ false };  // 订阅暂停状态。
-    std::atomic_bool m_wmiSubscribeStopFlag{ false }; // 订阅停止信号。
+    std::shared_ptr<std::atomic_bool> m_wmiSubscribeStopFlag = std::make_shared<std::atomic_bool>(false); // 订阅停止信号。
     std::unique_ptr<std::thread> m_wmiSubscribeThread; // WMI 后台订阅线程。
     int m_wmiProviderRefreshProgressPid = 0;          // WMI Provider 刷新进度 PID。
     int m_wmiSubscribeProgressPid = 0;                // WMI 订阅进度 PID。
-    std::vector<WmiEventSnapshot> m_wmiPendingRows;        // WMI 待刷入 UI 的事件缓存。
+    std::deque<WmiEventSnapshot> m_wmiPendingRows;        // WMI 待刷入 UI 的事件缓存。
     std::mutex m_wmiPendingMutex;                     // WMI 事件缓存互斥锁。
+    static constexpr std::size_t kWmiMirrorCapacity = 12000;
+    std::shared_ptr<ks::monitor::WmiEventArchive> m_wmiEventArchive;
+    std::vector<std::shared_ptr<ks::monitor::WmiEventArchive>> m_wmiEventArchives;
+    std::atomic<quint64> m_wmiArchivedRows{0}, m_wmiMirrorSkippedRows{0}, m_wmiCaptureGeneration{0};
+    std::atomic_bool m_wmiProgressPosted{false};
+    std::atomic<float> m_wmiLatestProgress{0};
+    QString m_wmiArchivePath, m_wmiArchiveError;
     QTimer* m_wmiUiUpdateTimer = nullptr;             // WMI UI 节流刷新定时器。
 
     // ========================= ETW 页 ===========================
@@ -1039,7 +1077,7 @@ private:
     QWidget* m_etwPostFilterGroupHostWidget = nullptr; // 后置筛选规则组宿主。
     QVBoxLayout* m_etwPostFilterGroupHostLayout = nullptr; // 后置筛选规则组布局。
     ProcessTraceTimelineWidget* m_etwTimelineWidget = nullptr; // ETW 事件瀑布流时间轴。
-    QTableWidget* m_etwEventTable = nullptr;         // ETW 事件表。
+    QTableView* m_etwEventTable = nullptr;         // ETW 事件表。
     QTimer* m_etwUiUpdateTimer = nullptr;            // 高频 ETW 的 UI 批量刷新定时器。
     QTimer* m_etwArchiveFilterDebounceTimer = nullptr; // ETW 全量后置筛选防抖定时器。
 
@@ -1063,6 +1101,7 @@ private:
     std::atomic<std::uint64_t> m_etwUiSkippedRows{ 0 }; // 仅 UI 镜像未展示的事件数，归档中仍完整保留。
     std::atomic<std::uint64_t> m_etwSourceEventsLost{ 0 }; // ETW 会话自身报告的源事件丢失数，必须显式告警。
     QElapsedTimer m_etwTimelineRefreshTimer;         // 时间轴重绘节流计时器。
+    ks::monitor::EtwArchiveMetadata m_etwArchiveMetadata; // GUI metadata never takes the IO mutex.
     QString m_etwArchiveDirectory;                  // 当前捕获会话的全量归档目录。
     QString m_etwArchiveActiveSegmentPath;          // 当前正在写入的 10 秒分段。
     QStringList m_etwArchiveClosedSegmentPaths;     // 已封存、可供后台筛选读取的分段。
@@ -1101,5 +1140,12 @@ private:
     bool m_arkRiskCenterInitialDiscoveryDone = false; // 风险中心是否已完成首轮汇总。
     bool m_arkRiskRefreshInProgress = false;         // 风险中心后台刷新互斥标记。
     std::uint64_t m_arkRiskRefreshTicket = 0;        // 风险中心刷新票据。
-    std::vector<ArkRiskCenterEntry> m_arkRiskCenterEntries; // 风险中心缓存。
+    std::shared_ptr<const std::vector<ArkRiskCenterEntry>> m_arkRiskCenterEntries = std::make_shared<const std::vector<ArkRiskCenterEntry>>();
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_arkRiskDispatcher;
+    ks::ui::CompleteExportOperation* m_arkRiskExportOperation = nullptr;
+    std::uint64_t m_arkRiskEntriesVersion = 0;
+    std::uint64_t m_arkRiskProjectionTicket = 0;
+    bool m_arkRiskProjectionRunning = false;
+    bool m_arkRiskProjectionScheduled = false;
+    bool m_arkRiskProjectionDue = false; // 风险中心缓存。
 };

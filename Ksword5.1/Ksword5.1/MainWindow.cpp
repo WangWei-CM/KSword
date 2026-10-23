@@ -1,4 +1,4 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include "UI/ToolbarMetrics.h"
 #include "UI/KernelHookWizard.h"
 #include "UI/SecondaryPageLayout.h"
@@ -6,6 +6,15 @@
 #include "UI/PageControlStyle.h"
 #include "UI/DockTabSelectionAnimation.h"
 #include "UI/PageNavigationBridge.h"
+#include "UI/PageNavigationCatalog.h"
+#include "UI/PerfTrace.h"
+#if KSWORD_PERF_TRACE_ENABLED
+#include "UI/SmoothScrollSupport.h"
+#include <QJsonObject>
+#endif
+#include "UI/UiAnimationGate.h"
+#include "UI/CoordinatedApplicationQuit.h"
+#include "UI/RetainedCleanupJob.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
@@ -16,6 +25,7 @@
 #include <QAction>
 #include <QAbstractScrollArea>
 #include <QAbstractItemView>
+#include <QListView>
 #include <QAbstractItemModel>
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
@@ -28,6 +38,7 @@
 #include <QTimer>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDateTime>
 #include <QCheckBox>
 #include <QDesktopServices>
@@ -108,6 +119,7 @@
 #include "UI/DockTabInteraction.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/GlobalUiBaseStyle.h"
+#include "UI/StandardWidgetTheme.h"
 #include "UI/ThemedSlider.h"
 #include "UI/GlobalUiSearch.h"
 #include "UI/CommandExecutionPopup.h"
@@ -152,6 +164,99 @@
 
 namespace
 {
+#if KSWORD_PERF_TRACE_ENABLED
+    ks::ui::PerfNavigationTarget CaptureDockNavigationTarget(ads::CDockWidget* dock)
+    {
+        auto* area = dock ? dock->dockAreaWidget() : nullptr;
+        const int current = area ? area->currentIndex() : -1;
+        const int index = area && current >= 0 && area->dockWidget(current) == dock ? current : -1;
+        return ks::ui::CapturePerfNavigationTarget(area, dock, index);
+    }
+
+    void RecordDockNavigationObservation(ads::CDockWidget* dock, const char* stage,
+        const char* origin = nullptr)
+    {
+        if (!dock) return;
+        const auto navigation = ks::ui::BeginPerfNavigationTrace("dock_selection",
+            CaptureDockNavigationTarget(dock), stage, origin);
+        // This signal proves selection/focus only. Warm readiness, worker data
+        // and subsequent presentation must not be inferred from its return.
+        ks::ui::RecordPerfNavigationStage(navigation, "end", "ads_selection_observer", "ready_unproven");
+    }
+
+    void RecordPerformanceConditions(const QWidget* window,
+        const ks::settings::AppearanceSettings& settings, const bool backgroundReady)
+    {
+        try
+        {
+            QElapsedTimer captureTimer; captureTimer.start();
+            QJsonObject conditions{
+                {QStringLiteral("schema"), 1},
+                {QStringLiteral("window_width"), window->width()},
+                {QStringLiteral("window_height"), window->height()},
+                {QStringLiteral("window_visible"), window->isVisible()},
+                {QStringLiteral("window_dpr"), window->devicePixelRatioF()},
+                {QStringLiteral("qt_platform"), QGuiApplication::platformName()},
+                {QStringLiteral("qt_style"), QApplication::style()->objectName()},
+                {QStringLiteral("shared_gl_contexts"), QCoreApplication::testAttribute(Qt::AA_ShareOpenGLContexts)},
+                {QStringLiteral("theme_mode"), static_cast<int>(settings.themeMode)},
+                {QStringLiteral("effective_dark"), KswordTheme::IsDarkModeEnabled()},
+                {QStringLiteral("accent"), KswordTheme::PrimaryBlueColor.name()},
+                {QStringLiteral("main_background"), window->palette().color(QPalette::Window).name()},
+                {QStringLiteral("background_image"), settings.backgroundImagePath},
+                {QStringLiteral("background_ready"), backgroundReady},
+                {QStringLiteral("background_opacity_percent"), settings.backgroundOpacityPercent},
+                {QStringLiteral("control_background_opacity_percent"), settings.controlBackgroundOpacityPercent},
+                {QStringLiteral("background_transparency"), settings.backgroundTransparencyEnabled},
+                {QStringLiteral("background_material"), settings.backgroundTranslucencyMaterial},
+                {QStringLiteral("background_blur_percent"), settings.backgroundBlurRadiusPercent},
+                {QStringLiteral("animations_requested"), settings.uiAnimationsEnabled},
+                {QStringLiteral("animations_effective"), ks::ui::AreUiAnimationsEnabled()},
+                {QStringLiteral("smooth_scrolling_requested"), settings.smoothScrollingEnabled},
+                {QStringLiteral("smooth_scrolling_effective"), ks::ui::IsGlobalSmoothScrollingEnabled()},
+                {QStringLiteral("language_requested"), settings.uiLanguage},
+                {QStringLiteral("app_font_family"), QApplication::font().family()},
+                {QStringLiteral("app_font_point_size"), QApplication::font().pointSizeF()},
+                {QStringLiteral("app_font_pixel_size"), QApplication::font().pixelSize()},
+                {QStringLiteral("text_antialiasing_requested"), settings.textAntialiasingEnabled},
+                {QStringLiteral("data_quantity_coverage"), QStringLiteral("focused_view_only")}
+            };
+            if (const QScreen* screen = window->screen())
+            {
+                conditions.insert(QStringLiteral("screen_name"), screen->name());
+                conditions.insert(QStringLiteral("screen_logical_dpi"), screen->logicalDotsPerInch());
+                conditions.insert(QStringLiteral("screen_physical_dpi"), screen->physicalDotsPerInch());
+                conditions.insert(QStringLiteral("screen_reported_refresh_hz"), screen->refreshRate());
+                conditions.insert(QStringLiteral("screen_width"), screen->geometry().width());
+                conditions.insert(QStringLiteral("screen_height"), screen->geometry().height());
+            }
+            // This bounded ancestor walk never forces the other hidden models.
+            QWidget* focused = QApplication::focusWidget();
+            if (focused) conditions.insert(QStringLiteral("focus_class"), QString::fromUtf8(focused->metaObject()->className()));
+            for (int depth = 0; focused && depth < 16; ++depth, focused = focused->parentWidget())
+            {
+                const auto* view = qobject_cast<const QAbstractItemView*>(focused);
+                if (!view || !view->model()) continue;
+                conditions.insert(QStringLiteral("focused_model_rows"), view->model()->rowCount(view->rootIndex()));
+                conditions.insert(QStringLiteral("focused_model_columns"), view->model()->columnCount(view->rootIndex()));
+                conditions.insert(QStringLiteral("focused_model_class"), QString::fromUtf8(view->model()->metaObject()->className()));
+                const QVariant backend = view->property("ksword_process_render_backend");
+                if (backend.isValid())
+                {
+                    conditions.insert(QStringLiteral("focused_render_backend"), backend.toString());
+                    conditions.insert(QStringLiteral("focused_gl_renderer"), view->property("ksword_process_gpu_renderer").toString());
+                    conditions.insert(QStringLiteral("focused_gl_renderer_scope"), QStringLiteral("last_initialized_context"));
+                    conditions.insert(QStringLiteral("focused_gpu_fallback"), view->property("ksword_process_gpu_fallback").toString());
+                }
+                break;
+            }
+            conditions.insert(QStringLiteral("probe_capture_ns"), static_cast<double>(captureTimer.nsecsElapsed()));
+            ks::ui::RecordPerfRuntimeConditions(conditions);
+        }
+        catch (...) {} // A diagnostic snapshot cannot change navigation or appearance.
+    }
+#endif
+
     constexpr wchar_t kKswordPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
     constexpr wchar_t kKswordEnableR0AfterElevationArgument[] = L"--ksword-enable-r0-after-elevation";
     constexpr wchar_t kKswordMainWindowPropertyName[] = L"KswordARK.MainWindow.Singleton.Release";
@@ -994,7 +1099,9 @@ namespace
             {
                 handled = ads::CDockWidgetTab::event(eventObject);
             }
-            if (shouldSyncTextAfterEvent || shouldRepaintAfterEvent)
+            // HoverMove 只推进原有绘制；进入/离开和真实主题/状态事件才同步文字。
+            if (shouldSyncTextAfterEvent || (shouldRepaintAfterEvent
+                && eventObject->type() != QEvent::HoverMove))
             {
                 syncDockTabTextColor();
             }
@@ -1024,8 +1131,11 @@ namespace
             // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
             const bool activeTab = property("activeTab").toBool();
             painter.setPen(Qt::NoPen);
-            painter.setBrush(dockTabHoverFillColor(activeTab));
-            painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+            if (!ks::ui::UsesTransparentMainSurface(this))
+            {
+                painter.setBrush(dockTabHoverFillColor(activeTab));
+                painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+            }
             if (activeTab)
             {
                 // marker 为底部两像素强调边；补绘后仍与生产QSS和预览保持一致。
@@ -1083,7 +1193,9 @@ namespace
                     eventObject->type() == QEvent::Show);
 
             const bool handled = ads::CAutoHideTab::event(eventObject);
-            if (shouldSyncTextAfterEvent || shouldRepaintAfterEvent)
+            // HoverMove 只推进原有绘制；进入/离开和真实主题/状态事件才同步文字。
+            if (shouldSyncTextAfterEvent || (shouldRepaintAfterEvent
+                && eventObject->type() != QEvent::HoverMove))
             {
                 syncDockTabTextColor();
             }
@@ -1556,6 +1668,40 @@ namespace
         }
         applyOpaqueComboPopupPalette(itemView->viewport());
         itemView->setProperty(kKswordComboPopupAutoThemedPropertyName, true);
+
+        // Qt sizes the popup before Show; the queued opaque theme may add frame
+        // margins or change item metrics afterwards. Restore room for short lists
+        // using their actual item rectangles, without changing long-list limits.
+        const QPointer<QListView> list(qobject_cast<QListView*>(itemView));
+        const QPointer<QWidget> popup(popupContainer);
+        if (hasDedicatedPopupContainer && popup->isVisible() && list
+            && !list->isWrapping() && list->flow() == QListView::TopToBottom
+            && comboBox->count() > 0 && comboBox->count() <= qMin(32, comboBox->maxVisibleItems()))
+        {
+            list->doItemsLayout();
+            if (!popup || !list || !popup->isVisible()) return;
+            QRect rows;
+            for (int row = 0; row < list->model()->rowCount(list->rootIndex()); ++row)
+                if (!list->isRowHidden(row))
+                    rows = rows.united(list->visualRect(list->model()->index(
+                        row, comboBox->modelColumn(), list->rootIndex())));
+            const int missingHeight = rows.height() + 2 * list->spacing() - list->viewport()->height();
+            if (missingHeight > 0)
+            {
+                const QScreen* const screen = popup->screen();
+                if (!screen) return;
+                const QRect available = screen->availableGeometry();
+                QRect geometry = popup->geometry();
+                const int height = qMin(geometry.height() + missingHeight,
+                    qMin(available.height(), popup->maximumHeight()));
+                if (height > geometry.height())
+                {
+                    geometry.setHeight(height);
+                    geometry.moveTop(qBound(available.top(), geometry.top(), available.bottom() - height + 1));
+                    popup->setGeometry(geometry);
+                }
+            }
+        }
     }
 
     // scheduleOpaqueComboPopupTheme 作用：
@@ -1614,7 +1760,7 @@ namespace
         cancelPopupFade(popup);
         BOOL animationsEnabled = TRUE; // 尊重系统减少动画选项。
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
-        if (!animationsEnabled)
+        if (!animationsEnabled || !ks::ui::AreUiAnimationsEnabled())
         {
             return;
         }
@@ -3140,33 +3286,7 @@ namespace
         const DWORD predecessorProcessId)
     {
         argumentList = argumentsWithPrivilegeRestartMarker(std::move(argumentList));
-        const QString waitPidArgument =
-            QString::fromWCharArray(ks::crash::kCrashRestartWaitPidArgument);
-        for (int index = 1; index < argumentList.size();)
-        {
-            if (QString::compare(
-                    argumentList.at(index),
-                    waitPidArgument,
-                    Qt::CaseInsensitive) != 0)
-            {
-                ++index;
-                continue;
-            }
-
-            argumentList.removeAt(index);
-            if (index < argumentList.size())
-            {
-                bool isProcessId = false;
-                (void)argumentList.at(index).toULongLong(&isProcessId);
-                if (isProcessId)
-                {
-                    argumentList.removeAt(index);
-                }
-            }
-        }
-        argumentList.push_back(waitPidArgument);
-        argumentList.push_back(QString::number(predecessorProcessId));
-        return argumentList;
+        return ks::ui::ArgumentsWithRestartPredecessorWait(std::move(argumentList), predecessorProcessId);
     }
 
     QString formatWin32StepFailure(const QString& stepText, const DWORD errorCode)
@@ -3650,12 +3770,13 @@ namespace
         }
         ScopedHandle primaryTokenHandle(rawPrimaryTokenHandle);
 
-        const QStringList launchArgumentList = argumentsWithPrivilegeRestartMarker(argumentList);
+        const QStringList launchArgumentList = argumentsWithPrivilegeRestartTakeover(
+            argumentList, ::GetCurrentProcessId());
         QString commandLineText = quoteQStringCommandLineArgument(QString::fromWCharArray(executablePathBuffer));
         for (int index = 1; index < launchArgumentList.size(); ++index)
         {
             commandLineText += QLatin1Char(' ');
-            commandLineText += quoteQStringCommandLineArgument(launchArgumentList.at(index));
+            commandLineText += ks::ui::QuoteCoordinatedRestartArgument(launchArgumentList.at(index));
         }
 
         std::wstring mutableCommandLine = commandLineText.toStdWString();
@@ -3683,6 +3804,7 @@ namespace
             return false;
         }
 
+        const bool validRestartChild = ks::crash::ValidateRestartChildProcess(processInfo.hProcess);
         if (processInfo.hThread != nullptr)
         {
             ::CloseHandle(processInfo.hThread);
@@ -3691,6 +3813,7 @@ namespace
         {
             ::CloseHandle(processInfo.hProcess);
         }
+        if (!validRestartChild) return false;
 
         if (detailTextOut != nullptr)
         {
@@ -4641,7 +4764,7 @@ namespace
     }
 
     // MainWindowBackgroundWidget 作用：
-    // - 作为主窗口根容器的唯一背景绘制者；
+    // - 绘制主窗口根容器或浮动 Dock 的底层背景；
     // - 每次绘制都按当前真实 rect 执行“居中、等比覆盖”，避免启动阶段预测窗口尺寸。
     // kTranslucentTintAlpha 作用：
     // - 穿透模式无背景图时主题着色层的默认不透明度（0~255）；
@@ -4798,81 +4921,15 @@ namespace
         int m_tintAlpha = kTranslucentTintAlpha; // m_tintAlpha：自绘着色层不透明度，由外观设置下发。
     };
 
-    // buildBackgroundBrush 作用：
-    // - 按“纯色底 + 可选背景图 + 透明度”组合一张画刷贴图；
-    // - 仅供仍使用独立调色板的浮动 Dock 容器绘制。
-    // 调用方式：MainWindow::applyFloatingDockContainerAppearance 调用。
-    // 入参 windowSize：目标窗口尺寸；
-    // 入参 baseColor：主题基底色（深色黑、浅色白）；
-    // 入参 sourceImage：已在线程池解码并由 UI 线程转换的缓存图片；可为空。
-    // 入参 imageOpacityPercent：背景图透明度（0~100）。
-    // 返回：可直接设置到 QPalette::Window 的画刷。
-    QBrush buildBackgroundBrush(
-        const QSize& windowSize,
-        const QColor& baseColor,
-        const QPixmap* sourceImage,
-        const int imageOpacityPercent)
+    // 浮动窗只借用主窗口现有的背景绘制宿主，不改变 ADS 的布局/父子身份。
+    // 只查直接子级；业务页面不参与背景宿主查找。
+    constexpr auto kFloatingBackgroundObjectName = "ks_floating_dock_background";
+
+    MainWindowBackgroundWidget* floatingDockBackgroundWidget(
+        ads::CFloatingDockContainer* floatingWidget)
     {
-        const QSize safeSize = windowSize.isValid() ? windowSize : QSize(1, 1);
-        const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
-        // effectiveSourceImage 用途：透明度为零时跳过合成，同时不访问任何文件路径。
-        const QPixmap* effectiveSourceImage = normalizedOpacityPercent > 0 ? sourceImage : nullptr;
-        if (effectiveSourceImage == nullptr || effectiveSourceImage->isNull())
-        {
-            // 纯色不依赖窗口尺寸，不分配/填充整窗像素，也不因 Resize 换纹理键触发 PaletteChange。
-            return QBrush(baseColor);
-        }
-        const quint64 sourceImageCacheKey =
-            effectiveSourceImage == nullptr ? 0 : effectiveSourceImage->cacheKey();
-
-        // 主窗口 resize 期间通常会连续收到相同尺寸或相邻布局事件。
-        // 缓存最近一次合成图，避免重复分配整窗像素缓冲并再次进行平滑缩放。
-        static QSize cachedSize;
-        static QColor cachedBaseColor;
-        static int cachedOpacityPercent = -1;
-        static quint64 cachedSourceImageCacheKey = 0;
-        static QPixmap cachedComposedPixmap;
-        const bool cacheHit =
-            cachedSize == safeSize
-            && cachedBaseColor == baseColor
-            && cachedOpacityPercent == normalizedOpacityPercent
-            && cachedSourceImageCacheKey == sourceImageCacheKey
-            && !cachedComposedPixmap.isNull();
-        if (cacheHit)
-        {
-            return QBrush(cachedComposedPixmap);
-        }
-
-        QPixmap composedPixmap(safeSize);
-        composedPixmap.fill(baseColor);
-        if (effectiveSourceImage != nullptr)
-        {
-            QPainter painter(&composedPixmap);
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            painter.setOpacity(static_cast<double>(normalizedOpacityPercent) / 100.0);
-
-            // scaledImageSize 作用：按“覆盖整个窗口”策略计算缩放尺寸。
-            QSizeF scaledImageSize = effectiveSourceImage->size();
-            scaledImageSize.scale(safeSize, Qt::KeepAspectRatioByExpanding);
-
-            const QRectF targetRect(
-                (static_cast<double>(safeSize.width()) - scaledImageSize.width()) / 2.0,
-                (static_cast<double>(safeSize.height()) - scaledImageSize.height()) / 2.0,
-                scaledImageSize.width(),
-                scaledImageSize.height());
-
-            painter.drawPixmap(
-                targetRect,
-                *effectiveSourceImage,
-                QRectF(QPointF(0, 0), effectiveSourceImage->size()));
-        }
-
-        cachedSize = safeSize;
-        cachedBaseColor = baseColor;
-        cachedOpacityPercent = normalizedOpacityPercent;
-        cachedSourceImageCacheKey = sourceImageCacheKey;
-        cachedComposedPixmap = composedPixmap;
-        return QBrush(composedPixmap);
+        return static_cast<MainWindowBackgroundWidget*>(floatingWidget->findChild<QWidget*>(
+            QString::fromLatin1(kFloatingBackgroundObjectName), Qt::FindDirectChildrenOnly));
     }
 
     // buildGlobalTooltipStyleBlock 作用：
@@ -5102,7 +5159,8 @@ namespace
             {
                 const int removeLength = (endMarkerIndex - beginMarkerIndex) + endMarkerText.length();
                 const QString oldBlock = styleSheetText.mid(beginMarkerIndex, removeLength);
-                if (oldBlock == replacementBlock)
+                // 截取范围不含片段外围换行；同内容不能因包装空白再次触发全局 repolish。
+                if (oldBlock == replacementBlock.trimmed())
                 {
                     return false;
                 }
@@ -5119,23 +5177,56 @@ namespace
         return true;
     }
 
+    // 启动与热换共用原外观配方；保留未显式接管的系统 palette 角色。
+    QPalette buildApplicationAppearancePalette(const QPalette& sourcePalette)
+    {
+        const QColor windowBackgroundColor = KswordTheme::MainBackgroundColor();
+        const QColor windowTextColor = KswordTheme::MainBackgroundTextColor();
+        const QColor textColor = KswordTheme::TextPrimaryColor();
+        const QColor baseColor = KswordTheme::SurfaceColor();
+        const QColor alternateBaseColor = KswordTheme::SurfaceAltColor();
+        const QColor midColor = KswordTheme::BorderColor();
+
+        // Windows 11 背景控制要求：
+        // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
+        QPalette mainPalette = sourcePalette;
+        mainPalette.setColor(QPalette::Window, windowBackgroundColor);
+        mainPalette.setColor(QPalette::WindowText, windowTextColor);
+        mainPalette.setColor(QPalette::Base, baseColor);
+        mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
+        mainPalette.setColor(QPalette::Mid, midColor);
+        mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
+        mainPalette.setColor(QPalette::Dark, KswordTheme::PaletteDarkColor());
+        mainPalette.setColor(QPalette::Text, textColor);
+        mainPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
+        mainPalette.setColor(QPalette::Button, alternateBaseColor);
+        mainPalette.setColor(QPalette::ButtonText, textColor);
+        mainPalette.setColor(QPalette::ToolTipBase, baseColor);
+        mainPalette.setColor(QPalette::ToolTipText, textColor);
+        mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
+        mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        return mainPalette;
+    }
+
     // applyGlobalApplicationStyleBlocks 作用：
     // - 合并更新 QApplication 级别 Tooltip/QMenu/交互控件/组合框样式块；
     // - 只在最终样式表内容确实变化时调用一次 QApplication::setStyleSheet；
     // - 避免原先 Tooltip 与 QMenu 分别 setStyleSheet 导致启动阶段全局 repolish 两次。
-    // 调用方式：applyAppearanceSettings 内部调用。
-    // 入参 tooltipStyleBlock/contextMenuStyleBlock/controlContrastStyleBlock/comboBoxStyleBlock：已带标记的 QSS 片段。
+    // 调用方式：启动准备与 applyAppearanceSettings 共用同一组带标记的样式块。
+    // 入参 darkModeEnabled：当前最终生效的深色模式状态。
     // 返回：实际触发 QApplication::setStyleSheet 时返回 true。
     bool applyGlobalApplicationStyleBlocks(
-        const QString& baseControlStyleBlock,
-        const QString& tooltipStyleBlock,
-        const QString& contextMenuStyleBlock,
-        const QString& controlContrastStyleBlock,
-        const QString& comboBoxStyleBlock,
+        const bool darkModeEnabled,
         qint64* elapsedMsOut = nullptr,
         int* widgetCountOut = nullptr,
         int* styleLengthOut = nullptr)
     {
+        const QString baseControlStyleBlock = ks::ui::BuildGlobalBaseControlStyleBlock();
+        const QString tooltipStyleBlock = buildGlobalTooltipStyleBlock(darkModeEnabled);
+        const QString contextMenuStyleBlock = buildGlobalContextMenuStyleBlock(darkModeEnabled);
+        const QString controlContrastStyleBlock = buildGlobalControlContrastStyleBlock(darkModeEnabled);
+        const QString comboBoxStyleBlock = buildGlobalComboBoxStyleBlock(darkModeEnabled);
+
         QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
         if (appInstance == nullptr)
         {
@@ -5255,6 +5346,37 @@ namespace
     }
 }
 
+// 后台只持该值状态；主窗口定时读取，不把GUI完成回调带入线程池。
+struct MainWindowShutdownServiceState
+{
+    R0ServiceOperationOutcome outcome;
+    bool runningKnown = false;
+    bool running = false;
+    std::atomic_bool finished{ false };
+};
+
+void MainWindow::prepareStartupAppearance(const ks::settings::AppearanceSettings& settings)
+{
+    const bool darkModeEnabled = isDarkModeEffective(settings);
+    KswordTheme::SetDarkModeEnabled(darkModeEnabled);
+    KswordTheme::SetPrimaryAccentColor(settings.customThemeColor);
+    KswordTheme::SetMainBackgroundColor(settings.customMainBackgroundColor);
+
+    // 先安装原标准绘制/度量/过滤器，跳过中间基线；正式 palette/QSS 各写一次。
+    // 此时尚未创建业务控件，不访问窗口背景、布局、预览或设置持久化。
+    ks::ui::InstallStandardWidgetTheme(qobject_cast<QApplication*>(QCoreApplication::instance()), false);
+    const QPalette startupPalette = buildApplicationAppearancePalette(QApplication::palette());
+    if (QApplication::palette() != startupPalette)
+    {
+        QApplication::setPalette(startupPalette);
+    }
+    if (QToolTip::palette() != startupPalette)
+    {
+        QToolTip::setPalette(startupPalette);
+    }
+    applyGlobalApplicationStyleBlocks(darkModeEnabled);
+}
+
 MainWindow::MainWindow(
     QWidget* parent,
     StartupProgressCallback startupProgressCallback,
@@ -5291,7 +5413,7 @@ MainWindow::MainWindow(
     // 大量页面在构造期就把 KswordTheme::*ColorHex() 求值成固定色串进自己的 QSS，
     // 而控件自身的 setStyleSheet 压得过之后重建的全局 QSS。种子设晚了，
     // 启动即预加载的页面（如启动默认页所在的 Dock）会永久停在浅色/默认强调色上。
-    // 这里只写种子，palette 与全局样式块仍由 initAppearanceSettings 统一下发。
+    // 启动入口已提前下发正式 palette/QSS；这里继续同步本次读取的设置种子。
     KswordTheme::SetDarkModeEnabled(isDarkModeEffective(m_currentAppearanceSettings));
     KswordTheme::SetPrimaryAccentColor(m_currentAppearanceSettings.customThemeColor);
     KswordTheme::SetMainBackgroundColor(m_currentAppearanceSettings.customMainBackgroundColor);
@@ -5374,9 +5496,7 @@ MainWindow::MainWindow(
     setCentralWidget(m_mainRootContainer);
     initResizeBorderOverlays();
 
-    // 浮动窗口创建后立即挂接事件过滤器：
-    // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
-    // - 后续 resize/show 时统一走 MainWindow 的外观同步逻辑。
+    // 浮动窗口创建时同步外观；Show 补齐主题/导航身份，Resize 只更新背景宿主几何。
     connect(
         m_pDockManager,
         &ads::CDockManager::floatingWidgetCreated,
@@ -5389,11 +5509,26 @@ MainWindow::MainWindow(
             }
             floatingWidget->installEventFilter(this);
             applyFloatingDockContainerAppearance(floatingWidget);
+            if (ads::CDockContainerWidget* container = floatingWidget->dockContainer(); container != nullptr)
+            {
+                // 新分区迁入现有浮动窗不一定再次触发 Show；只在结构变化时补齐导航身份。
+                connect(container, &ads::CDockContainerWidget::dockAreasAdded,
+                    floatingWidget, [floatingWidget]()
+                    {
+                        refreshAdsDockTabVisualIdentities(floatingWidget);
+                    });
+            }
         });
 
     // 显式要求“最后一个窗口关闭后退出应用”。
     // 说明：用户要求主窗口关闭时进程必须结束，这里先设置 Qt 全局退出策略。
     QApplication::setQuitOnLastWindowClosed(true);
+    const QPointer<MainWindow> restartOwner(this);
+    ks::ui::InstallCoordinatedApplicationRestart(this,
+        [restartOwner](ks::ui::DeferredApplicationRestart::Launch launch)
+    {
+        return restartOwner && restartOwner->requestCoordinatedRestart(std::move(launch));
+    });
 
     // 设置窗口标题和大小
     setWindowTitle("KswordARK-5.1-Release");
@@ -5485,6 +5620,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
+    ks::ui::RemoveCoordinatedApplicationRestart(this);
     // 排队的 MCP 动作必须先失效，再拆除页面、驱动租约与后台消费者。
     if (m_mcpLocalBridge)
     {
@@ -5519,118 +5655,211 @@ void MainWindow::reportStartupProgress(
         textKey);
 }
 
+// GUI-only preparation state; callbacks own values and weak widgets, never a close-event stack.
+struct MainWindowMemoryQuitState
+{
+    std::vector<QPointer<MemoryDock>> docks;
+    std::size_t index = 0;
+    std::uint64_t ticket = 0;
+    bool active = true;
+    bool waiting = false;
+    bool ready = false;
+    bool closeQueued = false;
+};
+
+static void CancelMemoryQuitState(const std::shared_ptr<MainWindowMemoryQuitState>& state)
+{
+    if (!state || !state->active) return;
+    state->active = false;
+    state->waiting = false;
+    ++state->ticket;
+    const auto docks = state->docks;
+    for (const auto& dock : docks) if (dock) dock->cancelWorkbenchQuit();
+    if (qApp) qApp->setProperty("ksword_memory_quit_guard_active", false);
+}
+
+void MainWindow::cancelMemoryWorkbenchPreparation(const std::shared_ptr<MainWindowMemoryQuitState>& state)
+{
+    if (m_memoryQuitState != state) return;
+    const QPointer<MainWindow> self(this);
+    m_memoryQuitState.reset();
+    CancelMemoryQuitState(state);
+    if (self) m_shutdownRestart.cancel();
+}
+
+ks::ui::LeaveEntryStatus MainWindow::prepareMemoryWorkbenchesForShutdown()
+{
+    using Status = ks::ui::LeaveEntryStatus;
+    const QPointer<MainWindow> self(this);
+    auto state = m_memoryQuitState;
+    if (state && state->ready)
+    {
+        // The async approval may have queued close for a later event turn.
+        // Validate that turn's actual identities and Dock inventory without
+        // repeating the already completed execution-control release.
+        bool current = true;
+        for (const auto& prepared : state->docks)
+        {
+            if (prepared && !prepared->workbenchQuitPreparationCurrent()) current = false;
+            if (!self || m_memoryQuitState != state || !state->active) return Status::Rejected;
+            if (!current) break;
+        }
+        if (current)
+        {
+            for (QWidget* widget : QApplication::allWidgets())
+            {
+                auto* dock = qobject_cast<MemoryDock*>(widget);
+                if (dock && std::none_of(state->docks.cbegin(), state->docks.cend(),
+                    [dock](const auto& known) { return known.data() == dock; }))
+                { current = false; break; }
+            }
+        }
+        if (current) return Status::Completed;
+        // Authority refresh is not a user cancellation: preserve an already
+        // authorized restart intent while collecting the new Dock approvals.
+        m_memoryQuitState.reset();
+        CancelMemoryQuitState(state);
+        if (!self) return Status::Rejected;
+        if (m_memoryQuitState) return Status::Busy;
+        state.reset(); // This close request must prepare the new authority set.
+    }
+    if (state && state->waiting) return Status::Pending;
+    if (!state)
+    {
+        if (qApp && qApp->property("ksword_memory_quit_guard_active").toBool()) return Status::Busy;
+        state = std::make_shared<MainWindowMemoryQuitState>();
+        m_memoryQuitState = state;
+        if (qApp)
+        {
+            qApp->setProperty("ksword_memory_quit_guard_active", true);
+            QObject::connect(this, &QObject::destroyed, qApp, [state]() { CancelMemoryQuitState(state); });
+        }
+    }
+    const auto appendDocks = [state]() {
+        for (QWidget* widget : QApplication::allWidgets())
+        {
+            if (auto* dock = qobject_cast<MemoryDock*>(widget))
+            {
+                if (std::none_of(state->docks.cbegin(), state->docks.cend(),
+                    [dock](const auto& known) { return known.data() == dock; })) state->docks.emplace_back(dock);
+            }
+        }
+    };
+    appendDocks();
+    while (state->index < state->docks.size())
+    {
+        const auto index = state->index;
+        const QPointer<MemoryDock> dock = state->docks[index];
+        if (!dock) { ++state->index; continue; }
+        const auto ticket = ++state->ticket;
+        state->waiting = true;
+        QObject::connect(dock, &QObject::destroyed, this, [self, state, ticket, index]() {
+            if (self && state->active && state->waiting && state->ticket == ticket && state->index == index)
+                self->cancelMemoryWorkbenchPreparation(state);
+        });
+        const auto status = dock->prepareWorkbenchQuit([self, state, dock, ticket, index](bool allowed) {
+            if (!self || !state->active || self->m_memoryQuitState != state || !state->waiting
+                || state->ticket != ticket || state->index != index) return;
+            state->waiting = false;
+            if (!allowed || !dock || state->docks[index] != dock || !dock->workbenchQuitPreparationCurrent())
+            {
+                if (self) self->cancelMemoryWorkbenchPreparation(state);
+                return;
+            }
+            if (!self) return;
+            state->index = index + 1;
+            const auto next = self->prepareMemoryWorkbenchesForShutdown();
+            if (!self || next != Status::Completed || state->closeQueued) return;
+            state->closeQueued = true;
+            QTimer::singleShot(0, self, [self, state]() {
+                if (self && self->m_memoryQuitState == state && state->ready) self->close();
+            });
+        });
+        if (!self) return Status::Rejected;
+        if (m_memoryQuitState != state || !state->active) return Status::Rejected;
+        if (status == Status::Pending) return status;
+        state->waiting = false;
+        if (!dock || status != Status::Completed || !dock->workbenchQuitPreparationCurrent())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+        ++state->index;
+        appendDocks();
+    }
+    // Every approval is rechecked before any execution control is released.
+    for (const auto& prepared : state->docks)
+    {
+        if (prepared && !prepared->workbenchQuitPreparationCurrent())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+    }
+    for (std::size_t index = 0; index < state->docks.size(); ++index)
+    {
+        const QPointer<MemoryDock> dock = state->docks[index];
+        if (dock && !dock->releaseWorkbenchExecutionForQuit())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+        const auto count = state->docks.size();
+        appendDocks();
+        if (state->docks.size() != count)
+        {
+            cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+    }
+    m_shutdownPreparedMemoryDocks = state->docks;
+    state->ready = true;
+    if (qApp) qApp->setProperty("ksword_memory_quit_guard_active", false);
+    return Status::Completed;
+}
+
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (m_shutdownWaiting || m_shutdownFinalizing)
+    {
+        if (event) event->ignore();
+        return;
+    }
     // 关闭事件日志：用于排查“窗口关闭但进程仍驻留”的问题。
     kLogEvent closeEventLog;
     info << closeEventLog << "[MainWindow] 收到关闭事件，准备退出进程。" << eol;
 
-    // 全局退出守卫覆盖主 Dock 与无父窗口的进程详情内嵌 Dock，并且在任何停驱/救援退出动作之前执行。
-    // 模态确认期间拒绝重复关闭；否则同一批暂存/int3 会被再次询问，甚至重入执行。
-    if (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
+    if (!m_shutdownCleanupReady)
     {
-        if (event != nullptr)
+        const QPointer<MainWindow> memoryGuardSelf(this);
+        const auto memoryStatus = prepareMemoryWorkbenchesForShutdown();
+        if (!memoryGuardSelf || memoryStatus != ks::ui::LeaveEntryStatus::Completed)
         {
-            event->ignore();
+            if (event) event->ignore();
+            return;
         }
-        return;
-    }
-    // closeGuardSelf：每个确认框都可能同步销毁主窗口，返回后不得继续保存布局或停止驱动。
-    const QPointer<MainWindow> closeGuardSelf(this);
-    if (qApp != nullptr)
-    {
-        qApp->setProperty("ksword_memory_quit_guard_active", true);
-    }
-    // workbenchDocks：UI 线程上一次性取得弱指针快照，避免后续模态事件循环销毁其它详情窗导致悬空。
-    std::vector<QPointer<MemoryDock>> workbenchDocks;
-    // appendNewWorkbenchDocks：模态期间已排队的详情页构建仍会执行，把晚到 Dock 也纳入同一次退出。
-    const auto appendNewWorkbenchDocks = [&workbenchDocks]() {
-        for (QWidget* widget : QApplication::allWidgets())
+        // Consume Ready exactly once; a queued continuation never repeats a dock's approval.
+        if (m_memoryQuitState) m_memoryQuitState->active = false;
+        m_memoryQuitState.reset();
+        ks::ui::AsyncCleanupRegistry::global().beginShutdown();
+        if (ks::ui::AsyncCleanupRegistry::global().pending() != 0 ||
+            g_r0ServiceOperationInFlight.load(std::memory_order_acquire))
         {
-            if (auto* memoryDock = qobject_cast<MemoryDock*>(widget))
-            {
-                const bool alreadyKnown = std::any_of(
-                    workbenchDocks.cbegin(), workbenchDocks.cend(),
-                    [memoryDock](const auto& knownDock) { return knownDock.data() == memoryDock; });
-                if (!alreadyKnown)
-                {
-                    workbenchDocks.emplace_back(memoryDock);
-                }
-            }
+            if (event) event->ignore();
+            beginCoordinatedShutdownWait();
+            return;
         }
-    };
-    appendNewWorkbenchDocks();
-    bool memoryQuitAllowed = true;
-    for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
-    {
-        // memoryDock：当前迭代独立的弱指针副本，追加晚到 Dock 时不依赖 vector 中可能失效的引用。
-        const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-        if (memoryDock && !memoryDock->prepareWorkbenchQuit())
-        {
-            memoryQuitAllowed = false;
-            break;
-        }
-        if (!closeGuardSelf)
-        {
-            break;
-        }
-        appendNewWorkbenchDocks();
-    }
-    // 所有 Dock 的暂存许可都通过后才归还执行控制，取消后续确认不会提前放行前一目标。
-    // 第二阶段不重复 confirmQuit；部分释放失败时保留实际状态及恢复入口，统一撤销许可。
-    if (closeGuardSelf && memoryQuitAllowed)
-    {
-        for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
-        {
-            const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-            if (memoryDock && !memoryDock->releaseWorkbenchExecutionForQuit())
-            {
-                memoryQuitAllowed = false;
-                break;
-            }
-            if (!closeGuardSelf)
-            {
-                break;
-            }
-            // HVM 释放会处理事件；若此时才创建新 Dock，本轮中止，下一次退出重新统一确认。
-            const std::size_t preparedCount = workbenchDocks.size();
-            appendNewWorkbenchDocks();
-            if (workbenchDocks.size() != preparedCount)
-            {
-                memoryQuitAllowed = false;
-                break;
-            }
-        }
-    }
-    if (!closeGuardSelf || !memoryQuitAllowed)
-    {
-        // 本次全局退出取消：清掉之前视图批准的 Keep 许可，禁止它误跳过下一次未经提示的分离安全网。
-        // 已明确批准并执行的应用/丢弃保留其结果；这不是对已执行编辑的回滚。
-        for (const auto& memoryDock : workbenchDocks)
-        {
-            if (memoryDock)
-            {
-                memoryDock->cancelWorkbenchQuit();
-            }
-        }
-    }
-    if (qApp != nullptr)
-    {
-        qApp->setProperty("ksword_memory_quit_guard_active", false);
-    }
-    if (!closeGuardSelf || !memoryQuitAllowed)
-    {
-        if (event != nullptr)
-        {
-            event->ignore();
-        }
-        return;
+        m_shutdownCleanupReady = true;
     }
 
     // 暂存确认已经允许退出，之后才撤销通知；普通托盘 hide 不进入本阶段。
     // 异步停驱会保留事件循环，窗口仍存活时也不能再让旧预检弹出新的 R0 选择框。
     m_r0UnavailablePromptArmed = false;
     m_r0UnavailablePromptShowing = false;
+    invalidateMemoryHvmAvailability();
     m_r0NotificationLifetime->store(false, std::memory_order_release);
 
     // 救援实例临时借用驱动和布局；退出时不覆盖主实例的配置，也不停止全局 R0 服务。
@@ -5646,7 +5875,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
             event->accept();
         }
         QMainWindow::closeEvent(event);
-        QCoreApplication::quit();
+        finishCoordinatedShutdown();
         return;
     }
 
@@ -5666,70 +5895,236 @@ void MainWindow::closeEvent(QCloseEvent* event)
     prepareR0DriverServiceStop();
     CallbackPromptManager::shutdownGlobalManager();
 
-    // 关闭窗口时自动停止 R0 驱动：
-    // - 先静默查询服务状态；
-    // - 若在运行则把整段 SCM 停驱交给线程池，UI 线程立刻把窗口藏起来，
-    //   不再让“SCM 卡在 STOP_PENDING”把关闭动作硬拖到 30 秒的假死。
-    bool r0RunningBeforeExit = false;
-    if (queryR0DriverServiceRunning(r0RunningBeforeExit, false) && r0RunningBeforeExit)
+    // 所有已接受会话STOP/事务收尾已归还lease后，才可停止它们依赖的R0服务。
+    // 查询与SCM动作均只持值状态；UI不隐藏，也不以固定超时杀掉未完成worker。
+    if (!m_shutdownServiceState)
     {
-        if (event != nullptr)
+        m_shutdownServiceState = std::make_shared<MainWindowShutdownServiceState>();
+        const auto serviceState = m_shutdownServiceState;
+        m_shutdownServiceReported = false;
+        g_r0ServiceOperationInFlight.store(true, std::memory_order_release);
+        g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
+        if (m_r0StatusButton) m_r0StatusButton->setEnabled(false);
+        const auto work = [serviceState]()
         {
-            // 这里必须 ignore：一旦 accept，Qt 会按 quitOnLastWindowClosed 在停驱回调
-            // 执行前就结束事件循环，回调与日志都会丢失。
-            event->ignore();
-        }
-        hide();
-
-        // 异步关闭流程只推进一次：窗口隐藏后若再收到关闭请求，直接返回，
-        // 避免重复派发停驱任务和重复排兜底定时器。
-        static bool asyncShutdownStarted = false;
-        if (asyncShutdownStarted)
+            try
+            {
+                const auto queryRunning = [serviceState]() -> DWORD
+                {
+                    serviceState->runningKnown = false;
+                    ScopedServiceHandle scm(::OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT));
+                    if (!scm.isValid()) return ::GetLastError();
+                    ScopedServiceHandle service(::OpenServiceW(scm.get(), kR0DriverServiceName, SERVICE_QUERY_STATUS));
+                    if (!service.isValid())
+                    {
+                        const auto error = ::GetLastError();
+                        if (error != ERROR_SERVICE_DOES_NOT_EXIST) return error;
+                        serviceState->runningKnown = true;
+                        serviceState->running = false;
+                        return ERROR_SUCCESS;
+                    }
+                    SERVICE_STATUS_PROCESS status{};
+                    DWORD error = ERROR_SUCCESS;
+                    if (!queryServiceStatus(service.get(), status, error)) return error;
+                    serviceState->runningKnown = true;
+                    serviceState->running = isRunningLikeServiceState(status.dwCurrentState);
+                    return ERROR_SUCCESS;
+                };
+                // 保留原语义：只有查询确认running-like时才停/删服务。
+                const auto queryError = queryRunning();
+                if (queryError == ERROR_SUCCESS && serviceState->running)
+                {
+                    serviceState->outcome = executeR0ServiceStopOnWorker();
+                    (void)queryRunning(); // 启动替代实例失败/取消退出时恢复实际R0状态。
+                }
+                else if (queryError == ERROR_SUCCESS)
+                {
+                    serviceState->outcome.alreadyInTargetState = true;
+                }
+                else serviceState->outcome.errorCode = queryError;
+            }
+            catch (...)
+            {
+                serviceState->outcome.errorCode = ERROR_UNHANDLED_EXCEPTION;
+            }
+            g_r0ServiceOperationInFlight.store(false, std::memory_order_release);
+            serviceState->finished.store(true, std::memory_order_release);
+        };
+        try { QThreadPool::globalInstance()->start(work); }
+        catch (...)
         {
-            return;
+            serviceState->outcome.errorCode = ERROR_UNHANDLED_EXCEPTION;
+            g_r0ServiceOperationInFlight.store(false, std::memory_order_release);
+            serviceState->finished.store(true, std::memory_order_release);
         }
-        asyncShutdownStarted = true;
+    }
+    if (event) event->ignore();
+    beginCoordinatedShutdownWait();
+}
 
-        dispatchR0ServiceStopToWorker(
-            [](const R0ServiceOperationOutcome& operationOutcome)
-            {
-                kLogEvent autoStopEvent;
-                if (operationOutcome.succeeded)
-                {
-                    info << autoStopEvent << "[MainWindow][R0] 关闭窗口时已自动停止并删除驱动服务。" << eol;
-                }
-                else
-                {
-                    warn << autoStopEvent << "[MainWindow][R0] 关闭窗口时自动停驱失败（已静默处理）。" << eol;
-                }
-                QApplication::quit();
-                QCoreApplication::exit(0);
-            });
+void MainWindow::beginCoordinatedShutdownWait()
+{
+    if (!m_shutdownTimer)
+    {
+        m_shutdownTimer = new QTimer(this);
+        m_shutdownTimer->setInterval(50);
+        connect(m_shutdownTimer, &QTimer::timeout, this, &MainWindow::pollCoordinatedShutdown);
+    }
+    if (m_shutdownOriginalTitle.isEmpty()) m_shutdownOriginalTitle = windowTitle();
+    m_shutdownWaiting = true;
+    m_r0UnavailablePromptArmed = false;
+    invalidateMemoryHvmAvailability();
+    m_r0NotificationLifetime->store(false, std::memory_order_release);
+    m_shutdownLastPending = static_cast<std::size_t>(-1);
+    m_shutdownClock.start();
+    m_shutdownWait.start(0, static_cast<int>(kR0ServiceStopWaitTimeoutMs) + 2000);
+    if (!isVisible()) show();
+    m_shutdownTimer->start();
+}
 
-        // 兜底定时器：后台停驱异常挂住时也必须退出，避免窗口已隐藏却留下常驻进程。
-        // 超时上限取“停驱等待上限 + 2 秒余量”，正常路径永远比它先触发退出。
-        QTimer::singleShot(
-            static_cast<int>(kR0ServiceStopWaitTimeoutMs) + 2000,
-            QCoreApplication::instance(),
-            []()
-            {
-                QApplication::quit();
-                QCoreApplication::exit(0);
-            });
+void MainWindow::pollCoordinatedShutdown()
+{
+    const bool serviceFinished = m_shutdownServiceState &&
+        m_shutdownServiceState->finished.load(std::memory_order_acquire);
+    if (serviceFinished && !m_shutdownServiceReported)
+    {
+        m_shutdownServiceReported = true;
+        const auto& outcome = m_shutdownServiceState->outcome;
+        if (m_shutdownServiceState->runningKnown)
+            m_r0DriverServiceRunning = m_shutdownServiceState->running;
+        kLogEvent autoStopEvent;
+        if (outcome.succeeded)
+        {
+            info << autoStopEvent << "[MainWindow][R0] 关闭窗口时已自动停止并删除驱动服务。" << eol;
+        }
+        else if (!outcome.alreadyInTargetState)
+        {
+            warn << autoStopEvent << "[MainWindow][R0] 关闭窗口时自动停驱失败（已静默处理）。" << eol;
+        }
+    }
+    if (!m_shutdownWaiting)
+    {
+        // 用户取消退出后，已经接受的停驱仍完成；完成后恢复其真实UI状态。
+        if (!m_shutdownServiceState || serviceFinished)
+        {
+            m_shutdownTimer->stop();
+            m_shutdownServiceState.reset();
+            if (m_r0StatusButton) m_r0StatusButton->setEnabled(true);
+            refreshPrivilegeStatusButtons();
+        }
         return;
     }
-
-    // 接受关闭事件并主动触发应用退出。
-    // 这里同时调用 quit 与 exit(0)，确保事件循环尽快结束。
-    if (event != nullptr)
+    const bool servicePending = (m_shutdownServiceState && !serviceFinished) ||
+        g_r0ServiceOperationInFlight.load(std::memory_order_acquire);
+    const auto pending = ks::ui::AsyncCleanupRegistry::global().pending() + (servicePending ? 1U : 0U);
+    if (m_shutdownLastPending != pending)
     {
-        event->accept();
+        m_shutdownLastPending = pending;
+        setWindowTitle(m_shutdownOriginalTitle + QStringLiteral(" — ") + ks::i18n::contextText(
+            QStringLiteral("main.shutdown.wait.status"), QStringLiteral("正在完成后台操作（%1）"))
+            .arg(static_cast<qulonglong>(pending)));
     }
-    QApplication::quit();
+    const auto status = m_shutdownWait.poll(m_shutdownClock.elapsed(), pending);
+    if (status == ks::ui::AsyncShutdownWait::Status::Ready)
+    {
+        // 等待期间仍可能完成已排队的详情窗构造；只在就绪边界核对一次。
+        // 新工作台未经本次批准时撤销许可并重新走原两阶段守卫。
+        for (QWidget* widget : QApplication::allWidgets())
+        {
+            auto* dock = qobject_cast<MemoryDock*>(widget);
+            if (dock && std::none_of(m_shutdownPreparedMemoryDocks.cbegin(),
+                m_shutdownPreparedMemoryDocks.cend(),
+                [dock](const auto& known) { return known.data() == dock; }))
+            {
+                cancelCoordinatedShutdown(true);
+                close();
+                return;
+            }
+        }
+        m_shutdownTimer->stop();
+        m_shutdownWaiting = false;
+        setWindowTitle(m_shutdownOriginalTitle);
+        if (m_shutdownServiceState) finishCoordinatedShutdown();
+        else
+        {
+            m_shutdownCleanupReady = true;
+            close(); // 不重复暂存/执行控制确认；继续原服务关闭阶段。
+        }
+    }
+    else if (status == ks::ui::AsyncShutdownWait::Status::TimedOut)
+    {
+        m_shutdownTimer->stop();
+        const QPointer<MainWindow> guard(this);
+        const auto choice = QMessageBox::question(this,
+            ks::i18n::contextText(QStringLiteral("main.shutdown.wait.title"), QStringLiteral("等待后台操作完成")),
+            ks::i18n::contextText(QStringLiteral("main.shutdown.wait.message"),
+                QStringLiteral("仍有 %1 个后台操作正在完成事务或资源清理。程序会保持打开，不会终止已接受的操作。\n\n重试继续等待，取消返回主窗口。"))
+                .arg(static_cast<qulonglong>(pending)),
+            QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (!guard) return;
+        if (choice == QMessageBox::Retry)
+        {
+            ks::ui::RetryRetainedCleanupJobs();
+            beginCoordinatedShutdownWait();
+        }
+        else cancelCoordinatedShutdown();
+    }
+}
+
+void MainWindow::cancelCoordinatedShutdown(const bool preserveRestart)
+{
+    if (!preserveRestart) m_shutdownRestart.cancel();
+    m_shutdownWaiting = false;
+    m_shutdownCleanupReady = false;
+    ks::ui::AsyncCleanupRegistry::global().cancelShutdown();
+    if (!m_shutdownOriginalTitle.isEmpty()) setWindowTitle(m_shutdownOriginalTitle);
+    m_r0NotificationLifetime->store(true, std::memory_order_release);
+    m_r0UnavailablePromptArmed = true;
+    if (m_privilegeStatusTimer) m_privilegeStatusTimer->start();
+    for (QWidget* widget : QApplication::allWidgets())
+    {
+        if (auto* dock = qobject_cast<MemoryDock*>(widget)) dock->cancelWorkbenchQuit();
+    }
+    m_shutdownPreparedMemoryDocks.clear();
+    if (m_shutdownServiceState) m_shutdownTimer->start();
+    else refreshPrivilegeStatusButtons();
+}
+
+void MainWindow::finishCoordinatedShutdown()
+{
+    Q_ASSERT(ks::ui::AsyncCleanupRegistry::global().pending() == 0);
+    Q_ASSERT(!g_r0ServiceOperationInFlight.load(std::memory_order_acquire));
+    if (m_shutdownTimer) m_shutdownTimer->stop();
+    if (m_shutdownFinalizing) return;
+    m_shutdownFinalizing = true;
+    if (m_shutdownRestart.hasIntent())
+    {
+        const QPointer<MainWindow> guard(this);
+        bool launched = false;
+        try { launched = m_shutdownRestart.launchWhenReady(); } catch (...) {}
+        if (!guard) return;
+        if (!launched)
+        {
+            m_shutdownFinalizing = false;
+            cancelCoordinatedShutdown();
+            return;
+        }
+    }
+    // 全部退出许可与资源收尾已完成；quit()会再发Close，被finalizing守卫否决。
     QCoreApplication::exit(0);
 
     kLogEvent closeFinishLog;
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
+}
+
+bool MainWindow::requestCoordinatedRestart(ks::ui::DeferredApplicationRestart::Launch launch)
+{
+    if (m_shutdownWaiting || m_shutdownCleanupReady || m_shutdownFinalizing ||
+        (qApp && qApp->property("ksword_memory_quit_guard_active").toBool()) ||
+        !m_shutdownRestart.accept(std::move(launch))) return false;
+    const QPointer<MainWindow> guard(this);
+    close(); // 首轮内存守卫拒绝与超时Cancel都清除意图，不污染下次普通关闭。
+    return guard && (m_shutdownRestart.hasIntent() || m_shutdownFinalizing);
 }
 
 void MainWindow::initResizeBorderOverlays()
@@ -6064,9 +6459,20 @@ bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
         qobject_cast<ads::CFloatingDockContainer*>(watchedObject);
     if (floatingWidget != nullptr && event != nullptr)
     {
-        if (event->type() == QEvent::Show || event->type() == QEvent::Resize)
+        if (event->type() == QEvent::Show)
         {
             applyFloatingDockContainerAppearance(floatingWidget);
+        }
+        else if (event->type() == QEvent::Resize || event->type() == QEvent::DevicePixelRatioChange)
+        {
+            // 尺寸和 DPR 只影响绘制目标，不影响主题配方、palette 或 ADS 导航身份。
+            if (MainWindowBackgroundWidget* background = floatingDockBackgroundWidget(floatingWidget);
+                background != nullptr && !background->isHidden())
+            {
+                background->setGeometry(floatingWidget->rect());
+                // cover 的中心随尺寸变化，必须重画整个背景，而非仅新增的边缘。
+                background->update();
+            }
         }
     }
 
@@ -7054,6 +7460,15 @@ void MainWindow::initGlobalUiSearchController()
         return;
     }
 
+    // 退出排空事件期间也可能执行已排队的目录/搜索分片，所有导航回调共用拒新门禁。
+    const QPointer<MainWindow> navigationOwner(this);
+    const QPointer<ads::CDockManager> navigationManager(m_pDockManager);
+    const std::weak_ptr<std::atomic_bool> navigationLifetime = m_r0NotificationLifetime;
+    const auto navigationAdmission = [navigationOwner, navigationManager, navigationLifetime]() {
+        const auto live = navigationLifetime.lock();
+        return navigationOwner && navigationManager && live && live->load(std::memory_order_acquire);
+    };
+
     // 弹层宿主是主窗口本体：无边框窗口下用子控件弹层可避免焦点被独立窗口抢走。
     m_globalUiSearchController = new ks::ui::GlobalUiSearchController(
         this,
@@ -7082,17 +7497,20 @@ void MainWindow::initGlobalUiSearchController()
         [this](const QString& commandText, const ks::ui::CommandExecutionOptions& options) {
             executeCommandWithOptions(commandText, options);
         });
-    m_globalUiSearchController->setDockListProvider([this]() {
-        return collectSearchableDockWidgets();
+    m_globalUiSearchController->setDockListProvider([this, navigationAdmission]() {
+        return navigationAdmission() ? collectSearchableDockWidgets() : QList<ads::CDockWidget*>{};
     });
-    m_globalUiSearchController->setDockPreparer([this](ads::CDockWidget* dockWidget) {
-        ensureDockContentInitialized(dockWidget);
+    m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, const bool useColdBodies) {
+        if (navigationAdmission()) ensureDockContentInitialized(dockWidget, useColdBodies);
     });
-    m_globalUiSearchController->setNestedDockPreparer([this](ads::CDockWidget* dockWidget) {
-        prepareNestedDockContentForNavigation(dockWidget);
+    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget,
+        ks::ui::UiSearchScope scope, const bool singleStep, const bool useColdBodies, std::function<void()> resume) {
+        return !navigationAdmission() ? ks::ui::PageSearchPreparation::Complete
+            : prepareNestedDockContentForNavigation(dockWidget,
+                scope == ks::ui::UiSearchScope::CurrentPage, singleStep, useColdBodies, std::move(resume));
     });
-    m_globalUiSearchController->setDockActivator([this](ads::CDockWidget* dockWidget) {
-        activateDockForSearchNavigation(dockWidget);
+    m_globalUiSearchController->setDockActivator([this, navigationAdmission](ads::CDockWidget* dockWidget) {
+        if (navigationAdmission()) activateDockForSearchNavigation(dockWidget);
     });
     connect(
         m_globalUiSearchController,
@@ -7116,16 +7534,82 @@ void MainWindow::initGlobalUiSearchController()
         m_customTitleBar->isSearchInputModeActive());
 
     // Taskbar 独立呈现目录；主程序复用已有 Dock 初始化/激活路径，只发布一级功能页。
-    m_pageNavigationBridge = new ks::ui::PageNavigationBridge(this, [this]()
+    m_pageNavigationBridge = new ks::ui::PageNavigationBridge(this, [this, navigationAdmission]()
     {
+        if (!navigationAdmission()) return QList<ads::CDockWidget*>{};
         auto docks = collectSearchableDockWidgets();
         docks.removeAll(m_dockLog);
         docks.removeAll(m_dockMonitor);
         docks.removeAll(m_dockCurrentOp);
         return docks;
-    }, [this](ads::CDockWidget* dock) { ensureDockContentInitialized(dock); },
-        [this](ads::CDockWidget* dock) { activateDockForSearchNavigation(dock); },
-        [this](ads::CDockWidget* dock) { prepareNestedDockContentForNavigation(dock); });
+    }, [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) ensureDockContentInitialized(dock); },
+        [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) activateDockForSearchNavigation(dock); },
+        [this, navigationAdmission](ads::CDockWidget* dock) { if (navigationAdmission()) prepareNestedDockContentForNavigation(dock); });
+
+    // 实际控制器成员避开ADS scroll wrapper；只映射已有对象，不执行任何惰性工厂。
+    const auto existingNavigationContent = [this, navigationOwner, navigationManager, navigationLifetime]
+        (ads::CDockWidget* dock) -> QWidget*
+    {
+        const auto live = navigationLifetime.lock();
+        if (!navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return nullptr;
+        if (dock == m_dockWelcome) return m_welcomeWidget;
+        if (dock == m_dockProcess) return m_processWidget;
+        if (dock == m_dockNetwork) return m_networkWidget;
+        if (dock == m_dockMemory) return m_memoryWidget;
+        if (dock == m_dockFile) return m_fileWidget;
+        if (dock == m_dockDriver) return m_driverWidget;
+        if (dock == m_dockKernel) return m_kernelWidget;
+        if (dock == m_dockHvm) return m_hvmWidget;
+        if (dock == m_dockMonitorTab) return m_monitorWidget;
+        if (dock == m_dockHardware) return m_hardwareWidget;
+        if (dock == m_dockPrivilege) return m_privilegeWidget;
+        if (dock == m_dockWindow) return m_windowWidget;
+        if (dock == m_dockRegistry) return m_registryWidget;
+        if (dock == m_dockHandle) return m_handleWidget;
+        if (dock == m_dockStartup) return m_startupWidget;
+        if (dock == m_dockService) return m_serviceWidget;
+        if (dock == m_dockMisc) return m_miscWidget;
+        return nullptr;
+    };
+    const auto readCatalog = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
+        (ads::CDockWidget* dock, const bool includeColdSearchBody) -> std::optional<ks::ui::PageNavigationCatalog>
+    {
+        const auto live = navigationLifetime.lock();
+        if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return std::nullopt;
+        const QString key = dock->property("ks_dock_layout_key").toString();
+        QWidget* const existing = existingNavigationContent(dock);
+        // Taskbar目录只读导航值；全文搜索仍使用同一完整正文生产者。
+        std::optional<ks::ui::PageNavigationCatalog> catalog;
+        if (!includeColdSearchBody && key == QStringLiteral("memory"))
+            catalog = MemoryDock::navigationCatalog(dynamic_cast<MemoryDock*>(existing), false);
+        else if (!includeColdSearchBody && key == QStringLiteral("misc"))
+            catalog = MiscDock::navigationCatalog(dynamic_cast<MiscDock*>(existing), false);
+        else catalog = ks::ui::RegisteredPageNavigationCatalog(key, existing);
+        if (catalog && !existing && key == QStringLiteral("misc"))
+            for (auto& page : *catalog)
+                if (page.id == QStringLiteral("misc.bugcheck")) page.visible =
+                    navigationOwner->m_currentAppearanceSettings.bugcheckDiagnosticsAutoInstallEnabled ||
+                    navigationOwner->m_bugcheckDiagnosticsInstalledForSession || navigationOwner->m_bugcheckDiagnosticsEntryRequestedForSession;
+        return catalog;
+    };
+    const auto catalogNavigator = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
+        (ads::CDockWidget* dock, const QString& id) -> QWidget*
+    {
+        const auto live = navigationLifetime.lock();
+        if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return nullptr;
+        return ks::ui::NavigateRegisteredPageNavigationCatalog(
+            dock->property("ks_dock_layout_key").toString(), existingNavigationContent(dock), id);
+    };
+    const auto searchCompleteness = [navigationAdmission](ads::CDockWidget* dock) {
+        return navigationAdmission() && dock && ks::ui::RegisteredPageNavigationCatalogSearchComplete(
+            dock->property("ks_dock_layout_key").toString());
+    };
+    m_globalUiSearchController->setPageCatalog([readCatalog](ads::CDockWidget* dock) {
+        return readCatalog(dock, true);
+    }, catalogNavigator, searchCompleteness);
+    m_pageNavigationBridge->setPageCatalog([readCatalog](ads::CDockWidget* dock) {
+        return readCatalog(dock, false);
+    }, catalogNavigator);
 
     connect(
         m_customTitleBar,
@@ -7173,6 +7657,13 @@ void MainWindow::activateDockForSearchNavigation(ads::CDockWidget* dockWidget)
         return;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    auto navigationContext = ks::ui::CapturePerfTraceContext();
+    navigationContext.origin = ks::ui::PerfTraceOrigin::ProgrammaticNavigation;
+    const ks::ui::PerfTraceContextScope navigationOrigin(navigationContext);
+#endif
+    // 采集：激活已有 Dock（可能触发惰性挂载）整体作为一个操作边界。
+    ks::ui::PerfScope activatePerf("perf_dock_activate", dockWidget->windowTitle());
     ensureDockContentInitialized(dockWidget);
     withTemporaryNonTopMostForDockSwitch([dockWidget]()
         {
@@ -7932,7 +8423,9 @@ void MainWindow::showLicenseFromMenu()
     }
 
     const QStringList supplementaryLegalFiles{
-        QStringLiteral("COMMUNITY_COVENANT.md")
+        QStringLiteral("COMMUNITY_COVENANT.md"),
+        QStringLiteral("licenses/third_party/qt-advanced-docking-system-NOTICE.md"),
+        QStringLiteral("licenses/third_party/qt-advanced-docking-system-LICENSE.txt")
     };
     for (const QString& legalFileName : supplementaryLegalFiles)
     {
@@ -8547,7 +9040,8 @@ void MainWindow::attachPrivilegeStatusButtonsToPrimaryDockTabBar()
 
 void MainWindow::handleR0DriverUnavailable(const unsigned long win32Error)
 {
-    Q_UNUSED(win32Error);
+    invalidateMemoryHvmAvailability(
+        QStringLiteral("查询 R-1 内存窗口失败：%1").arg(formatWin32ErrorText(win32Error)));
     // 先合并通知，再把只读 SCM 查询放到线程池，避免弹框前在 UI 线程等待系统服务调用。
     // pending 与正在显示共用同一守卫，预检期间多个页面的失败不会另起查询或重复提示。
     if (!m_r0UnavailablePromptArmed || m_r0UnavailablePromptShowing
@@ -8597,7 +9091,13 @@ void MainWindow::handleR0DriverUnavailable(const unsigned long win32Error)
                         window->m_r0UnavailablePromptShowing = false;
                         return;
                     }
+                    const bool runningChanged = window->m_r0DriverServiceRunning != serviceState.running;
                     window->m_r0DriverServiceRunning = serviceState.running;
+                    if (runningChanged)
+                    {
+                        window->invalidateMemoryHvmAvailability();
+                    }
+                    if (!guardedWindow) { return; }
                     if (serviceState.running || window->m_suppressR0PromptsForSession
                         || window->m_currentAppearanceSettings.suppressR0FeaturePrompts)
                     {
@@ -8807,6 +9307,33 @@ void MainWindow::applyPrivilegeButtonVisibility()
     }
 }
 
+bool MainWindow::canRefreshHvmMemoryAvailability() const
+{
+    return m_r0DriverServiceRunning && !m_shutdownWaiting && !m_shutdownCleanupReady
+        && m_r0NotificationLifetime->load(std::memory_order_acquire)
+        && !g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+        && !(qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool());
+}
+
+void MainWindow::invalidateMemoryHvmAvailability(const QString& reason)
+{
+    ++m_hvmMemoryAvailabilityGeneration;
+    m_hvmMemoryAvailabilityFollowupPending = false;
+    const QPointer<MemoryDock> consumer(m_memoryWidget);
+    if (!consumer) { return; }
+    const bool driverUnavailable = !m_r0DriverServiceRunning;
+    consumer->invalidateHvmMemoryAvailability();
+    // A device failure notification can precede the worker result which caused it.
+    // Publish that failure on the new epoch instead of leaving an unfinishable pending state.
+    if (consumer && (!reason.isEmpty() || driverUnavailable))
+    {
+        consumer->applyHvmMemoryAvailability(consumer->hvmMemoryAvailabilityEpoch(), false,
+            reason.isEmpty()
+                ? QStringLiteral("KswordARK 驱动未运行。请先点击 R0 启动驱动服务。")
+                : reason);
+    }
+}
+
 void MainWindow::refreshPrivilegeStatusButtons()
 {
     // 先应用可见性与称呼：两者都只影响这一排按钮的呈现，与状态查询无关，
@@ -8983,7 +9510,7 @@ bool MainWindow::hasUiAccessPrivilege() const
     return uiAccessEnabled;
 }
 
-bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
+bool MainWindow::launchSelfWithSystemUiAccessToken(const QStringList& arguments, QString* detailTextOut)
 {
     if (detailTextOut != nullptr)
     {
@@ -9209,8 +9736,13 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
     }
 
     QString commandLineText = quoteWin32CommandLineArgument(selfPath);
-    commandLineText += QLatin1Char(' ');
-    commandLineText += QString::fromWCharArray(kKswordPrivilegeRestartArgument);
+    const auto launchArguments = argumentsWithPrivilegeRestartTakeover(
+        arguments, ::GetCurrentProcessId());
+    for (int index = 1; index < launchArguments.size(); ++index)
+    {
+        commandLineText += QLatin1Char(' ');
+        commandLineText += ks::ui::QuoteCoordinatedRestartArgument(launchArguments.at(index));
+    }
     std::wstring commandLineWide = commandLineText.toStdWString();
     std::wstring applicationPathWide = selfPath;
 
@@ -9241,6 +9773,8 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
 
     ScopedHandle newProcessHandle(processInformation.hProcess);
     ScopedHandle newThreadHandle(processInformation.hThread);
+    if (!ks::crash::ValidateRestartChildProcess(newProcessHandle.get()))
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("CreateProcessAsUserW"), ERROR_INVALID_DATA));
     detailLineList << QStringLiteral("CreateProcessAsUserW：成功启动新实例，PID=%1。")
         .arg(processInformation.dwProcessId);
 
@@ -9257,74 +9791,64 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
 
 void MainWindow::handleUiAccessButtonClicked()
 {
-    // 当前实例已经带 UIAccess 时，按钮语义为回到普通用户实例；该路径不依赖任何签名证书。
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
+    const auto arguments = QCoreApplication::arguments();
+    const QPointer<MainWindow> guard(this);
+    // 启动器只在全部退出资源就绪后运行，冻结本次模式与argv。
     if (hasUiAccessPrivilege())
     {
-        QString launchDetailText;
-        const bool launchOk = launchSelfAsUnelevatedFromExplorer(QCoreApplication::arguments(), &launchDetailText);
-        if (!launchOk)
+        ks::ui::RequestCoordinatedApplicationRestart([guard, arguments]()
         {
+            if (!guard) return false;
+            QString launchDetailText;
+            const bool launchOk = launchSelfAsUnelevatedFromExplorer(arguments, &launchDetailText);
+            if (!launchOk)
+            {
+                kLogEvent logEvent;
+                err << logEvent
+                    << "[MainWindow][UIAccess] 从 UIAccess 降级重启普通实例失败: "
+                    << launchDetailText.toStdString() << eol;
+                QMessageBox::warning(guard.data(), QStringLiteral("UIAccess"),
+                    QStringLiteral("普通权限重启失败，当前实例保持运行。\n\n%1").arg(launchDetailText));
+                return false;
+            }
             kLogEvent logEvent;
-            err << logEvent
-                << "[MainWindow][UIAccess] 从 UIAccess 降级重启普通实例失败: "
-                << launchDetailText.toStdString()
-                << eol;
-            QMessageBox::warning(
-                this,
-                QStringLiteral("UIAccess"),
-                QStringLiteral("普通权限重启失败，当前实例保持运行。\n\n%1").arg(launchDetailText));
-            refreshPrivilegeStatusButtons();
-            return;
-        }
-
-        kLogEvent logEvent;
-        info << logEvent
-            << "[MainWindow][UIAccess] 当前实例已带 UIAccess，已启动普通权限实例并准备正常退出: "
-            << launchDetailText.toStdString()
-            << eol;
-        close();
+            info << logEvent
+                << "[MainWindow][UIAccess] 当前实例已带 UIAccess，已启动普通权限实例并准备正常退出: "
+                << launchDetailText.toStdString() << eol;
+            return true;
+        });
         return;
     }
 
     if (!hasAdminPrivilege())
     {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess"),
-            QStringLiteral(
-                "启用 UIAccess 需要管理员权限。\n\n"
-                "程序将先以管理员身份重新启动；重启后请再次点击 UIAccess。"));
+        QMessageBox::warning(this, QStringLiteral("UIAccess"),
+            QStringLiteral("启用 UIAccess 需要管理员权限。\n\n程序将先以管理员身份重新启动；重启后请再次点击 UIAccess。"));
         requestAdminElevationRestart();
         return;
     }
 
-    QString launchDetailText;
-    const bool launchOk = launchSelfWithSystemUiAccessToken(&launchDetailText);
-    if (!launchOk)
+    ks::ui::RequestCoordinatedApplicationRestart([guard, arguments]()
     {
-        kLogEvent logEvent;
-        err << logEvent
-            << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动失败: "
-            << launchDetailText.toStdString()
-            << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess 启动失败"),
-            launchDetailText);
-        refreshPrivilegeStatusButtons();
-        return;
-    }
-
-    {
+        if (!guard) return false;
+        QString launchDetailText;
+        const bool launchOk = guard->launchSelfWithSystemUiAccessToken(arguments, &launchDetailText);
+        if (!launchOk)
+        {
+            kLogEvent logEvent;
+            err << logEvent
+                << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动失败: "
+                << launchDetailText.toStdString() << eol;
+            QMessageBox::warning(guard.data(), QStringLiteral("UIAccess 启动失败"), launchDetailText);
+            return false;
+        }
         kLogEvent logEvent;
         info << logEvent
             << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动成功: "
-            << launchDetailText.toStdString()
-            << eol;
-    }
-    // 成功路径不弹框，避免重复打断；详细步骤已经写入日志。
-    refreshPrivilegeStatusButtons();
-    QApplication::quit();
+            << launchDetailText.toStdString() << eol;
+        return true;
+    });
 }
 
 void MainWindow::startR0DriverLogPoller()
@@ -9353,6 +9877,7 @@ void MainWindow::startR0DriverLogPoller()
 
 void MainWindow::prepareR0DriverServiceStop()
 {
+    invalidateMemoryHvmAvailability();
     // 停驱前统一清理入口：
     // 输入：无。
     // 处理：
@@ -9826,6 +10351,7 @@ bool MainWindow::queryR0DriverServiceRunning(bool& runningOut, const bool fatalO
 
 bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return false;
     const auto profile = ksword::ark::queryServiceProfile();
     if (!profile.scmManagementAllowed())
     {
@@ -9880,6 +10406,8 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
             if (operationOutcome.succeeded)
             {
                 guardedSelf->m_r0DriverServiceRunning = false;
+                guardedSelf->invalidateMemoryHvmAvailability();
+                if (!guardedSelf) { return; }
                 // 本次安装只绑定当前内核驱动映像，服务卸载成功后入口随之恢复配置态可见性。
                 guardedSelf->m_bugcheckDiagnosticsInstalledForSession = false;
                 guardedSelf->m_bugcheckDiagnosticsEntryRequestedForSession = false;
@@ -10097,6 +10625,7 @@ bool MainWindow::enableWindowsTestModeAndPromptReboot()
 
 bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPrompt)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return false;
     // 作用：
     // - 输入：无；驱动固定取当前 exe 目录下的 KswordARK.sys；
     // - 处理：UI 线程只做驱动文件校验与派发，SCM 创建/配置/启动/等待运行态整段交给线程池；
@@ -10110,6 +10639,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
 
     // 接受启用意图即淘汰旧预检；后续文件校验失败和错误框也不能恢复旧的 STOPPED 提示。
     g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    invalidateMemoryHvmAvailability();
 
     const QString driverPath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("KswordARK.sys"));
     const QString nativeDriverPath = QDir::toNativeSeparators(driverPath);
@@ -10120,6 +10650,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
         // 驱动文件缺失是立即可判的失败，不必为它派发后台任务。
         g_r0ServiceOperationInFlight.store(false);
         m_r0DriverServiceRunning = false;
+        invalidateMemoryHvmAvailability();
         showR0FatalError(
             QStringLiteral("R0 启动失败：当前程序目录下不存在 KswordARK.sys。"),
             ERROR_FILE_NOT_FOUND,
@@ -10151,6 +10682,8 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
             if (!operationOutcome.succeeded)
             {
                 guardedSelf->m_r0DriverServiceRunning = false;
+                guardedSelf->invalidateMemoryHvmAvailability();
+                if (!guardedSelf) { return; }
                 if (operationOutcome.startServiceCallFailed
                     && guardedSelf->isR0DriverSignatureFailure(operationOutcome.errorCode))
                 {
@@ -10193,6 +10726,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
 
 void MainWindow::handleR0StatusButtonClicked()
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
     // 作用：
     // - 输入：无；
     // - 处理：先做一次轻量的 SCM 状态查询，再按当前状态派发后台启停任务；
@@ -10203,7 +10737,9 @@ void MainWindow::handleR0StatusButtonClicked()
     {
         return;
     }
+    const bool runningChanged = m_r0DriverServiceRunning != runningNow;
     m_r0DriverServiceRunning = runningNow;
+    if (runningChanged) { invalidateMemoryHvmAvailability(); }
 
     const bool dispatchOk = runningNow
         ? stopR0DriverService()
@@ -10216,6 +10752,7 @@ void MainWindow::handleR0StatusButtonClicked()
 
 void MainWindow::requestAdminElevationRestart(const bool enableR0AfterRestart)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
     // 获取当前可执行文件路径，作为 runas 重启目标。
     wchar_t exePathBuffer[MAX_PATH] = {};
     const DWORD pathLength = ::GetModuleFileNameW(nullptr, exePathBuffer, static_cast<DWORD>(std::size(exePathBuffer)));
@@ -10226,33 +10763,47 @@ void MainWindow::requestAdminElevationRestart(const bool enableR0AfterRestart)
         return;
     }
 
-    QString elevationParameters = QString::fromWCharArray(kKswordPrivilegeRestartArgument);
+    auto launchArguments = argumentsWithPrivilegeRestartTakeover(
+        QCoreApplication::arguments(), ::GetCurrentProcessId());
     if (enableR0AfterRestart)
     {
-        elevationParameters += QLatin1Char(' ');
-        elevationParameters += QString::fromWCharArray(kKswordEnableR0AfterElevationArgument);
+        const auto enableArgument = QString::fromWCharArray(kKswordEnableR0AfterElevationArgument);
+        if (!containsQtArgument(launchArguments, enableArgument)) launchArguments.push_back(enableArgument);
     }
+    QStringList quotedArguments;
+    for (int index = 1; index < launchArguments.size(); ++index)
+        quotedArguments.push_back(ks::ui::QuoteCoordinatedRestartArgument(launchArguments.at(index)));
+    const QString elevationParameters = quotedArguments.join(QLatin1Char(' '));
     const std::wstring elevationParametersWide = elevationParameters.toStdWString();
+    const std::wstring executablePath(exePathBuffer);
+    const QPointer<MainWindow> guard(this);
 
     // 使用 ShellExecute("runas") 触发 UAC 提权；R0 请求会带内部参数，让提升后的实例
     // 直接执行用户刚刚确认的启用动作，而不是要求用户重启后再重复点击一次。
-    HINSTANCE shellResult = ::ShellExecuteW(
-        nullptr,
-        L"runas",
-        exePathBuffer,
-        elevationParametersWide.c_str(),
-        nullptr,
-        SW_SHOWNORMAL);
-    if (reinterpret_cast<std::intptr_t>(shellResult) <= 32)
+    ks::ui::RequestCoordinatedApplicationRestart([guard, executablePath, elevationParametersWide]()
     {
-        QMessageBox::warning(this, "Admin", "提权启动失败，可能被用户取消或系统策略阻止。");
-        return;
+    if (!guard) return false;
+    SHELLEXECUTEINFOW launch{};
+    launch.cbSize = sizeof(launch);
+    launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    launch.lpVerb = L"runas";
+    launch.lpFile = executablePath.c_str();
+    launch.lpParameters = elevationParametersWide.c_str();
+    launch.nShow = SW_SHOWNORMAL;
+    const bool created = ::ShellExecuteExW(&launch) != FALSE;
+    const bool validChild = created && ks::crash::ValidateRestartChildProcess(launch.hProcess);
+    if (launch.hProcess) ::CloseHandle(launch.hProcess);
+    if (!validChild)
+    {
+        QMessageBox::warning(guard.data(), "Admin", "提权启动失败，可能被用户取消或系统策略阻止。");
+        return false;
     }
 
     // 新进程启动成功后，当前实例退出。
     kLogEvent logEvent;
     info << logEvent << "[MainWindow] 已触发管理员重启，当前实例即将退出。" << eol;
-    QApplication::quit();
+    return true;
+    });
 }
 
 bool MainWindow::hasAdminPrivilege() const
@@ -10491,7 +11042,7 @@ QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
     return placeholderWidget;
 }
 
-void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
+void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget, const bool useColdBodies)
 {
     if (dockWidget == nullptr)
     {
@@ -10515,6 +11066,12 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     const QString dockTitleText = dockWidget->windowTitle().trimmed().isEmpty()
         ? dockKey
         : dockWidget->windowTitle().trimmed();
+    // 采集：整个惰性挂载（构造真实内容 + 首帧主题准备 + 刷新）作为一个操作边界。
+    ks::ui::PerfScope lazyMountPerf("perf_dock_mount", dockKey);
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto mountNavigation = ks::ui::BeginPerfNavigationTrace("dock_mount",
+        CaptureDockNavigationTarget(dockWidget));
+#endif
     dockWidget->setProperty("ks_lazy_initializing", true);
     const int progressPid = kPro.add(this, "页面", QStringLiteral("打开%1页").arg(dockTitleText).toStdString());
     kPro.set(progressPid, QStringLiteral("准备加载%1页").arg(dockTitleText).toStdString(), 0, 8.0f);
@@ -10538,6 +11095,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         QStringLiteral("正在创建%1页内容").arg(dockTitleText),
         30);
 
+    // 采集：内容构造（各 Dock 的 new）单独计时，用于判断挂载耗时是否集中在页面主体构造。
+    ks::ui::PerfScope constructPerf("perf_dock_construct", dockKey);
     if (dockKey == QStringLiteral("process"))
     {
         if (m_processWidget == nullptr)
@@ -10562,6 +11121,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         m_memoryWidget->openPoolModuleDetails = [guard = QPointer<MainWindow>(this)](const QString& path) {
             if (guard) { guard->openFileDetailDockByPath(path); }
         };
+        bindMemoryHvmAvailabilityConsumer();
         realWidget = m_memoryWidget;
     }
     else if (dockKey == QStringLiteral("file"))
@@ -10646,13 +11206,14 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         // 扫描器 / 转储分析 / 插件已并入杂项页，不再各自占用顶层 Dock，
         // 它们随杂项页内部的页签懒加载，这里只需构造杂项容器本身。
-        if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this); }
+        if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this, !useColdBodies); }
         m_miscWidget->setBugcheckDiagnosticsVisible(
             m_currentAppearanceSettings.bugcheckDiagnosticsAutoInstallEnabled ||
             m_bugcheckDiagnosticsInstalledForSession ||
             m_bugcheckDiagnosticsEntryRequestedForSession);
         realWidget = m_miscWidget;
     }
+    constructPerf.finish(); // 采集：内容构造阶段结束（尚未做挂载与主题准备）。
     if (realWidget == nullptr)
     {
         kPro.set(progressPid, QStringLiteral("%1页无需加载").arg(dockTitleText).toStdString(), 0, 100.0f);
@@ -10660,6 +11221,9 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         // 进度条必须归零并清空阶段文案，否则会永久停在 30%，看起来像卡死。
         updateLazyDockPlaceholderProgress(dockWidget, QString(), 0);
         dockWidget->setProperty("ks_lazy_initializing", false);
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_content_factory", "no_content");
+#endif
         return;
     }
 
@@ -10668,6 +11232,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     // KernelDock 挂载策略：
     // - 没有背景图时保持根控件自绘，避免 ADS 恢复布局后露出黑色父容器；
     // - 有背景图时允许根控件透明，把底图透出来，仅由全局 QSS 保持表格/树/列表可读。
+    // 采集：根容器尺寸策略与根样式块设置单独计时；setStyleSheet 会向整棵子树重抛 StyleChange。
+    ks::ui::PerfScope rootStylePerf("perf_dock_root_style", dockKey);
     realWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     if (isKernelDock)
     {
@@ -10707,6 +11273,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         dockWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
+    rootStylePerf.finish(); // 采集：根容器样式设置阶段结束。
     kPro.set(progressPid, QStringLiteral("正在挂载%1页").arg(dockTitleText).toStdString(), 0, 72.0f);
     // 占位页最后一次刷新：挂载真实内容后它就被 takeWidget 摘下并 deleteLater，
     // 因此 100% 那一帧没有意义，不再往上刷。
@@ -10714,6 +11281,8 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         dockWidget,
         QStringLiteral("正在挂载%1页").arg(dockTitleText),
         80);
+    // 采集：把真实内容挂到 ADS 父链（摘旧控件、setWidget、页签视觉身份）单独计时。
+    ks::ui::PerfScope attachPerf("perf_dock_attach", dockKey);
     QWidget* oldWidget = dockWidget->takeWidget();
     dockWidget->setWidget(
         realWidget,
@@ -10725,6 +11294,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         oldWidget->deleteLater();
     }
+    attachPerf.finish(); // 采集：挂载阶段结束（尚未做主题准备与布局整理）。
 
     if (realWidget == m_processWidget)
     {
@@ -10736,20 +11306,38 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     const QPointer<MainWindow> windowLifetime(this); // 局部主题或布局回调可能关闭所属窗口。
     const QPointer<QWidget> contentLifetime(realWidget);
     const QPointer<ads::CDockWidget> dockLifetime(dockWidget);
-    ks::ui::PrepareWidgetThemeBindingsForShow(realWidget);
+    {
+        // 采集：只测量可见分支主题绑定的首帧准备耗时，不含其后的布局与刷新。
+        ks::ui::PerfScope themePreparePerf("perf_dock_theme_prepare", dockKey);
+        ks::ui::PrepareWidgetThemeBindingsForShow(realWidget);
+    }
     if (!windowLifetime || !contentLifetime || !dockLifetime)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_theme_preparation", "owner_destroyed");
+#endif
         return;
     }
+    // 采集：首帧布局整理与局部刷新单独计时。
+    ks::ui::PerfScope layoutPerf("perf_dock_layout", dockKey);
     if (QLayout* contentLayout = realWidget->layout())
     {
         contentLayout->activate();
     }
     if (!windowLifetime || !contentLifetime || !dockLifetime)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_layout_preparation", "owner_destroyed");
+#endif
         return;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    ks::ui::RecordPerfNavigationStage(mountNavigation, "ready",
+        "dock_content_mounted_theme_layout", "shell_prepared");
+    ks::ui::RecordPerfNavigationStage(mountNavigation, "end",
+        "dock_content_mounted_theme_layout", "shell_prepared");
+#endif
     // 真实内容挂载后继续继承 Dock 控件树的调色板：
     // - 主窗口背景改由根容器 paintEvent 绘制后，MainWindow 的 Window/Base 画刷只含主题纯色；
     // - 若在这里把该调色板显式复制给新内容，QAbstractScrollArea 等子控件会在首次挂载时刷出黑/白实底；
@@ -10758,6 +11346,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     realWidget->update();
     dockWidget->update();
     kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
+    layoutPerf.finish(); // 采集：布局与刷新阶段结束。
 
     if (realWidget == m_kernelWidget && m_pendingR0DynDataRefresh)
     {
@@ -10773,23 +11362,26 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
 }
 
-void MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget)
+ks::ui::PageSearchPreparation MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget,
+    const bool currentPageOnly, const bool singleStep, const bool useColdBodies, std::function<void()> resume)
 {
     if (dockWidget == nullptr)
     {
-        return;
+        return ks::ui::PageSearchPreparation::Complete;
     }
 
     const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
     // 全局搜索与 Taskbar 目录只在显式请求时准备嵌套懒页；普通启动和切页仍保持原有懒加载。
     if (dockKey == QStringLiteral("misc") && m_miscWidget != nullptr)
     {
-        m_miscWidget->prepareNavigationPages();
+        return m_miscWidget->prepareNavigationPages(currentPageOnly, singleStep, useColdBodies, std::move(resume));
     }
     else if (dockKey == QStringLiteral("memory") && m_memoryWidget != nullptr)
     {
-        m_memoryWidget->prepareNavigationPages();
+        return m_memoryWidget->prepareNavigationPages(currentPageOnly, singleStep, useColdBodies)
+            ? ks::ui::PageSearchPreparation::Complete : ks::ui::PageSearchPreparation::MorePages;
     }
+    return ks::ui::PageSearchPreparation::Complete;
 }
 
 void MainWindow::configureDockWidgetPersistentIdentity(
@@ -11209,6 +11801,7 @@ void MainWindow::initDockWidgets()
         m_memoryWidget->openPoolModuleDetails = [guard = QPointer<MainWindow>(this)](const QString& path) {
             if (guard) { guard->openFileDetailDockByPath(path); }
         };
+        bindMemoryHvmAvailabilityConsumer();
     }
     if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
     if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }
@@ -11354,7 +11947,17 @@ void MainWindow::initDockWidgets()
                 {
                     if (visible)
                     {
-                        QTimer::singleShot(0, this, [this, guardedDock]() {
+#if KSWORD_PERF_TRACE_ENABLED
+                        const auto traceContext = ks::ui::CapturePerfTraceContext();
+#endif
+                        QTimer::singleShot(0, this, [this, guardedDock
+#if KSWORD_PERF_TRACE_ENABLED
+                            , traceContext
+#endif
+                        ]() {
+#if KSWORD_PERF_TRACE_ENABLED
+                            const ks::ui::PerfTraceContextScope context(traceContext);
+#endif
                             // 快速切走后不再构造旧的隐藏页；明确 focus/jump 仍走原同步入口。
                             if (guardedDock != nullptr && guardedDock->isVisible())
                             {
@@ -11492,6 +12095,142 @@ void MainWindow::setupDockLayout()
         }
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    // 采集：注册现场上下文（当前 Dock），并记录 Dock 切换标记，
+    // 只标明观察时的 Dock；心跳整个区间不归因于末尾页签。
+    // 现场仅由既有 Dock 信号更新，不为诊断重复扫描 UI 树。
+    const auto describePerfDock = [](ads::CDockWidget* dockWidget) -> QString
+    {
+        if (dockWidget == nullptr)
+        {
+            return QString();
+        }
+        QString description = dockWidget->windowTitle();
+        if (description.isEmpty())
+        {
+            description = dockWidget->property("ks_lazy_key").toString();
+        }
+        if (!dockWidget->objectName().isEmpty())
+        {
+            if (!description.isEmpty())
+            {
+                description += QLatin1Char(' ');
+            }
+            description += QLatin1Char('[') + dockWidget->objectName() + QLatin1Char(']');
+        }
+        return description;
+    };
+    ks::ui::InitializePerfTrace();
+    ks::ui::RecordPerfLoadedModule("ads", reinterpret_cast<quintptr>(&ads::CDockManager::configFlags));
+
+    const auto recordEnvironment = [this]() { RecordPerformanceConditions(this, m_currentAppearanceSettings, m_backgroundImageReady); };
+    recordEnvironment();
+    const auto connectPerfDockArea = [this, describePerfDock, recordEnvironment](ads::CDockAreaWidget* area)
+    {
+        if (area == nullptr || area->property("ksword_perf_trace_connected").toBool())
+        {
+            return;
+        }
+        area->setProperty("ksword_perf_trace_connected", true);
+        struct PendingDockSwitch
+        {
+            ks::ui::PerfNavigationTrace navigation;
+            QPointer<ads::CDockWidget> target;
+            QPointer<QWidget> content;
+            bool warm = false;
+        };
+        const auto pending = std::make_shared<PendingDockSwitch>();
+        const QPointer<ads::CDockAreaWidget> observedArea(area);
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanging, this,
+            [observedArea, pending](int index)
+            {
+                if (pending->navigation.id)
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_changing", "superseded");
+                *pending = {};
+                if (!observedArea || index < 0 || index >= observedArea->dockWidgetsCount()) return;
+                auto* target = observedArea->dockWidget(index);
+                if (!target) return;
+                pending->target = target;
+                pending->content = target->widget();
+                pending->warm = pending->content &&
+                    (!target->property("ks_lazy_initialized").isValid()
+                        || target->property("ks_lazy_initialized").toBool());
+                pending->navigation = ks::ui::BeginPerfNavigationTrace("dock_switch",
+                    ks::ui::CapturePerfNavigationTarget(observedArea.data(), target, index), "begin");
+            });
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, this,
+            [observedArea, pending, describePerfDock, recordEnvironment](int index)
+            {
+                if (!observedArea) return;
+                auto* current = observedArea->currentDockWidget();
+                if (pending->navigation.id && pending->target && pending->target == current
+                    && index == observedArea->currentIndex())
+                {
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "selected",
+                        "ads_current_index", "observed");
+                    // In the bundled ADS, currentChanged follows the selected
+                    // widget's synchronous show(). This proves that boundary,
+                    // not completion of queued layout, business work or present.
+                    const bool shown = pending->warm && current->isVisible() && !current->isClosed()
+                        && pending->content && current->widget() == pending->content
+                        && (!current->property("ks_lazy_initialized").isValid()
+                            || current->property("ks_lazy_initialized").toBool())
+                        && !current->property("ks_lazy_initializing").toBool();
+                    if (shown)
+                        ks::ui::RecordPerfNavigationStage(pending->navigation, "ready",
+                            "ads_current_widget_show_returned", "warm_content_visible");
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_widget_show_returned", shown ? "warm_content_visible" : "readiness_unproven");
+                }
+                else
+                {
+                    if (pending->navigation.id)
+                        ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                            "ads_current_changed", "target_changed");
+                    if (index == observedArea->currentIndex())
+                        RecordDockNavigationObservation(current, "selected");
+                }
+                *pending = {};
+                ks::ui::RecordPerfMark("perf_dock_focus",
+                    describePerfDock(current));
+                recordEnvironment();
+            });
+        QObject::connect(area, &QObject::destroyed, this, [pending]()
+            {
+                if (pending->navigation.id)
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_changing", "owner_destroyed");
+                *pending = {};
+            });
+        if (area->currentDockWidget() != nullptr)
+        {
+            RecordDockNavigationObservation(area->currentDockWidget(), "initial_state", "initial_state");
+            ks::ui::RecordPerfMark("perf_dock_initial_state",
+                describePerfDock(area->currentDockWidget()));
+        }
+    };
+    for (ads::CDockAreaWidget* area : m_pDockManager->findChildren<ads::CDockAreaWidget*>())
+    {
+        connectPerfDockArea(area);
+    }
+    connect(m_pDockManager, &ads::CDockManager::dockAreaCreated, this,
+        [connectPerfDockArea](ads::CDockAreaWidget* area)
+        {
+            connectPerfDockArea(area);
+        });
+    connect(m_pDockManager, &ads::CDockManager::focusedDockWidgetChanged, this,
+        [describePerfDock, recordEnvironment](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
+        {
+            if (currentDock != nullptr)
+            {
+                RecordDockNavigationObservation(currentDock, "focus_observed");
+                ks::ui::RecordPerfMark("perf_dock_focus", describePerfDock(currentDock));
+                recordEnvironment();
+            }
+        });
+
+#endif
     const bool mainWindowUpdatesWereEnabled = updatesEnabled();
     const bool dockManagerUpdatesWereEnabled = m_pDockManager->updatesEnabled();
     setUpdatesEnabled(false);
@@ -12337,6 +13076,18 @@ void MainWindow::initAppearanceSettings()
     }
     else
     {
+        // ADS retains each XML area's saved selection in this property. Startup
+        // mounting and appearance work happen after restoreState; finish them by
+        // restoring that selection once, before the first business window Show.
+        for (auto* container : m_pDockManager->dockContainers())
+            for (int index = 0; index < container->dockAreaCount(); ++index)
+            {
+                auto* area = container->dockArea(index);
+                auto* savedDock = m_pDockManager->findDockWidget(area->property("currentDockWidget").toString());
+                if (savedDock && !savedDock->isClosed() && savedDock->dockAreaWidget() == area
+                    && area->currentDockWidget() != savedDock)
+                    area->setCurrentDockWidget(savedDock);
+            }
         reportStartupProgress(
             92,
             QStringLiteral("main.startup.progress.reuse_dock_layout"),
@@ -12371,6 +13122,9 @@ void MainWindow::applyAppearanceSettings(
     // 但快照采集依赖它，提前求值才能拿到“换色前”的主题状态。
     const bool effectiveThemeChanged =
         isInitialAppearanceApply || KswordTheme::IsDarkModeEnabled() != darkModeEnabled;
+    const bool controlOpacityChanged = isInitialAppearanceApply
+        || previousSettings.controlBackgroundOpacityPercent != settings.controlBackgroundOpacityPercent;
+    ks::ui::SetMainDataSurfaceOpacityPercent(settings.controlBackgroundOpacityPercent);
     // themeVisualRefreshRequired 用途：作为所有专用主题控件的唯一重建条件。
     // 深浅主题、强调色或独立主背景色任一变化，都必须进入同一刷新入口。
     const bool themeVisualRefreshRequired =
@@ -12425,6 +13179,10 @@ void MainWindow::applyAppearanceSettings(
     const bool smoothScrollingChanged =
         isInitialAppearanceApply
         || previousSettings.smoothScrollingEnabled != settings.smoothScrollingEnabled;
+    // 动画总开关变化也要重算平滑滚动，因为总开关关闭时滚轮必须直接跳转。
+    const bool uiAnimationsChanged =
+        isInitialAppearanceApply
+        || previousSettings.uiAnimationsEnabled != settings.uiAnimationsEnabled;
     const bool topMostChanged =
         isInitialAppearanceApply
         || previousSettings.startupTopMostEnabled != settings.startupTopMostEnabled;
@@ -12449,9 +13207,12 @@ void MainWindow::applyAppearanceSettings(
         // 保存主题/通知配置不改变详情布局，避免再次遍历并重排全部已登记的详情面板。
         ks::ui::DetailLayoutRegistry::applyGlobalScheme(settings.detailDisplayScheme);
     }
-    if (smoothScrollingChanged)
+    ks::ui::SetGlobalUiAnimationsEnabled(settings.uiAnimationsEnabled);
+    if (smoothScrollingChanged || uiAnimationsChanged)
     {
-        ks::ui::SetGlobalSmoothScrollingEnabled(settings.smoothScrollingEnabled);
+        // 总开关覆盖平滑滚动：关闭界面动画时不做逐帧缓动。
+        ks::ui::SetGlobalSmoothScrollingEnabled(
+            settings.smoothScrollingEnabled && settings.uiAnimationsEnabled);
     }
     RuntimeAppearanceProgress runtimeProgress(runtimeProgressRequired);
 
@@ -12484,7 +13245,7 @@ void MainWindow::applyAppearanceSettings(
         || (previousBackgroundImageReady || windowTranslucencyActive) != enableDockContentTransparency;
     const bool mainStyleRefreshRequired =
         themeVisualRefreshRequired
-        || dockTransparencyChanged;
+        || dockTransparencyChanged || controlOpacityChanged;
     const bool backgroundRefreshRequired =
         isInitialAppearanceApply
         || effectiveThemeChanged
@@ -12517,27 +13278,7 @@ void MainWindow::applyAppearanceSettings(
         const QColor windowTextColor = KswordTheme::MainBackgroundTextColor();
         const QColor textColor = KswordTheme::TextPrimaryColor();
         const QColor baseColor = KswordTheme::SurfaceColor();
-        const QColor alternateBaseColor = KswordTheme::SurfaceAltColor();
-        const QColor midColor = KswordTheme::BorderColor();
-
-        // Windows 11 背景控制要求：
-        // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
-        QPalette mainPalette = palette();
-        mainPalette.setColor(QPalette::Window, windowBackgroundColor);
-        mainPalette.setColor(QPalette::WindowText, windowTextColor);
-        mainPalette.setColor(QPalette::Base, baseColor);
-        mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
-        mainPalette.setColor(QPalette::Mid, midColor);
-        mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
-        mainPalette.setColor(QPalette::Dark, KswordTheme::PaletteDarkColor());
-        mainPalette.setColor(QPalette::Text, textColor);
-        mainPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
-        mainPalette.setColor(QPalette::Button, alternateBaseColor);
-        mainPalette.setColor(QPalette::ButtonText, textColor);
-        mainPalette.setColor(QPalette::ToolTipBase, baseColor);
-        mainPalette.setColor(QPalette::ToolTipText, textColor);
-        mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-        mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        const QPalette mainPalette = buildApplicationAppearancePalette(palette());
         if (QApplication::palette() != mainPalette)
         {
             QApplication::setPalette(mainPalette);
@@ -12558,11 +13299,7 @@ void MainWindow::applyAppearanceSettings(
         }
 
         globalAppStyleChanged = applyGlobalApplicationStyleBlocks(
-            ks::ui::BuildGlobalBaseControlStyleBlock(),
-            buildGlobalTooltipStyleBlock(darkModeEnabled),
-            buildGlobalContextMenuStyleBlock(darkModeEnabled),
-            buildGlobalControlContrastStyleBlock(darkModeEnabled),
-            buildGlobalComboBoxStyleBlock(darkModeEnabled),
+            darkModeEnabled,
             &globalAppStyleApplyMs,
             &globalAppStyleWidgetCount,
             &globalAppStyleLength);
@@ -12668,6 +13405,7 @@ void MainWindow::applyAppearanceSettings(
         QElapsedTimer styleSheetApplyTimer;
         styleSheetApplyTimer.start();
         mainStyleSheetChanged = (styleSheet() != appearanceStyleSheet);
+        ks::ui::RegisterSharedMainSurfaceButtonStyle(this, appearanceStyleSheet);
         if (mainStyleSheetChanged)
         {
             setStyleSheet(appearanceStyleSheet);
@@ -12733,6 +13471,8 @@ void MainWindow::applyAppearanceSettings(
             m_notificationCardManager->applySettings(m_currentAppearanceSettings);
         }
     }
+    if (!themeVisualRefreshRequired && (controlOpacityChanged || dockTransparencyChanged))
+        ks::ui::RefreshWidgetThemeBindings();
     if (themeVisualRefreshRequired)
     {
         refreshThemeDependentVisuals(darkModeEnabled);
@@ -12876,6 +13616,9 @@ void MainWindow::applyAppearanceSettings(
         << "，elapsedMs="
         << appearanceApplyTimer.elapsed()
         << eol;
+#if KSWORD_PERF_TRACE_ENABLED
+    RecordPerformanceConditions(this, m_currentAppearanceSettings, m_backgroundImageReady);
+#endif
 }
 
 void MainWindow::refreshThemeDependentVisuals(const bool darkModeEnabled)
@@ -12915,7 +13658,7 @@ void MainWindow::refreshThemeDependentVisuals(const bool darkModeEnabled)
     }
 }
 
-bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const
+bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& settings)
 {
     if (settings.themeMode == ks::settings::ThemeMode::Dark)
     {
@@ -13051,7 +13794,7 @@ const QPixmap* MainWindow::cachedBackgroundImage(const QString& rawImagePath) co
         return nullptr;
     }
     // 模糊副本只在“玻璃模糊半径”>0 且已由 refreshBackgroundImageBlurCache 生成时替换原图；
-    // 主窗口根容器与浮动 Dock 画刷都走这里，因此两者永远取到同一张底图。
+    // 主窗口根容器与浮动 Dock 背景宿主都走这里，因此两者永远取到同一张底图。
     return m_backgroundImageBlurredPixmap.isNull()
         ? &m_backgroundImagePixmap
         : &m_backgroundImageBlurredPixmap;
@@ -13210,36 +13953,29 @@ void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
     }
 }
 
-void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const
+void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget)
 {
     if (floatingWidget == nullptr)
     {
         return;
     }
 
-    const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
     const QColor baseColor = KswordTheme::MainBackgroundColor();
+    // 浮动窗沿用独立不透明顶层的既有策略；主窗口的穿透开关不改变浮动窗原生属性。
     const bool enableDockContentTransparency =
         isCachedBackgroundImageReady(m_currentAppearanceSettings.backgroundImagePath);
-    // sourceImage 用途：浮动容器复用线程池解码结果，不执行路径探测或文件加载。
-    const QPixmap* sourceImage =
-        cachedBackgroundImage(m_currentAppearanceSettings.backgroundImagePath);
-
-    // floatingSize 用途：浮动容器当前尺寸；无效时至少给 1x1，避免画刷构造失败。
-    floatingWidget->setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
-    const QSize floatingSize = floatingWidget->size().isValid() ? floatingWidget->size() : QSize(1, 1);
-    const QBrush backgroundBrush = buildBackgroundBrush(
-        floatingSize,
-        baseColor,
-        sourceImage,
+    const int imageOpacityPercent = normalizeOpacityPercent(
         m_currentAppearanceSettings.backgroundOpacityPercent);
+    const QPixmap* sourceImage = imageOpacityPercent > 0
+        ? cachedBackgroundImage(m_currentAppearanceSettings.backgroundImagePath)
+        : nullptr;
+    const bool paintBackgroundImage = sourceImage != nullptr && !sourceImage->isNull();
 
+    floatingWidget->setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
     QPalette floatingPalette = floatingWidget->palette();
+    // palette 只保留稳定纯色；不再分配随每个新尺寸变化的整窗纹理。
     floatingPalette.setColor(QPalette::Window, baseColor);
-    floatingPalette.setBrush(QPalette::Window, backgroundBrush);
-    floatingPalette.setColor(
-        QPalette::WindowText,
-        KswordTheme::MainBackgroundTextColor());
+    floatingPalette.setColor(QPalette::WindowText, KswordTheme::MainBackgroundTextColor());
     if (floatingWidget->palette() != floatingPalette)
     {
         floatingWidget->setPalette(floatingPalette);
@@ -13247,34 +13983,70 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     floatingWidget->setAutoFillBackground(true);
     floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
 
-    // 浮动窗口是独立顶层窗口，不继承 MainWindow 的局部样式表；
-    // 这里显式复用同一套外观样式，确保 Tab/TitleBar/内容区规则一致。
-    const QString appearanceStyleSheet =
-        QSS_MainWindow_TabWidget
-        + QSS_MainWindow_dockStyle
-        + buildAppearanceOverlayStyleSheet(
-            m_currentAppearanceSettings,
-            darkModeEnabled,
-            enableDockContentTransparency);
-    // 尺寸/背景图刷新仍需换画刷，但配色规则没有变化时不重抛整棵浮动页的 StyleChange。
-    if (floatingWidget->styleSheet() != appearanceStyleSheet)
+    // 配方只依赖实际深浅模式/强调色/主背景及透明内容策略，所有浮动窗共享结果。
+    // 全局种子代次也会因保存相同配置递增，故比较真实输入，图片/opacity 更新不重建 QSS。
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    const QColor accentColor = KswordTheme::PrimaryAccentColor();
+    if (m_floatingDockAppearanceDarkMode != darkModeEnabled
+        || m_floatingDockAppearanceAccentColor != accentColor
+        || m_floatingDockAppearanceBaseColor != baseColor
+        || m_floatingDockAppearanceTransparency != enableDockContentTransparency
+        || m_floatingDockAppearanceStyleSheet.isEmpty())
     {
-        floatingWidget->setStyleSheet(appearanceStyleSheet);
+        m_floatingDockAppearanceStyleSheet =
+            QSS_MainWindow_TabWidget
+            + QSS_MainWindow_dockStyle
+            + buildAppearanceOverlayStyleSheet(
+                m_currentAppearanceSettings,
+                darkModeEnabled,
+                enableDockContentTransparency);
+        m_floatingDockAppearanceDarkMode = darkModeEnabled;
+        m_floatingDockAppearanceAccentColor = accentColor;
+        m_floatingDockAppearanceBaseColor = baseColor;
+        m_floatingDockAppearanceTransparency = enableDockContentTransparency;
     }
-    // 仍校验真实导航结构，已改为 ADS 登记表遍历，惰性新 Dock 不会因样式相同而漏接入。
+    ks::ui::RegisterSharedMainSurfaceButtonStyle(floatingWidget, m_floatingDockAppearanceStyleSheet);
+    if (floatingWidget->styleSheet() != m_floatingDockAppearanceStyleSheet)
+    {
+        floatingWidget->setStyleSheet(m_floatingDockAppearanceStyleSheet);
+    }
+    // 仅创建/Show/主题刷新检查导航；Resize 不再进入此路径。
     refreshAdsDockTabVisualIdentities(floatingWidget);
+
+    MainWindowBackgroundWidget* background = floatingDockBackgroundWidget(floatingWidget);
+    if (paintBackgroundImage)
+    {
+        if (background == nullptr)
+        {
+            background = new MainWindowBackgroundWidget(floatingWidget);
+            background->setObjectName(QString::fromLatin1(kFloatingBackgroundObjectName));
+            background->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            background->setFocusPolicy(Qt::NoFocus);
+            // 作为布局外的最底层兄弟，保留 ADS 容器、标题栏和业务页的既有身份。
+            background->lower();
+        }
+        background->setBackground(baseColor, sourceImage, imageOpacityPercent);
+        background->setGeometry(floatingWidget->rect());
+        background->show();
+    }
+    else if (background != nullptr)
+    {
+        // 图片关闭/opacity 0 立即释放旧像素引用，回到原来的纯色自动填充快速路径。
+        background->setBackground(baseColor, nullptr, 0);
+        background->hide();
+    }
 
     ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();
     if (dockContainer != nullptr)
     {
         QPalette dockContainerPalette = dockContainer->palette();
         dockContainerPalette.setColor(QPalette::Window, baseColor);
-        dockContainerPalette.setBrush(QPalette::Window, backgroundBrush);
         if (dockContainer->palette() != dockContainerPalette)
         {
             dockContainer->setPalette(dockContainerPalette);
         }
-        dockContainer->setAutoFillBackground(true);
+        // 有图时让底层背景宿主一次绘制完整 cover；无图保持既有纯色填充。
+        dockContainer->setAutoFillBackground(!paintBackgroundImage);
         dockContainer->setAttribute(Qt::WA_StyledBackground, false);
     }
 }
@@ -13287,7 +14059,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // tooltipStyle 作用：
     // - 强制全局提示框采用主题化背景和文字；
     // - 修复深色模式下 Tooltip 仍为白底的问题。
-    const QString windowBackgroundText = KswordTheme::MainBackgroundColorHex();
+    const QString windowBackgroundText = ks::ui::MainDataSurfaceStyleColor(
+        KswordTheme::MainBackgroundColor(), enableDockContentTransparency);
     const QString windowTextColor = KswordTheme::MainBackgroundTextColorHex();
     const QString surfaceBackgroundText = KswordTheme::SurfaceColorHex();
     const QString surfaceAltBackgroundText = KswordTheme::SurfaceAltColorHex();
@@ -13662,7 +14435,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
             + tabPluginOpaqueStyle
             + finalOrdinaryTabHoverStyle
-            + KswordTheme::DockNavigationStyleSheet();
+            + KswordTheme::DockNavigationStyleSheet(enableDockContentTransparency ? ks::ui::MainDataSurfaceAlpha() : 255);
     }
 
     return rootStyle
@@ -13718,5 +14491,5 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
         + tabPluginOpaqueStyle
         + finalOrdinaryTabHoverStyle
-        + KswordTheme::DockNavigationStyleSheet();
+        + KswordTheme::DockNavigationStyleSheet(enableDockContentTransparency ? ks::ui::MainDataSurfaceAlpha() : 255);
 }

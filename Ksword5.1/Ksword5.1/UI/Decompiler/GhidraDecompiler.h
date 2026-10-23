@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <memory>
 
@@ -75,6 +76,8 @@ namespace ks::ui
         struct State;
         std::unique_ptr<State> m_state;
         void launch(const DecompilerRequest& request);
+        void launchProcess(const QString& java, const QStringList& arguments, int seconds);
+        void publishResult(DecompilerResult result, quint64 revision);
         void complete(const QString& error = QString());
         void stopProcess(const QString& reason);
         void collectOutput();

@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
@@ -5,6 +6,10 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/FlatTableModel.h"
+#include "NetworkValueTableModel.h"
+#include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -23,13 +28,13 @@
 #include "../theme.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../Internationalization/LanguageManager.h"
-#include "../UI/GlobalDialogTheme.h"
 #include "../ksword/process/process.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
 #include <QAction>
 #include <QCheckBox>
+#include <QBrush>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
@@ -56,8 +61,9 @@
 #include <QSplitter>
 #include <QStringList>
 #include <QTabWidget>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include <QTableView>
+#include <QSortFilterProxyModel>
+
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -74,6 +80,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <tuple>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -120,7 +127,7 @@ namespace
     constexpr std::size_t kMaximumQueuedLiveEvents = 2000U;
 
     void installFirewallTableCopyMenu(
-        QTableWidget* tableWidget,
+        QTableView* tableWidget,
         const std::function<void(int)>& addBlockRuleHandler = {})
     {
         // installFirewallTableCopyMenu 作用：
@@ -135,14 +142,14 @@ namespace
         tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(
             tableWidget,
-            &QTableWidget::customContextMenuRequested,
+            &QTableView::customContextMenuRequested,
             tableWidget,
             [tableWidget, addBlockRuleHandler](const QPoint& localPosition)
             {
                 const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
                 if (clickedIndex.isValid())
                 {
-                    tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                    tableWidget->setCurrentIndex(clickedIndex);
                 }
 
                 QMenu contextMenu(tableWidget);
@@ -152,21 +159,22 @@ namespace
                     QStringLiteral("复制当前行"));
                 // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
                 ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-                copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+                copyRowAction->setEnabled(!ks::ui::IsTableRowExcludedByFilter(tableWidget, tableWidget->currentIndex().row()));
                 QAction* addBlockRuleAction = nullptr;
                 if (addBlockRuleHandler)
                 {
                     addBlockRuleAction = contextMenu.addAction(
                         QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
                         QStringLiteral("预填阻断规则"));
-                    addBlockRuleAction->setEnabled(tableWidget->currentRow() >= 0);
+                    addBlockRuleAction->setEnabled(!ks::ui::IsTableRowExcludedByFilter(tableWidget, tableWidget->currentIndex().row()));
                 }
 
                 const QAction* selectedAction = contextMenu.exec(
                     tableWidget->viewport()->mapToGlobal(localPosition));
-                if (selectedAction == addBlockRuleAction)
+                if (selectedAction == addBlockRuleAction && addBlockRuleHandler
+                    && !ks::ui::IsTableRowExcludedByFilter(tableWidget, tableWidget->currentIndex().row()))
                 {
-                    addBlockRuleHandler(tableWidget->currentRow());
+                    addBlockRuleHandler(tableWidget->currentIndex().row());
                     return;
                 }
                 if (selectedAction != copyRowAction)
@@ -175,18 +183,18 @@ namespace
                 }
 
                 QClipboard* clipboardObject = QGuiApplication::clipboard();
-                const int rowIndex = tableWidget->currentRow();
-                if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+                const int rowIndex = tableWidget->currentIndex().row();
+                if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->model()->rowCount()
+                    || ks::ui::IsTableRowExcludedByFilter(tableWidget, rowIndex))
                 {
                     return;
                 }
 
                 QStringList rowFields;
-                rowFields.reserve(tableWidget->columnCount());
-                for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+                rowFields.reserve(tableWidget->model()->columnCount());
+                for (int columnIndex = 0; columnIndex < tableWidget->model()->columnCount(); ++columnIndex)
                 {
-                    const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
-                    rowFields.push_back(item != nullptr ? item->text() : QString());
+                    rowFields.push_back(tableWidget->model()->index(rowIndex, columnIndex).data().toString());
                 }
                 clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
             });
@@ -417,6 +425,99 @@ namespace
     {
         return valueText.trimmed().isEmpty() ? QStringLiteral("-") : valueText.trimmed();
     }
+
+    void clearFilteredFirewallSelection(QTableView* table)
+    {
+        if (!table || !table->selectionModel()) return;
+        auto* selection = table->selectionModel();
+        QItemSelection excludedSelection;
+        for (const auto& row : network_value_detail::selectedRows(selection))
+            if (ks::ui::IsTableRowExcludedByFilter(table, row.row()))
+                excludedSelection.select(table->model()->index(row.row(), 0),
+                    table->model()->index(row.row(), table->model()->columnCount() - 1));
+        if (!excludedSelection.isEmpty()) selection->select(excludedSelection, QItemSelectionModel::Deselect);
+        if (ks::ui::IsTableRowExcludedByFilter(table, table->currentIndex().row()))
+            selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+    }
+
+    using FirewallEventModel = network_value_detail::Model<NetworkFirewallPage::FirewallEventEntry>;
+    using FirewallRuleModel = network_value_detail::Model<NetworkFirewallPage::FirewallRuleEntry>;
+    using HostnameCommit = std::function<void(const QHash<QString, QString>&)>;
+
+    QString eventColumnText(const NetworkFirewallPage::FirewallEventEntry& entry, const int column)
+    {
+        switch (column)
+        {
+        case ColumnName: return safeText(entry.nameText);
+        case ColumnAction: return safeText(entry.actionText);
+        case ColumnDirection: return safeText(entry.directionText);
+        case ColumnRule: return safeText(entry.ruleText);
+        case ColumnDescription: return safeText(entry.descriptionText);
+        case ColumnLocalAddress: return safeText(entry.localAddressText);
+        case ColumnLocalPort: return safeText(entry.localPortText);
+        case ColumnLocalHost: return safeText(entry.localHostText);
+        case ColumnRemoteAddress: return safeText(entry.remoteAddressText);
+        case ColumnRemotePort: return safeText(entry.remotePortText);
+        case ColumnRemoteHost: return safeText(entry.remoteHostText);
+        case ColumnProtocol: return safeText(entry.protocolText);
+        case ColumnTimestamp: return safeText(entry.timestampText);
+        default: return {};
+        }
+    }
+
+    QString ruleColumnText(const NetworkFirewallPage::FirewallRuleEntry& entry, const int column)
+    {
+        switch (column)
+        {
+        case RuleColumnName: return safeText(entry.nameText);
+        case RuleColumnEnabled: return entry.enabled ? QStringLiteral("Yes") : QStringLiteral("No");
+        case RuleColumnAction: return safeText(entry.actionText);
+        case RuleColumnDirection: return safeText(entry.directionText);
+        case RuleColumnProfiles: return safeText(entry.profilesText);
+        case RuleColumnProtocol: return safeText(entry.protocolText);
+        case RuleColumnLocalPorts: return safeText(entry.localPortsText);
+        case RuleColumnRemotePorts: return safeText(entry.remotePortsText);
+        case RuleColumnApplication: return safeText(entry.applicationText);
+        case RuleColumnService: return safeText(entry.serviceText);
+        case RuleColumnGrouping: return safeText(entry.groupingText);
+        case RuleColumnDescription: return safeText(entry.descriptionText);
+        default: return {};
+        }
+    }
+
+    template<class Entry, class Resolver>
+    QString firewallSearchDocument(const Entry& entry, const int columns, Resolver resolve)
+    {
+        QStringList fields;
+        fields.reserve(columns);
+        for (int column = 0; column < columns; ++column) fields.push_back(resolve(entry, column));
+        return fields.join(QLatin1Char('\n')).toCaseFolded();
+    }
+
+    bool sameFirewallRule(const NetworkFirewallPage::FirewallRuleEntry& a,
+        const NetworkFirewallPage::FirewallRuleEntry& b)
+    {
+        return std::tie(a.fingerprintText, a.nameText, a.descriptionText, a.applicationText, a.serviceText,
+            a.localPortsText, a.remotePortsText, a.localAddressesText, a.remoteAddressesText, a.groupingText,
+            a.actionText, a.directionText, a.profilesText, a.protocolText, a.enabled,
+            a.actionValue, a.directionValue, a.profilesValue, a.protocolValue)
+            == std::tie(b.fingerprintText, b.nameText, b.descriptionText, b.applicationText, b.serviceText,
+                b.localPortsText, b.remotePortsText, b.localAddressesText, b.remoteAddressesText, b.groupingText,
+                b.actionText, b.directionText, b.profilesText, b.protocolText, b.enabled,
+                b.actionValue, b.directionValue, b.profilesValue, b.protocolValue);
+    }
+
+    bool sameFirewallEvent(const NetworkFirewallPage::FirewallEventEntry& a,
+        const NetworkFirewallPage::FirewallEventEntry& b)
+    {
+        return std::tie(a.displayIdentity, a.nameText, a.applicationPathText, a.actionText, a.directionText,
+            a.ruleText, a.descriptionText, a.localAddressText, a.localPortText, a.localHostText,
+            a.remoteAddressText, a.remotePortText, a.remoteHostText, a.protocolText, a.timestampText, a.isDrop)
+            == std::tie(b.displayIdentity, b.nameText, b.applicationPathText, b.actionText, b.directionText,
+                b.ruleText, b.descriptionText, b.localAddressText, b.localPortText, b.localHostText,
+                b.remoteAddressText, b.remotePortText, b.remoteHostText, b.protocolText, b.timestampText, b.isDrop);
+    }
+
 
     // rawTextOrEmpty 作用：
     // - 输入：候选文本；
@@ -867,7 +968,6 @@ namespace
         {
             setWindowTitle(initialRuleEntry == nullptr ? QStringLiteral("新增防火墙规则") : QStringLiteral("编辑防火墙规则"));
             resize(900, 470);
-            ks::ui::RefreshGlobalDialogTheme();
             ks::ui::StyleSecondaryWindow(this);
 
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
@@ -1357,49 +1457,12 @@ namespace
         return pendingAddressList;
     }
 
-    // applyResolvedHostnamesToEventTable 作用：
-    // - 输入：事件表控件、地址 -> 主机名映射；
-    // - 处理：在 UI 线程按地址列文本回填本地/远端主机名列；
-    // - 返回：无。
-    void applyResolvedHostnamesToEventTable(
-        QTableWidget* eventTable,
-        const QHash<QString, QString>& resolvedHostnameMap)
-    {
-        if (eventTable == nullptr || resolvedHostnameMap.isEmpty())
-        {
-            return;
-        }
-
-        constexpr std::array<int, 2> addressColumnList = { ColumnLocalAddress, ColumnRemoteAddress };
-        constexpr std::array<int, 2> hostnameColumnList = { ColumnLocalHost, ColumnRemoteHost };
-        eventTable->setUpdatesEnabled(false);
-        for (int rowIndex = 0; rowIndex < eventTable->rowCount(); ++rowIndex)
-        {
-            for (std::size_t columnPairIndex = 0; columnPairIndex < addressColumnList.size(); ++columnPairIndex)
-            {
-                const QTableWidgetItem* addressItem = eventTable->item(rowIndex, addressColumnList[columnPairIndex]);
-                QTableWidgetItem* hostnameItem = eventTable->item(rowIndex, hostnameColumnList[columnPairIndex]);
-                if (addressItem == nullptr || hostnameItem == nullptr)
-                {
-                    continue;
-                }
-                const auto resolvedIterator = resolvedHostnameMap.constFind(addressItem->text());
-                if (resolvedIterator == resolvedHostnameMap.constEnd() || resolvedIterator.value().isEmpty())
-                {
-                    continue;
-                }
-                hostnameItem->setText(resolvedIterator.value());
-            }
-        }
-        eventTable->setUpdatesEnabled(true);
-    }
-
     // submitResolvedHostnames 作用：
-    // - 输入：事件表控件、握手状态、本批解析结果；
-    // - 处理：在 owner 仍然有效时把结果回投给 UI 线程写表；
+    // - 输入：规范值回填函数、握手状态、本批解析结果；
+    // - 处理：在 owner 仍然有效时把值回投给 UI 线程；
     // - 返回：页面已析构返回 false，调用方据此结束反查任务。
     bool submitResolvedHostnames(
-        QTableWidget* eventTable,
+        const HostnameCommit& commit,
         const std::shared_ptr<FirewallAsyncTaskState>& taskState,
         const QHash<QString, QString>& resolvedHostnameMap)
     {
@@ -1416,25 +1479,25 @@ namespace
         }
         QMetaObject::invokeMethod(
             receiver,
-            [eventTable, taskState, resolvedHostnameMap]()
+            [commit, taskState, resolvedHostnameMap]()
             {
-                // 事件表是页面的子控件：owner 非空即代表控件仍然存活。
-                std::lock_guard<std::mutex> stateGuard(taskState->dispatchMutex);
-                if (taskState->owner == nullptr)
+                // Only the queued GUI sink reads its guarded page. No view/model
+                // enters the resolver worker, and no Qt signal runs under this mutex.
                 {
-                    return;
+                    std::lock_guard<std::mutex> stateGuard(taskState->dispatchMutex);
+                    if (taskState->owner == nullptr) return;
                 }
-                applyResolvedHostnamesToEventTable(eventTable, resolvedHostnameMap);
+                commit(resolvedHostnameMap);
             },
             Qt::QueuedConnection);
         return true;
     }
 
     // runHostnameResolutionWorker 作用：
-    // - 输入：事件表控件、握手状态；
+    // - 输入：GUI值回填函数、握手状态；
     // - 处理：串行消费待反查队列，每条地址前检查取消位，攒够一批就回投；
-    // - 返回：无。整个任务只使用文件级缓存和控件公开接口，不触碰页面成员。
-    void runHostnameResolutionWorker(QTableWidget* eventTable, const std::shared_ptr<FirewallAsyncTaskState>& taskState)
+    // - 返回：无。任务只处理地址和值，不读取控件或页面成员。
+    void runHostnameResolutionWorker(const HostnameCommit& commit, const std::shared_ptr<FirewallAsyncTaskState>& taskState)
     {
         // 反查任务不登记 AsyncWorkerScope：单次 GetNameInfoW 在 PTR 缺失时可能要秒级
         // 才超时返回，析构不应该为它多等；它本身不触碰页面成员，可以自行跑完退出。
@@ -1464,7 +1527,7 @@ namespace
             {
                 continue;
             }
-            if (!submitResolvedHostnames(eventTable, taskState, resolvedHostnameMap))
+            if (!submitResolvedHostnames(commit, taskState, resolvedHostnameMap))
             {
                 std::lock_guard<std::mutex> queueGuard(taskState->hostnameQueueMutex);
                 taskState->pendingHostnameAddressList.clear();
@@ -1475,19 +1538,19 @@ namespace
             resolvedHostnameMap.clear();
         }
 
-        (void)submitResolvedHostnames(eventTable, taskState, resolvedHostnameMap);
+        (void)submitResolvedHostnames(commit, taskState, resolvedHostnameMap);
     }
 
     // enqueueHostnameResolution 作用：
-    // - 输入：事件表控件、握手状态、待反查地址列表；
+    // - 输入：GUI值回填函数、握手状态、待反查地址列表；
     // - 处理：把地址并入去重队列，必要时 detach 唯一一个反查任务；
     // - 返回：无。
     void enqueueHostnameResolution(
-        QTableWidget* eventTable,
+        const HostnameCommit& commit,
         const std::shared_ptr<FirewallAsyncTaskState>& taskState,
         const QStringList& pendingAddressList)
     {
-        if (eventTable == nullptr || !taskState || pendingAddressList.isEmpty())
+        if (!commit || !taskState || pendingAddressList.isEmpty())
         {
             return;
         }
@@ -1517,9 +1580,9 @@ namespace
 
         try
         {
-            std::thread([eventTable, taskState]()
+            std::thread([commit, taskState]()
             {
-                runHostnameResolutionWorker(eventTable, taskState);
+                runHostnameResolutionWorker(commit, taskState);
             }).detach();
         }
         catch (...)
@@ -2521,6 +2584,18 @@ NetworkFirewallPage::NetworkFirewallPage(QWidget* parent)
 void NetworkFirewallPage::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
+    if (event != nullptr && event->type() == QEvent::LanguageChange)
+    {
+        // FlatTableModel localizes on read. The existing model-data opt-out
+        // prevents compatibility translation from walking every source cell.
+        for (auto* table : {m_eventTable, m_ruleTable})
+            if (table)
+            {
+                table->viewport()->update();
+                table->horizontalHeader()->viewport()->update();
+            }
+        return;
+    }
     if (event == nullptr || (event->type() != QEvent::PaletteChange
         && event->type() != QEvent::ApplicationPaletteChange) || m_itemThemeRefreshScheduled)
     {
@@ -2534,12 +2609,36 @@ void NetworkFirewallPage::changeEvent(QEvent* event)
     });
 }
 
+bool NetworkFirewallPage::eventFilter(QObject* watched, QEvent* event)
+{
+    if ((watched == m_eventTable || watched == m_ruleTable) && event != nullptr
+        && (event->type() == QEvent::Show || event->type() == QEvent::ShowToParent))
+    {
+        presentPendingFirewallValues();
+        if (watched == m_eventTable && m_eventFilterDirty) applyFilterToRows();
+        if (watched == m_ruleTable && m_ruleFilterDirty) applyRuleFilterToRows();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 NetworkFirewallPage::~NetworkFirewallPage()
 {
     // 所有后台任务都只使用文件级函数和入参副本，不触碰页面成员：这里先置取消位
     // 并清空回投 owner，再限时等待在跑任务收敛。等待超时也不死等——任务继续跑到底
     // 同样安全，它们只会发现 owner 已空并放弃回投。
     m_shuttingDown.store(true);
+    if (m_eventFilterOperation) m_eventFilterOperation->close();
+    if (m_ruleFilterOperation) m_ruleFilterOperation->close();
+    if (m_eventSourceOperation) m_eventSourceOperation->close();
+    if (m_eventDiffOperation) m_eventDiffOperation->close();
+    if (m_ruleDiffOperation) m_ruleDiffOperation->close();
+    if (m_eventTable) m_eventTable->removeEventFilter(this);
+    if (m_ruleTable)
+    {
+        m_ruleTable->removeEventFilter(this);
+        if (m_ruleTable->selectionModel())
+            QObject::disconnect(m_ruleTable->selectionModel(), nullptr, this, nullptr);
+    }
     if (m_liveFlushTimer != nullptr)
     {
         m_liveFlushTimer->stop();
@@ -2664,11 +2763,10 @@ void NetworkFirewallPage::initializeEventMonitorUi()
 
     // 证据列表保留完整高度；工具色块与画布明确分层。
     ks::ui::StyleWorkspacePage(m_eventMonitorPage);
-    m_eventTable = new ks::ui::VisibleTableWidget(m_eventMonitorPage);
+    m_eventTable = new ks::ui::TableActionTableView(m_eventMonitorPage);
     // 防火墙事件保留完整取证操作栏。
     ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Full);
-    m_eventTable->setColumnCount(ColumnCount);
-    m_eventTable->setHorizontalHeaderLabels({
+    const QStringList eventHeaders = {
         QStringLiteral("Name"),
         QStringLiteral("Action"),
         QStringLiteral("Direction"),
@@ -2682,7 +2780,30 @@ void NetworkFirewallPage::initializeEventMonitorUi()
         QStringLiteral("Remote host"),
         QStringLiteral("Protocol"),
         QStringLiteral("Timestamp")
+        };
+    std::vector<FirewallEventModel::ColumnSpec> eventColumns;
+    for (const auto& header : eventHeaders) eventColumns.push_back({header});
+    m_eventValueModel = new FirewallEventModel(std::move(eventColumns),
+        [](const FirewallEventEntry& entry, const int column, const int role) -> QVariant {
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return eventColumnText(entry, column);
+            if (role == Qt::UserRole) return entry.isDrop;
+            if (column == ColumnName && role == Qt::UserRole + 1) return entry.applicationPathText;
+            if (column == ColumnName && role == Qt::UserRole + 2) return entry.searchDocumentText;
+            return {};
+        }, m_eventTable, FirewallEventModel::FlagsResolver{},
+        [](const FirewallEventEntry& entry) { return std::to_string(entry.displayIdentity); },
+        [](const FirewallEventEntry& a, const FirewallEventEntry& b) {
+            return sameFirewallEvent(a, b) ? std::vector<FirewallEventModel::ColumnChange>{}
+                : std::vector<FirewallEventModel::ColumnChange>{{0, ColumnCount - 1, {}}};
         });
+    auto* eventSort = new network_value_detail::SortProxy(m_eventTable);
+    eventSort->setSourceModel(m_eventValueModel);
+    eventSort->request = [this]() { m_eventDiffRequestedRevision.reset(); m_eventProjectionDirty = true; presentPendingFirewallValues(); };
+    m_eventTable->setProperty("ks_i18n_preserve_model_data", true);
+    m_eventTable->setModel(eventSort);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_eventTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    m_eventTable->installEventFilter(this);
     m_eventTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_eventTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_eventTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2700,20 +2821,18 @@ void NetworkFirewallPage::initializeEventMonitorUi()
     m_eventTable->setColumnWidth(ColumnTimestamp, 170);
     installFirewallTableCopyMenu(m_eventTable, [this](const int rowIndex)
     {
-        if (m_eventTable == nullptr || rowIndex < 0 || rowIndex >= m_eventTable->rowCount())
+        if (m_eventTable == nullptr || rowIndex < 0 || rowIndex >= m_eventTable->model()->rowCount()
+            || ks::ui::IsTableRowExcludedByFilter(m_eventTable, rowIndex))
         {
             return;
         }
 
         const auto textAt = [this, rowIndex](const int column) -> QString
         {
-            const QTableWidgetItem* item = m_eventTable->item(rowIndex, column);
-            return item != nullptr ? item->text().trimmed() : QString();
+            return m_eventTable->model()->index(rowIndex, column).data().toString().trimmed();
         };
-        const QTableWidgetItem* nameItem = m_eventTable->item(rowIndex, ColumnName);
-        const QString applicationPathHint = nameItem != nullptr
-            ? nameItem->data(Qt::UserRole + 1).toString().trimmed()
-            : QString();
+        const QString applicationPathHint = m_eventTable->model()->index(rowIndex, ColumnName)
+            .data(Qt::UserRole + 1).toString().trimmed();
         const QString wfpDirection = textAt(ColumnDirection);
         const QString firewallDirection = wfpDirection.compare(QStringLiteral("In"), Qt::CaseInsensitive) == 0
             ? QStringLiteral("Inbound")
@@ -2735,7 +2854,7 @@ void NetworkFirewallPage::initializeEventMonitorUi()
 
     if (m_innerTabWidget != nullptr)
     {
-        m_innerTabWidget->addTab(m_eventMonitorPage, QStringLiteral("事件监控"));
+        network_navigation_detail::AddTab(m_innerTabWidget, m_eventMonitorPage, QStringLiteral("firewall.events"));
     }
 }
 
@@ -2810,11 +2929,10 @@ void NetworkFirewallPage::initializeRuleManagerUi()
     m_ruleSplitter = new QSplitter(Qt::Vertical, m_ruleManagerPage);
     // 证据列表保留完整高度；工具色块与画布明确分层。
     ks::ui::StyleWorkspacePage(m_ruleManagerPage);
-    m_ruleTable = new ks::ui::VisibleTableWidget(m_ruleSplitter);
+    m_ruleTable = new ks::ui::TableActionTableView(m_ruleSplitter);
     // 规则变更具有对比意义，不能按小结果表直接隐藏。
     ks::ui::SetTableActionBarMode(m_ruleTable, ks::ui::TableActionBarMode::Full);
-    m_ruleTable->setColumnCount(RuleColumnCount);
-    m_ruleTable->setHorizontalHeaderLabels({
+    const QStringList ruleHeaders = {
         QStringLiteral("Name"),
         QStringLiteral("Enabled"),
         QStringLiteral("Action"),
@@ -2827,7 +2945,42 @@ void NetworkFirewallPage::initializeRuleManagerUi()
         QStringLiteral("Service"),
         QStringLiteral("Grouping"),
         QStringLiteral("Description")
+        };
+    std::vector<FirewallRuleModel::ColumnSpec> ruleColumns;
+    for (const auto& header : ruleHeaders) ruleColumns.push_back({header});
+    m_ruleValueModel = new FirewallRuleModel(std::move(ruleColumns),
+        [](const FirewallRuleEntry& entry, const int column, const int role) -> QVariant {
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return ruleColumnText(entry, column);
+            if (role == Qt::UserRole) return entry.fingerprintText;
+            if (role == Qt::UserRole + 1) return entry.enabled;
+            if (column == RuleColumnName && role == Qt::UserRole + 2) return entry.searchDocumentText;
+            if (role == Qt::ForegroundRole)
+            {
+                if (!entry.enabled) return QBrush(KswordTheme::TextSecondaryColor());
+                if (column == RuleColumnAction && entry.actionValue == NET_FW_ACTION_BLOCK)
+                    return QBrush(KswordTheme::ErrorColor());
+            }
+            if (role == ks::ui::kThemeItemForegroundRole)
+            {
+                if (!entry.enabled) return static_cast<int>(ks::ui::ItemForegroundRole::Secondary);
+                if (column == RuleColumnAction && entry.actionValue == NET_FW_ACTION_BLOCK)
+                    return static_cast<int>(ks::ui::ItemForegroundRole::Error);
+            }
+            return {};
+        }, m_ruleTable, FirewallRuleModel::FlagsResolver{},
+        [](const FirewallRuleEntry& entry) { return entry.fingerprintText.toUtf8().toStdString(); },
+        [](const FirewallRuleEntry& a, const FirewallRuleEntry& b) {
+            return sameFirewallRule(a, b) ? std::vector<FirewallRuleModel::ColumnChange>{}
+                : std::vector<FirewallRuleModel::ColumnChange>{{0, RuleColumnCount - 1, {}}};
         });
+    auto* ruleSort = new network_value_detail::SortProxy(m_ruleTable);
+    ruleSort->setSourceModel(m_ruleValueModel);
+    ruleSort->request = [this]() { m_ruleDiffRequestedRevision.reset(); m_ruleProjectionDirty = true; presentPendingFirewallValues(); };
+    m_ruleTable->setProperty("ks_i18n_preserve_model_data", true);
+    m_ruleTable->setModel(ruleSort);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_ruleTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    m_ruleTable->installEventFilter(this);
     m_ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ruleTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ruleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2858,7 +3011,7 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     if (m_innerTabWidget != nullptr)
     {
-        m_innerTabWidget->addTab(m_ruleManagerPage, QStringLiteral("规则管理"));
+        network_navigation_detail::AddTab(m_innerTabWidget, m_ruleManagerPage, QStringLiteral("firewall.rules"));
     }
 }
 
@@ -2880,12 +3033,12 @@ void NetworkFirewallPage::initializeConnections()
     {
         if (m_eventTable != nullptr)
         {
-            m_eventTable->setRowCount(0);
+            appendEventsToTable({}, true);
         }
     });
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this]()
     {
-        applyFilterToRows();
+        m_eventFilterDirty = true;
     });
     connect(m_dropOnlyCheck, &QCheckBox::toggled, this, [this]()
     {
@@ -2894,6 +3047,8 @@ void NetworkFirewallPage::initializeConnections()
     connect(m_liveFlushTimer, &QTimer::timeout, this, [this]()
     {
         flushLiveEventsToUi();
+        if (m_eventFilterDirty && m_eventMonitorPage && m_eventMonitorPage->isVisible()) applyFilterToRows();
+        if (m_ruleFilterDirty && m_ruleManagerPage && m_ruleManagerPage->isVisible()) applyRuleFilterToRows();
     });
     connect(m_refreshRulesButton, &QPushButton::clicked, this, [this]()
     {
@@ -2917,22 +3072,22 @@ void NetworkFirewallPage::initializeConnections()
     });
     connect(m_ruleSearchEdit, &QLineEdit::textChanged, this, [this]()
     {
-        applyRuleFilterToRows();
+        m_ruleFilterDirty = true;
     });
     connect(m_ruleEnabledOnlyCheck, &QCheckBox::toggled, this, [this]()
     {
         applyRuleFilterToRows();
     });
-    connect(m_ruleTable, &QTableWidget::itemSelectionChanged, this, [this]()
+    connect(m_ruleTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
     {
         updateRuleActionButtons();
         updateRuleDetailEditor();
     });
-    connect(m_ruleTable, &QTableWidget::cellDoubleClicked, this, [this](const int, const int)
+    connect(m_ruleTable, &QTableView::doubleClicked, this, [this](const QModelIndex&)
     {
         editSelectedFirewallRule();
     });
-    connect(m_ruleTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position)
+    connect(m_ruleTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position)
     {
         showRuleContextMenu(position);
     });
@@ -2963,13 +3118,15 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
         m_refreshingHistory.store(false);
         return;
     }
-    // 事件表是页面子控件：只有在 owner 复核通过（页面存活）时才会被使用。
-    QTableWidget* const eventTablePointer = m_eventTable;
+    const QPointer<NetworkFirewallPage> hostnameOwner(this);
+    const HostnameCommit hostnameCommit = [hostnameOwner](const QHash<QString, QString>& values) {
+        if (hostnameOwner) hostnameOwner->applyResolvedHostnames(values);
+    };
 
     try
     {
         // 枚举任务只调用文件级函数，页面析构后仍可安全跑完，因此直接 detach。
-        std::thread([taskState, eventTablePointer]()
+        std::thread([taskState, hostnameCommit]()
         {
             const AsyncWorkerScope workerScope(taskState);
             std::vector<FirewallEventEntry> eventList;
@@ -3005,8 +3162,11 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
                 return;
             }
 
+            for (auto& entry : eventList)
+                entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
             // 反向 DNS 已从枚举主链路里拆出来：先把 IP 摆上表，主机名交给独立任务回填。
             const QStringList pendingAddressList = collectUnresolvedAddressList(eventList);
+            const auto eventValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(eventList)));
 
             std::lock_guard<std::mutex> dispatchGuard(taskState->dispatchMutex);
             NetworkFirewallPage* const receiver = taskState->owner;
@@ -3017,7 +3177,7 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
 
             const bool invokeOk = QMetaObject::invokeMethod(
                 receiver,
-                [taskState, eventTablePointer, eventList = std::move(eventList), errorText, pendingAddressList]() mutable
+                [taskState, hostnameCommit, eventList = eventValues, errorText, pendingAddressList]() mutable
                 {
                     NetworkFirewallPage* pagePointer = nullptr;
                     {
@@ -3033,9 +3193,9 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
                         pagePointer->appendEventsToTable(eventList, true);
                         pagePointer->setStatusText(
                             QStringLiteral("历史事件：%1 条，刷新：%2")
-                            .arg(static_cast<int>(eventList.size()))
+                            .arg(static_cast<int>(eventList->size()))
                             .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
-                        enqueueHostnameResolution(eventTablePointer, taskState, pendingAddressList);
+                        enqueueHostnameResolution(hostnameCommit, taskState, pendingAddressList);
                     }
                     else
                     {
@@ -3303,139 +3463,222 @@ void NetworkFirewallPage::stopLiveMonitor()
 }
 
 void NetworkFirewallPage::appendEventsToTable(
-    const std::vector<FirewallEventEntry>& eventList,
-    const bool clearBeforeAppend)
+    std::shared_ptr<const std::vector<FirewallEventEntry>> eventList, const bool clearBeforeAppend)
 {
-    if (m_eventTable == nullptr)
-    {
-        return;
-    }
+    if (!m_eventTable || m_shuttingDown.load()) return;
+    const std::size_t limit = static_cast<std::size_t>(kMaximumDisplayedFirewallEvents);
+    const auto incoming = eventList ? std::min(eventList->size(), limit) : 0U;
+    auto mutation = std::make_shared<EventMutation>();
+    mutation->previous = m_eventMutations;
+    mutation->events = std::move(eventList);
+    mutation->clear = clearBeforeAppend;
+    mutation->firstIdentity = m_nextEventIdentity + 1;
+    m_nextEventIdentity += incoming;
+    m_eventCanonicalCount = std::min(limit, (clearBeforeAppend ? 0U : m_eventCanonicalCount) + incoming);
+    m_eventMutations = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const EventMutation>(std::move(mutation)));
+    ++m_eventSourceRevision;
+    m_eventProjectionDirty = true;
+    m_eventFilterDirty = true;
+    preparePendingEventSource();
+}
 
-    if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_eventTable}))
+void NetworkFirewallPage::preparePendingEventSource()
+{
+    if (!m_eventMutations || m_shuttingDown.load()) return;
+    struct Request
     {
-        const QPointer<NetworkFirewallPage> safeThis(this);
-        ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("firewall-event-table-append"),
-            {m_eventTable},
-            [safeThis, eventList, clearBeforeAppend]()
+        std::shared_ptr<const std::vector<FirewallEventEntry>> base;
+        std::shared_ptr<const EventMutation> tail;
+        quint64 revision;
+    };
+    using Result = std::shared_ptr<const std::vector<FirewallEventEntry>>;
+    const Request request{m_eventEntryList, m_eventMutations, m_eventSourceRevision};
+    if (!m_eventSourceOperation) m_eventSourceOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<NetworkFirewallPage> owner(this);
+    m_eventSourceOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Result {
+            std::vector<const EventMutation*> mutations;
+            for (auto next = value.tail; next; next = next->previous) mutations.push_back(next.get());
+            auto rows = *value.base;
+            const std::size_t limit = static_cast<std::size_t>(kMaximumDisplayedFirewallEvents);
+            for (auto next = mutations.rbegin(); next != mutations.rend(); ++next)
             {
-                if (!safeThis.isNull())
+                if (token.isCanceled()) return {};
+                const auto& change = **next;
+                if (change.clear) rows.clear();
+                if (change.events)
                 {
-                    safeThis->appendEventsToTable(eventList, clearBeforeAppend);
+                    const auto first = change.events->size() > limit ? change.events->size() - limit : 0U;
+                    const auto incoming = change.events->size() - first;
+                    const auto keep = limit - incoming;
+                    if (rows.size() > keep) rows.erase(rows.begin(), rows.end() - keep);
+                    rows.reserve(rows.size() + incoming);
+                    for (std::size_t i = first; i < change.events->size(); ++i)
+                    {
+                        auto entry = (*change.events)[i];
+                        entry.displayIdentity = change.firstIdentity + i - first;
+                        if (entry.searchDocumentText.isEmpty()) entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
+                        rows.push_back(std::move(entry));
+                    }
                 }
-            });
-        return;
-    }
-
-    const std::size_t maximumDisplayedEventCount =
-        static_cast<std::size_t>(kMaximumDisplayedFirewallEvents);
-    const std::size_t firstEventIndex = eventList.size() > maximumDisplayedEventCount
-        ? eventList.size() - maximumDisplayedEventCount
-        : 0U;
-    const int incomingRowCount = static_cast<int>(eventList.size() - firstEventIndex);
-
-    m_eventTable->setUpdatesEnabled(false);
-    if (clearBeforeAppend)
-    {
-        m_eventTable->setRowCount(0);
-    }
-
-    // 只保留能与本批新事件共同落在显示上限内的最新旧行。QTableWidget 的模型一次
-    // removeRows 可批量移动剩余行，避免逐行 removeRow(0) 反复搬移整个二维表。
-    const int existingRowCount = m_eventTable->rowCount();
-    const int existingRowsToKeep = std::max(0, kMaximumDisplayedFirewallEvents - incomingRowCount);
-    const int existingRowsToRemove = std::max(0, existingRowCount - existingRowsToKeep);
-    if (existingRowsToRemove > 0)
-    {
-        QAbstractItemModel* const eventTableModel = m_eventTable->model();
-        if (eventTableModel == nullptr || !eventTableModel->removeRows(0, existingRowsToRemove))
-        {
-            // QTableWidget 的内部模型正常支持批量删除；异常实现下清空可确保上限仍成立。
-            m_eventTable->setRowCount(0);
-        }
-    }
-
-    const int firstNewRow = m_eventTable->rowCount();
-    m_eventTable->setRowCount(firstNewRow + incomingRowCount);
-    for (std::size_t eventIndex = firstEventIndex; eventIndex < eventList.size(); ++eventIndex)
-    {
-        const FirewallEventEntry& entry = eventList[eventIndex];
-        const int row = firstNewRow + static_cast<int>(eventIndex - firstEventIndex);
-        const std::array<QString, ColumnCount> values = {
-            safeText(entry.nameText),
-            safeText(entry.actionText),
-            safeText(entry.directionText),
-            safeText(entry.ruleText),
-            safeText(entry.descriptionText),
-            safeText(entry.localAddressText),
-            safeText(entry.localPortText),
-            safeText(entry.localHostText),
-            safeText(entry.remoteAddressText),
-            safeText(entry.remotePortText),
-            safeText(entry.remoteHostText),
-            safeText(entry.protocolText),
-            safeText(entry.timestampText)
-        };
-
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            QTableWidgetItem* item = new QTableWidgetItem(values[static_cast<std::size_t>(column)]);
-            item->setData(Qt::UserRole, entry.isDrop);
-            if (column == ColumnName)
-            {
-                item->setData(Qt::UserRole + 1, entry.applicationPathText);
+                if (!change.hostnames.isEmpty())
+                    for (auto& entry : rows)
+                    {
+                        bool changed = false;
+                        const auto local = change.hostnames.constFind(entry.localAddressText);
+                        if (local != change.hostnames.cend() && !local->isEmpty() && entry.localHostText != *local)
+                        { entry.localHostText = *local; changed = true; }
+                        const auto remote = change.hostnames.constFind(entry.remoteAddressText);
+                        if (remote != change.hostnames.cend() && !remote->isEmpty() && entry.remoteHostText != *remote)
+                        { entry.remoteHostText = *remote; changed = true; }
+                        if (changed) entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
+                    }
             }
-            // 不写入固定前景色：DROP/Allowed 均继承表格调色板，并可随主题切换自动更新。
-            // 动作类别仍通过 Action 列和“仅 DROP”筛选判断。
-            m_eventTable->setItem(row, column, item);
-        }
+            return ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(rows)));
+        },
+        [owner, request](const Result& result, std::uint64_t ticket) {
+            if (!owner || !result || !owner->m_eventSourceOperation->isCurrent(ticket)
+                || owner->m_eventMutations != request.tail || owner->m_eventSourceRevision != request.revision) return true;
+            owner->m_eventEntryList = result;
+            owner->m_eventMutations.reset();
+            owner->m_eventSourceReadyRevision = request.revision;
+            owner->presentPendingFirewallValues();
+            return true;
+        }, [](std::exception_ptr) {});
+}
+
+void NetworkFirewallPage::presentPendingFirewallValues()
+{
+    if (m_shuttingDown.load()) return;
+    if (m_eventProjectionDirty && m_eventSourceReadyRevision == m_eventSourceRevision && m_eventTable && m_eventTable->isVisible())
+    {
+        const QPointer<NetworkFirewallPage> owner(this);
+        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+            QStringLiteral("firewall_event_value_projection"), {m_eventTable},
+            [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return;
+        if (m_eventDiffRequestedRevision == m_eventSourceRevision
+            || !m_eventValueModel->canAcceptPreparedRows(m_eventValueModel->rowsRevision())) return;
+        using Model = FirewallEventModel;
+        struct Request { Model::RowsHandle oldRows, rows; quint64 revision, sourceRevision, sortRevision; int columns, sortColumn; Qt::SortOrder sortOrder; ks::i18n::SourceTextSnapshot language; };
+        const auto* sort = dynamic_cast<network_value_detail::SortProxy*>(m_eventTable->model());
+        const Request request{m_eventValueModel->rowsHandle(), m_eventEntryList,
+            m_eventValueModel->rowsRevision(), m_eventSourceRevision, sort->sortRevision(), m_eventValueModel->columnCount(), sort->sortColumn(), sort->sortOrder(), ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
+        const QPointer<Model> model(m_eventValueModel);
+        if (!m_eventDiffOperation) m_eventDiffOperation = new ks::ui::AsyncOperation(this);
+        m_eventDiffRequestedRevision = request.sourceRevision;
+        m_eventDiffOperation->submit<Request, Model::PreparedRows>(request,
+            [](const Request& value, const ks::ui::AsyncOperationToken&) {
+                auto rows = *value.rows;
+                network_value_detail::sortRows(rows, value.sortColumn, value.sortOrder, value.language, eventColumnText, value.oldRows.get(),
+                    [](const FirewallEventEntry& row) { return std::to_string(row.displayIdentity); });
+                return Model::prepareRows(value.oldRows, std::move(rows), value.columns,
+                    [](const FirewallEventEntry& row) { return std::to_string(row.displayIdentity); },
+                    [](const FirewallEventEntry& a, const FirewallEventEntry& b) {
+                        return sameFirewallEvent(a, b) ? std::vector<Model::ColumnChange>{}
+                            : std::vector<Model::ColumnChange>{{0, ColumnCount - 1, {}}};
+                    }, value.revision);
+            },
+            [owner, model, sourceRevision = request.sourceRevision, sortRevision = request.sortRevision](Model::PreparedRows& result, std::uint64_t ticket) {
+                if (!owner || !owner->m_eventDiffOperation->isCurrent(ticket)) return true;
+                owner->m_eventDiffRequestedRevision.reset();
+                auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_eventTable->model());
+                if (!model || owner->m_eventValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
+                    || owner->m_eventSourceRevision != sourceRevision || proxy->sortRevision() != sortRevision
+                    || !model->canAcceptPreparedRows(result.baseRevision))
+                { owner->presentPendingFirewallValues(); return true; }
+                if (!owner->m_eventTable->isVisible()) return true;
+                if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                    QStringLiteral("firewall_event_value_projection"), {owner->m_eventTable},
+                    [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
+                if (!owner->m_eventValueModel->setPreparedRows(std::move(result)))
+                { owner->presentPendingFirewallValues(); return true; }
+                if (!owner) return true;
+                if (owner->m_eventSourceRevision != sourceRevision)
+                { owner->presentPendingFirewallValues(); return true; }
+                owner->m_eventProjectionDirty = false;
+                owner->m_eventFilterSource.reset();
+                owner->applyFilterToRows();
+                return true;
+            }, [owner](std::exception_ptr) { if (owner) owner->m_eventDiffRequestedRevision.reset(); });
     }
-    applyFilterToRowRange(firstNewRow, incomingRowCount);
-    m_eventTable->setUpdatesEnabled(true);
+    if (m_ruleProjectionDirty && m_ruleTable && m_ruleTable->isVisible())
+        appendRulesToTable(*m_ruleEntryList, true);
+}
+
+void NetworkFirewallPage::applyResolvedHostnames(const QHash<QString, QString>& resolvedHostnameMap)
+{
+    if (m_shuttingDown.load() || resolvedHostnameMap.isEmpty()) return;
+    auto mutation = std::make_shared<EventMutation>();
+    mutation->previous = m_eventMutations;
+    mutation->hostnames = resolvedHostnameMap;
+    m_eventMutations = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const EventMutation>(std::move(mutation)));
+    ++m_eventSourceRevision;
+    m_eventProjectionDirty = true;
+    m_eventFilterDirty = true;
+    preparePendingEventSource();
 }
 
 void NetworkFirewallPage::applyFilterToRows()
 {
-    if (m_eventTable == nullptr)
+    if (!m_eventTable) return;
+    m_eventFilterDirty = true;
+    if (!m_eventTable->isVisible() || m_eventProjectionDirty) return;
+    const QPointer<NetworkFirewallPage> owner(this);
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+        QStringLiteral("firewall_event_filter"), {m_eventTable},
+        [owner]() { if (owner) owner->applyFilterToRows(); })) return;
+    const auto filter = m_searchEdit ? m_searchEdit->text().trimmed().toCaseFolded() : QString();
+    const bool dropOnly = m_dropOnlyCheck && m_dropOnlyCheck->isChecked();
+    if (filter.isEmpty() && !dropOnly)
     {
+        if (m_eventFilterOperation) m_eventFilterOperation->cancel();
+        ks::ui::ApplyTableRowFilterPredicateIncrementally(m_eventTable, {});
+        clearFilteredFirewallSelection(m_eventTable);
+        m_eventFilterDirty = false;
         return;
     }
-    applyFilterToRowRange(0, m_eventTable->rowCount());
-}
-
-void NetworkFirewallPage::applyFilterToRowRange(const int firstRow, const int rowCount)
-{
-    if (m_eventTable == nullptr || rowCount <= 0)
-    {
-        return;
-    }
-    const QString filterText = m_searchEdit != nullptr ? m_searchEdit->text().trimmed().toLower() : QString();
-    const bool dropOnly = m_dropOnlyCheck != nullptr && m_dropOnlyCheck->isChecked();
-
-    const int firstValidRow = std::clamp(firstRow, 0, m_eventTable->rowCount());
-    const int lastValidRow = std::min(m_eventTable->rowCount(), firstValidRow + rowCount);
-    for (int row = firstValidRow; row < lastValidRow; ++row)
-    {
-        bool isDrop = false;
-        QString rowText;
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            QTableWidgetItem* item = m_eventTable->item(row, column);
-            if (item == nullptr)
+    // Copy the immutable value vector once per published source, never walk the
+    // proxy/model roles or construct exclusions on the GUI for each search.
+    if (!m_eventFilterSource)
+        m_eventFilterSource = m_eventValueModel->rowsHandle();
+    struct Request { std::shared_ptr<const std::vector<FirewallEventEntry>> source; QString filter; bool dropOnly; };
+    using Excluded = std::shared_ptr<const QSet<quint64>>;
+    const Request request{m_eventFilterSource, filter, dropOnly};
+    if (!m_eventFilterOperation) m_eventFilterOperation = new ks::ui::AsyncOperation(this);
+    m_eventFilterDirty = false;
+    m_eventFilterOperation->submit<Request, Excluded>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Excluded {
+            auto excluded = std::make_shared<QSet<quint64>>();
+            for (const auto& entry : *value.source)
             {
-                continue;
+                if (token.isCanceled()) return {};
+                if ((!value.filter.isEmpty() && !entry.searchDocumentText.contains(value.filter))
+                    || (value.dropOnly && !entry.isDrop)) excluded->insert(entry.displayIdentity);
             }
-            rowText.append(item->text()).append(QLatin1Char('\n'));
-            if (column == ColumnAction)
-            {
-                isDrop = item->data(Qt::UserRole).toBool();
-            }
-        }
-        const bool textMatched = filterText.isEmpty() || rowText.toLower().contains(filterText);
-        const bool dropMatched = !dropOnly || isDrop;
-        m_eventTable->setRowHidden(row, !(textMatched && dropMatched));
-    }
+            return ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const QSet<quint64>>(std::move(excluded)));
+        },
+        [owner, request](const Excluded& excluded, std::uint64_t ticket) {
+            if (!owner || !excluded || !owner->m_eventFilterOperation->isCurrent(ticket)
+                || owner->m_eventFilterSource != request.source
+                || owner->m_eventProjectionDirty
+                || (owner->m_searchEdit ? owner->m_searchEdit->text().trimmed().toCaseFolded() : QString()) != request.filter
+                || (owner->m_dropOnlyCheck && owner->m_dropOnlyCheck->isChecked()) != request.dropOnly) return true;
+            if (!owner->m_eventTable->isVisible()) { owner->m_eventFilterDirty = true; return true; }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall_event_filter"), {owner->m_eventTable},
+                [owner]() { if (owner) owner->applyFilterToRows(); })) return true;
+            const QPointer<FirewallEventModel> model = owner->m_eventValueModel;
+            const QPointer<network_value_detail::SortProxy> proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_eventTable->model());
+            ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_eventTable,
+                [model, proxy, excluded](const QModelIndex& index) {
+                    if (!model || !proxy) return false;
+                    const auto* entry = model->rowAt(proxy->mapToSource(index).row());
+                    return entry && excluded->contains(entry->displayIdentity);
+                });
+            if (owner) clearFilteredFirewallSelection(owner->m_eventTable);
+            return true;
+        },
+        [owner](std::exception_ptr) { if (owner) owner->m_eventFilterDirty = true; });
 }
 
 void NetworkFirewallPage::flushLiveEventsToUi()
@@ -3474,15 +3717,16 @@ void NetworkFirewallPage::flushLiveEventsToUi()
         eventList.push_back(std::move(queuedEvents.front()));
         queuedEvents.pop_front();
     }
-    appendEventsToTable(eventList, false);
+    const auto eventValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(eventList)));
+    appendEventsToTable(eventValues, false);
     // 实时事件的主机名同样不在 WFP 回调线程里做同步反查，改成事后异步回填。
     enqueueHostnameResolution(
-        m_eventTable,
+        [safeThis](const QHash<QString, QString>& values) { if (safeThis) safeThis->applyResolvedHostnames(values); },
         acquireFirewallAsyncTaskState(this),
-        collectUnresolvedAddressList(eventList));
+        collectUnresolvedAddressList(*eventValues));
     setStatusText(QStringLiteral("实时事件：追加 %1 条，总计 %2 条")
-        .arg(static_cast<int>(eventList.size()))
-        .arg(m_eventTable != nullptr ? m_eventTable->rowCount() : 0));
+        .arg(static_cast<int>(eventValues->size()))
+        .arg(m_eventCanonicalCount));
 }
 
 void NetworkFirewallPage::setStatusText(const QString& statusText)
@@ -3491,7 +3735,7 @@ void NetworkFirewallPage::setStatusText(const QString& statusText)
     {
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(statusText);
+            if (m_statusLabel->text() != statusText) m_statusLabel->setText(statusText);
         }
         return;
     }
@@ -3500,7 +3744,8 @@ void NetworkFirewallPage::setStatusText(const QString& statusText)
         this,
         [safeThis, statusText]()
         {
-            if (!safeThis.isNull() && safeThis->m_statusLabel != nullptr)
+            if (!safeThis.isNull() && safeThis->m_statusLabel != nullptr
+                && safeThis->m_statusLabel->text() != statusText)
             {
                 safeThis->m_statusLabel->setText(statusText);
             }
@@ -3544,6 +3789,8 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
             try
             {
                 ruleList = enumerateFirewallRulesSnapshotShared(&errorText);
+                for (auto& entry : ruleList)
+                    entry.searchDocumentText = firewallSearchDocument(entry, RuleColumnCount, ruleColumnText);
             }
             catch (const std::exception& exception)
             {
@@ -3559,6 +3806,7 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
                 return;
             }
 
+            const auto ruleValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallRuleEntry>>(std::move(ruleList)));
             std::lock_guard<std::mutex> dispatchGuard(taskState->dispatchMutex);
             NetworkFirewallPage* const receiver = taskState->owner;
             if (receiver == nullptr)
@@ -3568,7 +3816,7 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
 
             const bool invokeOk = QMetaObject::invokeMethod(
                 receiver,
-                [taskState, ruleList = std::move(ruleList), errorText]() mutable
+                [taskState, ruleList = ruleValues, errorText]() mutable
                 {
                     NetworkFirewallPage* pagePointer = nullptr;
                     {
@@ -3598,10 +3846,11 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
                         if (errorText.isEmpty())
                         {
                             deferredPagePointer->m_ruleEntryList = ruleSnapshot;
-                            deferredPagePointer->appendRulesToTable(deferredPagePointer->m_ruleEntryList, true);
+                            ++deferredPagePointer->m_ruleSourceRevision;
+                            deferredPagePointer->appendRulesToTable(*deferredPagePointer->m_ruleEntryList, true);
                             deferredPagePointer->setStatusText(
                                 QStringLiteral("防火墙规则：%1 条，刷新：%2")
-                                .arg(static_cast<int>(deferredPagePointer->m_ruleEntryList.size()))
+                                .arg(static_cast<int>(deferredPagePointer->m_ruleEntryList->size()))
                                 .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
                         }
                         else
@@ -3614,7 +3863,6 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
                             deferredPagePointer->m_refreshRulesButton->setEnabled(true);
                         }
                         deferredPagePointer->updateRuleActionButtons();
-                        deferredPagePointer->updateRuleDetailEditor();
                         deferredPagePointer->m_refreshingRules.store(false);
                     };
 
@@ -3647,131 +3895,168 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
 }
 
 void NetworkFirewallPage::appendRulesToTable(
-    const std::vector<FirewallRuleEntry>& ruleList,
-    const bool clearBeforeAppend)
+    const std::vector<FirewallRuleEntry>& ruleList, const bool clearBeforeAppend)
 {
-    if (m_ruleTable == nullptr)
-    {
-        return;
-    }
-
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ruleDetailEditor);
-
-    if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_ruleTable}))
-    {
-        const QPointer<NetworkFirewallPage> safeThis(this);
-        ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("firewall-rule-table-append"),
-            {m_ruleTable},
-            [safeThis, ruleList, clearBeforeAppend]()
+    if (!m_ruleTable || m_shuttingDown.load()) return;
+    (void)ruleList; // The canonical retained owner is captured below.
+    // All existing producers publish complete rule snapshots. Keep the signature
+    // for the established call sites; a hidden snapshot remains canonical here.
+    Q_ASSERT(clearBeforeAppend);
+    (void)clearBeforeAppend;
+    m_ruleProjectionDirty = true;
+    if (!m_ruleTable->isVisible()) return;
+    const QPointer<NetworkFirewallPage> owner(this);
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+        QStringLiteral("firewall-rule-table-append"), {m_ruleTable},
+        [owner]() { if (owner) owner->appendRulesToTable(*owner->m_ruleEntryList, true); })) return;
+    if (m_ruleDiffRequestedRevision == m_ruleSourceRevision
+        || !m_ruleValueModel->canAcceptPreparedRows(m_ruleValueModel->rowsRevision())) return;
+    using Model = FirewallRuleModel;
+    struct Request { Model::RowsHandle oldRows, rows; quint64 revision, sourceRevision, sortRevision; int columns, sortColumn; Qt::SortOrder sortOrder; ks::i18n::SourceTextSnapshot language; };
+    struct Result { Model::PreparedRows plan; bool unchanged = false; };
+    const auto* sort = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+    const Request request{m_ruleValueModel->rowsHandle(), m_ruleEntryList,
+        m_ruleValueModel->rowsRevision(), m_ruleSourceRevision, sort->sortRevision(), m_ruleValueModel->columnCount(), sort->sortColumn(), sort->sortOrder(), ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
+    const QPointer<Model> model(m_ruleValueModel);
+    if (!m_ruleDiffOperation) m_ruleDiffOperation = new ks::ui::AsyncOperation(this);
+    m_ruleDiffRequestedRevision = request.sourceRevision;
+    m_ruleDiffOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken&) {
+            // Preserve the page's original unchanged-snapshot fast path,
+            // including duplicate-key snapshots that must not gain a reset.
+            auto rows = *value.rows;
+            network_value_detail::sortRows(rows, value.sortColumn, value.sortOrder, value.language, ruleColumnText, value.oldRows.get(),
+                [](const FirewallRuleEntry& row) { return row.fingerprintText.toUtf8().toStdString(); });
+            if (value.oldRows->size() == rows.size()
+                && std::equal(value.oldRows->cbegin(), value.oldRows->cend(), rows.cbegin(), sameFirewallRule))
             {
-                if (!safeThis.isNull())
-                {
-                    safeThis->appendRulesToTable(ruleList, clearBeforeAppend);
-                }
-            });
-        return;
-    }
-
-    if (clearBeforeAppend)
-    {
-        m_ruleTable->setRowCount(0);
-    }
-
-    m_ruleTable->setUpdatesEnabled(false);
-    for (const FirewallRuleEntry& ruleEntry : ruleList)
-    {
-        const int row = m_ruleTable->rowCount();
-        m_ruleTable->insertRow(row);
-
-        const std::array<QString, RuleColumnCount> valueList = {
-            safeText(ruleEntry.nameText),
-            ruleEntry.enabled ? QStringLiteral("Yes") : QStringLiteral("No"),
-            safeText(ruleEntry.actionText),
-            safeText(ruleEntry.directionText),
-            safeText(ruleEntry.profilesText),
-            safeText(ruleEntry.protocolText),
-            safeText(ruleEntry.localPortsText),
-            safeText(ruleEntry.remotePortsText),
-            safeText(ruleEntry.applicationText),
-            safeText(ruleEntry.serviceText),
-            safeText(ruleEntry.groupingText),
-            safeText(ruleEntry.descriptionText)
-        };
-
-        for (int column = 0; column < RuleColumnCount; ++column)
-        {
-            QTableWidgetItem* item = new QTableWidgetItem(valueList[static_cast<std::size_t>(column)]);
-            item->setData(Qt::UserRole, ruleEntry.fingerprintText);
-            item->setData(Qt::UserRole + 1, ruleEntry.enabled);
-            if (!ruleEntry.enabled)
-            {
-                ks::ui::ApplyThemeItemForeground(item, ks::ui::ItemForegroundRole::Secondary);
+                Result result;
+                result.plan.baseRevision = value.revision;
+                result.unchanged = true;
+                return result;
             }
-            else if (column == RuleColumnAction && ruleEntry.actionValue == NET_FW_ACTION_BLOCK)
+            return Result{Model::prepareRows(value.oldRows, std::move(rows), value.columns,
+                [](const FirewallRuleEntry& row) { return row.fingerprintText.toUtf8().toStdString(); },
+                [](const FirewallRuleEntry& a, const FirewallRuleEntry& b) {
+                    return sameFirewallRule(a, b) ? std::vector<Model::ColumnChange>{}
+                        : std::vector<Model::ColumnChange>{{0, RuleColumnCount - 1, {}}};
+                }, value.revision), false};
+        },
+        [owner, model, sourceRevision = request.sourceRevision, sortRevision = request.sortRevision](Result& result, std::uint64_t ticket) {
+            if (!owner || !owner->m_ruleDiffOperation->isCurrent(ticket)) return true;
+            owner->m_ruleDiffRequestedRevision.reset();
+            auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_ruleTable->model());
+            if (!model || owner->m_ruleValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
+                || owner->m_ruleSourceRevision != sourceRevision || proxy->sortRevision() != sortRevision
+                || !model->canAcceptPreparedRows(result.plan.baseRevision))
+            { owner->presentPendingFirewallValues(); return true; }
+            if (!owner->m_ruleTable->isVisible()) return true;
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall-rule-table-append"), {owner->m_ruleTable},
+                [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
+            if (!result.unchanged && !owner->m_ruleValueModel->setPreparedRows(std::move(result.plan)))
+            { owner->presentPendingFirewallValues(); return true; }
+            if (!owner) return true;
+            if (owner->m_ruleSourceRevision != sourceRevision)
+            { owner->presentPendingFirewallValues(); return true; }
+            owner->m_ruleProjectionDirty = false;
+            if (!result.unchanged)
             {
-                ks::ui::ApplyThemeItemForeground(item, ks::ui::ItemForegroundRole::Error);
+                owner->m_ruleFilterSource.reset();
+                owner->m_ruleFilterDirty = true;
             }
-            m_ruleTable->setItem(row, column, item);
-        }
-    }
-    m_ruleTable->setUpdatesEnabled(true);
-    applyRuleFilterToRows();
+            if (result.unchanged && !owner->m_ruleFilterDirty) return true;
+            owner->applyRuleFilterToRows();
+            if (!owner) return true;
+            owner->updateRuleActionButtons();
+            if (owner) owner->updateRuleDetailEditor();
+            return true;
+        }, [owner](std::exception_ptr) { if (owner) owner->m_ruleDiffRequestedRevision.reset(); });
 }
 
 void NetworkFirewallPage::applyRuleFilterToRows()
 {
-    if (m_ruleTable == nullptr)
+    if (!m_ruleTable) return;
+    m_ruleFilterDirty = true;
+    if (!m_ruleTable->isVisible() || m_ruleProjectionDirty) return;
+    const QPointer<NetworkFirewallPage> owner(this);
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+        QStringLiteral("firewall_rule_filter"), {m_ruleTable},
+        [owner]() { if (owner) owner->applyRuleFilterToRows(); })) return;
+    const auto filter = m_ruleSearchEdit ? m_ruleSearchEdit->text().trimmed().toCaseFolded() : QString();
+    const bool enabledOnly = m_ruleEnabledOnlyCheck && m_ruleEnabledOnlyCheck->isChecked();
+    if (filter.isEmpty() && !enabledOnly)
     {
+        if (m_ruleFilterOperation) m_ruleFilterOperation->cancel();
+        ks::ui::ApplyTableRowFilterPredicateIncrementally(m_ruleTable, {});
+        clearFilteredFirewallSelection(m_ruleTable);
+        m_ruleFilterDirty = false;
+        updateRuleActionButtons();
         return;
     }
-
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ruleDetailEditor);
-
-    const QString filterText = m_ruleSearchEdit != nullptr ? m_ruleSearchEdit->text().trimmed().toLower() : QString();
-    const bool enabledOnly = m_ruleEnabledOnlyCheck != nullptr && m_ruleEnabledOnlyCheck->isChecked();
-
-    for (int row = 0; row < m_ruleTable->rowCount(); ++row)
-    {
-        QString rowText;
-        bool enabled = false;
-        for (int column = 0; column < RuleColumnCount; ++column)
-        {
-            QTableWidgetItem* item = m_ruleTable->item(row, column);
-            if (item == nullptr)
+    if (!m_ruleFilterSource)
+        m_ruleFilterSource = m_ruleValueModel->rowsHandle();
+    struct Request { std::shared_ptr<const std::vector<FirewallRuleEntry>> source; QString filter; bool enabledOnly; };
+    struct ExcludedRows { QSet<QString> keys, duplicateKeys; std::vector<bool> rows; };
+    using Excluded = std::shared_ptr<const ExcludedRows>;
+    const Request request{m_ruleFilterSource, filter, enabledOnly};
+    if (!m_ruleFilterOperation) m_ruleFilterOperation = new ks::ui::AsyncOperation(this);
+    m_ruleFilterDirty = false;
+    m_ruleFilterOperation->submit<Request, Excluded>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Excluded {
+            auto excluded = std::make_shared<ExcludedRows>();
+            QSet<QString> seen;
+            excluded->rows.reserve(value.source->size());
+            for (const auto& entry : *value.source)
             {
-                continue;
+                if (token.isCanceled()) return {};
+                if (seen.contains(entry.fingerprintText)) excluded->duplicateKeys.insert(entry.fingerprintText);
+                else seen.insert(entry.fingerprintText);
+                const bool hidden = (!value.filter.isEmpty() && !entry.searchDocumentText.contains(value.filter))
+                    || (value.enabledOnly && !entry.enabled);
+                excluded->rows.push_back(hidden);
+                if (hidden) excluded->keys.insert(entry.fingerprintText);
             }
-            rowText.append(item->text()).append(QLatin1Char('\n'));
-            if (column == RuleColumnEnabled)
-            {
-                enabled = item->data(Qt::UserRole + 1).toBool();
-            }
-        }
-
-        const bool textMatched = filterText.isEmpty() || rowText.toLower().contains(filterText);
-        const bool enabledMatched = !enabledOnly || enabled;
-        m_ruleTable->setRowHidden(row, !(textMatched && enabledMatched));
-    }
+            return ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const ExcludedRows>(std::move(excluded)));
+        },
+        [owner, request](const Excluded& excluded, std::uint64_t ticket) {
+            if (!owner || !excluded || !owner->m_ruleFilterOperation->isCurrent(ticket)
+                || owner->m_ruleFilterSource != request.source
+                || owner->m_ruleProjectionDirty
+                || (owner->m_ruleSearchEdit ? owner->m_ruleSearchEdit->text().trimmed().toCaseFolded() : QString()) != request.filter
+                || (owner->m_ruleEnabledOnlyCheck && owner->m_ruleEnabledOnlyCheck->isChecked()) != request.enabledOnly) return true;
+            if (!owner->m_ruleTable->isVisible()) { owner->m_ruleFilterDirty = true; return true; }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall_rule_filter"), {owner->m_ruleTable},
+                [owner]() { if (owner) owner->applyRuleFilterToRows(); })) return true;
+            const QPointer<FirewallRuleModel> model = owner->m_ruleValueModel;
+            const QPointer<network_value_detail::SortProxy> proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_ruleTable->model());
+            ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_ruleTable,
+                [model, proxy, excluded](const QModelIndex& index) {
+                    if (!model || !proxy) return false;
+                    const int sourceRow = proxy->mapToSource(index).row();
+                    const auto* entry = model->rowAt(sourceRow);
+                    if (!entry) return false;
+                    // Duplicate-key snapshots already reset in FlatTableModel.
+                    // Keep their per-source-row outcomes distinct until then.
+                    if (excluded->duplicateKeys.contains(entry->fingerprintText))
+                        return sourceRow >= 0 && sourceRow < static_cast<int>(excluded->rows.size())
+                            && excluded->rows[static_cast<std::size_t>(sourceRow)];
+                    return excluded->keys.contains(entry->fingerprintText);
+                });
+            if (owner) clearFilteredFirewallSelection(owner->m_ruleTable);
+            if (owner) owner->updateRuleActionButtons();
+            if (owner) owner->updateRuleDetailEditor();
+            return true;
+        },
+        [owner](std::exception_ptr) { if (owner) owner->m_ruleFilterDirty = true; });
 }
 
 void NetworkFirewallPage::updateRuleActionButtons()
 {
-    int visibleSelectedRowCount = 0;
-    if (m_ruleTable != nullptr)
-    {
-        const QModelIndexList rowIndexList = m_ruleTable->selectionModel() != nullptr
-            ? m_ruleTable->selectionModel()->selectedRows()
-            : QModelIndexList{};
-        for (const QModelIndex& rowIndex : rowIndexList)
-        {
-            if (!m_ruleTable->isRowHidden(rowIndex.row()))
-            {
-                ++visibleSelectedRowCount;
-            }
-        }
-    }
+    const int visibleSelectedRowCount = m_ruleTable
+        ? static_cast<int>(network_value_detail::selectedRows(m_ruleTable->selectionModel(), 2,
+            [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); }).size()) : 0;
 
     const bool hasSingleSelection = visibleSelectedRowCount == 1;
     const bool hasSelection = visibleSelectedRowCount > 0;
@@ -3794,21 +4079,20 @@ void NetworkFirewallPage::updateRuleActionButtons()
         FirewallRuleEntry selectedRuleEntryValue;
         if (selectedRuleEntry(&selectedRuleEntryValue))
         {
-            m_toggleRuleButton->setText(selectedRuleEntryValue.enabled ? QStringLiteral("禁用") : QStringLiteral("启用"));
+            const QString text = selectedRuleEntryValue.enabled ? QStringLiteral("禁用") : QStringLiteral("启用");
+            if (m_toggleRuleButton->text() != text) m_toggleRuleButton->setText(text);
         }
     }
     else if (m_toggleRuleButton != nullptr)
     {
-        m_toggleRuleButton->setText(QStringLiteral("启用/禁用"));
+        if (m_toggleRuleButton->text() != QStringLiteral("启用/禁用"))
+            m_toggleRuleButton->setText(QStringLiteral("启用/禁用"));
     }
 }
 
 void NetworkFirewallPage::updateRuleDetailEditor()
 {
-    if (m_ruleDetailEditor == nullptr)
-    {
-        return;
-    }
+    if (m_ruleDetailEditor == nullptr || m_ruleTable == nullptr || !m_ruleTable->isVisible()) return;
 
     FirewallRuleEntry ruleEntry;
     if (!selectedRuleEntry(&ruleEntry))
@@ -3856,7 +4140,7 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
             ruleSelectionModel != nullptr && ruleSelectionModel->isSelected(clickedIndex);
         if (!clickedRowAlreadySelected)
         {
-            m_ruleTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            m_ruleTable->setCurrentIndex(clickedIndex);
             m_ruleTable->selectRow(clickedIndex.row());
         }
         else if (ruleSelectionModel != nullptr)
@@ -3868,9 +4152,12 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
 
     FirewallRuleEntry selectedEntry;
     const bool hasSingleRule = selectedRuleEntry(&selectedEntry);
-    const bool hasAnySelection =
-        m_ruleTable->selectionModel() != nullptr
-        && !m_ruleTable->selectionModel()->selectedRows().isEmpty();
+    const auto selectedRows = m_ruleTable->selectionModel() != nullptr
+        ? network_value_detail::selectedRows(m_ruleTable->selectionModel(), 1,
+            [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); }) : QModelIndexList{};
+    const bool hasAnySelection = std::any_of(selectedRows.cbegin(), selectedRows.cend(), [this](const QModelIndex& row) {
+        return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row.row());
+    });
 
     QMenu menu(m_ruleTable);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -3900,7 +4187,7 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
         QStringLiteral("复制当前行"));
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyAction, ks::ui::TableContextActionRole::CopyRows);
-    copyAction->setEnabled(m_ruleTable->currentRow() >= 0);
+    copyAction->setEnabled(!ks::ui::IsTableRowExcludedByFilter(m_ruleTable, m_ruleTable->currentIndex().row()));
 
     const QAction* selectedAction = menu.exec(
         m_ruleTable->viewport()->mapToGlobal(localPosition));
@@ -3926,13 +4213,13 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
     }
     else if (selectedAction == copyAction)
     {
-        const int rowIndex = m_ruleTable->currentRow();
+        const int rowIndex = m_ruleTable->currentIndex().row();
+        if (ks::ui::IsTableRowExcludedByFilter(m_ruleTable, rowIndex)) return;
         QStringList rowFields;
-        rowFields.reserve(m_ruleTable->columnCount());
-        for (int columnIndex = 0; columnIndex < m_ruleTable->columnCount(); ++columnIndex)
+        rowFields.reserve(m_ruleTable->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < m_ruleTable->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = m_ruleTable->item(rowIndex, columnIndex);
-            rowFields.push_back(item != nullptr ? item->text() : QString());
+            rowFields.push_back(m_ruleTable->model()->index(rowIndex, columnIndex).data().toString());
         }
         if (QGuiApplication::clipboard() != nullptr)
         {
@@ -3948,41 +4235,21 @@ bool NetworkFirewallPage::selectedRuleEntry(FirewallRuleEntry* ruleEntryOut) con
         return false;
     }
 
-    const QModelIndexList rowIndexList = m_ruleTable->selectionModel()->selectedRows();
-    if (rowIndexList.isEmpty())
-    {
-        return false;
-    }
-
-    const int row = rowIndexList.front().row();
-    const QTableWidgetItem* nameItem = m_ruleTable->item(row, RuleColumnName);
-    if (nameItem == nullptr)
-    {
-        return false;
-    }
-
-    const QString fingerprintText = nameItem->data(Qt::UserRole).toString();
-    const auto it = std::find_if(
-        m_ruleEntryList.begin(),
-        m_ruleEntryList.end(),
-        [&fingerprintText](const FirewallRuleEntry& ruleEntry)
-        {
-            return ruleEntry.fingerprintText == fingerprintText;
-        });
-    if (it == m_ruleEntryList.end())
-    {
-        return false;
-    }
-
-    *ruleEntryOut = *it;
+    const auto rows = network_value_detail::selectedRows(m_ruleTable->selectionModel(), 1,
+        [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); });
+    if (rows.isEmpty()) return false;
+    const auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+    const auto* entry = proxy ? m_ruleValueModel->rowAt(proxy->mapToSource(rows.front()).row()) : nullptr;
+    if (!entry) return false;
+    *ruleEntryOut = *entry;
     return true;
 }
 
 int NetworkFirewallPage::ruleNameDuplicateCount(const QString& ruleNameText) const
 {
     return static_cast<int>(std::count_if(
-        m_ruleEntryList.begin(),
-        m_ruleEntryList.end(),
+        m_ruleEntryList->begin(),
+        m_ruleEntryList->end(),
         [&ruleNameText](const FirewallRuleEntry& ruleEntry)
         {
             return ruleEntry.nameText.compare(ruleNameText, Qt::CaseSensitive) == 0;
@@ -4669,18 +4936,16 @@ void NetworkFirewallPage::deleteSelectedFirewallRules()
     }
 
     QStringList ruleNameList;
-    const QModelIndexList rowIndexList = m_ruleTable->selectionModel()->selectedRows();
+    const QModelIndexList rowIndexList = network_value_detail::selectedRows(m_ruleTable->selectionModel());
     for (const QModelIndex& rowIndex : rowIndexList)
     {
-        if (m_ruleTable->isRowHidden(rowIndex.row()))
+        if (ks::ui::IsTableRowExcludedByFilter(m_ruleTable, rowIndex.row()))
         {
             continue;
         }
-        QTableWidgetItem* nameItem = m_ruleTable->item(rowIndex.row(), RuleColumnName);
-        if (nameItem != nullptr)
-        {
-            ruleNameList.push_back(nameItem->text());
-        }
+        const auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+        const auto* entry = proxy ? m_ruleValueModel->rowAt(proxy->mapToSource(rowIndex).row()) : nullptr;
+        if (entry) ruleNameList.push_back(safeText(entry->nameText));
     }
     ruleNameList.removeDuplicates();
     if (ruleNameList.isEmpty())
@@ -4872,6 +5137,7 @@ void NetworkFirewallPage::enqueueLiveEvent(const void* wfpEventPointer)
         return;
     }
     FirewallEventEntry entry = convertWfpEventToEntry(wfpEventPointer, m_liveEngineHandle);
+    entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
     std::lock_guard<std::mutex> guard(m_liveEventMutex);
     while (m_liveEventQueue.size() >= kMaximumQueuedLiveEvents)
     {

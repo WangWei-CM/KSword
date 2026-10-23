@@ -1,4 +1,5 @@
 #include "KernelIoTimerTab.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -9,6 +10,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/DetailLayoutRegistry.h"
+#include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -31,6 +34,8 @@
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
+#include <QScrollBar>
 #include <QThreadPool>
 #include <QVBoxLayout>
 
@@ -118,7 +123,13 @@ KernelIoTimerTab::KernelIoTimerTab(QWidget* parent)
     : QWidget(parent)
 {
     initializeUi();
+    m_controlOperation = new ks::ui::AsyncOperation(this);
     applyTranslatedText();
+}
+
+KernelIoTimerTab::~KernelIoTimerTab()
+{
+    if (m_controlOperation != nullptr) m_controlOperation->close();
 }
 
 void KernelIoTimerTab::requestInitialRefresh()
@@ -175,6 +186,7 @@ void KernelIoTimerTab::initializeUi()
 
     auto* splitter = new QSplitter(Qt::Vertical, this);
     m_table = new QTableWidget(splitter);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 定时器回调地址与启停状态是核心证据，保留跨次比较。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(Column::Count));
@@ -208,9 +220,14 @@ void KernelIoTimerTab::initializeUi()
     connect(m_stopButton, &QPushButton::clicked, this, [this]() {
         runControlAction(KSWORD_ARK_IO_TIMER_CONTROL_ACTION_STOP);
     });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildTable();
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_table->horizontalHeader(), &QHeaderView::sortIndicatorChanged, this, [this]() {
+        QTimer::singleShot(0, this, [this]() { applyFilter(); });
     });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() {
         updateDetail();
         updateControlActions();
@@ -265,6 +282,7 @@ void KernelIoTimerTab::applyTranslatedText()
 
 void KernelIoTimerTab::refreshAsync()
 {
+    if (m_controlInFlight) return;
     bool expected = false;
     if (!m_refreshRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
@@ -322,7 +340,8 @@ KernelIoTimerTab::Snapshot KernelIoTimerTab::collectSnapshot()
         const ksword::ark::DriverObjectQueryResult queryResult = driverClient.queryDriverObject(
             driverObjectPath.toStdWString(),
             KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES |
-                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES,
+                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES |
+                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_SKIP_START_IO,
             KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT,
             0UL);
         ++snapshot.driverObjectsQueried;
@@ -389,6 +408,10 @@ KernelIoTimerTab::Snapshot KernelIoTimerTab::collectSnapshot()
 
 void KernelIoTimerTab::applySnapshot(const Snapshot& snapshot)
 {
+    const QPointer<KernelIoTimerTab> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-iotimer-snapshot"),
+        {m_table}, [guard, snapshot]() { if (guard) guard->applySnapshot(snapshot); })) return;
+    m_filterTimer->stop();
     m_rows = snapshot.rows;
     m_lastSnapshot = snapshot;
     m_refreshRunning.store(false, std::memory_order_release);
@@ -419,7 +442,8 @@ void KernelIoTimerTab::applySnapshot(const Snapshot& snapshot)
 void KernelIoTimerTab::rebuildTable()
 {
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-    const QString filterText = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
+    m_filterActive = false;
+    m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
     m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
 
@@ -436,10 +460,6 @@ void KernelIoTimerTab::rebuildTable()
             row.imagePath,
             row.queryStatus
         };
-        if (!filterText.isEmpty() && !searchableFields.join(QLatin1Char('\n')).contains(filterText, Qt::CaseInsensitive))
-        {
-            continue;
-        }
 
         const int tableRow = m_table->rowCount();
         m_table->insertRow(tableRow);
@@ -458,6 +478,7 @@ void KernelIoTimerTab::rebuildTable()
         {
             QTableWidgetItem* item = makeReadOnlyItem(cells[column]);
             item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            if (column == 0) item->setData(Qt::UserRole + 1, searchableFields.join(QLatin1Char('\n')));
             if (column <= static_cast<int>(Column::DriverObject))
             {
                 item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -467,14 +488,56 @@ void KernelIoTimerTab::rebuildTable()
     }
 
     m_table->setSortingEnabled(true);
-    if (m_table->rowCount() > 0)
+    applyFilter(false);
+}
+
+void KernelIoTimerTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelIoTimerTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-iotimer-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString filter = m_filterEdit->text().trimmed();
+    const bool active = !filter.isEmpty();
+    if (active && !m_filterActive)
     {
-        m_table->selectRow(0);
+        const auto* selected = m_table->item(m_table->currentRow(), 0);
+        m_unfilteredSourceIndex = selected != nullptr
+            ? static_cast<std::size_t>(selected->data(Qt::UserRole).toULongLong())
+            : std::numeric_limits<std::size_t>::max();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
     }
-    else
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    int restoredRow = -1;
+    for (int row = 0; row < m_table->rowCount(); ++row)
     {
-        m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(ioTimerText("kernel.iotimer.detail.empty", QStringLiteral("当前筛选条件下没有 IoTimer 记录。"))));
+        const auto* item = m_table->item(row, 0);
+        const bool visible = item != nullptr && (!active || item->data(Qt::UserRole + 1).toString().contains(filter, Qt::CaseInsensitive));
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
+        if (visible && firstVisible < 0) firstVisible = row;
+        if (!active && m_filterActive && item != nullptr
+            && static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong()) == m_unfilteredSourceIndex) restoredRow = row;
     }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
+    if (restoredRow >= 0) m_table->selectRow(restoredRow);
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
+    {
+        if (firstVisible >= 0) m_table->selectRow(firstVisible);
+        else
+        {
+            m_table->setCurrentItem(nullptr);
+            m_table->clearSelection();
+            m_detailEditor->setDocument(ks::ui::FieldDocument{}.note(ioTimerText("kernel.iotimer.detail.empty", QStringLiteral("当前筛选条件下没有 IoTimer 记录。"))));
+        }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    }
+    m_filterActive = active;
     updateControlActions();
 }
 
@@ -529,7 +592,7 @@ const KernelIoTimerTab::IoTimerRow* KernelIoTimerTab::selectedRow() const
 
 void KernelIoTimerTab::updateControlActions()
 {
-    const bool enabled =
+    const bool enabled = !m_controlInFlight &&
         !m_refreshRunning.load(std::memory_order_relaxed) && selectedRow() != nullptr;
     if (m_startButton != nullptr)
     {
@@ -543,6 +606,7 @@ void KernelIoTimerTab::updateControlActions()
 
 void KernelIoTimerTab::runControlAction(const std::uint32_t action)
 {
+    if (m_controlInFlight || m_controlOperation->isBusy()) return;
     const IoTimerRow* selected = selectedRow();
     if (selected == nullptr)
     {
@@ -614,14 +678,20 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
         return;
     }
 
-    ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoTimerControlResult result = driverClient.controlIoTimer(
-        action,
-        row.namespacePath.toStdWString(),
-        row.driverObjectAddress,
-        row.deviceObjectAddress,
-        row.timerAddress,
-        true);
+    m_controlInFlight = true;
+    m_refreshButton->setEnabled(false);
+    updateControlActions();
+    const auto ticket = m_controlOperation->submitTransaction<ControlRequest, ksword::ark::IoTimerControlResult>(
+        ControlRequest{action, row},
+        [](const ControlRequest& value) {
+            const ksword::ark::DriverClient client;
+            return client.controlIoTimer(value.action, value.row.namespacePath.toStdWString(),
+                value.row.driverObjectAddress, value.row.deviceObjectAddress, value.row.timerAddress, true);
+        },
+        [this, actionTitle, isStart](const ksword::ark::IoTimerControlResult& result, std::uint64_t) {
+            m_controlInFlight = false;
+            m_refreshButton->setEnabled(!m_refreshRunning.load());
+            updateControlActions();
     if (!result.io.ok)
     {
         const QString transportText = result.unsupported
@@ -633,7 +703,7 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 QStringLiteral("IoTimer 控制 IOCTL 失败。\n%1"))
                 .arg(QString::fromStdString(result.io.message));
         QMessageBox::critical(this, actionTitle, transportText);
-        return;
+        return true;
     }
 
     if (result.status != KSWORD_ARK_IO_TIMER_CONTROL_STATUS_OK)
@@ -654,7 +724,7 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 .arg(pointerText(result.observedDeviceObjectAddress))
                 .arg(pointerText(result.observedTimerAddress)));
         refreshAsync();
-        return;
+        return true;
     }
 
     QMessageBox::information(
@@ -668,6 +738,21 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 "因此此结果表示 API 已接受调用，不伪造“已验证运行态”。"))
             .arg(isStart ? QStringLiteral("IoStartTimer") : QStringLiteral("IoStopTimer")));
     refreshAsync();
+            return true;
+        },
+        [this](std::exception_ptr) {
+            m_controlInFlight = false;
+            m_refreshButton->setEnabled(!m_refreshRunning.load());
+            updateControlActions();
+            m_statusLabel->setText(ioTimerText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+        });
+    if (ticket == 0)
+    {
+        m_controlInFlight = false;
+        m_refreshButton->setEnabled(!m_refreshRunning.load());
+        updateControlActions();
+        m_statusLabel->setText(ioTimerText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
 }
 
 void KernelIoTimerTab::showContextMenu(const QPoint& localPosition)
@@ -705,7 +790,7 @@ void KernelIoTimerTab::showContextMenu(const QPoint& localPosition)
         ioTimerText("kernel.iotimer.menu.copy_row", QStringLiteral("复制当前行")));
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-    const bool canControl =
+    const bool canControl = !m_controlInFlight &&
         !m_refreshRunning.load(std::memory_order_relaxed) && selectedRow() != nullptr;
     startAction->setEnabled(canControl);
     stopAction->setEnabled(canControl);

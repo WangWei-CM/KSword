@@ -5,9 +5,11 @@
 #include "./PageTabFocusStyle.h"
 #include "./AdaptivePageScroll.h"
 #include "./PrimaryPageStyle.h"
+#include "./PerfTrace.h"
 
 #include <QBoxLayout>
 #include <QEvent>
+#include <QHash>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStackedWidget>
@@ -28,7 +30,7 @@ namespace
     };
 
     // 主窗口使用工作区层级，独立窗口使用现有表面角色；子栏与父栏用不同强度。
-    PageTabColors tabColors(bool mainSurface, bool child, bool joined = false)
+    PageTabColors tabColors(bool mainSurface, bool child, bool joined = false, bool transparent = false)
     {
         const ks::ui::MainSurfaceColors mainColors = ks::ui::MainWindowSurfaceColors();
         PageTabColors colors;
@@ -50,6 +52,13 @@ namespace
             colors.selected = mainSurface ? mainColors.header : KswordTheme::SurfaceAltColor();
         }
         colors.hovered = KswordTheme::BlendColors(colors.rail, colors.selected, 128);
+        if (transparent)
+        {
+            colors.page = Qt::transparent;
+            colors.rail.setAlpha(ks::ui::MainDataSurfaceAlpha());
+            colors.selected.setAlpha(ks::ui::MainDataSurfaceAlpha());
+            colors.hovered.setAlpha(ks::ui::MainDataSurfaceAlpha());
+        }
         return colors;
     }
 
@@ -84,9 +93,9 @@ namespace
             "%1::tab:left:selected,%1::tab:right:selected{border-left-color:%7;}"
             "%1 QToolButton{background:%9;color:%2;border:0;border-radius:5px;}"
             "%1 QToolButton:hover{background:%3;color:%4;}")
-            .arg(selector, text.name(), colors.hovered.name(), hoverText.name(),
-                colors.selected.name(), selectedText.name(), marker.name(),
-                disabledText.name(), colors.rail.name());
+            .arg(selector, text.name(), colors.hovered.name(QColor::HexArgb), hoverText.name(),
+                colors.selected.name(QColor::HexArgb), selectedText.name(), marker.name(),
+                disabledText.name(), colors.rail.name(QColor::HexArgb));
         if (child && colors.childNavigation)
         {
             // 子导航保留自然文字宽度；状态共享同一内缩与圆角，不复制父级贴边页签造型。
@@ -216,7 +225,7 @@ namespace
         }
         const bool child = tabs->tabBar()->property("ksword_page_tabs_child").toBool();
         const bool joined = tabs->property("ksword_joined_result_tabs").toBool(); // 连体结果区不重复内缩。
-        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined);
+        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined, ks::ui::UsesTransparentMainSurface(tabs));
         const int inset = pageFrameInset(tabs); // 只计最内层明确登记的留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
         bool parameterCanvas = false; // 参数卡片内的Tab不再新增更暗的页根底板。
@@ -309,7 +318,7 @@ namespace
                 return;
             }
             // 外框层级与父子栏强调程度分开，子栏也保留清楚的同心外弧。
-            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), false);
+            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), false, false, ks::ui::UsesTransparentMainSurface(m_tabs));
             QPainterPath square; // 只填外框圆弧之外的角落，保留内部原有圆角和留白。
             square.addRect(QRectF(rect()));
             QPainterPath content;
@@ -464,7 +473,7 @@ namespace
             }
             const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child,
-                m_tabs->property("ksword_joined_result_tabs").toBool());
+                m_tabs->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(m_tabs));
             QPainter painter(this); // 水平/竖向导航均使用控制器给出的真实栏范围。
             painter.fillRect(rect(), colors.rail);
         }
@@ -492,42 +501,76 @@ namespace
             {
                 stack->installEventFilter(this); // 原生 pane 布局更新后同步局部连接，不争抢几何。
             }
-            connect(tabs, &QTabWidget::currentChanged, this, [this]()
+            connect(tabs, &QTabWidget::currentChanged, this, [this](int index)
             {
-                m_layoutDirty = true;
-                if (canPreparePage()) prepareNow(); // Qt已显示目标页，再处理当前页的明确外层布局。
+#if KSWORD_PERF_TRACE_ENABLED
+                if (m_tabs && index == m_tabs->currentIndex()) beginNavigation(index);
+#else
+                Q_UNUSED(index);
+#endif
+                if (canPreparePage()) prepareNow(); // 首次页或真实dirty才整理结构，热切只同步现存外壳。
                 else schedule();
             });
+#if KSWORD_PERF_TRACE_ENABLED
+            beginNavigation(tabs->currentIndex(), "initial_state");
+#endif
             schedule();
         }
+
+#if KSWORD_PERF_TRACE_ENABLED
+        ~PageTabEnvelope() override
+        {
+            finishNavigation("owner_destroyed");
+        }
+#endif
 
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
             const QPointer<QObject> source(watched); // 同步样式/布局可能销毁当前宿主。
-            // 惰性创建、改字号、移动宿主与标签溢出都会改变栏几何，合并到下一轮布局。
+            if (m_preparing) return source.isNull(); // 本次pane/边距准备引起的通知由末尾同步统一消费。
+            if (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved)
+            {
+                // ChildRemoved also arrives while Qt tears down a page/layout.
+                // QPointer can still be live then; currentWidget() may already
+                // reach a partially destroyed QStackedLayout. Defer the lookup.
+                invalidateLayout(watched);
+                m_surfaceDirty = true;
+                if (m_tabs && m_tabs->isVisible()) schedule();
+                return source.isNull();
+            }
+            QWidget* contentPage = m_contentPages.value(qobject_cast<QWidget*>(watched)).data();
+            const bool hiddenContent = contentPage && (!m_tabs || contentPage != m_tabs->currentWidget());
+            // 只观察已访问页及其明确外层宿主；隐藏页结构失效保留，几何通知不安排后台工作。
             switch (event->type())
             {
             case QEvent::Resize:
             case QEvent::Move:
+                if (!hiddenContent) schedule();
+                break;
             case QEvent::FontChange:
-                schedule();
+            case QEvent::ApplicationFontChange:
+                invalidateLayout(watched);
+                if (!hiddenContent) schedule();
                 break;
             case QEvent::LayoutRequest:
-                if (!m_preparing && canPreparePage() && needsLayoutPreparation()) prepareNow();
+                if (hiddenContent) break;
+                if (canPreparePage() && needsLayoutPreparation()) prepareNow();
                 else schedule();
                 break;
             case QEvent::Show:
+                if (hiddenContent) break;
                 m_surfaceDirty = true;
-                if (!m_preparing && canPreparePage()
+                if (canPreparePage()
                     && (watched == m_tabs || watched == m_tabs->currentWidget()
                         || watched == m_observedSurface))
                 {
-                    prepareNow(); // 当前页已完成Show/原生布局，首绘前建立留白和现有角片。
+                    prepareNow(); // dirty当前页在首绘前准备；已处理热页只更新角片与栏底面。
                 }
                 else schedule();
                 break;
             case QEvent::Paint:
+                if (hiddenContent) break;
                 if (m_geometryDirty)
                 {
                     if (!m_layoutDirty)
@@ -538,15 +581,22 @@ namespace
                     synchronizeSurfaces(); // Paint绝不写业务layout或QSS。
                 }
                 break;
+            case QEvent::DynamicPropertyChange:
+                if (!isLayoutProperty(static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()))
+                {
+                    break; // 测量pending、业务状态及本组件自己的QSS缓存不使布局失效。
+                }
+                [[fallthrough]];
             case QEvent::StyleChange:
             case QEvent::PaletteChange:
             case QEvent::ApplicationPaletteChange:
             case QEvent::ParentChange:
-            case QEvent::DynamicPropertyChange:
-            case QEvent::ChildAdded:
-                m_surfaceDirty = true; // 几何同步与主题底色失效分开，避免每个Move都重画。
-                m_layoutDirty = true;
-                schedule();
+                invalidateLayout(watched);
+                if (!hiddenContent)
+                {
+                    m_surfaceDirty = true;
+                    schedule();
+                }
                 break;
             case QEvent::Hide:
                 if (watched == m_tabs && m_surface)
@@ -571,6 +621,74 @@ namespace
         }
 
     private:
+#if KSWORD_PERF_TRACE_ENABLED
+        void finishNavigation(const char* outcome)
+        {
+            if (!m_navigation.id) return;
+            ks::ui::RecordPerfNavigationStage(m_navigation, "end", "tab_envelope", outcome);
+            m_navigation = {};
+            m_navigationPage.clear();
+        }
+
+        void beginNavigation(int index, const char* origin = nullptr)
+        {
+            finishNavigation("superseded_before_shell_ready");
+            if (!m_tabs || index < 0 || !m_tabs->widget(index)) return;
+            m_navigationPage = m_tabs->widget(index);
+            m_navigation = ks::ui::BeginPerfNavigationTrace("page_tab",
+                ks::ui::CapturePerfNavigationTarget(m_tabs, m_navigationPage, index), "selected", origin);
+        }
+
+        void recordNavigationPreparation()
+        {
+            if (!m_navigation.id || !m_navigationPage || !hasVisibleFramePage()
+                || m_tabs->currentWidget() != m_navigationPage
+                || m_tabs->currentIndex() != m_navigation.target.index
+                || m_preparing || needsLayoutPreparation()) return;
+            // Actual existing layout/pane/surface work has returned for this
+            // same target. This says nothing about its business data or paint.
+            ks::ui::RecordPerfNavigationStage(m_navigation, "ready",
+                "tab_envelope_layout_and_surfaces", "shell_prepared");
+            finishNavigation("shell_prepared");
+        }
+#endif
+
+        struct PreparedPage
+        {
+            QPointer<QWidget> owner;
+            QPointer<QLayout> layout;
+            QPointer<QWidget> pageParent;
+            QPointer<QWidget> ownerParent;
+            QLayout::SizeConstraint constraint = QLayout::SetDefaultConstraint;
+            quint64 revision = 0;
+            bool dirty = true;
+        };
+
+        static bool isLayoutProperty(const QByteArray& name)
+        {
+            return name == "ksword_secondary_tabs" || name == "ksword_page_tabs_child"
+                || name == "ksword_joined_result_tabs" || name == "ksword_standard_tabs_gap"
+                || name == "ksword_page_tabs_content_inset" || name == "ksword_square_page_frame"
+                || name == "ksword_workspace_content_frame" || name == "ksword_primary_content_panel"
+                || name == "ksword_parameter_surface" || name == "ksword_page_frame_host"
+                || name == "ksword_main_surface_hierarchy";
+        }
+
+        void invalidateLayout(QObject* source)
+        {
+            QWidget* page = m_contentPages.value(qobject_cast<QWidget*>(source)).data();
+            if (page)
+            {
+                const auto prepared = m_preparedPages.find(page);
+                if (prepared != m_preparedPages.end()) prepared->dirty = true;
+            }
+            else
+            {
+                ++m_layoutRevision; // 标签容器/栏的主题、字体或挂载归属改变，所有缓存页需重新消费。
+                m_layoutDirty = true;
+            }
+        }
+
         // 几何/Show/Hide/ZOrderChange可同步换页；旧页快照不能继续覆盖新页的外角。
         bool retainCurrentPage(const QPointer<QWidget>& page)
         {
@@ -600,8 +718,14 @@ namespace
             QWidget* page = m_tabs->currentWidget();
             QWidget* owner = pageLayoutOwner(page);
             QLayout* layout = owner ? owner->layout() : nullptr;
-            return m_layoutDirty || m_preparedPage != page || m_preparedOwner != owner
+            const auto prepared = m_preparedPages.constFind(page);
+            return m_layoutDirty || prepared == m_preparedPages.cend() || prepared->dirty
+                || prepared->revision != m_layoutRevision || prepared->owner != owner
+                || prepared->layout != layout || prepared->pageParent != page->parentWidget()
+                || prepared->ownerParent != (owner ? owner->parentWidget() : nullptr)
+                || (layout && prepared->constraint != layout->sizeConstraint())
                 || m_preparedInset != pageFrameInset(m_tabs)
+                || m_preparedDelegation != (delegatedPageTabs(m_tabs) != nullptr)
                 || (layout && ownsPageMargin(owner)
                     && layout->contentsMargins() != QMargins());
         }
@@ -627,7 +751,7 @@ namespace
             if (m_preparing) return;
             ++m_scheduleGeneration; // 同步消费后，旧回调不能清理后来的新pending。
             m_pending = false;
-            m_layoutDirty = true; // Show必须按挂载后的真实父归属补齐pane，普通Resize不重做此阶段。
+            // Show本身不使结构失效；真实结构/主题请求和宿主签名决定是否同步准备。
             synchronize();
         }
 
@@ -652,26 +776,29 @@ namespace
         // 观察当前页及其明确滚动内容；惰性页面建好布局后再消除重复的外围间距。
         void observeContent(QWidget* page, QWidget* surface)
         {
-            if (m_observedPage == page && m_observedSurface == surface)
-            {
-                return; // Resize/LayoutRequest不会改变归属，不重复移动同一个事件过滤器。
-            }
-            for (QWidget* previous : {m_observedPage.data(), m_observedSurface.data()})
-            {
-                if (previous && previous != page && previous != surface)
-                {
-                    previous->removeEventFilter(this);
-                }
-            }
             m_observedPage = page;
             m_observedSurface = surface;
-            if (page)
+            for (QWidget* widget : {page, surface})
             {
-                page->installEventFilter(this);
-            }
-            if (surface && surface != page)
-            {
-                surface->installEventFilter(this);
+                if (!widget) continue;
+                if (!m_contentPages.contains(widget))
+                {
+                    widget->installEventFilter(this);
+                    connect(widget, &QObject::destroyed, this, [this, widget]()
+                    {
+                        m_preparedPages.remove(widget);
+                        for (auto entry = m_contentPages.begin(); entry != m_contentPages.end();)
+                        {
+                            if (entry.key() == widget || !entry.value())
+                            {
+                                if (entry.key() != widget) entry.key()->removeEventFilter(this);
+                                entry = m_contentPages.erase(entry);
+                            }
+                            else ++entry;
+                        }
+                    });
+                }
+                m_contentPages.insert(widget, page);
             }
         }
 
@@ -682,6 +809,9 @@ namespace
             {
                 return;
             }
+#if KSWORD_PERF_TRACE_ENABLED
+            const QPointer<PageTabEnvelope> navigationLifetime(this);
+#endif
             const bool visiblePage = hasVisibleFramePage();
             if ((canPreparePage() || (fromQueue && visiblePage)) && needsLayoutPreparation())
             {
@@ -705,13 +835,29 @@ namespace
                     schedule(); // 真正换页/换惰性内容后，不能把旧归属标成新页面已准备。
                     return;
                 }
-                m_preparedPage = page;
-                m_preparedOwner = owner;
+                PreparedPage prepared;
+                prepared.owner = owner;
+                prepared.layout = owner ? owner->layout() : nullptr;
+                prepared.pageParent = page->parentWidget();
+                prepared.ownerParent = owner ? owner->parentWidget() : nullptr;
+                prepared.constraint = owner && owner->layout()
+                    ? owner->layout()->sizeConstraint() : QLayout::SetDefaultConstraint;
+                prepared.revision = m_layoutRevision;
+                prepared.dirty = false;
+                m_preparedPages.insert(page, prepared);
                 m_preparedInset = pageFrameInset(m_tabs);
+                m_preparedDelegation = delegatedPageTabs(m_tabs) != nullptr;
                 m_layoutDirty = false;
                 m_preparing = false;
             }
+            else if (visiblePage)
+            {
+                observeContent(m_tabs->currentWidget(), pageLayoutOwner(m_tabs->currentWidget()));
+            }
             synchronizeSurfaces();
+#if KSWORD_PERF_TRACE_ENABLED
+            if (navigationLifetime) recordNavigationPreparation();
+#endif
         }
 
         // 只摆放既有导航底面及四角，可在firstPaint兜底；绝不写layout、pane或创建覆盖层。
@@ -821,10 +967,16 @@ namespace
         bool m_geometryDirty = true; // Paint仅处理现有overlay的几何。
         bool m_layoutDirty = true; // 真正布局/主题工作不被Paint兜底错误消费。
         bool m_preparing = false; // 自身pane/layout事件不回投新的同步或排队任务。
-        QPointer<QWidget> m_preparedPage; // 当前页身份变化才需要首显布局准备。
-        QPointer<QWidget> m_preparedOwner; // 惰性宿主更换真实内容后再准备其最外层布局。
-        int m_preparedInset = -1; // 嵌套Tab外留白变化也在安全布局点处理。
+        QHash<QWidget*, PreparedPage> m_preparedPages; // 每个已访问页保存外层布局契约，A→B→A不重做准备。
+        QHash<QWidget*, QPointer<QWidget>> m_contentPages; // 明确页/滚动宿主到页的身份映射，不扫描控件树。
+        quint64 m_layoutRevision = 0; // 共享主题、字体和Tab挂载失效代次。
+        int m_preparedInset = -1; // pane属于整个Tab，切到不同留白关系仍须更新一次。
+        bool m_preparedDelegation = false; // 纯子Tab转交与普通页的pane接缝不同。
         quint64 m_scheduleGeneration = 0; // 同步已消费的旧回调自动失效。
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::PerfNavigationTrace m_navigation;
+        QPointer<QWidget> m_navigationPage;
+#endif
     };
 }
 
@@ -834,7 +986,7 @@ namespace ks::ui
     {
         const bool child = bar && bar->property("ksword_page_tabs_child").toBool();
         return tabColors(UsesMainSurfaceHierarchy(bar), child,
-            bar && bar->property("ksword_joined_result_tabs").toBool()).rail;
+            bar && bar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(bar)).rail;
     }
 
     QColor PageTabIconContrastColor(const QColor& preferred)
@@ -875,7 +1027,7 @@ namespace ks::ui
             }
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeBar), child,
-                safeBar->property("ksword_joined_result_tabs").toBool());
+                safeBar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(safeBar));
             return PageTabMotionColors{colors.selected, KswordTheme::EnsureTextContrast(
                 KswordTheme::ControlAccentColor(), colors.selected, 3.0)};
         });
@@ -884,7 +1036,7 @@ namespace ks::ui
             const bool child = bar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
                 tabColors(UsesMainSurfaceHierarchy(bar), child,
-                    bar->property("ksword_joined_result_tabs").toBool()), child, true);
+                    bar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(bar)), child, true);
             if (bar->styleSheet() != rules)
             {
                 bar->setStyleSheet(rules); // 重复明确接入不再触发整栏polish和外壳StyleChange。
@@ -903,7 +1055,7 @@ namespace ks::ui
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
                 tabColors(UsesMainSurfaceHierarchy(safeBar), child,
-                    safeBar->property("ksword_joined_result_tabs").toBool()), child, true);
+                    safeBar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(safeBar)), child, true);
             if (safeBar->styleSheet() != rules)
             {
                 safeBar->setStyleSheet(rules);

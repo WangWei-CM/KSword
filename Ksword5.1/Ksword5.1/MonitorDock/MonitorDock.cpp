@@ -1,7 +1,12 @@
+#include "MonitorTableExport.h"
+#include "MonitorEventFilterProjection.h"
+#include "../UI/AsyncCleanupRegistry.h"
 
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
+#include "../UI/CompleteExport.h"
+#include "MonitorNavigationSchema.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include <MonitorDock/EtwArchiveCompression.h>
 #include "../UI/VisibleTableWidget.h"
@@ -26,6 +31,8 @@
 
 #include <QApplication>
 #include <QAbstractItemModel>
+#include <QAbstractTableModel>
+#include <QThreadPool>
 #include <QBuffer>
 #include <QByteArray>
 #include <QCheckBox>
@@ -868,7 +875,8 @@ namespace
             "  color:%2;"
             "  border:none;"
             "}")
-            .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+            .arg(ks::ui::UsesTransparentMainSurface(panel) ? QStringLiteral("transparent")
+                : ks::ui::UsesMainSurfaceHierarchy(panel)
                 ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex());
     }
@@ -876,10 +884,10 @@ namespace
     // collapseHeaderButtonStyle 作用：
     // - 重写折叠头按钮主题，避免继承旧 Collapse/QToolBox 的固定配色；
     // - 返回：可直接应用到 QToolButton 的样式表。
-    QString collapseHeaderButtonStyle()
+    QString collapseHeaderButtonStyle(const QAbstractButton* button)
     {
         // 纯色主题只接管颜色；保留本页按钮尺寸和业务选中状态。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Auto, button)
             + QStringLiteral("QToolButton{border-radius:5px;padding:5px 8px;font-weight:600;text-align:left;}");
 
     }
@@ -920,7 +928,7 @@ namespace
         // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
         ks::ui::BindWidgetTheme(headerButton, [headerButton]()
         {
-            const QString style = collapseHeaderButtonStyle();
+            const QString style = collapseHeaderButtonStyle(headerButton);
             if (headerButton->styleSheet() != style)
             {
                 headerButton->setStyleSheet(style);
@@ -1148,34 +1156,7 @@ namespace
     // - 支持普通 contains 与正则匹配两种模式；
     // - 支持大小写敏感切换；
     // - pattern 为空时视为“匹配通过”。
-    bool textMatch(
-        const QString& sourceText,
-        const QString& patternText,
-        const bool useRegex,
-        const Qt::CaseSensitivity caseSensitivity)
-    {
-        if (patternText.trimmed().isEmpty())
-        {
-            return true;
-        }
 
-        if (!useRegex)
-        {
-            return sourceText.contains(patternText, caseSensitivity);
-        }
-
-        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-        if (caseSensitivity == Qt::CaseInsensitive)
-        {
-            options |= QRegularExpression::CaseInsensitiveOption;
-        }
-        const QRegularExpression regex(patternText, options);
-        if (!regex.isValid())
-        {
-            return false;
-        }
-        return regex.match(sourceText).hasMatch();
-    }
 
     // 连接 ROOT\\CIMV2。
     bool connectWmi(IWbemServices** serviceOut, QString* errorOut)
@@ -4559,15 +4540,80 @@ namespace
         return node;
     }
 
+    class EtwEventTableModel final : public QAbstractTableModel
+    {
+    public:
+        using Row = MonitorDock::EtwCapturedEventRow;
+        explicit EtwEventTableModel(std::deque<Row>* rows, QObject* parent)
+            : QAbstractTableModel(parent), m_rows(rows) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : static_cast<int>(m_rows->size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 7; }
+        static QString cellText(const Row& row, const int column)
+        {
+            switch (column) {
+            case 0: return row.timestampText;
+            case 1: return row.providerName;
+            case 2: return QString::number(row.eventId);
+            case 3: return row.eventName;
+            case 4: return row.pidTidText;
+            case 5: return row.detailSummary;
+            case 6: return row.activityId;
+            default: return {};
+            }
+        }
+        QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()
+                || index.column() < 0 || index.column() >= 7) return {};
+            const Row& row = (*m_rows)[static_cast<std::size_t>(index.row())];
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return cellText(row, index.column());
+            if (role == Qt::UserRole && index.column() == 5) return QVariant::fromValue(row.detailObject);
+            return {};
+        }
+        QVariant headerData(const int section, const Qt::Orientation orientation,
+            const int role = Qt::DisplayRole) const override
+        {
+            if (orientation == Qt::Vertical) {
+                if (section < 0 || section >= rowCount()) return {};
+                if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
+                const auto sequence = (*m_rows)[static_cast<std::size_t>(section)].archiveSequence;
+                if (role == Qt::DisplayRole) return QString::number(sequence ? sequence : static_cast<std::uint64_t>(section + 1));
+                return {};
+            }
+            if (role != Qt::DisplayRole || section < 0 || section >= m_headers.size()) return {};
+            return ks::i18n::sourceText(m_headers.at(section));
+        }
+        void setHeaders(QStringList headers) { m_headers = std::move(headers); }
+        void replace(std::deque<Row> rows)
+        {
+            auto retired = std::make_shared<std::deque<Row>>();
+            beginResetModel(); retired->swap(*m_rows); m_rows->swap(rows); endResetModel();
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        void trimFront(const int count)
+        {
+            if (count <= 0) return;
+            beginRemoveRows({}, 0, count - 1);
+            auto retired = std::make_shared<std::deque<Row>>();
+            for (int i = 0; i < count; ++i) { retired->push_back(std::move(m_rows->front())); m_rows->pop_front(); }
+            endRemoveRows(); QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        void beginAppend(const int count) { beginInsertRows({}, rowCount(), rowCount() + count - 1); }
+        void endAppend() { endInsertRows(); }
+    private:
+        std::deque<Row>* m_rows;
+        QStringList m_headers;
+    };
+
     // buildEtwRowDetailText：
     // - 作用：把 ETW 事件表某一行格式化为可读详情文本；
     // - 调用：右键“查看返回详情”和双击事件行时复用。
-    monitor_text_viewer::MonitorDocument buildEtwRowDetailText(QTableWidget* eventTable, const int row)
+    monitor_text_viewer::MonitorDocument buildEtwRowDetailText(QTableView* eventTable, const int row)
     {
-        if (eventTable == nullptr || row < 0 || row >= eventTable->rowCount()) return {};
+        if (eventTable == nullptr || row < 0 || row >= eventTable->model()->rowCount()) return {};
         const auto itemTextAt = [eventTable, row](const int column) -> QString {
-            const QTableWidgetItem* item = eventTable->item(row, column);
-            return item ? item->text() : QString();
+            return eventTable->model()->index(row, column).data().toString();
         };
         ks::ui::FieldDocument document;
         document.section(QStringLiteral("事件"));
@@ -4577,9 +4623,7 @@ namespace
         document.field(QStringLiteral("事件名"), itemTextAt(3));
         document.field(QStringLiteral("PID / TID"), itemTextAt(4));
         document.field(QStringLiteral("ActivityId"), itemTextAt(6));
-        QJsonObject snapshot;
-        if (const QTableWidgetItem* detail = eventTable->item(row, 5))
-            snapshot = detail->data(Qt::UserRole).value<QJsonObject>();
+        const QJsonObject snapshot = eventTable->model()->index(row, 5).data(Qt::UserRole).value<QJsonObject>();
         document.nodes.push_back(monitorJsonNode(QStringLiteral("ETW"), snapshot));
         const QJsonValue raw = snapshot.value(QStringLiteral("rawFallback"));
         const QString rawPayload = raw.isString() ? raw.toString() : raw.toObject().value(QStringLiteral("hexDump")).toString();
@@ -4667,12 +4711,16 @@ bool MonitorDock::event(QEvent* eventPointer)
 
 void MonitorDock::ensureDirectKernelCallTabInitialized()
 {
-    // 构造/挂载结束后才准备首帧主题，所有提前返回继续复用现有业务页面。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_directKernelCallHostPage);
     if (m_directKernelCallWidget != nullptr || m_directKernelCallHostPage == nullptr)
     {
+        if (m_directKernelCallHostPage != nullptr && m_directKernelCallHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_directKernelCallHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_directKernelCallHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_directKernelCallHostPage->layout());
     if (hostLayout == nullptr)
@@ -4700,12 +4748,16 @@ void MonitorDock::ensureDirectKernelCallTabInitialized()
 
 void MonitorDock::ensureKernelCallbackTabInitialized()
 {
-    // 统一出口准备当前可见宿主，不在控件半构造时执行主题回调。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_kernelCallbackHostPage);
     if (m_kernelCallbackWidget != nullptr || m_kernelCallbackHostPage == nullptr)
     {
+        if (m_kernelCallbackHostPage != nullptr && m_kernelCallbackHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_kernelCallbackHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_kernelCallbackHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_kernelCallbackHostPage->layout());
     if (hostLayout == nullptr)
@@ -4730,12 +4782,22 @@ void MonitorDock::ensureKernelCallbackTabInitialized()
 
 void MonitorDock::ensureWinApiTabInitialized()
 {
-    // WinAPI页面挂载和激活完成后准备主题，重显时同样消费已有绑定。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_winApiPage);
     if (m_winApiPage == nullptr)
     {
         return;
     }
+    if (m_winApiWidget != nullptr)
+    {
+        const QPointer<QWidget> page(m_winApiPage); // 激活回调允许关闭宿主。
+        m_winApiWidget->notifyPageActivated();
+        if (page != nullptr && page->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
+        }
+        return;
+    }
+    // 首次挂载和业务激活完成之后才准备真正可见分支。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_winApiPage);
 
     if (m_winApiWidget == nullptr)
     {
@@ -4763,6 +4825,11 @@ void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
     }
 
     QWidget* currentPage = m_sideTabWidget->currentWidget();
+    if (currentPage == m_arkRiskCenterPage && m_arkRiskExportOperation) {
+        const QPointer<MonitorDock> guard(this);
+        m_arkRiskExportOperation->reconcile();
+        if (!guard) return;
+    }
     if (currentPage == m_wmiPage && !m_wmiInitialDiscoveryDone)
     {
         m_wmiInitialDiscoveryDone = true;
@@ -4784,6 +4851,90 @@ void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
         m_arkRiskCenterInitialDiscoveryDone = true;
         refreshArkRiskCenterAsync();
     }
+}
+
+QWidget* MonitorDock::monitorNavigationPage(const QString& key) const
+{
+    if (key == QStringLiteral("process-trace")) return m_processTraceWidget;
+    if (key == QStringLiteral("kernel-callback")) return m_kernelCallbackHostPage;
+    if (key == QStringLiteral("direct-kernel-call")) return m_directKernelCallHostPage;
+    if (key == QStringLiteral("winapi")) return m_winApiPage;
+    if (key == QStringLiteral("wmi")) return m_wmiPage;
+    if (key == QStringLiteral("etw")) return m_etwPage;
+    if (key == QStringLiteral("ark-risk")) return m_arkRiskCenterPage;
+    return nullptr;
+}
+
+ks::ui::PageNavigationCatalog MonitorDock::navigationCatalog(const MonitorDock* existing)
+{
+    ks::ui::PageNavigationCatalog result;
+    result.reserve(static_cast<qsizetype>(ks::monitor::MonitorNavigationSpecs.size()));
+    for (const auto& spec : ks::monitor::MonitorNavigationSpecs)
+    {
+        ks::ui::PageNavigationDescriptor page;
+        page.id = QString::fromLatin1(spec.id);
+        page.parentId = QString::fromLatin1(spec.parent);
+        page.title = ks::monitor::MonitorNavigationTitle(spec);
+        page.searchTexts = QString::fromLatin1(spec.search).split(QChar('|'));
+        page.searchTexts.append(page.id);
+        page.current = spec.defaultCurrent;
+        QTabWidget* tabs = nullptr;
+        QWidget* target = nullptr;
+        if (existing)
+        {
+            if (page.parentId.isEmpty()) {
+                tabs = existing->m_sideTabWidget;
+                target = existing->monitorNavigationPage(page.id);
+            }
+            else if (existing->m_winApiWidget && existing->m_winApiWidget->m_resultTabs) {
+                tabs = existing->m_winApiWidget->m_resultTabs;
+                for (int index = 0; index < tabs->count(); ++index)
+                    if (tabs->widget(index)->property("ksword_monitor_navigation_id").toString() == page.id)
+                    { target = tabs->widget(index); break; }
+            }
+        }
+        if (tabs) {
+            const int index = target ? tabs->indexOf(target) : -1;
+            if (index >= 0) {
+                page.title = tabs->tabText(index);
+                page.visible = tabs->isTabVisible(index);
+                page.enabled = tabs->isTabEnabled(index) && target->isEnabled();
+                page.current = tabs->currentWidget() == target;
+            }
+            else { page.visible = false; page.enabled = false; page.current = false; }
+        }
+        result.append(std::move(page));
+    }
+    return result;
+}
+
+QWidget* MonitorDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto* spec = ks::monitor::FindMonitorNavigationSpec(id);
+    if (!spec || !m_sideTabWidget) return nullptr;
+    const auto catalog = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QStringLiteral("监控"));
+    if (!catalog) return nullptr;
+    bool available = false;
+    for (const auto& page : *catalog)
+        if (page.page.id == id) { available = page.page.visible && page.page.enabled; break; }
+    if (!available) return nullptr;
+    const QString rootId = *spec->parent ? QString::fromLatin1(spec->parent) : id;
+    activateMonitorTab(rootId); // Existing user navigation owns the actual lazy factory and discovery.
+    if (!*spec->parent) return monitorNavigationPage(rootId);
+    if (!m_winApiWidget || !m_winApiWidget->m_resultTabs) return nullptr;
+    auto* tabs = m_winApiWidget->m_resultTabs;
+    for (int index = 0; index < tabs->count(); ++index)
+        if (tabs->widget(index)->property("ksword_monitor_navigation_id").toString() == id) {
+            if (!tabs->isTabVisible(index) || !tabs->isTabEnabled(index) || !tabs->widget(index)->isEnabled()) return nullptr;
+            tabs->setCurrentIndex(index);
+            return tabs->widget(index);
+        }
+    return nullptr;
+}
+
+namespace {
+    [[maybe_unused]] const bool monitorCatalogRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<MonitorDock>(QStringLiteral("monitor"));
 }
 
 void MonitorDock::activateMonitorTab(const QString& tabKey)
@@ -4867,6 +5018,11 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
 
 MonitorDock::~MonitorDock()
 {
+    if (m_wmiTableExport) m_wmiTableExport->close();
+    if (m_wmiFilterProjection) m_wmiFilterProjection->close();
+    if (m_arkRiskExportOperation) m_arkRiskExportOperation->close();
+    if (m_arkRiskDispatcher) m_arkRiskDispatcher->close();
+    ++m_arkRiskProjectionTicket;
     // 析构阶段必须同步等待线程退出，防止对象释放后后台线程仍访问成员。
     stopWmiSubscriptionInternal(true);
     stopEtwCaptureInternal(true);
@@ -4912,12 +5068,7 @@ void MonitorDock::initializeUi()
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);
-    m_sideTabWidget->addTab(
-        m_processTraceWidget,
-        QIcon(QStringLiteral(":/Icon/process_main.svg")),
-        QStringLiteral("进程定向"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_processTraceWidget, QStringLiteral("monitor.tab.process_trace"), QStringLiteral("进程定向"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_processTraceWidget, QStringLiteral("process-trace"));
 
     m_kernelCallbackHostPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* kernelCallbackHostLayout = new QVBoxLayout(m_kernelCallbackHostPage);
@@ -4929,15 +5080,7 @@ void MonitorDock::initializeUi()
             QStringLiteral("内核回调监控待加载"),
             QStringLiteral("切换到本页后再连接驱动并创建回调事件界面。")),
         1);
-    m_sideTabWidget->addTab(
-        m_kernelCallbackHostPage,
-        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("内核回调"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_kernelCallbackHostPage,
-        QStringLiteral("monitor.tab.kernel_callback"),
-        QStringLiteral("内核回调"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_kernelCallbackHostPage, QStringLiteral("kernel-callback"));
 
     m_directKernelCallHostPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* directKernelCallHostLayout = new QVBoxLayout(m_directKernelCallHostPage);
@@ -4949,26 +5092,13 @@ void MonitorDock::initializeUi()
             QStringLiteral("直接内核调用待加载"),
             QStringLiteral("切换到本页后再解析 syscall 映射并创建 ETW 采集界面。")),
         1);
-    m_sideTabWidget->addTab(
-        m_directKernelCallHostPage,
-        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("直接内核调用"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_directKernelCallHostPage,
-        QStringLiteral("monitor.tab.direct_kernel_call"),
-        QStringLiteral("直接内核调用"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_directKernelCallHostPage, QStringLiteral("direct-kernel-call"));
 
     m_winApiPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);
     winApiPageLayout->setContentsMargins(0, 0, 0, 0);
     winApiPageLayout->setSpacing(0);
-    m_sideTabWidget->addTab(
-        m_winApiPage,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("WinAPI"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_winApiPage, QStringLiteral("monitor.tab.winapi"), QStringLiteral("WinAPI"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_winApiPage, QStringLiteral("winapi"));
 
     initializeWmiTab();
     initializeEtwTab();
@@ -5834,9 +5964,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->setStretch(0, 0);
     m_wmiLayout->setStretch(1, 0);
     m_wmiLayout->setStretch(2, 1);
-    m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_wmiPage, QStringLiteral("monitor.tab.wmi"), QStringLiteral("WMI"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_wmiPage, QStringLiteral("wmi"));
 }
 
 void MonitorDock::updateWmiSubscribePanelCompactLayout()
@@ -6246,10 +6374,12 @@ void MonitorDock::initializeEtwTab()
     m_etwLayout->addWidget(m_etwTimelineWidget, 0);
 
     // 结果表。
-    m_etwEventTable = new ks::ui::VisibleTableWidget(m_etwPage);
+    m_etwEventTable = new ks::ui::TableActionTableView(m_etwPage);
+    auto* etwEventModel = new EtwEventTableModel(&m_etwCapturedRows, m_etwEventTable);
+    m_etwEventTable->setModel(etwEventModel);
+    m_etwEventTable->installEventFilter(this);
     ks::ui::SetTableActionBarMode(m_etwEventTable, ks::ui::TableActionBarMode::Full);
-    m_etwEventTable->setColumnCount(7);
-    m_etwEventTable->setHorizontalHeaderLabels(QStringList{
+    etwEventModel->setHeaders(QStringList{
         QStringLiteral("时间戳(100ns)"),
         QStringLiteral("Provider"),
         QStringLiteral("事件ID"),
@@ -6298,9 +6428,7 @@ void MonitorDock::initializeEtwTab()
     updateEtwCaptureActionState();
     updateEtwCollapseHeight();
 
-    m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW监控"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_etwPage, QStringLiteral("monitor.tab.etw"), QStringLiteral("ETW监控"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_etwPage, QStringLiteral("etw"));
 }
 
 MonitorDock::EtwSimpleFilterUiState& MonitorDock::etwSimpleFilterUi(const EtwFilterStage stage)
@@ -7251,15 +7379,11 @@ void MonitorDock::initializeConnections()
         flushEtwPendingRows(!m_etwCaptureRunning.load());
     });
 
-    connect(m_etwEventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+    connect(m_etwEventTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
         showEtwEventContextMenu(pos);
     });
-    connect(m_etwEventTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* itemPointer) {
-        if (itemPointer == nullptr)
-        {
-            return;
-        }
-        openEtwEventDetailViewerForRow(itemPointer->row());
+    connect(m_etwEventTable, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+        if (index.isValid()) openEtwEventDetailViewerForRow(index.row());
     });
 }
 
@@ -8042,8 +8166,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
     bool archiveAvailable = false;
     if (stage == EtwFilterStage::Post)
     {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveAvailable = !m_etwArchiveDirectory.trimmed().isEmpty();
+        archiveAvailable = !m_etwArchiveMetadata.snapshot().directory.trimmed().isEmpty();
     }
 
     if (compiledGroupList.empty())
@@ -8057,7 +8180,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
             && isEtwTimelineFilterActive())
         {
             int visibleCount = 0;
-            for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+            for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
             {
                 if (!m_etwEventTable->isRowHidden(row))
                 {
@@ -8067,7 +8190,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
             stateLabel->setText(QStringLiteral("%1 | 可见: %2 / %3 | 时间轴已筛选")
                 .arg(QStringLiteral("后置筛选当前无规则"))
                 .arg(visibleCount)
-                .arg(m_etwEventTable->rowCount()));
+                .arg(m_etwEventTable->model()->rowCount()));
             ks::ui::ApplyStatusRole(stateLabel, ks::ui::StatusRole::Info);
         }
         else
@@ -8092,14 +8215,14 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
     if (stage == EtwFilterStage::Post && !archiveAvailable && m_etwEventTable != nullptr)
     {
         int visibleCount = 0;
-        for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+        for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
         {
             if (!m_etwEventTable->isRowHidden(row))
             {
                 ++visibleCount;
             }
         }
-        summaryText += QStringLiteral(" | 可见: %1 / %2").arg(visibleCount).arg(m_etwEventTable->rowCount());
+        summaryText += QStringLiteral(" | 可见: %1 / %2").arg(visibleCount).arg(m_etwEventTable->model()->rowCount());
         if (isEtwTimelineFilterActive())
         {
             summaryText += QStringLiteral(" | 时间轴已筛选");
@@ -8118,7 +8241,7 @@ void MonitorDock::applyEtwPostFilterToTable(const int firstRow, const bool updat
     }
 
     const int rowCount = std::min(
-        m_etwEventTable->rowCount(),
+        m_etwEventTable->model()->rowCount(),
         static_cast<int>(m_etwCapturedRows.size()));
 
     const bool hasPostRules = m_etwPostSimpleFilterCompiled.hasAnyCondition()
@@ -8149,7 +8272,7 @@ void MonitorDock::applyEtwPostFilterToTable(const int firstRow, const bool updat
         }
         m_etwEventTable->setRowHidden(row, !visible);
     }
-    for (int row = std::max(rowCount, firstRowToApply); row < m_etwEventTable->rowCount(); ++row)
+    for (int row = std::max(rowCount, firstRowToApply); row < m_etwEventTable->model()->rowCount(); ++row)
     {
         m_etwEventTable->setRowHidden(row, false);
     }
@@ -8199,11 +8322,7 @@ void MonitorDock::applyEtwFilterRules(const EtwFilterStage stage)
     {
         m_etwPostSimpleFilterCompiled = simpleFilter;
         m_etwPostFilterCompiledGroupList = std::move(compiledGroupList);
-        QString archiveDirectory;
-        {
-            std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-            archiveDirectory = m_etwArchiveDirectory;
-        }
+        const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
         if (archiveDirectory.trimmed().isEmpty())
         {
             applyEtwPostFilterToTable();
@@ -9003,11 +9122,7 @@ void MonitorDock::commitEtwFilterConfigModel(
         m_etwPreFilterCompiledSnapshot = preSnapshotPointer;
     }
 
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty())
     {
         applyEtwPostFilterToTable(0, false);
@@ -9717,93 +9832,45 @@ void MonitorDock::applyWmiProviderFilter()
 
 void MonitorDock::applyWmiEventFilter()
 {
-    if (m_wmiEventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString globalKeyword = m_wmiEventGlobalFilterEdit != nullptr
-        ? m_wmiEventGlobalFilterEdit->text().trimmed()
-        : QString();
-    const QString providerKeyword = m_wmiEventProviderFilterEdit != nullptr
-        ? m_wmiEventProviderFilterEdit->text().trimmed()
-        : QString();
-    const QString classKeyword = m_wmiEventClassFilterEdit != nullptr
-        ? m_wmiEventClassFilterEdit->text().trimmed()
-        : QString();
-    const QString pidKeyword = m_wmiEventPidFilterEdit != nullptr
-        ? m_wmiEventPidFilterEdit->text().trimmed()
-        : QString();
-    const QString detailKeyword = m_wmiEventDetailFilterEdit != nullptr
-        ? m_wmiEventDetailFilterEdit->text().trimmed()
-        : QString();
-    const bool useRegex = m_wmiEventRegexCheck != nullptr && m_wmiEventRegexCheck->isChecked();
-    const bool invertMatch = m_wmiEventInvertCheck != nullptr && m_wmiEventInvertCheck->isChecked();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_wmiEventCaseCheck != nullptr && m_wmiEventCaseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    int visibleCount = 0;
-    const int totalCount = m_wmiEventTable->rowCount();
-    for (int row = 0; row < totalCount; ++row)
-    {
-        const QString tsText = m_wmiEventTable->item(row, 0) != nullptr
-            ? m_wmiEventTable->item(row, 0)->text()
-            : QString();
-        const QString providerText = m_wmiEventTable->item(row, 1) != nullptr
-            ? m_wmiEventTable->item(row, 1)->text()
-            : QString();
-        const QString classText = m_wmiEventTable->item(row, 2) != nullptr
-            ? m_wmiEventTable->item(row, 2)->text()
-            : QString();
-        const QString pidText = m_wmiEventTable->item(row, 3) != nullptr
-            ? m_wmiEventTable->item(row, 3)->text()
-            : QString();
-        const QString detailText = m_wmiEventTable->item(row, 4) != nullptr
-            ? m_wmiEventTable->item(row, 4)->text()
-            : QString();
-
-        const QString mergedText = QStringLiteral("%1 %2 %3 %4 %5")
-            .arg(tsText, providerText, classText, pidText, detailText);
-        const bool globalMatch = textMatch(mergedText, globalKeyword, useRegex, caseSensitivity);
-        const bool providerMatch = textMatch(providerText, providerKeyword, useRegex, caseSensitivity);
-        const bool classMatch = textMatch(classText, classKeyword, useRegex, caseSensitivity);
-        const bool pidMatch = textMatch(pidText, pidKeyword, useRegex, caseSensitivity);
-        const bool detailMatch = textMatch(detailText, detailKeyword, useRegex, caseSensitivity);
-        bool showRow = globalMatch && providerMatch && classMatch && pidMatch && detailMatch;
-        if (invertMatch)
-        {
-            showRow = !showRow;
-        }
-
-        m_wmiEventTable->setRowHidden(row, !showRow);
-        if (showRow)
-        {
-            ++visibleCount;
-        }
-    }
-
-    if (m_wmiEventFilterStatusLabel != nullptr)
-    {
-        m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visibleCount).arg(totalCount));
-    }
-    if (m_wmiEventKeepBottomCheck != nullptr && m_wmiEventKeepBottomCheck->isChecked())
-    {
-        m_wmiEventTable->scrollToBottom();
-    }
-
-    kLogEvent event;
-    dbg << event
-        << "[MonitorDock] 应用WMI事件筛选, total="
-        << totalCount
-        << ", visible="
-        << visibleCount
-        << ", regex="
-        << (useRegex ? "true" : "false")
-        << ", invert="
-        << (invertMatch ? "true" : "false")
-        << eol;
+    if (!m_wmiEventTable) return;
+    if (!m_wmiFilterProjection)
+        m_wmiFilterProjection = new ks::monitor::EventFilterProjection(m_wmiEventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                for (int column = 0; column < 5; ++column)
+                    values.fields.append(m_wmiEventTable->item(row, column) ? m_wmiEventTable->item(row, column)->text() : QString());
+                values.exportCells = values.fields;
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                if (m_wmiEventFilterStatusLabel) m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visible).arg(total));
+                updateWmiExportAction();
+                if (!pending && m_wmiEventTable->isVisible()
+                    && m_wmiEventKeepBottomCheck && m_wmiEventKeepBottomCheck->isChecked())
+                {
+                    const QPointer<MonitorDock> guard(this);
+                    const auto followLatest = [guard]() {
+                        if (guard && guard->m_wmiEventTable && guard->m_wmiEventTable->isVisible()
+                            && guard->m_wmiEventKeepBottomCheck && guard->m_wmiEventKeepBottomCheck->isChecked()
+                            && guard->m_wmiFilterProjection && !guard->m_wmiFilterProjection->isPending())
+                            guard->m_wmiEventTable->scrollToBottom();
+                    };
+                    if (!ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                        QStringLiteral("monitor-wmi-follow-bottom"), { m_wmiEventTable }, followLatest))
+                        followLatest();
+                }
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_wmiEventGlobalFilterEdit ? m_wmiEventGlobalFilterEdit->text().trimmed() : QString(),
+        m_wmiEventProviderFilterEdit ? m_wmiEventProviderFilterEdit->text().trimmed() : QString(),
+        m_wmiEventClassFilterEdit ? m_wmiEventClassFilterEdit->text().trimmed() : QString(),
+        m_wmiEventPidFilterEdit ? m_wmiEventPidFilterEdit->text().trimmed() : QString(),
+        m_wmiEventDetailFilterEdit ? m_wmiEventDetailFilterEdit->text().trimmed() : QString()};
+    spec.fieldIndexes = {-1, 1, 2, 3, 4};
+    spec.regex = m_wmiEventRegexCheck && m_wmiEventRegexCheck->isChecked();
+    spec.invert = m_wmiEventInvertCheck && m_wmiEventInvertCheck->isChecked();
+    spec.sensitivity = m_wmiEventCaseCheck && m_wmiEventCaseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    m_wmiFilterProjection->setFilter(std::move(spec));
 }
 
 void MonitorDock::clearWmiEventFilter()
@@ -9877,9 +9944,17 @@ void MonitorDock::startWmiSubscription()
             << eol;
     }
 
+    auto stopSignal = std::make_shared<std::atomic_bool>(false);
+    const std::weak_ptr<std::atomic_bool> weakStop(stopSignal);
+    auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weakStop]() {
+        if (const auto stop = weakStop.lock()) stop->store(true);
+    });
+    if (!cleanupLease) return; // Application exit has closed session admission.
+    m_wmiSubscribeStopFlag = std::move(stopSignal);
+
     m_wmiSubscribeRunning.store(true);
     m_wmiSubscribePaused.store(false);
-    m_wmiSubscribeStopFlag.store(false);
+    m_wmiSubscribeStopFlag->store(false);
 
     if (m_wmiSubscribeProgressPid == 0)
     {
@@ -9894,18 +9969,30 @@ void MonitorDock::startWmiSubscription()
         m_wmiUiUpdateTimer->start();
     }
     {
-        // 启动新一轮订阅前清空待刷队列，避免残留事件混入新会话。
         std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+        m_wmiMirrorSkippedRows.fetch_add(m_wmiPendingRows.size());
         m_wmiPendingRows.clear();
+        m_wmiArchivePath.clear();
+        m_wmiArchiveError.clear();
     }
+    const quint64 generation = ++m_wmiCaptureGeneration;
+    auto archive = std::make_shared<ks::monitor::WmiEventArchive>();
+    m_wmiEventArchive = archive;
+    m_wmiEventArchives.push_back(archive);
+    m_wmiProgressPosted.store(false);
 
     QPointer<MonitorDock> guardThis(this);
-    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause]() {
+    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause, generation, archive, cleanupLease]() {
+        struct ArchiveSeal final
+        {
+            std::shared_ptr<ks::monitor::WmiEventArchive> archive;
+            ~ArchiveSeal() { archive->finish(); }
+        } seal{archive};
         QString errorText;
         if (!initCom(&errorText))
         {
-            QMetaObject::invokeMethod(qApp, [guardThis, errorText]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, errorText, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -9921,8 +10008,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -9933,8 +10020,8 @@ void MonitorDock::startWmiSubscription()
         if (!connectWmi(&service, &errorText) || service == nullptr)
         {
             ::CoUninitialize();
-            QMetaObject::invokeMethod(qApp, [guardThis, errorText]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, errorText, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -9950,8 +10037,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -9968,7 +10055,7 @@ void MonitorDock::startWmiSubscription()
         for (std::size_t classIndex = 0; classIndex < classList.size(); ++classIndex)
         {
             const QString className = classList[classIndex];
-            if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag.load())
+            if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag->load())
             {
                 break;
             }
@@ -9977,8 +10064,8 @@ void MonitorDock::startWmiSubscription()
                 + (classList.empty()
                     ? 0.0f
                     : (static_cast<float>(classIndex + 1) * 15.0f / static_cast<float>(classList.size())));
-            QMetaObject::invokeMethod(qApp, [guardThis, setupProgressValue, className]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, setupProgressValue, className, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -10024,8 +10111,8 @@ void MonitorDock::startWmiSubscription()
         if (enums.empty())
         {
             ::CoUninitialize();
-            QMetaObject::invokeMethod(qApp, [guardThis]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -10041,8 +10128,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -10050,7 +10137,7 @@ void MonitorDock::startWmiSubscription()
         }, Qt::QueuedConnection);
 
         std::size_t eventCount = 0;
-        while (guardThis != nullptr && !guardThis->m_wmiSubscribeStopFlag.load())
+        while (guardThis != nullptr && !guardThis->m_wmiSubscribeStopFlag->load())
         {
             if (guardThis->m_wmiSubscribePaused.load())
             {
@@ -10061,7 +10148,7 @@ void MonitorDock::startWmiSubscription()
             bool hasEvent = false;
             for (ClassEnum& classEnum : enums)
             {
-                if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag.load())
+                if (guardThis == nullptr || guardThis->m_wmiSubscribeStopFlag->load())
                 {
                     break;
                 }
@@ -10163,32 +10250,40 @@ void MonitorDock::startWmiSubscription()
             if (guardThis != nullptr && eventCount % 20 == 0)
             {
                 const float progressValue = 45.0f + static_cast<float>(std::min<std::size_t>(eventCount, 200)) * 0.25f;
-                QMetaObject::invokeMethod(qApp, [guardThis, progressValue]() {
-                    if (guardThis == nullptr)
-                    {
-                        return;
-                    }
-                    kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI事件接收中", 0, std::min(progressValue, 95.0f));
-                }, Qt::QueuedConnection);
+                guardThis->m_wmiLatestProgress.store(std::min(progressValue, 95.0f));
+                if (!guardThis->m_wmiProgressPosted.exchange(true))
+                    QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+                        if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation) return;
+                        guardThis->m_wmiProgressPosted.store(false);
+                        kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI事件接收中", 0, guardThis->m_wmiLatestProgress.load());
+                    }, Qt::QueuedConnection);
             }
         }
 
+        QString finalArchiveError;
+        archive->finish(&finalArchiveError);
+        if (!finalArchiveError.isEmpty() && guardThis != nullptr)
+        {
+            std::lock_guard<std::mutex> lock(guardThis->m_wmiPendingMutex);
+            guardThis->m_wmiArchiveError = finalArchiveError;
+        }
         ::CoUninitialize();
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
-            guardThis->flushWmiPendingRows();
-            if (guardThis->m_wmiUiUpdateTimer != nullptr)
-            {
-                guardThis->m_wmiUiUpdateTimer->stop();
-            }
             guardThis->m_wmiSubscribeRunning.store(false);
+            // Keep the timer alive until every accepted mirror row has drained.
+            guardThis->flushWmiPendingRows();
             guardThis->m_wmiSubscribePaused.store(false);
-            guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
-            ks::ui::ApplyStatusRole(guardThis->m_wmiSubscribeStatusLabel, ks::ui::StatusRole::Idle);
+            QString archiveError;
+            { const std::lock_guard<std::mutex> lock(guardThis->m_wmiPendingMutex); archiveError = guardThis->m_wmiArchiveError; }
+            guardThis->m_wmiSubscribeStatusLabel->setText(archiveError.isEmpty() ? QStringLiteral("● 已停止")
+                : ks::i18n::contextText(QStringLiteral("monitor.wmi.archive_failed"), QStringLiteral("● 归档失败: %1")).arg(archiveError));
+            ks::ui::ApplyStatusRole(guardThis->m_wmiSubscribeStatusLabel,
+                archiveError.isEmpty() ? ks::ui::StatusRole::Idle : ks::ui::StatusRole::Error);
             if (guardThis->m_wmiSubscribeProgressPid != 0)
             {
                 kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
@@ -10218,7 +10313,7 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
             << eol;
     }
 
-    m_wmiSubscribeStopFlag.store(true);
+    m_wmiSubscribeStopFlag->store(true);
 
     if (m_wmiSubscribeStatusLabel != nullptr)
     {
@@ -10318,12 +10413,28 @@ void MonitorDock::enqueueWmiEventRow(
     snapshot.pidAndName = pidAndName;
     snapshot.document = document;
 
-    std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+    snapshot.sequence = m_wmiArchivedRows.load() + 1;
+    QString archiveError;
+    if (!m_wmiEventArchive || !m_wmiEventArchive->append(snapshot, &archiveError))
+    {
+        { const std::lock_guard<std::mutex> lock(m_wmiPendingMutex); m_wmiArchiveError = archiveError; }
+        m_wmiSubscribeStopFlag->store(true);
+        return;
+    }
+    m_wmiArchivedRows.fetch_add(1);
+    const std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+    m_wmiArchivePath = m_wmiEventArchive->path();
     m_wmiPendingRows.push_back(std::move(snapshot));
+    while (m_wmiPendingRows.size() > kWmiMirrorCapacity)
+    {
+        m_wmiPendingRows.pop_front();
+        m_wmiMirrorSkippedRows.fetch_add(1);
+    }
 }
 
 void MonitorDock::flushWmiPendingRows()
 {
+    if (!m_wmiEventTable || !m_wmiEventTable->isVisible()) return;
     // 先进入菜单提交门，再从共享队列移走事件；latest-wins 仅合并 timeout，
     // 不会覆盖已经取出的 WMI 数据。
     const QPointer<MonitorDock> guardThis(this);
@@ -10348,6 +10459,7 @@ void MonitorDock::flushWmiPendingRows()
         std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
         if (m_wmiPendingRows.empty())
         {
+            if (!m_wmiSubscribeRunning.load() && m_wmiUiUpdateTimer) m_wmiUiUpdateTimer->stop();
             return;
         }
 
@@ -10356,14 +10468,16 @@ void MonitorDock::flushWmiPendingRows()
         rowsToFlush.reserve(flushCount);
         for (std::size_t rowIndex = 0; rowIndex < flushCount; ++rowIndex)
         {
-            rowsToFlush.push_back(std::move(m_wmiPendingRows[rowIndex]));
+            rowsToFlush.push_back(std::move(m_wmiPendingRows.front()));
+            m_wmiPendingRows.pop_front();
         }
-        using DiffType = std::vector<WmiEventSnapshot>::difference_type;
-        m_wmiPendingRows.erase(
-            m_wmiPendingRows.begin(),
-            m_wmiPendingRows.begin() + static_cast<DiffType>(flushCount));
     }
 
+    QElapsedTimer budget;
+    budget.start();
+    std::size_t renderedCount = 0;
+    const bool updatesEnabled = m_wmiEventTable->updatesEnabled();
+    m_wmiEventTable->setUpdatesEnabled(false);
     for (const WmiEventSnapshot& snapshot : rowsToFlush)
     {
         appendWmiEventRow(snapshot.provider, snapshot.className, snapshot.pidAndName, snapshot.document);
@@ -10372,7 +10486,32 @@ void MonitorDock::flushWmiPendingRows()
             timestamp->setText(snapshot.timestamp);
             timestamp->setToolTip(snapshot.timestamp);
         }
+        if (!m_wmiFilterProjection) applyWmiEventFilter();
+        m_wmiFilterProjection->trackRow(m_wmiEventTable->rowCount() - 1);
+        ++renderedCount;
+        if (budget.elapsed() >= 4) break;
     }
+    const int removeCount = std::max(0, m_wmiEventTable->rowCount() - 6000);
+    if (removeCount > 0) m_wmiEventTable->model()->removeRows(0, removeCount);
+    m_wmiEventTable->setUpdatesEnabled(updatesEnabled);
+    std::size_t pending = 0;
+    QString archivePath;
+    {
+        const std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+        for (std::size_t i = rowsToFlush.size(); i > renderedCount; --i)
+            m_wmiPendingRows.push_front(std::move(rowsToFlush[i - 1]));
+        while (m_wmiPendingRows.size() > kWmiMirrorCapacity)
+        {
+            m_wmiPendingRows.pop_front();
+            m_wmiMirrorSkippedRows.fetch_add(1);
+        }
+        pending = m_wmiPendingRows.size();
+        archivePath = m_wmiArchivePath;
+    }
+    if (m_wmiSubscribeStatusLabel)
+        m_wmiSubscribeStatusLabel->setToolTip(ks::i18n::contextText(QStringLiteral("monitor.wmi.archive_stats"),
+            QStringLiteral("WMI：归档 %1，显示跳过 %2，待显示 %3"))
+            .arg(m_wmiArchivedRows.load()).arg(m_wmiMirrorSkippedRows.load()).arg(pending) + QChar('\n') + archivePath);
 
     // 每批次刷入完成后统一应用筛选，避免逐行重算造成 UI 抖动。
     applyWmiEventFilter();
@@ -10417,108 +10556,84 @@ void MonitorDock::appendWmiEventRow(
     m_wmiEventTable->setItem(row, 3, pidItem);
     m_wmiEventTable->setItem(row, 4, detailItem);
 
-    while (m_wmiEventTable->rowCount() > 6000)
-    {
-        m_wmiEventTable->removeRow(0);
-    }
+
+}
+
+void MonitorDock::updateWmiExportAction()
+{
+    if (!m_wmiExportButton) return;
+    const bool preparing = m_wmiTableExport && m_wmiTableExport->isPreparing();
+    const bool busy = m_wmiTableExport && m_wmiTableExport->isBusy();
+    m_wmiExportButton->setEnabled(preparing || (!busy && m_wmiEventTable && m_wmiEventTable->rowCount() > 0));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_wmiExportButton->setText(preparing ? language.text(QStringLiteral("monitor.export.cancel_preparation"), QStringLiteral("取消导出准备"))
+        : language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")));
+    m_wmiExportButton->setToolTip(language.text(preparing ? QStringLiteral("monitor.export.preparing_hint") : busy ? QStringLiteral("monitor.export.in_progress") : QStringLiteral("monitor.export.ready_hint"),
+        preparing ? QStringLiteral("正在准备完整导出；再次点击可取消准备。") : busy ? QStringLiteral("导出进行中") : QStringLiteral("导出当前结果范围")));
 }
 
 void MonitorDock::exportWmiRowsToTsv()
 {
-    if (m_wmiEventTable == nullptr || m_wmiEventTable->rowCount() == 0)
+    const QPointer<MonitorDock> guard(this);
+    if (m_wmiTableExport) m_wmiTableExport->reconcile();
+    if (!guard) return;
+    if (m_wmiTableExport && m_wmiTableExport->isPreparing()) { m_wmiTableExport->cancelPreparation(); return; }
+    if (m_wmiTableExport && m_wmiTableExport->isBusy()) return;
+    if (!m_wmiEventTable || !m_wmiEventTable->model()) return;
+    if (m_wmiEventTable->model()->rowCount() == 0) { QMessageBox::information(this, QStringLiteral("导出WMI结果"), QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。")); return; }
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出WMI结果"), QStringLiteral("wmi_events_%1.tsv").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))), QStringLiteral("TSV文件 (*.tsv);;文本文件 (*.txt)"));
+    if (!guard || path.trimmed().isEmpty() || (m_wmiTableExport && m_wmiTableExport->isBusy())) return;
+    try {
+    if (!m_wmiTableExport)
     {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：无可导出事件。"
-            << eol;
-        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前没有可导出的WMI事件。"));
-        return;
+        m_wmiTableExport = new ks::monitor::MonitorCanonicalExport(this);
+        m_wmiTableExport->setStateChangedCallback([guard]() { if (guard) guard->updateWmiExportAction(); });
     }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
-    {
-        if (!m_wmiEventTable->isRowHidden(row))
-        {
-            ++visibleCount;
-        }
+    applyWmiEventFilter();
+    if (!guard) return;
+    ks::monitor::MonitorCachedTableExportSnapshot values;
+    values.rows = m_wmiFilterProjection->retainedRowsInDisplayOrder();
+    values.businessFilter = m_wmiFilterProjection->currentCompiledFilter();
+    values.archiveRevision = m_wmiFilterProjection->retainedRowsRevision();
+    values.search = ks::ui::CaptureTableSearchResultFilterSpec(m_wmiEventTable);
+    values.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    values.wmi = true;
+    for (int column = 0; column < m_wmiEventTable->columnCount(); ++column) {
+        const auto header = m_wmiEventTable->horizontalHeaderItem(column);
+        values.headers.push_back(header ? values.language.displayText(header->text()) : QString());
     }
-    if (visibleCount == 0)
-    {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：当前筛选后无可见事件。"
-            << eol;
-        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。"));
-        return;
+    const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(std::move(values));
+    if (!guard) return;
+    const bool started = m_wmiTableExport->start(snapshot, QStringLiteral("monitor/retained-table/MonitorDock"), path, QString(),
+        [guard](const ks::monitor::CanonicalExportOutcome& result) {
+            if (!guard) return;
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+            auto& language = ks::i18n::LanguageManager::instance();
+            const QString title = language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出"));
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                QMessageBox::information(guard, title, QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。")); return;
+            }
+            if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                QMessageBox::warning(guard, title, language.text(QStringLiteral("monitor.export.not_accepted"),
+                    QStringLiteral("未开始写入文件，请重试导出。"))); return;
+            }
+            const auto& receipt = result.receipt;
+            if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                    language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+            }
+            if (!receipt.succeeded()) QMessageBox::warning(guard, title,
+                language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
+            else QMessageBox::information(guard, QStringLiteral("导出WMI"), QStringLiteral("导出完成：%1").arg(receipt.outputPath));
+        }, ks::monitor::CanonicalExportFormat::Tsv, true);
+    if (!guard) return;
+    if (!started) QMessageBox::information(this, ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")),
+        ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, ks::i18n::sourceText(QStringLiteral("导出")),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-
-    const QString defaultName = QStringLiteral("wmi_events_%1.tsv")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-
-    const QString path = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出WMI结果"),
-        defaultName,
-        QStringLiteral("TSV文件 (*.tsv);;文本文件 (*.txt)"));
-
-    if (path.trimmed().isEmpty())
-    {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：用户未选择路径。"
-            << eol;
-        return;
-    }
-
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    {
-        kLogEvent event;
-        err << event
-            << "[MonitorDock] WMI导出失败：无法写入文件, path="
-            << path.toStdString()
-            << eol;
-        QMessageBox::warning(this, QStringLiteral("导出WMI"), QStringLiteral("无法写入文件：%1").arg(path));
-        return;
-    }
-
-    QTextStream out(&file);
-
-    QStringList header;
-    for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
-    {
-        QTableWidgetItem* item = m_wmiEventTable->horizontalHeaderItem(col);
-        header << (item != nullptr ? item->text() : QString());
-    }
-    out << header.join('\t') << '\n';
-
-    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
-    {
-        if (m_wmiEventTable->isRowHidden(row))
-        {
-            continue;
-        }
-
-        QStringList values;
-        for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
-        {
-            QTableWidgetItem* item = m_wmiEventTable->item(row, col);
-            values << (item != nullptr ? item->text().replace('\t', ' ') : QString());
-        }
-        out << values.join('\t') << '\n';
-    }
-
-    file.close();
-
-    kLogEvent event;
-    info << event
-        << "[MonitorDock] WMI导出完成:"
-        << path.toStdString()
-        << ", visibleRows="
-        << visibleCount
-        << eol;
-    QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("导出完成：%1").arg(path));
+    if (guard) updateWmiExportAction();
 }
 
 void MonitorDock::openWmiEventDetailViewerForRow(const int row) const
@@ -11414,11 +11529,7 @@ void MonitorDock::cancelAndWaitEtwArchiveBackgroundTasks()
 
 void MonitorDock::scheduleEtwArchiveFilterRebuild()
 {
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty())
     {
         applyEtwPostFilterToTable();
@@ -11473,6 +11584,7 @@ bool MonitorDock::prepareEtwArchiveSession(QString* errorTextOut)
     m_etwArchiveNextSequence = 0;
     m_etwArchiveSegmentIndex = 0;
     m_etwArchiveWriteFailed = false;
+    m_etwArchiveMetadata.beginSession(m_etwArchiveDirectory);
     return true;
 }
 
@@ -11579,6 +11691,7 @@ bool MonitorDock::archiveEtwCapturedRow(EtwCapturedEventRow* rowData)
         }
         m_etwArchiveWriteBuffer.clear();
     }
+    m_etwArchiveMetadata.accepted(rowData->archiveSequence);
     return true;
 }
 
@@ -11620,11 +11733,7 @@ void MonitorDock::finishEtwArchiveSession(const bool flushToPhysicalDisk)
 
 void MonitorDock::rebuildEtwArchiveFilterAsync()
 {
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty() || !beginEtwArchiveBackgroundTask())
     {
         return;
@@ -11849,181 +11958,117 @@ void MonitorDock::rebuildEtwArchiveFilterAsync()
 }
 
 void MonitorDock::replaceEtwRowsWithSnapshot(
-    std::deque<EtwCapturedEventRow> rows,
-    const std::uint64_t totalMatchCount,
-    const std::uint64_t scannedRowCount,
-    const std::uint64_t scannedMaxSequence)
+    std::deque<EtwCapturedEventRow> rows, const std::uint64_t totalMatchCount,
+    const std::uint64_t scannedRowCount, const std::uint64_t scannedMaxSequence)
 {
-    if (m_etwEventTable == nullptr)
-    {
+    if (!m_etwEventTable) return;
+    auto projection = std::make_shared<EtwSnapshotProjection>();
+    projection->rows = std::move(rows);
+    projection->totalMatchCount = totalMatchCount;
+    projection->scannedRowCount = scannedRowCount;
+    projection->scannedMaxSequence = scannedMaxSequence;
+    projection->ticket = m_etwArchiveFilterTicket.load(std::memory_order_relaxed);
+    projection->generation = m_etwArchiveSessionGeneration.load(std::memory_order_relaxed);
+    auto retired = std::exchange(m_etwSnapshotProjection, std::move(projection));
+    if (retired) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+    scheduleEtwSnapshotProjection();
+}
+
+void MonitorDock::scheduleEtwSnapshotProjection()
+{
+    if (!m_etwSnapshotProjection || m_etwSnapshotWakeScheduled || !m_etwEventTable
+        || !m_etwEventTable->isVisible()) return;
+    m_etwSnapshotWakeScheduled = true;
+    QTimer::singleShot(16, this, [this]() {
+        m_etwSnapshotWakeScheduled = false;
+        continueEtwSnapshotProjection();
+    });
+}
+
+void MonitorDock::continueEtwSnapshotProjection()
+{
+    auto projection = m_etwSnapshotProjection;
+    if (!projection || !m_etwEventTable || !m_etwEventTable->isVisible()) return;
+    if (projection->ticket != m_etwArchiveFilterTicket.load(std::memory_order_relaxed)
+        || projection->generation != m_etwArchiveSessionGeneration.load(std::memory_order_relaxed)) {
+        m_etwSnapshotProjection.reset();
+        QThreadPool::globalInstance()->start([projection = std::move(projection)]() {});
         return;
     }
+    const QPointer<MonitorDock> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("monitor-etw-snapshot-replace"),
+        { m_etwEventTable }, [guard]() { if (guard) guard->scheduleEtwSnapshotProjection(); })) return;
 
-    // 后台归档扫描会整表替换。使用共享快照避免“未延后”路径额外复制数千行，
-    // 并确保菜单打开时连 pending 队列裁剪也不会提前发生。
-    const QPointer<MonitorDock> guardThis(this);
-    const std::uint64_t filterTicketSnapshot =
-        m_etwArchiveFilterTicket.load(std::memory_order_relaxed);
-    const std::uint64_t sessionGenerationSnapshot =
-        m_etwArchiveSessionGeneration.load(std::memory_order_relaxed);
-    const auto deferredRows =
-        std::make_shared<std::deque<EtwCapturedEventRow>>(std::move(rows));
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("monitor-etw-snapshot-replace"),
-        { m_etwEventTable },
-        [
-            guardThis,
-            deferredRows,
-            totalMatchCount,
-            scannedRowCount,
-            scannedMaxSequence,
-            filterTicketSnapshot,
-            sessionGenerationSnapshot]() mutable
-        {
-            if (!guardThis.isNull()
-                && guardThis->m_etwArchiveFilterTicket.load(std::memory_order_relaxed)
-                    == filterTicketSnapshot
-                && guardThis->m_etwArchiveSessionGeneration.load(std::memory_order_relaxed)
-                    == sessionGenerationSnapshot)
-            {
-                guardThis->replaceEtwRowsWithSnapshot(
-                    std::move(*deferredRows),
-                    totalMatchCount,
-                    scannedRowCount,
-                    scannedMaxSequence);
-            }
-        }))
-    {
-        return;
-    }
-    rows = std::move(*deferredRows);
-
+    QElapsedTimer elapsed; elapsed.start();
+    std::size_t processed = 0;
     constexpr std::size_t kMaximumVisibleRows = 6000;
-    for (const EtwCapturedEventRow& liveRow : m_etwCapturedRows)
-    {
-        if (liveRow.archiveSequence <= scannedMaxSequence)
-        {
-            continue;
+    // Live UI rows remain stable until the swap. Business capture/archive continues;
+    // the bounded live mirror queue is not drained during snapshot preparation.
+    while (projection->liveCursor < m_etwCapturedRows.size() && processed < 256 && elapsed.elapsed() < 4) {
+        const auto& live = m_etwCapturedRows[projection->liveCursor++]; ++processed;
+        if (live.archiveSequence <= projection->scannedMaxSequence) continue;
+        bool matches = etwFilterStageMatches(m_etwPostSimpleFilterCompiled, m_etwPostFilterCompiledGroupList, live);
+        if (matches && isEtwTimelineFilterActive()) {
+            const auto time = etwRawTimestampToTimelineTimestamp(live.timestampValue);
+            matches = time >= m_etwTimelineSelectionStart100ns && time <= m_etwTimelineSelectionEnd100ns;
         }
-
-        bool matches = etwFilterStageMatches(
-            m_etwPostSimpleFilterCompiled,
-            m_etwPostFilterCompiledGroupList,
-            liveRow);
-        if (matches && isEtwTimelineFilterActive())
-        {
-            const std::uint64_t timestamp100ns = etwRawTimestampToTimelineTimestamp(liveRow.timestampValue);
-            matches = timestamp100ns >= m_etwTimelineSelectionStart100ns
-                && timestamp100ns <= m_etwTimelineSelectionEnd100ns;
-        }
-        if (matches)
-        {
-            rows.push_back(liveRow);
-            if (rows.size() > kMaximumVisibleRows)
-            {
-                rows.pop_front();
+        if (matches) {
+            projection->rows.push_back(live);
+            if (projection->rows.size() > kMaximumVisibleRows) {
+                projection->retiredRows.push_back(std::move(projection->rows.front())); projection->rows.pop_front();
             }
         }
     }
-
+    while (projection->liveCursor == m_etwCapturedRows.size()
+        && projection->pointCursor < projection->rows.size() && processed < 256 && elapsed.elapsed() < 4) {
+        const auto& row = projection->rows[projection->pointCursor++]; ++processed;
+        projection->points.push_back(ks::ui::MakeEtwTimelinePoint(
+            etwRawTimestampToTimelineTimestamp(row.timestampValue),
+            etwProviderDisplayName(row.providerGuid, row.providerName, row.opcode),
+            row.eventName, etwTimelineTypeFromCapturedRow(row)));
+    }
+    if (projection->liveCursor < m_etwCapturedRows.size() || projection->pointCursor < projection->rows.size()) {
+        scheduleEtwSnapshotProjection(); return;
+    }
+    bool pendingPrefix = false;
     {
         std::lock_guard<std::mutex> lock(m_etwPendingMutex);
-        while (!m_etwPendingRows.empty()
-            && m_etwPendingRows.front().archiveSequence <= scannedMaxSequence)
-        {
-            m_etwPendingRows.pop_front();
+        while (!m_etwPendingRows.empty() && m_etwPendingRows.front().archiveSequence <= projection->scannedMaxSequence
+            && processed < 256 && elapsed.elapsed() < 4) {
+            projection->retiredRows.push_back(std::move(m_etwPendingRows.front())); m_etwPendingRows.pop_front(); ++processed;
         }
+        pendingPrefix = !m_etwPendingRows.empty() && m_etwPendingRows.front().archiveSequence <= projection->scannedMaxSequence;
     }
+    if (pendingPrefix) { scheduleEtwSnapshotProjection(); return; }
 
-    const bool hasPostRules = m_etwPostSimpleFilterCompiled.hasAnyCondition()
-        || !m_etwPostFilterCompiledGroupList.empty();
-    const bool timelineFilterActive = isEtwTimelineFilterActive();
-    if (hasPostRules || timelineFilterActive)
-    {
-        rows.erase(
-            std::remove_if(
-                rows.begin(),
-                rows.end(),
-                [this, timelineFilterActive](const EtwCapturedEventRow& rowData) {
-                    bool matches = etwFilterStageMatches(
-                        m_etwPostSimpleFilterCompiled,
-                        m_etwPostFilterCompiledGroupList,
-                        rowData);
-                    if (matches && timelineFilterActive)
-                    {
-                        const std::uint64_t timestamp100ns = etwRawTimestampToTimelineTimestamp(
-                            rowData.timestampValue);
-                        matches = timestamp100ns >= m_etwTimelineSelectionStart100ns
-                            && timestamp100ns <= m_etwTimelineSelectionEnd100ns;
-                    }
-                    return !matches;
-                }),
-            rows.end());
-    }
-
-    m_etwEventTable->setUpdatesEnabled(false);
-    m_etwEventTable->clearContents();
-    m_etwEventTable->setRowCount(static_cast<int>(rows.size()));
-    m_etwCapturedRows.clear();
-    m_etwTimelineEventPoints.clear();
-
-    int tableRow = 0;
-    for (EtwCapturedEventRow& rowData : rows)
-    {
-        m_etwCapturedRows.push_back(std::move(rowData));
-        const EtwCapturedEventRow& captured = m_etwCapturedRows.back();
-        QTableWidgetItem* sequenceItem = new QTableWidgetItem(QString::number(
-            static_cast<qulonglong>(captured.archiveSequence != 0
-                ? captured.archiveSequence
-                : static_cast<std::uint64_t>(tableRow + 1))));
-        sequenceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_etwEventTable->setVerticalHeaderItem(tableRow, sequenceItem);
-        const QStringList rowTextList{
-            captured.timestampText,
-            captured.providerName,
-            QString::number(captured.eventId),
-            captured.eventName,
-            captured.pidTidText,
-            captured.detailSummary,
-            captured.activityId
-        };
-        for (int column = 0; column < rowTextList.size(); ++column)
-        {
-            QTableWidgetItem* item = new QTableWidgetItem(rowTextList.at(column));
-            item->setToolTip(rowTextList.at(column));
-            if (column == 5)
-            {
-                item->setData(Qt::UserRole, QVariant::fromValue(captured.detailObject));
-            }
-            m_etwEventTable->setItem(tableRow, column, item);
-        }
-
-        // 机器 Provider/事件名生成稳定身份，已转换的暂停会话时间完整传入。
-        ProcessTraceTimelineEventPoint timelinePoint = ks::ui::MakeEtwTimelinePoint(
-            etwRawTimestampToTimelineTimestamp(captured.timestampValue),
-            etwProviderDisplayName(captured.providerGuid, captured.providerName, captured.opcode),
-            captured.eventName, etwTimelineTypeFromCapturedRow(captured));
-        m_etwTimelineEventPoints.push_back(std::move(timelinePoint));
-        ++tableRow;
-    }
-
+    static_cast<EtwEventTableModel*>(m_etwEventTable->model())->replace(std::move(projection->rows));
+    m_etwTimelineEventPoints.swap(projection->points);
+    m_etwSnapshotProjection.reset();
     refreshEtwTimelineRange(!m_etwCaptureRunning.load());
     refreshEtwTimelinePoints();
-    m_etwEventTable->setUpdatesEnabled(true);
     m_etwEventTable->scrollToBottom();
-    m_etwEventTable->viewport()->update();
-
-    if (m_etwPostSimpleFilterUi.stateLabel != nullptr)
-    {
+    if (m_etwPostSimpleFilterUi.stateLabel) {
         m_etwPostSimpleFilterUi.stateLabel->setText(
             QStringLiteral("全量匹配: %1 | 当前显示最近: %2 | 已扫描: %3 | UI镜像跳过: %4（已归档）")
-                .arg(static_cast<qulonglong>(totalMatchCount))
-                .arg(m_etwEventTable->rowCount())
-                .arg(static_cast<qulonglong>(scannedRowCount))
+                .arg(static_cast<qulonglong>(projection->totalMatchCount))
+                .arg(m_etwEventTable->model()->rowCount())
+                .arg(static_cast<qulonglong>(projection->scannedRowCount))
                 .arg(static_cast<qulonglong>(m_etwUiSkippedRows.load(std::memory_order_relaxed))));
         ks::ui::ApplyStatusRole(m_etwPostSimpleFilterUi.stateLabel, ks::ui::StatusRole::Info);
     }
+    QThreadPool::globalInstance()->start([projection = std::move(projection)]() {});
+    flushEtwPendingRows(!m_etwCaptureRunning.load());
+}
+
+bool MonitorDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_etwEventTable && event && event->type() == QEvent::Show) {
+        QTimer::singleShot(0, this, [this]() {
+            scheduleEtwSnapshotProjection();
+            flushEtwPendingRows(!m_etwCaptureRunning.load());
+        });
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void WINAPI MonitorDock::etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr)
@@ -12588,10 +12633,10 @@ void MonitorDock::startEtwCapture()
     // - 时间轴起点使用启动瞬间的 100ns 时间戳，后续右边界实时跟随。
     if (m_etwEventTable != nullptr)
     {
-        m_etwEventTable->clearContents();
-        m_etwEventTable->setRowCount(0);
+        static_cast<EtwEventTableModel*>(m_etwEventTable->model())->replace({});
     }
-    m_etwCapturedRows.clear();
+    if (auto retired = std::exchange(m_etwSnapshotProjection, {}))
+        QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
     m_etwTimelineEventPoints.clear();
     m_etwTimelinePauseIntervals.clear();
     m_etwCaptureStartTime100ns = currentSystemTime100ns();
@@ -13246,10 +13291,8 @@ void MonitorDock::updateEtwCaptureActionState()
 
 void MonitorDock::flushEtwPendingRows(const bool captureFinished)
 {
-    if (m_etwEventTable == nullptr)
-    {
-        return;
-    }
+    if (!m_etwEventTable || !m_etwEventTable->isVisible()) return;
+    if (m_etwSnapshotProjection) { scheduleEtwSnapshotProjection(); return; }
     if (!captureFinished && m_etwCapturePaused.load())
     {
         // 防止暂停前已经投递到事件循环的最后一次 timeout 继续排空队列。
@@ -13353,67 +13396,26 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
     m_etwEventTable->setUpdatesEnabled(false);
 
     // 先腾出固定结果窗口空间，再批量扩展行数，避免 insertRow/removeRow 循环触发大量模型和布局更新。
-    const int projectedRowCount = m_etwEventTable->rowCount() + static_cast<int>(rows.size());
+    const int projectedRowCount = m_etwEventTable->model()->rowCount() + static_cast<int>(rows.size());
     const int overflowCount = projectedRowCount > kTrimThresholdRows
         ? projectedRowCount - kMaxCapturedRows
         : 0;
     if (overflowCount > 0)
     {
-        if (!m_etwEventTable->model()->removeRows(0, overflowCount))
-        {
-            for (int rowIndex = 0; rowIndex < overflowCount; ++rowIndex)
-            {
-                m_etwEventTable->removeRow(0);
-            }
-        }
-        for (int rowIndex = 0; rowIndex < overflowCount && !m_etwCapturedRows.empty(); ++rowIndex)
-        {
-            m_etwCapturedRows.pop_front();
-        }
+        static_cast<EtwEventTableModel*>(m_etwEventTable->model())->trimFront(overflowCount);
         for (int rowIndex = 0; rowIndex < overflowCount && !m_etwTimelineEventPoints.empty(); ++rowIndex)
         {
             m_etwTimelineEventPoints.pop_front();
         }
     }
 
-    const int firstInsertedRow = m_etwEventTable->rowCount();
-    m_etwEventTable->setRowCount(firstInsertedRow + static_cast<int>(rows.size()));
+    auto* eventModel = static_cast<EtwEventTableModel*>(m_etwEventTable->model());
+    eventModel->beginAppend(static_cast<int>(rows.size()));
     for (std::size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
     {
         EtwCapturedEventRow& rowData = rows[rowIndex];
         m_etwCapturedRows.push_back(std::move(rowData));
         EtwCapturedEventRow& captured = m_etwCapturedRows.back();
-
-        const int row = firstInsertedRow + static_cast<int>(rowIndex);
-        QTableWidgetItem* sequenceItem = new QTableWidgetItem(QString::number(
-            static_cast<qulonglong>(captured.archiveSequence != 0
-                ? captured.archiveSequence
-                : static_cast<std::uint64_t>(row + 1))));
-        sequenceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_etwEventTable->setVerticalHeaderItem(row, sequenceItem);
-
-        const QStringList rowTextList{
-            captured.timestampText,
-            captured.providerName,
-            QString::number(captured.eventId),
-            captured.eventName,
-            captured.pidTidText,
-            captured.detailSummary,
-            captured.activityId
-        };
-
-        for (int col = 0; col < rowTextList.size(); ++col)
-        {
-            const QString cellText = rowTextList.at(col);
-            QTableWidgetItem* item = new QTableWidgetItem(cellText);
-            item->setToolTip(cellText);
-            if (col == 5)
-            {
-                // Detail 列的 UserRole 保存完整 JSON，表格文本只显示摘要。
-                item->setData(Qt::UserRole, QVariant::fromValue(captured.detailObject));
-            }
-            m_etwEventTable->setItem(row, col, item);
-        }
 
         // 时间轴使用宿主转换后的有效运行时间，机器身份不借翻译后的类别词。
         ProcessTraceTimelineEventPoint pointValue = ks::ui::MakeEtwTimelinePoint(
@@ -13423,6 +13425,7 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
         m_etwTimelineEventPoints.push_back(std::move(pointValue));
     }
 
+    eventModel->endAppend();
     // m_etwCapturedRows 与 m_etwTimelineEventPoints 已在追加前同步批量裁剪，
     // 行号仍能一一对应，无需逐行 erase(begin())。
     if (refreshTimeline)
@@ -13468,7 +13471,8 @@ void MonitorDock::applyEtwTimelineSelection(
     // 这里保存的是“扣除暂停段后的有效时间戳”，表格筛选时会把事件原始时间映射后比较。
     m_etwTimelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_etwTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_etwTimelineUserSelectionActive = true;
+    m_etwTimelineUserSelectionActive = m_etwTimelineWidget != nullptr
+        && m_etwTimelineWidget->hasUserAdjustedSelection();
     scheduleEtwArchiveFilterRebuild();
 }
 
@@ -13607,12 +13611,9 @@ bool MonitorDock::isEtwTimelineFilterActive() const
 
 void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
 {
-    bool hasArchiveRows = false;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        hasArchiveRows = !m_etwArchiveDirectory.trimmed().isEmpty()
-            && m_etwArchiveNextSequence != 0;
-    }
+    const auto archiveMetadata = m_etwArchiveMetadata.snapshot();
+    const bool hasArchiveRows = !archiveMetadata.directory.trimmed().isEmpty()
+        && archiveMetadata.acceptedSequence != 0;
 
     if (hasArchiveRows)
     {
@@ -13631,10 +13632,9 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         QStringList header;
         if (m_etwEventTable != nullptr)
         {
-            for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+            for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
             {
-                QTableWidgetItem* item = m_etwEventTable->horizontalHeaderItem(col);
-                header << (item != nullptr ? item->text() : QString());
+                header << m_etwEventTable->model()->headerData(col, Qt::Horizontal).toString();
             }
         }
         if (header.isEmpty())
@@ -13887,7 +13887,7 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         return;
     }
 
-    if (m_etwEventTable == nullptr || m_etwEventTable->rowCount() == 0)
+    if (m_etwEventTable == nullptr || m_etwEventTable->model()->rowCount() == 0)
     {
         kLogEvent event;
         dbg << event
@@ -13898,7 +13898,7 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
     }
 
     int exportableCount = 0;
-    for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+    for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
     {
         if (!visibleOnly || !m_etwEventTable->isRowHidden(row))
         {
@@ -13948,14 +13948,13 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
     QTextStream out(&file);
 
     QStringList header;
-    for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+    for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
     {
-        QTableWidgetItem* item = m_etwEventTable->horizontalHeaderItem(col);
-        header << (item != nullptr ? item->text() : QString());
+        header << m_etwEventTable->model()->headerData(col, Qt::Horizontal).toString();
     }
     out << header.join('\t') << '\n';
 
-    for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+    for (int row = 0; row < m_etwEventTable->model()->rowCount(); ++row)
     {
         if (visibleOnly && m_etwEventTable->isRowHidden(row))
         {
@@ -13963,10 +13962,9 @@ void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
         }
 
         QStringList values;
-        for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
+        for (int col = 0; col < m_etwEventTable->model()->columnCount(); ++col)
         {
-            QTableWidgetItem* item = m_etwEventTable->item(row, col);
-            values << (item != nullptr ? item->text().replace('\t', ' ') : QString());
+            values << m_etwEventTable->model()->index(row, col).data().toString().replace('\t', ' ');
         }
         out << values.join('\t') << '\n';
     }
@@ -13996,11 +13994,7 @@ void MonitorDock::openEtwEventDetailViewerForRow(const int row) const
     QString eventNameText;
     if (m_etwEventTable != nullptr)
     {
-        QTableWidgetItem* eventNameItem = m_etwEventTable->item(row, 3);
-        if (eventNameItem != nullptr)
-        {
-            eventNameText = eventNameItem->text().trimmed();
-        }
+        eventNameText = m_etwEventTable->model()->index(row, 3).data().toString().trimmed();
     }
 
     monitor_text_viewer::showReadOnlyDocumentWindow(
@@ -14036,9 +14030,9 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     menu.addSeparator();
     QAction* gotoProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     std::uint32_t relatedPid = 0;
-    QTableWidgetItem* relatedPidItem = m_etwEventTable->item(row, 4);
-    gotoProcessAction->setEnabled(relatedPidItem != nullptr
-        && parsePid(relatedPidItem->text(), relatedPid) && relatedPid != 0);
+    const QModelIndex relatedPidItem = m_etwEventTable->model()->index(row, 4);
+    gotoProcessAction->setEnabled(relatedPidItem.isValid()
+        && parsePid(relatedPidItem.data().toString(), relatedPid) && relatedPid != 0);
     ks::online_scan::addVirusTotalSandboxMenu(
         &menu,
         this,
@@ -14046,11 +14040,10 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
             // 输入：ETW 事件表当前右键行。
             // 处理：从 PID/TID 列解析 PID，并查询该进程 EXE 路径。
             // 返回：VT 上传目标；解析失败时由统一 helper 显示错误。
-            QTableWidgetItem* pidItem = m_etwEventTable != nullptr
-                ? m_etwEventTable->item(row, 4)
-                : nullptr;
+            const QModelIndex pidItem = m_etwEventTable != nullptr
+                ? m_etwEventTable->model()->index(row, 4) : QModelIndex();
             std::uint32_t pidValue = 0;
-            if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &pidValue)
+            if (!pidItem.isValid() || !ks::online_scan::tryParsePidFromText(pidItem.data().toString(), &pidValue)
                 || pidValue == 0)
             {
                 return {
@@ -14112,11 +14105,8 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
 
     if (action == copyCellAction)
     {
-        QTableWidgetItem* item = m_etwEventTable->item(row, col);
-        if (item != nullptr)
-        {
-            QApplication::clipboard()->setText(item->text());
-        }
+        const QModelIndex item = m_etwEventTable->model()->index(row, col);
+        if (item.isValid()) QApplication::clipboard()->setText(item.data().toString());
         kLogEvent event;
         dbg << event
             << "[MonitorDock] ETW事件右键操作：复制单元格, row="
@@ -14130,10 +14120,9 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     if (action == copyRowAction)
     {
         QStringList values;
-        for (int i = 0; i < m_etwEventTable->columnCount(); ++i)
+        for (int i = 0; i < m_etwEventTable->model()->columnCount(); ++i)
         {
-            QTableWidgetItem* item = m_etwEventTable->item(row, i);
-            values << (item != nullptr ? item->text() : QString());
+            values << m_etwEventTable->model()->index(row, i).data().toString();
         }
         QApplication::clipboard()->setText(values.join('\t'));
         kLogEvent event;
@@ -14146,19 +14135,19 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
 
     if (action == gotoProcessAction)
     {
-        QTableWidgetItem* pidItem = m_etwEventTable->item(row, 4);
-        if (pidItem == nullptr)
+        const QModelIndex pidItem = m_etwEventTable->model()->index(row, 4);
+        if (!pidItem.isValid())
         {
             return;
         }
 
         std::uint32_t pid = 0;
-        if (!parsePid(pidItem->text(), pid))
+        if (!parsePid(pidItem.data().toString(), pid))
         {
             kLogEvent event;
             warn << event
                 << "[MonitorDock] ETW事件右键操作失败：PID解析失败, text="
-                << pidItem->text().toStdString()
+                << pidItem.data().toString().toStdString()
                 << eol;
             QMessageBox::information(this, QStringLiteral("ETW事件"), QStringLiteral("未解析到有效PID。"));
             return;

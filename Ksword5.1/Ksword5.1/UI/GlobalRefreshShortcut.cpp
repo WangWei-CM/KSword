@@ -5,6 +5,8 @@
 #include <QEvent>
 #include <QKeyEvent>
 #include <QPointer>
+#include <QSet>
+#include <QVector>
 #include <QString>
 #include <QWidget>
 
@@ -38,18 +40,39 @@ namespace
     // 返回：可点击的刷新按钮；找不到返回 nullptr。
     QAbstractButton* findRefreshButtonNear(QWidget* startWidget)
     {
+        // 每个 QObject 在一次 F5 中最多检查一次；隐藏页和其它窗口是明确边界。
+        QSet<QObject*> visited;
         for (QWidget* scope = startWidget; scope != nullptr; scope = scope->parentWidget())
         {
-            const QList<QAbstractButton*> buttonList = scope->findChildren<QAbstractButton*>();
-            for (QAbstractButton* button : buttonList)
+            QVector<QObject*> pending;
+            const auto appendChildren = [&pending](QObject* object)
             {
-                if (button != nullptr
-                    && button->isVisible()
-                    && button->isEnabled()
-                    && looksLikeRefreshButton(button))
+                const auto& children = object->children();
+                for (auto child = children.crbegin(); child != children.crend(); ++child)
                 {
-                    return button;
+                    pending.append(*child); // 与 findChildren 相同的前序、对象顺序。
                 }
+            };
+            appendChildren(scope);
+            while (!pending.isEmpty())
+            {
+                QObject* object = pending.takeLast();
+                if (visited.contains(object))
+                {
+                    continue;
+                }
+                visited.insert(object);
+                if (auto* widget = qobject_cast<QWidget*>(object);
+                    widget != nullptr && (widget->isWindow() || !widget->isVisible() || !widget->isEnabled()))
+                {
+                    continue;
+                }
+                if (auto* button = qobject_cast<QAbstractButton*>(object);
+                    button != nullptr && looksLikeRefreshButton(button))
+                {
+                    return button; // 无需先构建该作用域全部按钮列表。
+                }
+                appendChildren(object);
             }
             if (scope->isWindow())
             {

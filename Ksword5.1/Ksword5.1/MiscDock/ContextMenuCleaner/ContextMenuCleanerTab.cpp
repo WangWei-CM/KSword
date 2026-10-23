@@ -5,8 +5,16 @@
 #include "../../UI/ToolbarMetrics.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../UI/VisibleTableWidget.h"
+#include "../../UI/TableInteractionSupport.h"
 #include "../../UI/StructuredFieldView.h"
 #include "../../UI/DetailLayoutRegistry.h"
+#include "../../UI/AsyncOperation.h"
+#include "../../Internationalization/LanguageManager.h"
+#include <QElapsedTimer>
+#include <QShowEvent>
+#include <QHash>
+#include <QPointer>
+#include "../../UI/RetainedCleanupJob.h"
 
 #include "ContextMenuCleanerTab.Internal.h"
 #include "../../theme.h"
@@ -23,29 +31,159 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPointer>
+#include <exception>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTimer>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QStringList>
 
 #include <array>
+#include <utility>
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kContextMenuNavigation[] = {
+    {"ie", "", "", "IE右键菜单", true},
+    {"desktop", "", "", "桌面右键菜单", false},
+    {"file", "", "", "文件右键菜单", false},
+    {"url", "", "", "URL 绑定", false},
+    {"open_with", "", "", "文件打开方式", false},
+    {"format", "", "", "格式右键菜单", false},
+    {"explorer", "", "", "资源管理器主页第三方程序", false}
+};
+
+enum class ContextBody { Backup, RestoreBackup, LatencyEmpty, Refresh, Delete, RestoreUrl,
+    CopyPath, Filter, NotRefreshed };
+constexpr const char* kContextBody[] = {
+    "备份右键菜单", "恢复备份", "尚未测量。", "刷新", "删除选中", "恢复上次删除",
+    "复制路径", "筛选：名称/显示名/命令/注册表路径/CLSID", "尚未刷新。"
+};
+constexpr const char* kContextHeaders[] = {
+    "名称", "显示名", "类型", "来源", "命令/处理器", "注册表位置", "状态", "详情", "耗时"
+};
+QString contextBodySource(ContextBody id)
+{
+    return QString::fromUtf8(kContextBody[static_cast<int>(id)]);
+}
+QString contextAreaTarget(int area, const char* suffix)
+{
+    return QString::fromLatin1("ks_context_") + QString::fromLatin1(kContextMenuNavigation[area].id)
+        + QLatin1Char('_') + QString::fromLatin1(suffix);
+}
+QStringList contextHeaderSources()
+{
+    QStringList labels;
+    for (const char* source : kContextHeaders) labels.append(QString::fromUtf8(source));
+    return labels;
+}
+}
 
 namespace ks::misc
 {
 
 using namespace context_menu_cleaner_detail;
 
+QVector<ks::ui::PageSearchBodyText> ContextMenuCleanerTab::coldSearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    const bool showFields = ks::ui::DetailLayoutRegistry::globalScheme() == ks::settings::DetailDisplayScheme::Right;
+    body.reserve(showFields ? 165 : 123);
+    const auto append = [&body](ContextBody id, const QString& target,
+        const QStringList& groups = {}, bool mnemonic = false)
+    {
+        body.append({ks::i18n::sourceText(contextBodySource(id)), target, groups, mnemonic});
+    };
+    append(ContextBody::Backup, QStringLiteral("ks_context_backup"), {}, true);
+    append(ContextBody::RestoreBackup, QStringLiteral("ks_context_restore_backup"), {}, true);
+    append(ContextBody::LatencyEmpty, QStringLiteral("ks_context_latency"));
+    // QTabWidget contributes every real tab title before traversing its pages.
+    for (int area = 0; area < 7; ++area)
+    {
+        const QString title = ks::ui::PageNavigationTabDescriptor(kContextMenuNavigation[area]).title;
+        body.append({title, contextAreaTarget(area, "page"), {ks::ui::StripUiSearchMnemonicMarkers(title)}, true});
+    }
+    for (int area = 0; area < 7; ++area)
+    {
+        const QStringList path{ks::ui::StripUiSearchMnemonicMarkers(
+            ks::ui::PageNavigationTabDescriptor(kContextMenuNavigation[area]).title)};
+        append(ContextBody::Refresh, contextAreaTarget(area, "refresh"), path, true);
+        append(ContextBody::Delete, contextAreaTarget(area, "delete"), path, true);
+        if (area == static_cast<int>(MenuArea::UrlBinding))
+            append(ContextBody::RestoreUrl, contextAreaTarget(area, "restore_url"), path, true);
+        append(ContextBody::CopyPath, contextAreaTarget(area, "copy_path"), path, true);
+        append(ContextBody::Filter, contextAreaTarget(area, "filter"), path);
+        for (const QString& source : contextHeaderSources())
+            body.append({ks::i18n::sourceText(source), contextAreaTarget(area, "table"), path, false});
+        for (auto entry : ks::ui::ColdCompactTableActionBody(contextAreaTarget(area, "actions")))
+        {
+            entry.groupTitles = path;
+            body.append(std::move(entry));
+        }
+        // The empty shared fields are revealable only in the Right strategy;
+        // the other three original strategies explicitly hide this pane.
+        if (showFields)
+            for (auto entry : ks::ui::StructuredFieldView::coldSearchBody(contextAreaTarget(area, "fields")))
+            {
+                entry.groupTitles = path;
+                body.append(std::move(entry));
+            }
+        append(ContextBody::NotRefreshed, contextAreaTarget(area, "status"), path);
+    }
+    return body;
+}
+
 ContextMenuCleanerTab::ContextMenuCleanerTab(QWidget* parent)
     : QWidget(parent)
 {
+    // One value gate survives page close/reopen while accepted work drains.
+    static const auto registrySerial = std::make_shared<std::mutex>();
+    m_registrySerial = registrySerial;
+    m_shellOperation = new ks::ui::AsyncOperation(this);
+    m_shellOperation->setStateChangedCallback([this]() { settleShellTransaction(); });
     initializeUi();
-    refreshArea(MenuArea::InternetExplorer);
 
     kLogEvent event;
     info << event << "[ContextMenuCleanerTab] 右键菜单清理页初始化完成。" << eol;
+}
+
+ContextMenuCleanerTab::~ContextMenuCleanerTab()
+{
+    if (m_latencySession) m_latencySession->stop.store(true);
+    if (m_latencyCleanup && !m_latencyCleanup->isCleanupRequested()) m_latencyCleanup->requestCleanup();
+    m_shellCompletion = {};
+    if (m_shellOperation != nullptr) m_shellOperation->close();
+    const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
+        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu,
+        MenuArea::ExplorerHome};
+    for (const MenuArea area : areas)
+    {
+        AreaWidgets* widgets = widgetsForArea(area);
+        if (widgets->queryOperation != nullptr) widgets->queryOperation->close();
+        if (widgets->presentationTimer != nullptr) widgets->presentationTimer->stop();
+    }
+}
+
+void ContextMenuCleanerTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (std::exchange(m_initialRefreshDeferred, false))
+    {
+        // A hidden factory has no consumer for registry rows. Start its first
+        // read at the original visible page, before the first usable frame.
+        const QPointer<ContextMenuCleanerTab> self(this);
+        AreaWidgets* current = widgetsForArea(currentArea());
+        if (current && !current->hasLoaded && !current->queryPending) refreshArea(currentArea());
+        if (!self) return;
+    }
+    AreaWidgets* widgets = widgetsForArea(currentArea());
+    if (widgets != nullptr && widgets->presentationTimer != nullptr
+        && (widgets->tableBuilding || widgets->pendingSnapshot.has_value()))
+        widgets->presentationTimer->start(0);
 }
 
 void ContextMenuCleanerTab::initializeUi()
@@ -64,12 +202,14 @@ void ContextMenuCleanerTab::initializeUi()
     ks::ui::StylePrimaryToolbar(m_pageToolbar);
 
     m_backupButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_copy.svg")),
-        QStringLiteral("备份右键菜单"), m_pageToolbar);
+        contextBodySource(ContextBody::Backup), m_pageToolbar);
+    m_backupButton->setObjectName(QStringLiteral("ks_context_backup"));
     m_backupButton->setToolTip(QStringLiteral(
         "把全部七类 Shell 关联注册表导出成 JSON 文件，存放在 exe 同级目录的 ContextMenuBackups 下。\n"
         "测量耗时会自动先做一次同样的备份。"));
     m_restoreBackupButton = new QPushButton(QIcon(QStringLiteral(":/Icon/codeeditor_undo.svg")),
-        QStringLiteral("恢复备份"), m_pageToolbar);
+        contextBodySource(ContextBody::RestoreBackup), m_pageToolbar);
+    m_restoreBackupButton->setObjectName(QStringLiteral("ks_context_restore_backup"));
     m_restoreBackupButton->setToolTip(QStringLiteral(
         "选择一份备份文件恢复右键菜单。恢复等于遗弃当前状态，因此恢复前会自动把当前状态另存一份。"));
     m_latencyButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_track.svg")),
@@ -84,7 +224,8 @@ void ContextMenuCleanerTab::initializeUi()
     // 初次可见性由页签切换回调统一维护（默认停在 IE 右键菜单，属于不可测分类）。
     m_latencyButton->setVisible(false);
     m_latencyStopButton->setVisible(false);
-    m_latencyStatusLabel = new QLabel(QStringLiteral("尚未测量。"), m_pageToolbar);
+    m_latencyStatusLabel = new QLabel(contextBodySource(ContextBody::LatencyEmpty), m_pageToolbar);
+    m_latencyStatusLabel->setObjectName(QStringLiteral("ks_context_latency"));
     // 测量结果可在剩余工具区换行，长状态不抬高整个专业页的最小宽度。
     m_latencyStatusLabel->setWordWrap(true);
     m_latencyStatusLabel->setMinimumWidth(0);
@@ -157,10 +298,13 @@ void ContextMenuCleanerTab::initializeUi()
             }
             const MenuArea area = orderedAreas[static_cast<std::size_t>(tabIndex)];
             AreaWidgets* areaWidgets = widgetsForArea(area);
-            if (areaWidgets != nullptr && !areaWidgets->hasLoaded)
+            if (areaWidgets != nullptr && !areaWidgets->hasLoaded && !areaWidgets->queryPending)
             {
                 refreshArea(area);
             }
+
+            if (areaWidgets != nullptr && (areaWidgets->tableBuilding || areaWidgets->pendingSnapshot.has_value()))
+                areaWidgets->presentationTimer->start(0);
 
             // 测量入口只在该分类真的存在可触发的右键菜单时出现（当前仅桌面右键菜单可测）。
             const bool measurable = areaSupportsLatencyProbe(area);
@@ -184,6 +328,8 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     }
 
     areaWidgets->page = new QWidget(m_areaTabWidget);
+    const int areaIndex = static_cast<int>(area);
+    areaWidgets->page->setObjectName(contextAreaTarget(areaIndex, "page"));
     areaWidgets->layout = new QVBoxLayout(areaWidgets->page);
     areaWidgets->layout->setContentsMargins(16, 16, 16, 16);
     areaWidgets->layout->setSpacing(12);
@@ -196,9 +342,11 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     toolbarLayout->setSpacing(6);
     areaWidgets->layout->addWidget(areaWidgets->toolbarWidget);
 
-    areaWidgets->refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), areaWidgets->toolbarWidget);
+    areaWidgets->refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), contextBodySource(ContextBody::Refresh), areaWidgets->toolbarWidget);
+    areaWidgets->refreshButton->setObjectName(contextAreaTarget(areaIndex, "refresh"));
     areaWidgets->refreshButton->setToolTip(QStringLiteral("重新枚举当前分类的 Shell 关联注册表项目"));
-    areaWidgets->deleteButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_terminate.svg")), QStringLiteral("删除选中"), areaWidgets->toolbarWidget);
+    areaWidgets->deleteButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_terminate.svg")), contextBodySource(ContextBody::Delete), areaWidgets->toolbarWidget);
+    areaWidgets->deleteButton->setObjectName(contextAreaTarget(areaIndex, "delete"));
     // 备份口径按分类不同，挂在删除按钮上比页首一段通用说明更贴近实际动作。
     areaWidgets->deleteButton->setToolTip(
         area == MenuArea::UrlBinding
@@ -208,15 +356,18 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     {
         areaWidgets->restoreButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/codeeditor_undo.svg")),
-            QStringLiteral("恢复上次删除"),
+            contextBodySource(ContextBody::RestoreUrl),
             areaWidgets->toolbarWidget);
+        areaWidgets->restoreButton->setObjectName(contextAreaTarget(areaIndex, "restore_url"));
         areaWidgets->restoreButton->setToolTip(QStringLiteral("恢复上一次 URL 绑定删除前自动保存的注册表树"));
     }
-    areaWidgets->copyButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制路径"), areaWidgets->toolbarWidget);
+    areaWidgets->copyButton = new QPushButton(QIcon(QStringLiteral(":/Icon/log_copy.svg")), contextBodySource(ContextBody::CopyPath), areaWidgets->toolbarWidget);
+    areaWidgets->copyButton->setObjectName(contextAreaTarget(areaIndex, "copy_path"));
     areaWidgets->copyButton->setToolTip(QStringLiteral("复制选中项的注册表路径"));
     areaWidgets->filterEdit = new QLineEdit(areaWidgets->toolbarWidget);
+    areaWidgets->filterEdit->setObjectName(contextAreaTarget(areaIndex, "filter"));
     areaWidgets->filterEdit->setClearButtonEnabled(true);
-    areaWidgets->filterEdit->setPlaceholderText(QStringLiteral("筛选：名称/显示名/命令/注册表路径/CLSID"));
+    areaWidgets->filterEdit->setPlaceholderText(contextBodySource(ContextBody::Filter));
     ks::ui::StyleSearchField(areaWidgets->filterEdit);
 
     ks::ui::ApplyFlatButtonTheme(areaWidgets->refreshButton, ks::ui::FlatButtonTone::Neutral,
@@ -247,17 +398,10 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     areaWidgets->table = new ks::ui::VisibleTableWidget(splitter);
     // 七类关联页已有备份/恢复/删除工具，保留紧凑复制导出以免重复。
     ks::ui::SetTableActionBarMode(areaWidgets->table, ks::ui::TableActionBarMode::Compact);
+    areaWidgets->table->setObjectName(contextAreaTarget(areaIndex, "table"));
+    ks::ui::SetCompactTableSearchTargetPrefix(areaWidgets->table, contextAreaTarget(areaIndex, "actions"));
     areaWidgets->table->setColumnCount(kColumnCount);
-    areaWidgets->table->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("名称"),
-        QStringLiteral("显示名"),
-        QStringLiteral("类型"),
-        QStringLiteral("来源"),
-        QStringLiteral("命令/处理器"),
-        QStringLiteral("注册表位置"),
-        QStringLiteral("状态"),
-        QStringLiteral("详情"),
-        QStringLiteral("耗时") });
+    areaWidgets->table->setHorizontalHeaderLabels(contextHeaderSources());
     areaWidgets->table->setSelectionBehavior(QAbstractItemView::SelectRows);
     areaWidgets->table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     areaWidgets->table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -281,6 +425,7 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     // 详情编辑器：只读，承载当前选中行的完整信息。
     // 这里只用既有字段拼文本，不新增表格列，也不改枚举逻辑。
     areaWidgets->detailEditor = new ks::ui::StructuredFieldView(splitter);
+    areaWidgets->detailEditor->setSearchTargetPrefix(contextAreaTarget(areaIndex, "fields"));
     splitter->setStretchFactor(0, 4);
     splitter->setStretchFactor(1, 2);
     areaWidgets->layout->addWidget(splitter, 1);
@@ -292,7 +437,8 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
         areaWidgets->detailEditor,
         areaWidgets->page);
 
-    areaWidgets->statusLabel = new QLabel(QStringLiteral("尚未刷新。"), areaWidgets->page);
+    areaWidgets->statusLabel = new QLabel(contextBodySource(ContextBody::NotRefreshed), areaWidgets->page);
+    areaWidgets->statusLabel->setObjectName(contextAreaTarget(areaIndex, "status"));
     areaWidgets->statusLabel->setWordWrap(true);
     areaWidgets->layout->addWidget(areaWidgets->statusLabel);
 
@@ -311,8 +457,13 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
     connect(areaWidgets->copyButton, &QPushButton::clicked, this, [this, area]() {
         copySelectedEntries(area);
     });
-    connect(areaWidgets->filterEdit, &QLineEdit::textChanged, this, [this, area](const QString&) {
-        rebuildAreaTable(area);
+    areaWidgets->filterTimer = new QTimer(areaWidgets->page);
+    areaWidgets->filterTimer->setSingleShot(true);
+    areaWidgets->filterTimer->setInterval(80);
+    connect(areaWidgets->filterEdit, &QLineEdit::textChanged, areaWidgets->filterTimer,
+        qOverload<>(&QTimer::start));
+    connect(areaWidgets->filterTimer, &QTimer::timeout, this, [this, area]() {
+        applyAreaFilter(area);
     });
     connect(areaWidgets->table, &QTableWidget::customContextMenuRequested, this, [this, area](const QPoint& localPosition) {
         showAreaContextMenu(area, localPosition);
@@ -323,113 +474,264 @@ void ContextMenuCleanerTab::createAreaPage(const MenuArea area)
         updateAreaDetail(area);
     });
 
-    m_areaTabWidget->addTab(areaWidgets->page, QIcon(areaIconPath(area)), areaTitle(area));
+    areaWidgets->queryOperation = new ks::ui::AsyncOperation(this);
+    areaWidgets->queryOperation->setStateChangedCallback([this, area]()
+    {
+        AreaWidgets* widgets = widgetsForArea(area);
+        if (!widgets->queryOperation->isInFlight() && widgets->queryPending)
+        {
+            widgets->queryPending = false;
+            widgets->statusLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
+        }
+    });
+    areaWidgets->presentationTimer = new QTimer(this);
+    areaWidgets->presentationTimer->setSingleShot(true);
+    connect(areaWidgets->presentationTimer, &QTimer::timeout, this,
+        [this, area]() { processAreaPresentation(area); });
+    m_navigationTabs.add(kContextMenuNavigation[static_cast<int>(area)], m_areaTabWidget,
+        areaWidgets->page, QIcon(areaIconPath(area)));
+}
+
+QVector<ContextMenuCleanerTab::ContextMenuEntry> ContextMenuCleanerTab::enumerateAreaSnapshot(const MenuArea area)
+{
+    QVector<ContextMenuEntry> entries = enumerateEntriesForArea(area);
+    QHash<QString, QPair<QString, QString>> clsidCache;
+    for (ContextMenuEntry& entry : entries)
+    {
+        if (!entry.clsidText.isEmpty())
+        {
+            auto it = clsidCache.constFind(entry.clsidText);
+            if (it == clsidCache.cend())
+                it = clsidCache.insert(entry.clsidText,
+                    qMakePair(queryClsidFriendlyName(entry.clsidText), queryClsidServerPath(entry.clsidText)));
+            entry.clsidFriendlyName = it->first;
+            entry.clsidServerPath = it->second;
+        }
+        entry.detailText = entry.details.toPlainText();
+        entry.registryPathText = registryTargetPathText(entry.rootLabel, entry.subKeyPath,
+            entry.deleteKind == DeleteKind::RegistryValue, entry.valueName);
+        entry.searchText = QStringList{entry.itemName, entry.displayName, entry.entryKind,
+            entry.sourceGroup, entry.commandOrHandler, entry.registryPathText,
+            entry.statusText, entry.detailText, entry.clsidText}.join('\n').toLower();
+    }
+    return entries;
 }
 
 void ContextMenuCleanerTab::refreshArea(const MenuArea area)
 {
-    AreaWidgets* areaWidgets = widgetsForArea(area);
-    if (areaWidgets == nullptr)
+    AreaWidgets* widgets = widgetsForArea(area);
+    if (widgets == nullptr) return;
+    if (shellBusy())
     {
+        widgets->refreshDeferred = true;
         return;
     }
+    widgets->refreshDeferred = false;
+    const std::uint64_t generation = ++widgets->refreshGeneration;
+    widgets->pendingSnapshot.reset();
+    widgets->queryPending = true;
+    widgets->statusLabel->setText(ks::i18n::text(QStringLiteral("misc.shell.refreshing"),
+        QStringLiteral("正在刷新注册表快照…")));
+    const auto serial = m_registrySerial;
+    const auto accepted = widgets->queryOperation->submit<MenuArea, QVector<ContextMenuEntry>>(
+        area,
+        [serial](const MenuArea& requestedArea, const ks::ui::AsyncOperationToken& token)
+        {
+            std::lock_guard<std::mutex> lock(*serial);
+            if (token.isCanceled()) return QVector<ContextMenuEntry>();
+            return enumerateAreaSnapshot(requestedArea);
+        },
+        [this, area, generation](const QVector<ContextMenuEntry>& entries, std::uint64_t)
+        {
+            AreaWidgets* current = widgetsForArea(area);
+            if (generation != current->refreshGeneration) return true; // Stale presentation is consumed, never left awaitingCommit.
+            current->queryPending = false;
+            applyAreaSnapshot(area, generation, entries);
+            return true;
+        },
+        [this, area](std::exception_ptr)
+        {
+            AreaWidgets* current = widgetsForArea(area);
+            current->queryPending = false;
+            current->statusLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"),
+                QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
+        });
+    if (accepted == 0) widgets->queryPending = false;
+}
 
-    const QVector<ContextMenuEntry> newEntries = enumerateEntriesForArea(area);
-    areaWidgets->entries = newEntries;
-    areaWidgets->hasLoaded = true;
-    // 重新枚举后上一轮的耗时结论已失效，先清空耗时列再重建。
-    clearLatencyColumn(area);
+void ContextMenuCleanerTab::applyAreaSnapshot(const MenuArea area, const std::uint64_t generation,
+    QVector<ContextMenuEntry> entries)
+{
+    AreaWidgets* widgets = widgetsForArea(area);
+    if (generation != widgets->refreshGeneration) return;
+    widgets->hasLoaded = true;
+    if (shellBusy() || !widgets->page->isVisible())
+    {
+        widgets->pendingSnapshot = std::move(entries);
+        widgets->pendingSnapshotGeneration = generation;
+        return;
+    }
+    // Modal confirmation and table menus retain the exact target snapshot until they return.
+    if (QApplication::activeModalWidget() != nullptr
+        || ks::ui::IsTableUiCommitBlockedByContextMenu({widgets->table}))
+    {
+        widgets->pendingSnapshot = std::move(entries);
+        widgets->pendingSnapshotGeneration = generation;
+        widgets->presentationTimer->start(25);
+        return;
+    }
+    widgets->entries = std::move(entries);
+    widgets->hasLoaded = true;
+    // Resetting source rows already clears all latency cells from the old snapshot.
     rebuildAreaTable(area);
-
     kLogEvent event;
-    info << event
-        << "[ContextMenuCleanerTab] 刷新分类完成, area="
-        << areaTitle(area).toStdString()
-        << ", count="
-        << newEntries.size()
-        << eol;
+    info << event << "[ContextMenuCleanerTab] 刷新分类完成, area="
+        << areaTitle(area).toStdString() << ", count=" << widgets->entries.size() << eol;
+}
+
+void ContextMenuCleanerTab::flushDeferredAreaRefreshes()
+{
+    const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
+        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu,
+        MenuArea::ExplorerHome};
+    for (const MenuArea area : areas)
+        if (widgetsForArea(area)->refreshDeferred) refreshArea(area);
 }
 
 void ContextMenuCleanerTab::rebuildAreaTable(const MenuArea area)
 {
-    AreaWidgets* areaWidgets = widgetsForArea(area);
-    if (areaWidgets == nullptr || areaWidgets->table == nullptr)
+    AreaWidgets* widgets = widgetsForArea(area);
+    if (widgets == nullptr || widgets->table == nullptr) return;
+    widgets->filterTimer->stop();
+    widgets->presentationTimer->stop();
+    widgets->entryAnchors.clear();
+    widgets->entryAnchors.resize(widgets->entries.size());
+    widgets->searchTexts.clear();
+    widgets->searchTexts.reserve(widgets->entries.size());
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(widgets->detailEditor);
+    widgets->table->setSortingEnabled(false);
+    widgets->table->setRowCount(0);
+    widgets->table->setRowCount(widgets->entries.size());
+    widgets->tableBuilding = true;
+    widgets->nextPresentationRow = 0;
+    widgets->table->setEnabled(false);
+    widgets->deleteButton->setEnabled(false);
+    widgets->copyButton->setEnabled(false);
+    if (currentArea() == area) m_latencyButton->setEnabled(false);
+    processAreaPresentation(area);
+}
+
+void ContextMenuCleanerTab::processAreaPresentation(const MenuArea area)
+{
+    AreaWidgets* widgets = widgetsForArea(area);
+    if (shellBusy()) return;
+    if (widgets->pendingSnapshot.has_value())
     {
+        QVector<ContextMenuEntry> entries = std::move(*widgets->pendingSnapshot);
+        widgets->pendingSnapshot.reset();
+        applyAreaSnapshot(area, widgets->pendingSnapshotGeneration, std::move(entries));
         return;
     }
-
-    const QString filterText = areaWidgets->filterEdit != nullptr
-        ? areaWidgets->filterEdit->text().trimmed().toLower()
-        : QString();
-
-    // 重建数据前先让详情宿主收起行内详情：合成的行内控件引用的是即将失效的源行。
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(areaWidgets->detailEditor);
-
-    areaWidgets->table->setSortingEnabled(false);
-    areaWidgets->table->setRowCount(0);
-
-    int visibleCount = 0;
-    for (int entryIndex = 0; entryIndex < areaWidgets->entries.size(); ++entryIndex)
+    if (!widgets->tableBuilding || !widgets->page->isVisible()) return;
+    if (QApplication::activeModalWidget() != nullptr
+        || ks::ui::IsTableUiCommitBlockedByContextMenu({widgets->table}))
     {
-        const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        const QString searchableText = QStringList{
-            entry.itemName,
-            entry.displayName,
-            entry.entryKind,
-            entry.sourceGroup,
-            entry.commandOrHandler,
-            registryTargetPathText(
-                entry.rootLabel,
-                entry.subKeyPath,
-                entry.deleteKind == DeleteKind::RegistryValue,
-                entry.valueName),
-            entry.statusText,
-            entry.details.toPlainText(),
-            entry.clsidText }.join('\n').toLower();
-        if (!filterText.isEmpty() && !searchableText.contains(filterText))
+        widgets->presentationTimer->start(25);
+        return;
+    }
+    QElapsedTimer budget;
+    budget.start();
+    const int startRow = widgets->nextPresentationRow;
+    while (widgets->nextPresentationRow < widgets->entries.size()
+        && widgets->nextPresentationRow - startRow < 160
+        && (widgets->nextPresentationRow == startRow || budget.elapsed() < 4))
+    {
+        const int row = widgets->nextPresentationRow++;
+        const ContextMenuEntry& entry = widgets->entries.at(row);
+        widgets->searchTexts.push_back(entry.searchText);
+        const auto makeItem = [row](const QString& text)
         {
-            continue;
-        }
-
-        const int row = visibleCount++;
-        areaWidgets->table->insertRow(row);
-
-        const auto makeItem = [entryIndex](const QString& text) -> QTableWidgetItem*
-        {
-            QTableWidgetItem* item = new QTableWidgetItem(text);
-            item->setData(Qt::UserRole, entryIndex);
+            auto* item = new QTableWidgetItem(text);
+            item->setData(Qt::UserRole, row);
             item->setToolTip(text);
             return item;
         };
-
-        areaWidgets->table->setItem(row, kColumnName, makeItem(entry.itemName));
-        areaWidgets->table->setItem(row, kColumnDisplayName, makeItem(entry.displayName));
-        areaWidgets->table->setItem(row, kColumnKind, makeItem(entry.entryKind));
-        areaWidgets->table->setItem(row, kColumnSource, makeItem(entry.sourceGroup));
-        areaWidgets->table->setItem(row, kColumnCommandOrHandler, makeItem(entry.commandOrHandler));
-        areaWidgets->table->setItem(
-            row,
-            kColumnRegistryPath,
-            makeItem(registryTargetPathText(
-                entry.rootLabel,
-                entry.subKeyPath,
-                entry.deleteKind == DeleteKind::RegistryValue,
-                entry.valueName)));
-        areaWidgets->table->setItem(row, kColumnStatus, makeItem(entry.statusText));
-        areaWidgets->table->setItem(row, kColumnDetail, makeItem(entry.details.toPlainText()));
+        auto* anchor = makeItem(entry.itemName);
+        widgets->entryAnchors[row] = anchor;
+        widgets->table->setItem(row, kColumnName, anchor);
+        widgets->table->setItem(row, kColumnDisplayName, makeItem(entry.displayName));
+        widgets->table->setItem(row, kColumnKind, makeItem(entry.entryKind));
+        widgets->table->setItem(row, kColumnSource, makeItem(entry.sourceGroup));
+        widgets->table->setItem(row, kColumnCommandOrHandler, makeItem(entry.commandOrHandler));
+        widgets->table->setItem(row, kColumnRegistryPath, makeItem(entry.registryPathText));
+        widgets->table->setItem(row, kColumnStatus, makeItem(entry.statusText));
+        widgets->table->setItem(row, kColumnDetail, makeItem(entry.detailText));
     }
+    if (widgets->nextPresentationRow < widgets->entries.size())
+    {
+        widgets->presentationTimer->start(0);
+        return;
+    }
+    widgets->tableBuilding = false;
+    widgets->table->setSortingEnabled(true);
+    widgets->table->setEnabled(!shellBusy());
+    widgets->deleteButton->setEnabled(!shellBusy());
+    widgets->copyButton->setEnabled(!shellBusy());
+    if (currentArea() == area) m_latencyButton->setEnabled(!shellBusy());
+    applyAreaFilter(area);
+    if (widgets->queryPending)
+        widgets->statusLabel->setText(ks::i18n::text(QStringLiteral("misc.shell.refreshing"),
+            QStringLiteral("正在刷新注册表快照…")));
+    updateAreaDetail(area);
+}
 
-    areaWidgets->table->setSortingEnabled(true);
+void ContextMenuCleanerTab::applyAreaFilter(const MenuArea area)
+{
+    AreaWidgets* areaWidgets = widgetsForArea(area);
+    if (areaWidgets == nullptr || areaWidgets->table == nullptr || areaWidgets->tableBuilding)
+    {
+        return;
+    }
+    const QString filterText = areaWidgets->filterEdit != nullptr
+        ? areaWidgets->filterEdit->text().trimmed().toLower() : QString();
+    const QSignalBlocker tableSignals(areaWidgets->table);
+    int visibleCount = 0;
+    QSet<QPersistentModelIndex> excludedRows;
+    for (int row = 0; row < areaWidgets->table->rowCount(); ++row)
+    {
+        QTableWidgetItem* anchor = areaWidgets->table->item(row, kColumnName);
+        if (anchor == nullptr || !anchor->data(Qt::UserRole).isValid())
+        {
+            continue;
+        }
+        const int index = anchor->data(Qt::UserRole).toInt();
+        const bool visible = index >= 0 && index < areaWidgets->searchTexts.size()
+            && (filterText.isEmpty() || areaWidgets->searchTexts.at(index).contains(filterText));
+        if (visible)
+        {
+            ++visibleCount;
+        }
+        else
+        {
+            excludedRows.insert(QPersistentModelIndex(areaWidgets->table->model()->index(row, 0)));
+            areaWidgets->table->selectionModel()->select(
+                areaWidgets->table->model()->index(row, 0),
+                QItemSelectionModel::Deselect | QItemSelectionModel::Rows);
+        }
+    }
+    ks::ui::ApplyTableRowFilter(areaWidgets->table, excludedRows);
     if (areaWidgets->statusLabel != nullptr)
     {
         areaWidgets->statusLabel->setText(QStringLiteral("%1：共枚举 %2 项，当前显示 %3 项。")
-            .arg(areaTitle(area))
-            .arg(areaWidgets->entries.size())
-            .arg(visibleCount));
+            .arg(areaTitle(area)).arg(areaWidgets->entries.size()).arg(visibleCount));
     }
-
-    // 重建后选中行已失效：重新同步一次详情文本（无选中行则回到引导占位）。
-    updateAreaDetail(area);
+    const int currentRow = areaWidgets->table->currentRow();
+    if (currentRow >= 0 && ks::ui::IsTableRowExcludedByFilter(areaWidgets->table, currentRow))
+    {
+        areaWidgets->table->setCurrentCell(-1, -1);
+        updateAreaDetail(area);
+    }
 }
 
 void ContextMenuCleanerTab::showAreaContextMenu(const MenuArea area, const QPoint& localPosition)
@@ -473,8 +775,11 @@ void ContextMenuCleanerTab::showAreaContextMenu(const MenuArea area, const QPoin
 
 void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
 {
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();
+    if (!alive || shellBusy()) return;
     AreaWidgets* areaWidgets = widgetsForArea(area);
-    if (areaWidgets == nullptr)
+    if (areaWidgets == nullptr || areaWidgets->tableBuilding)
     {
         return;
     }
@@ -487,7 +792,7 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
     }
 
     QStringList targetPaths;
-    QVector<int> deleteableIndexes;
+    QVector<ContextMenuEntry> targets;
     int machineScopeTargetCount = 0;
     for (const int entryIndex : selectedIndexes)
     {
@@ -496,12 +801,11 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             continue;
         }
         const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        if (!entry.canDelete
-            || (area == MenuArea::UrlBinding && !isUrlBindingDeletionAllowed(entry)))
+        if (!entry.canDelete)
         {
             continue;
         }
-        deleteableIndexes.push_back(entryIndex);
+        targets.push_back(entry);
         if (entry.rootKey == HKEY_LOCAL_MACHINE)
         {
             ++machineScopeTargetCount;
@@ -512,7 +816,7 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             entry.deleteKind == DeleteKind::RegistryValue,
             entry.valueName));
     }
-    if (deleteableIndexes.isEmpty())
+    if (targets.isEmpty())
     {
         QMessageBox::information(
             this,
@@ -539,128 +843,76 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             .arg(targetPaths.size())
             .arg(previewText)
             .arg(moreText);
-    const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
-        this,
-        QStringLiteral("确认删除注册表项目"),
-        confirmationText,
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmButton != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    if (area == MenuArea::UrlBinding)
-    {
-        QString backupError;
-        if (!createUrlBindingBackup(deleteableIndexes, &backupError))
+    if (!beginShellAction()) return;
+    const auto confirmButton = QMessageBox::warning(this,
+        QStringLiteral("确认删除注册表项目"), confirmationText,
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!alive) return;
+    if (confirmButton != QMessageBox::Yes) { endShellAction(); return; }
+    submitShellTransaction([targets, area]() {
+        ShellTransactionResult result;
+        if (area == MenuArea::UrlBinding && !createUrlBindingBackup(targets, &result.error))
+        { result.stage = ShellTransactionStage::BackupFailed; return result; } // No target mutation before a complete published backup.
+        result.stage = ShellTransactionStage::Completed;
+        for (const ContextMenuEntry& entry : targets)
         {
-            QMessageBox::critical(
-                this,
-                QStringLiteral("URL 绑定备份失败"),
-                QStringLiteral("删除已取消，因为无法建立可恢复备份：\n\n%1").arg(backupError));
+            QString errorText;
+            const QString path = registryTargetPathText(entry.rootLabel, entry.subKeyPath,
+                entry.deleteKind == DeleteKind::RegistryValue, entry.valueName);
+            bool ok = entry.canDelete;
+            if (area == MenuArea::UrlBinding) ok = ok && isUrlBindingDeletionAllowed(entry);
+            if (ok)
+                ok = entry.deleteKind == DeleteKind::RegistryValue
+                    ? deleteRegistryValueWithView(entry.rootKey, entry.subKeyPath, entry.valueName,
+                        entry.viewFlag, entry.cleanupOpenWithMru, &errorText)
+                    : deleteRegistryTreeWithView(entry.rootKey, entry.subKeyPath, entry.viewFlag, &errorText);
+            else errorText = QStringLiteral("执行时安全校验拒绝删除");
+            if (ok) ++result.count;
+            else result.failures.push_back(QStringLiteral("%1：%2").arg(path, errorText));
+            kLogEvent event;
+            if (ok) warn << event << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目成功, path="
+                << path.toStdString() << eol;
+            else err << event << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目失败, path="
+                << path.toStdString() << ", error=" << errorText.toStdString() << eol;
+        }
+        result.ok = result.failures.isEmpty();
+        return result;
+    }, [this, area](const ShellTransactionResult& result) {
+        const QPointer<ContextMenuCleanerTab> alive(this);
+        if (result.stage == ShellTransactionStage::BackupFailed)
+        {
+            QMessageBox::critical(this, QStringLiteral("URL 绑定备份失败"),
+                QStringLiteral("删除已取消，因为无法建立可恢复备份：\n\n%1").arg(result.error));
             return;
         }
-    }
-
-    QStringList failedMessages;
-    int successCount = 0;
-    // privilegePromptHandled：批量删除中最多显示一次权限恢复提示，并抑制最终重复失败框。
-    bool privilegePromptHandled = false;
-    for (const int entryIndex : deleteableIndexes)
-    {
-        if (entryIndex < 0 || entryIndex >= areaWidgets->entries.size())
+        refreshArea(area);
+        if (result.stage != ShellTransactionStage::Completed)
         {
-            continue;
+            QMessageBox::warning(this, QStringLiteral("Shell 关联管理"),
+                result.stage == ShellTransactionStage::NotAccepted
+                    ? QStringLiteral("事务未被接受，未执行注册表修改。")
+                    : QStringLiteral("后台事务未返回可确认的完成状态；可能已部分执行。请刷新后核对实际注册表：%1").arg(result.error));
+            return;
         }
-        const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        if (area == MenuArea::UrlBinding && !isUrlBindingDeletionAllowed(entry))
-        {
-            failedMessages.push_back(QStringLiteral("%1：执行时安全校验拒绝删除")
-                .arg(registryTargetPathText(
-                    entry.rootLabel,
-                    entry.subKeyPath,
-                    entry.deleteKind == DeleteKind::RegistryValue,
-                    entry.valueName)));
-            continue;
-        }
-        QString errorText;
-        const bool deleteOk = entry.deleteKind == DeleteKind::RegistryValue
-            ? deleteRegistryValueWithView(
-                entry.rootKey,
-                entry.subKeyPath,
-                entry.valueName,
-                entry.viewFlag,
-                entry.cleanupOpenWithMru,
-                &errorText)
-            : deleteRegistryTreeWithView(
-                entry.rootKey,
-                entry.subKeyPath,
-                entry.viewFlag,
-                &errorText);
-        const QString targetPath = registryTargetPathText(
-            entry.rootLabel,
-            entry.subKeyPath,
-            entry.deleteKind == DeleteKind::RegistryValue,
-            entry.valueName);
-        if (deleteOk)
-        {
-            ++successCount;
-            kLogEvent event;
-            warn << event
-                << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目成功, path="
-                << targetPath.toStdString()
-                << eol;
-        }
+        if (result.failures.isEmpty())
+            QMessageBox::information(this, QStringLiteral("Shell 关联管理"),
+                QStringLiteral("已删除 %1 项。建议重启 Explorer 或相关程序后确认变化。").arg(result.count));
         else
         {
-            if (!privilegePromptHandled)
-            {
-                privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("清理 Shell 关联注册表项目"),
-                    errorText);
-            }
-            failedMessages.push_back(QStringLiteral("%1：%2")
-                .arg(targetPath, errorText));
-            kLogEvent event;
-            err << event
-                << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目失败, path="
-                << targetPath.toStdString()
-                << ", error="
-                << errorText.toStdString()
-                << eol;
-        }
-    }
-
-    refreshArea(area);
-
-    if (failedMessages.isEmpty())
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("Shell 关联管理"),
-            QStringLiteral("已删除 %1 项。建议重启 Explorer 或相关程序后确认变化。").arg(successCount));
-    }
-    else
-    {
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("Shell 关联管理"),
+            const bool handled = ks::ui::promptForPrivilegeFailure(this,
+                QStringLiteral("清理 Shell 关联注册表项目"), result.failures.first());
+            if (!alive) return;
+            if (!handled) QMessageBox::warning(this, QStringLiteral("Shell 关联管理"),
                 QStringLiteral("成功删除 %1 项，失败 %2 项：\n\n%3")
-                    .arg(successCount)
-                    .arg(failedMessages.size())
-                    .arg(failedMessages.join('\n')));
+                    .arg(result.count).arg(result.failures.size()).arg(result.failures.join('\n')));
         }
-    }
+    });
 }
 
 void ContextMenuCleanerTab::copySelectedEntries(const MenuArea area) const
 {
     const AreaWidgets* areaWidgets = widgetsForArea(area);
-    if (areaWidgets == nullptr)
+    if (areaWidgets == nullptr || areaWidgets->tableBuilding)
     {
         return;
     }
@@ -706,6 +958,10 @@ QVector<int> ContextMenuCleanerTab::selectedEntryIndexes(const MenuArea area) co
     const QModelIndexList selectedRows = areaWidgets->table->selectionModel()->selectedRows();
     for (const QModelIndex& modelIndex : selectedRows)
     {
+        if (ks::ui::IsTableRowExcludedByFilter(areaWidgets->table, modelIndex.row()))
+        {
+            continue;
+        }
         const QTableWidgetItem* item = areaWidgets->table->item(modelIndex.row(), kColumnName);
         if (item == nullptr)
         {
@@ -766,24 +1022,10 @@ const ContextMenuCleanerTab::AreaWidgets* ContextMenuCleanerTab::widgetsForArea(
 
 QString ContextMenuCleanerTab::areaTitle(const MenuArea area)
 {
-    switch (area)
-    {
-    case MenuArea::InternetExplorer:
-        return QStringLiteral("IE右键菜单");
-    case MenuArea::Desktop:
-        return QStringLiteral("桌面右键菜单");
-    case MenuArea::File:
-        return QStringLiteral("文件右键菜单");
-    case MenuArea::UrlBinding:
-        return QStringLiteral("URL 绑定");
-    case MenuArea::OpenWith:
-        return QStringLiteral("文件打开方式");
-    case MenuArea::FormatMenu:
-        return QStringLiteral("格式右键菜单");
-    case MenuArea::ExplorerHome:
-        return QStringLiteral("资源管理器主页第三方程序");
-    }
-    return QStringLiteral("文件右键菜单");
+    const int index = static_cast<int>(area);
+    const int safeIndex = index >= 0 && index < static_cast<int>(std::size(kContextMenuNavigation))
+        ? index : static_cast<int>(MenuArea::File);
+    return QString::fromUtf8(kContextMenuNavigation[safeIndex].sourceTitle);
 }
 
 QString ContextMenuCleanerTab::areaIconPath(const MenuArea area)
@@ -853,7 +1095,7 @@ void ContextMenuCleanerTab::applyAreaDetailPlaceholder(const MenuArea area)
     areaWidgets->detailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("【%1 详情】\n\n在上方表格中选择一行，这里显示该条 Shell 关联的完整信息：注册表根键与精确位置、命令或 CLSID 处理器、状态标记与删除粒度。\n\n详情显示方式可在设置中切换：下方折叠（默认）、行内展开、独立窗口、右侧面板。").arg(areaTitle(area))));
 }
 
-ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const ContextMenuEntry& entry) const
+ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const ContextMenuEntry& entry)
 {
     // 只用枚举阶段已经采集到的字段拼装文本，不新增数据来源，也不改表格列；
     // CLSID 友好名与服务器路径复用 Internal.h 里既有的 HKCR 查询 helper。
@@ -879,12 +1121,12 @@ ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const Cont
     {
 
         lines.field(QStringLiteral("CLSID"), QStringLiteral("%1").arg(entry.clsidText));
-        const QString friendlyName = queryClsidFriendlyName(entry.clsidText);
+        const QString& friendlyName = entry.clsidFriendlyName;
         if (!friendlyName.isEmpty())
         {
             lines.field(QStringLiteral("CLSID 名称"), QStringLiteral("%1").arg(friendlyName));
         }
-        const QString serverPath = queryClsidServerPath(entry.clsidText);
+        const QString& serverPath = entry.clsidServerPath;
         if (!serverPath.isEmpty())
         {
             lines.field(QStringLiteral("服务器"), QStringLiteral("%1").arg(serverPath));
@@ -911,4 +1153,135 @@ ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const Cont
     return lines;
 }
 
+bool ContextMenuCleanerTab::shellBusy() const
+{
+    return m_shellPromptActive || m_shellPending || m_latencyRunning.load()
+        || (m_latencySession && m_latencySession->recoveryPending.load());
+}
+
+void ContextMenuCleanerTab::suspendShellQueries()
+{
+    const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
+        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu, MenuArea::ExplorerHome};
+    for (const MenuArea area : areas)
+    {
+        auto* widgets = widgetsForArea(area);
+        if (widgets->queryOperation->isInFlight() || widgets->pendingSnapshot || widgets->tableBuilding)
+            widgets->refreshDeferred = true;
+        widgets->queryPending = false;
+        ++widgets->refreshGeneration;
+        widgets->queryOperation->cancel();
+        widgets->pendingSnapshot.reset();
+        widgets->presentationTimer->stop();
+    }
+}
+
+bool ContextMenuCleanerTab::beginShellAction()
+{
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();
+    if (!alive || shellBusy()) return false;
+    m_shellPromptActive = true;
+    suspendShellQueries();
+    setLatencyUiRunning(m_latencyRunning.load());
+    return true;
+}
+
+void ContextMenuCleanerTab::endShellAction()
+{
+    m_shellPromptActive = false;
+    setLatencyUiRunning(m_latencyRunning.load());
+}
+
+void ContextMenuCleanerTab::settleShellTransaction()
+{
+    if (!m_shellPending || m_shellOperation->isInFlight()) return;
+    ShellTransactionResult result;
+    if (m_shellReceipt)
+    {
+        std::lock_guard<std::mutex> lock(m_shellReceipt->mutex);
+        if (m_shellReceipt->result) result = *m_shellReceipt->result;
+        else result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+    }
+    else result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+    // Consume old state before any callback/modal can accept a new transaction.
+    auto completed = std::move(m_shellCompletion);
+    m_shellReceipt.reset();
+    m_shellPending = false;
+    m_shellPromptActive = false;
+    setLatencyUiRunning(m_latencyRunning.load());
+    if (completed) completed(result);
+}
+
+void ContextMenuCleanerTab::submitShellTransaction(
+    std::function<ShellTransactionResult()> worker,
+    std::function<void(const ShellTransactionResult&)> completed)
+{
+    auto receipt = std::make_shared<ShellTransactionReceipt>();
+    const auto serial = m_registrySerial;
+    m_shellPromptActive = false;
+    m_shellPending = true;
+    m_shellReceipt = receipt;
+    m_shellCompletion = std::move(completed);
+    setLatencyUiRunning(m_latencyRunning.load());
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    std::uint64_t accepted = 0;
+    bool submitReturned = false;
+    try
+    {
+        accepted = m_shellOperation->submitTransaction<int, ShellTransactionResult>(0,
+            [serial, receipt, worker = std::move(worker)](const int&) {
+            ShellTransactionResult result;
+            {
+                std::lock_guard<std::mutex> lock(*serial);
+                try { result = worker(); }
+                catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
+                catch (...) { result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。"); }
+            }
+            kLogEvent event;
+            info << event << "[ContextMenuCleanerTab] accepted transaction receipt: success="
+                << result.ok << ", count=" << result.count << ", path=" << result.path.toStdString()
+                << ", error=" << result.error.toStdString() << ", failures="
+                << result.failures.join('\n').toStdString() << eol;
+            { std::lock_guard<std::mutex> lock(receipt->mutex); receipt->result = result; }
+            return result;
+        }, [](const ShellTransactionResult&, std::uint64_t) { return true; },
+        [receipt](std::exception_ptr) {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            ShellTransactionResult failed;
+            failed.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+            receipt->result = std::move(failed);
+        });
+        submitReturned = true;
+    }
+    catch (...) {}
+    if (!alive) return;
+    if (accepted == 0)
+    {
+        if (submitReturned && m_shellReceipt == receipt)
+        {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            ShellTransactionResult rejected;
+            rejected.stage = ShellTransactionStage::NotAccepted;
+            rejected.error = QStringLiteral("事务未被接受，未执行注册表修改。");
+            receipt->result = std::move(rejected);
+        }
+        settleShellTransaction();
+    }
+}
+
 } // namespace ks::misc
+
+ks::ui::PageNavigationCatalog ks::misc::ContextMenuCleanerTab::navigationCatalog(const ContextMenuCleanerTab* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kContextMenuNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ContextMenuCleanerTab::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kContextMenuNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ContextMenuCleanerTab>(QStringLiteral("misc.context")); }

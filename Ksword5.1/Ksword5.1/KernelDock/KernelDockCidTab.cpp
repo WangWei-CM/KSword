@@ -18,6 +18,7 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -44,6 +45,7 @@
 #include <QTableWidgetItem>
 #include <QThreadPool>
 #include <QTimer>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -209,6 +211,7 @@ void KernelDockCidTab::initializeUi()
     rootLayout->addLayout(m_toolbarLayout);
 
     m_table = new ks::ui::VisibleTableWidget(this);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // CID 多源对象异常与消失需要保存现场以供比较。
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
     m_table->setColumnCount(static_cast<int>(CidColumn::Count));
@@ -254,9 +257,11 @@ void KernelDockCidTab::initializeConnections()
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() {
         refreshAsync();
     });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildTable();
-    });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     // 详情去抖：
     // - 连按方向键或逐字输入过滤词时，选中行会以按键频次变化；
     // - 本地字段立即渲染，R0 对象摘要延后到最后一次变化之后再发一次 IOCTL。
@@ -496,6 +501,8 @@ void KernelDockCidTab::applyRefreshResult(std::vector<CidEvidenceRow> rows, cons
 {
     m_refreshing.store(false);
     m_refreshButton->setEnabled(true);
+    m_lastSnapshotSuccess = success;
+    m_lastSnapshotError = errorText;
     m_rows = std::move(rows);
     rebuildTable();
 
@@ -516,16 +523,17 @@ void KernelDockCidTab::rebuildTable()
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
 
     m_table->setSortingEnabled(false);
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    m_diagnosticItems.fill(nullptr);
+    m_diagnosticDocument = ks::ui::FieldDocument();
+    ks::ui::ApplyTableRowFilter(m_table, {});
     m_table->setRowCount(0);
 
-    std::size_t visibleCount = 0;
     for (std::size_t index = 0; index < m_rows.size(); ++index)
     {
         const CidEvidenceRow& row = m_rows[index];
-        if (!rowMatchesFilter(row))
-        {
-            continue;
-        }
 
         const int rowIndex = m_table->rowCount();
         m_table->insertRow(rowIndex);
@@ -548,6 +556,7 @@ void KernelDockCidTab::rebuildTable()
         auto* statusItem = readOnlyItem(statusLabelText(row.lastStatus));
 
         kindItem->setData(Qt::UserRole, static_cast<qulonglong>(index));
+        kindItem->setData(Qt::UserRole + 1, searchableFields(row));
         if ((row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT) != 0U ||
             (row.anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_ORPHAN) != 0U)
         {
@@ -573,10 +582,34 @@ void KernelDockCidTab::rebuildTable()
         m_table->setItem(rowIndex, static_cast<int>(CidColumn::DetailStatus), detailStatusItem);
         m_table->setItem(rowIndex, static_cast<int>(CidColumn::Denoise), denoiseItem);
         m_table->setItem(rowIndex, static_cast<int>(CidColumn::Status), statusItem);
-        ++visibleCount;
     }
 
+    insertDiagnosticRow(QString(), QString(), ks::ui::FieldDocument());
     m_table->setSortingEnabled(true);
+    applyFilter(false);
+}
+
+void KernelDockCidTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelDockCidTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-cid-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString keyword = m_filterEdit->text().trimmed();
+    const bool active = !keyword.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_table->currentIndex();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
+    }
+    std::size_t visibleCount = 0;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        if (item == nullptr || !item->data(Qt::UserRole + 2).toString().isEmpty()) continue;
+        const auto values = item->data(Qt::UserRole + 1).toStringList();
+        if (keyword.isEmpty() || std::any_of(values.cbegin(), values.cend(), [&keyword](const QString& value) { return value.contains(keyword, Qt::CaseInsensitive); })) ++visibleCount;
+    }
     const QString cidSummaryText = m_cidSummary.queried
         ? kernelText("kernel.cid.status.summary_detail", QStringLiteral("；PspCidTable=%1；CID returned/total=%2/%3；status=%4；truncated=%5；visited=%6/%7"))
             .arg(formatHex64(m_cidSummary.pspCidTableAddress))
@@ -611,13 +644,39 @@ void KernelDockCidTab::rebuildTable()
                 : kernelText("kernel.cid.placeholder.no_matches", QStringLiteral("<筛选无结果>")),
             reasonText,
             detailText);
-        m_table->setCurrentCell(0, static_cast<int>(CidColumn::Kind));
-        scheduleDetailRefresh();
-        return;
     }
-
-    const int targetRow = m_table->currentRow() >= 0 ? m_table->currentRow() : 0;
-    m_table->setCurrentCell(qMin(targetRow, m_table->rowCount() - 1), static_cast<int>(CidColumn::Kind));
+    else m_diagnosticDocument = ks::ui::FieldDocument();
+    if (!m_lastSnapshotSuccess)
+    {
+        m_statusLabel->setText(kernelText("kernel.cid.status.failed", QStringLiteral("状态：刷新失败 - %1")).arg(m_lastSnapshotError));
+        m_statusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const bool diagnostic = item != nullptr && !item->data(Qt::UserRole + 2).toString().isEmpty();
+        const auto values = item != nullptr ? item->data(Qt::UserRole + 1).toStringList() : QStringList();
+        const bool visible = diagnostic ? visibleCount == 0U : item != nullptr && (keyword.isEmpty() || std::any_of(values.cbegin(), values.cend(), [&keyword](const QString& value) { return value.contains(keyword, Qt::CaseInsensitive); }));
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_table->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
+    {
+        if (firstVisible >= 0) m_table->setCurrentCell(firstVisible, static_cast<int>(CidColumn::Kind));
+        else { m_table->setCurrentItem(nullptr); m_table->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
     scheduleDetailRefresh();
 }
 
@@ -685,6 +744,7 @@ const KernelDockCidTab::CidEvidenceRow* KernelDockCidTab::selectedRow() const
         return nullptr;
     }
 
+    if (ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow())) return nullptr;
     const QTableWidgetItem* kindItem = m_table->item(m_table->currentRow(), static_cast<int>(CidColumn::Kind));
     if (kindItem == nullptr)
     {
@@ -955,65 +1015,50 @@ ks::ui::FieldDocument KernelDockCidTab::buildDiagnosticDetailText(const QString&
     return lines;
 }
 
-void KernelDockCidTab::insertDiagnosticRow(
-    const QString& titleText,
-    const QString& statusText,
-    const ks::ui::FieldDocument& detailText)
+void KernelDockCidTab::insertDiagnosticRow(const QString& titleText, const QString& statusText, const ks::ui::FieldDocument& detailText)
 {
-    // insertDiagnosticRow：
-    // - 输入：诊断标题、状态列文本和详情文本；
-    // - 处理：构造一行只读占位，所有列都可通过右键复制；
-    // - 返回：无返回值，UserRole + 2 保存详情区文本。
-    if (m_table == nullptr)
-    {
-        return;
-    }
-
+    const bool sorting = m_table->isSortingEnabled();
     m_table->setSortingEnabled(false);
-    m_table->setRowCount(1);
-
-    auto* kindItem = readOnlyItem(titleText);
+    if (m_diagnosticItems[0] == nullptr)
+    {
+        const int row = m_table->rowCount();
+        m_table->insertRow(row);
+        for (int column = 0; column < 14; ++column)
+        {
+            auto* item = readOnlyItem(QString());
+            item->setData(Qt::UserRole, static_cast<qulonglong>(m_rows.size()));
+            item->setData(Qt::UserRole + 2, QStringLiteral("diagnostic"));
+            m_table->setItem(row, column, item);
+            m_diagnosticItems[column] = item;
+        }
+    }
     m_diagnosticDocument = detailText;
-    m_table->setItem(0, static_cast<int>(CidColumn::Kind), kindItem);
-    m_table->setItem(0, static_cast<int>(CidColumn::CidValue), readOnlyItem(kernelText("kernel.cid.placeholder.diagnostic", QStringLiteral("<诊断>"))));
-    m_table->setItem(0, static_cast<int>(CidColumn::ProcessId), readOnlyItem(emptyText()));
-    m_table->setItem(0, static_cast<int>(CidColumn::ThreadId), readOnlyItem(emptyText()));
-    m_table->setItem(0, static_cast<int>(CidColumn::Image), readOnlyItem(QStringLiteral("CID / CrossView")));
-    m_table->setItem(0, static_cast<int>(CidColumn::ObjectAddress), readOnlyItem(formatHex64(0)));
-    m_table->setItem(0, static_cast<int>(CidColumn::StartAddress), readOnlyItem(formatHex64(0)));
-    m_table->setItem(0, static_cast<int>(CidColumn::SourceMask), readOnlyItem(kernelText("kernel.cid.placeholder.no_source", QStringLiteral("<无源>"))));
-    m_table->setItem(0, static_cast<int>(CidColumn::AnomalyFlags), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
-    m_table->setItem(0, static_cast<int>(CidColumn::CidEntryFlags), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
-    m_table->setItem(0, static_cast<int>(CidColumn::Confidence), readOnlyItem(QStringLiteral("0")));
-    m_table->setItem(0, static_cast<int>(CidColumn::DetailStatus), readOnlyItem(QStringLiteral("Diagnostic")));
-    m_table->setItem(0, static_cast<int>(CidColumn::Denoise), readOnlyItem(kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>"))));
-    m_table->setItem(0, static_cast<int>(CidColumn::Status), readOnlyItem(statusText));
-    m_table->setSortingEnabled(true);
+    const QStringList values{ titleText,
+        kernelText("kernel.cid.placeholder.diagnostic", QStringLiteral("<诊断>")), emptyText(), emptyText(), QStringLiteral("CID / CrossView"),
+        formatHex64(0), formatHex64(0), kernelText("kernel.cid.placeholder.no_source", QStringLiteral("<无源>")),
+        kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>")), kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>")),
+        QStringLiteral("0"), QStringLiteral("Diagnostic"), kernelText("kernel.cid.placeholder.none", QStringLiteral("<无>")), statusText };
+    for (int column = 0; column < values.size(); ++column) m_diagnosticItems[column]->setText(values[column]);
+    m_table->setSortingEnabled(sorting);
 }
 
-bool KernelDockCidTab::rowMatchesFilter(const CidEvidenceRow& row) const
+QStringList KernelDockCidTab::searchableFields(const CidEvidenceRow& row) const
 {
-    const QString keyword = m_filterEdit != nullptr ? m_filterEdit->text().trimmed() : QString();
-    if (keyword.isEmpty())
-    {
-        return true;
-    }
-
-    return roleText(row.isThread).contains(keyword, Qt::CaseInsensitive) ||
-        QString::number(row.processId).contains(keyword, Qt::CaseInsensitive) ||
-        QString::number(row.threadId).contains(keyword, Qt::CaseInsensitive) ||
-        QString::number(row.cidValue).contains(keyword, Qt::CaseInsensitive) ||
-        cidKindText(row.cidExpectedKind).contains(keyword, Qt::CaseInsensitive) ||
-        cidEntryFlagsText(row.cidEntryFlags).contains(keyword, Qt::CaseInsensitive) ||
-        safeText(row.imageNameText).contains(keyword, Qt::CaseInsensitive) ||
-        formatHex64(row.objectAddress).contains(keyword, Qt::CaseInsensitive) ||
-        formatHex64(row.startAddress).contains(keyword, Qt::CaseInsensitive) ||
-        sourceMaskText(row.sourceMask).contains(keyword, Qt::CaseInsensitive) ||
-        anomalyFlagsText(row.anomalyFlags).contains(keyword, Qt::CaseInsensitive) ||
-        denoiseFlagsText(row.denoiseFlags).contains(keyword, Qt::CaseInsensitive) ||
-        detailStatusText(row.detailStatus).contains(keyword, Qt::CaseInsensitive) ||
-        statusLabelText(row.lastStatus).contains(keyword, Qt::CaseInsensitive) ||
-        row.detailText.contains(keyword, Qt::CaseInsensitive);
+    return { roleText(row.isThread),
+        QString::number(row.processId),
+        QString::number(row.threadId),
+        QString::number(row.cidValue),
+        cidKindText(row.cidExpectedKind),
+        cidEntryFlagsText(row.cidEntryFlags),
+        safeText(row.imageNameText),
+        formatHex64(row.objectAddress),
+        formatHex64(row.startAddress),
+        sourceMaskText(row.sourceMask),
+        anomalyFlagsText(row.anomalyFlags),
+        denoiseFlagsText(row.denoiseFlags),
+        detailStatusText(row.detailStatus),
+        statusLabelText(row.lastStatus),
+        row.detailText };
 }
 
 QTableWidgetItem* KernelDockCidTab::readOnlyItem(const QString& text)

@@ -118,7 +118,11 @@ namespace ks::ui
         // A pending patch must retain the chain that authorized its location.
         // Switching to another pointer requires the existing apply/discard guard.
         pointerClearAfterPending_ = hexPane_ && hexPane_->overlay().HasPendingPatches();
-        if (!pointerClearAfterPending_) pointerBindings_->ClearActive();
+        if (!pointerClearAfterPending_)
+        {
+            if (writeController_) writeController_->invalidateWriteAuthorization();
+            pointerBindings_->ClearActive();
+        }
     }
 
     void MemoryWorkbenchView::onPointerChainCreateRequested() { showPointerChainEditor(0); }
@@ -268,7 +272,13 @@ namespace ks::ui
         if (!entry || !entry->pointerChain) return;
         if (navigate && hexPane_ && hexPane_->overlay().HasPendingPatches())
         {
-            if (!target_->requestLeave(LeaveReason::PinChange) || !self) return;
+            const auto leave = target_->requestLeave(LeaveReason::PinChange,
+                [self, entry = *entry, id, navigate, disassembly](bool allowed) {
+                    if (!self || !allowed) return;
+                    const auto current = WorkbenchShared::Instance().AddressBook().find(id);
+                    if (current && SameDefinition(entry, *current)) self->resolvePointerChain(id, navigate, disassembly);
+                });
+            if (!self || leave != LeaveEntryStatus::Completed) return;
         }
         if (!self || !target_) return;
         const auto captured = target_->capture();
@@ -315,6 +325,7 @@ namespace ks::ui
                 if (outcome != NavStatus::Ok || !latest || !SameDefinition(entry, *latest) || !self->target_) return;
                 const auto currentSession = self->target_->session();
                 if (!self || !ksword::memwb::SameTarget(currentSession, captured.session)) return;
+                if (self->writeController_) self->writeController_->invalidateWriteAuthorization();
                 if (self->pointerBindings_->Bind({ entry, captured.session, resolved.result }))
                 {
                     self->pointerClearAfterPending_ = false;
@@ -342,6 +353,7 @@ namespace ks::ui
         if (!self || !ksword::memwb::SameTarget(before, writeSession))
         { reason = T(QStringLiteral("指针链对应的进程实例或通道已改变，写入已取消。")).toUtf8().toStdString(); return false; }
         ksword::memwb_pointer_access::Resolution last;
+        if (writeController_) writeController_->invalidateWriteAuthorization();
         const auto guarded = bindings->Validate(writeSession, address, length,
             writeController_ && writeController_->isHistoryReplay(),
             [](std::uint64_t id) { return WorkbenchShared::Instance().AddressBook().find(id); },

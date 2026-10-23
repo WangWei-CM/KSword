@@ -2,13 +2,17 @@
 
 #include <QFutureWatcher>
 #include <QColor>
+#include <QCache>
 #include <QHash>
 #include <QIcon>
+#include <QImage>
 #include <QSet>
 #include <QVector>
+#include <QVariant>
+#include <QStringList>
+#include <array>
 #include <QWidget>
 
-class QFileIconProvider;
 class QHideEvent;
 class QPoint;
 class QShowEvent;
@@ -80,9 +84,24 @@ private:
         double netKBps = 0.0;
     };
 
+    struct PresentationRow
+    {
+        QString key;
+        QString parentKey;
+        ProcessEntry entry;
+        QStringList cells;
+        std::array<double, 5> ratios{};
+        QVariantList terminateIdentities;
+        bool group = false;
+        bool aggregate = false;
+        int groupOrder = 0;
+    };
+
     struct RefreshResult
     {
         QVector<ProcessEntry> entries;
+        QVector<PresentationRow> rows;
+        bool ok = false;
         QHash<QString, CounterSample> nextSamples;
         double totalCpuPercent = 0.0;
         double totalRamMB = 0.0;
@@ -94,6 +113,10 @@ private:
         double maxNetKBps = 0.0;
     };
 
+    struct IconResult { QString path; QString key; QImage pixels; };
+    void requestNextIcon();
+    static QString iconCacheKey(const QString& path, qreal dpr);
+    static IconResult collectIconPixels(QString path, qreal dpr);
     void initializeUi();
     void applyTreeWidgetStyle();
     void showContextMenu(const QPoint& localPosition);
@@ -104,12 +127,13 @@ private:
     void requestRefresh();
     void captureExpandedState();
     void captureExpandedStateForItem(QTreeWidgetItem* itemPointer);
-    void restoreExpandedState(QTreeWidgetItem* itemPointer, const QString& stateKey, bool defaultExpanded);
     static RefreshResult collectRefreshResult(
         const QHash<QString, CounterSample>& previousSamples,
         const QHash<QString, QString>& cachedImagePathByIdentity,
         int logicalCpuCount);
+    static void preparePresentationRows(RefreshResult& result);
     void applyRefreshResult(const RefreshResult& result);
+    void applyRefreshChunk();
     void updateHeaderSummary(const RefreshResult& result);
     QIcon resolveProcessIcon(const ProcessEntry& entry);
     static void classifyProcessGroups(QVector<ProcessEntry>* entries, const QSet<quint32>& visibleWindowPidSet);
@@ -117,25 +141,9 @@ private:
     static bool isWindowsSystemProcess(const ProcessEntry& entry, const QString& windowsDirectoryPath);
     static ProcessEntry aggregateApplicationEntry(const QVector<ProcessEntry>& applicationEntries);
     static QString expansionKeyForGroup(ProcessGroupType groupType);
-    static QString expansionKeyForApplication(quint32 rootPidValue);
-    static QString expansionKeyForProcess(quint32 pidValue);
     static QString processGroupTitle(ProcessGroupType groupType, int entryCount);
     static int processGroupOrder(ProcessGroupType groupType);
-    static QTreeWidgetItem* createProcessGroupItem(ProcessGroupType groupType, int entryCount);
-    QTreeWidgetItem* createApplicationRootItem(
-        const ProcessEntry& aggregateEntry,
-        const QVector<ProcessEntry>& applicationEntries,
-        int childProcessCount,
-        double maxRamMB,
-        double maxDiskMBps,
-        double maxNetKBps);
     static QString buildProcessInstanceKey(quint32 pidValue, quint64 creationTime100ns);
-    QTreeWidgetItem* updateOrCreateRow(
-        const ProcessEntry& entry,
-        QTreeWidgetItem* parentItem,
-        double maxRamMB,
-        double maxDiskMBps,
-        double maxNetKBps);
     static double usageRatioForEntry(const ProcessEntry& entry, int columnIndex, double maxRamMB, double maxDiskMBps, double maxNetKBps);
     static QString formatPercent(double value, int decimals = 2);
     static QString formatRamMB(double value);
@@ -144,7 +152,9 @@ private:
 
     QTreeWidget* m_treeWidget = nullptr;
     QStyledItemDelegate* m_metricDelegate = nullptr;
-    QFileIconProvider* m_fileIconProvider = nullptr;
+    QFutureWatcher<IconResult>* m_iconWatcher = nullptr;
+    QIcon m_fallbackIcon;
+    QHash<QString, QString> m_iconPathByRowKey;
     QTimer* m_refreshTimer = nullptr;
     QFutureWatcher<RefreshResult>* m_refreshWatcher = nullptr;
     bool m_refreshInProgress = false;
@@ -153,8 +163,13 @@ private:
     QColor m_effectiveBackgroundColor = QColor(10, 15, 22); // 资源轨道下方的实际合成底色。
     QHash<QString, CounterSample> m_previousSamples;
     QHash<QString, QString> m_imagePathByIdentity;
-    QHash<QString, QIcon> m_iconCacheByIdentity;
-    QHash<QString, QIcon> m_iconCacheByPath;
-    QHash<quint32, QTreeWidgetItem*> m_itemByPid;
+    QCache<QString, QIcon> m_iconCacheByPath{512};
+    QHash<QString, QTreeWidgetItem*> m_itemByKey;
+    QTimer* m_applyTimer = nullptr;
+    QVector<PresentationRow> m_pendingRows;
+    QStringList m_pendingRemovals;
+    QHash<QString, int> m_siblingIndex;
+    int m_applyOffset = 0;
+    int m_removeOffset = 0;
     QHash<QString, bool> m_expandedStateByKey;
 };

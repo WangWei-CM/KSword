@@ -5,6 +5,7 @@
 #endif
 
 #include "HvmHookWizard.h"
+#include "HvmRehearsalResource.h"
 #include "./SecondaryPageLayout.h"
 #include "./ToolbarMetrics.h"
 #include "StructuredFieldView.h"
@@ -29,6 +30,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTimer>
@@ -134,25 +136,21 @@ namespace ks::ui
 
     HvmHookWizard::~HvmHookWizard()
     {
-        // 顺序不可换：排练页的物理帧一旦还给系统就会被别的东西拿去用，而那条
-        // 视图仍然指着那个帧 —— 那时被重定向去执行影子页的将是一段与我们毫无
-        // 关系的代码。所以先撤视图，撤不掉就宁可把这一页泄漏掉。
-        bool viewRemoved = true;
-        if (m_plan.installed
-            && m_plan.installedViewId != 0
-            && m_plan.targetSource == HvmHookTargetSource::Rehearsal)
-        {
-            // 这是本文件里唯一一处在 UI 线程上发 IOCTL 的地方。对话框正在析构，
-            // 没有别的线程能替它做这件事，而把一页仍挂着视图的内存还给系统，
-            // 比在这里阻塞一次要坏得多。
-            const ksword::hvm::HvmViewResult removal =
-                ksword::hvm::removeView(m_plan.installedViewId);
-            viewRemoved = removal.ok;
-        }
-        if (viewRemoved)
-        {
-            releaseRehearsalPage();
-        }
+        // Stop admitting work; accepted workers own value reservations until
+        // their final page access and view publication, even if UI delivery drops.
+        releaseRehearsalPage();
+    }
+
+    void HvmHookWizard::showEvent(QShowEvent* event)
+    {
+        QDialog::showEvent(event);
+        presentResidentEvidence();
+    }
+
+    void HvmHookWizard::changeEvent(QEvent* event)
+    {
+        QDialog::changeEvent(event);
+        if (event->type() == QEvent::WindowStateChange) presentResidentEvidence();
     }
 
     void HvmHookWizard::openWizard(QWidget* const parent)
@@ -322,6 +320,7 @@ namespace ks::ui
 
         updateNavigationState();
         // 「进入这一步要做什么」只有这一个分派点。
+        presentResidentEvidence();
         enterStep(step);
     }
 
@@ -1020,6 +1019,8 @@ namespace ks::ui
             break;
         }
 
+        std::shared_ptr<HvmRehearsalResource::Reservation> rehearsalAccess;
+        if (!retainRehearsalAccess(rehearsalAccess)) return;
         m_plan.virtualAddress = virtualAddress;
         m_targetResolveInFlight = true;
         ++m_targetResolveSequence;
@@ -1035,7 +1036,7 @@ namespace ks::ui
 
         QPointer<HvmHookWizard> safeThis(this);
         std::thread([safeThis, sequence, source, virtualAddress,
-                     rawPhysicalAddress]() {
+                     rawPhysicalAddress, rehearsalAccess]() {
             const HvmHookTargetResolution resolution = resolveTargetBlocking(
                 source, virtualAddress, rawPhysicalAddress);
             if (safeThis == nullptr)
@@ -1338,19 +1339,42 @@ namespace ks::ui
         {
             return true;
         }
+        // Admission is registered before allocating or accepting any worker.
+        // A shutdown-raced null job is an abandoned epoch, never reopened.
+        static_assert(KSWORD_ARK_HVM_MAX_VIEWS == 32, "rehearsal view capacity");
+        auto resource = std::make_shared<HvmRehearsalResource>(
+            [](const unsigned long viewId) { return ksword::hvm::removeView(viewId).ok; },
+            [](void* const allocation) {
+                (void)::VirtualUnlock(allocation, static_cast<SIZE_T>(kPageBytes));
+                return ::VirtualFree(allocation, 0, MEM_RELEASE) != FALSE;
+            });
+        auto cleanup = RetainedCleanupJob::create(
+            [resource]() { return resource->cleanup(); }, 0,
+            [resource]() { resource->close(); },
+            [resource]() { return resource->isIdle(); });
+        if (!cleanup) return false;
+        m_rehearsalResource = std::move(resource);
+        m_rehearsalCleanup = std::move(cleanup);
         // VirtualAlloc 给出的地址天然 4 KiB 对齐，所以排练入口不需要额外做页对齐。
-        void* const page = ::VirtualAlloc(
-            nullptr,
-            static_cast<SIZE_T>(kPageBytes),
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE);
+        BOOL locked = FALSE;
+        DWORD allocationError = ERROR_SHUTDOWN_IN_PROGRESS;
+        DWORD lockError = ERROR_SUCCESS;
+        void* const page = m_rehearsalResource->allocatePage([&]() -> void* {
+            void* const allocation = ::VirtualAlloc(nullptr,
+                static_cast<SIZE_T>(kPageBytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (allocation == nullptr) { allocationError = ::GetLastError(); return nullptr; }
+            static_cast<volatile unsigned char*>(allocation)[0] = kRehearsalMarkerByte;
+            locked = ::VirtualLock(allocation, static_cast<SIZE_T>(kPageBytes));
+            lockError = ::GetLastError();
+            return allocation;
+        });
         if (page == nullptr)
         {
             if (m_rehearsalLabel != nullptr)
             {
                 m_rehearsalLabel->setText(ks::i18n::sourceText(
                     QStringLiteral("排练页分配失败：Win32 错误 %1。"))
-                    .arg(::GetLastError()));
+                    .arg(allocationError));
                 ApplyStatusRole(m_rehearsalLabel, StatusRole::Error);
             }
             return false;
@@ -1359,9 +1383,6 @@ namespace ks::ui
         // 顺序不可换：先写一个字节让页真正落到一个物理帧上，再 VirtualLock
         // 把它钉住。没有驻留的页翻译出来的帧随时会换人，而接下来要往那个帧上
         // 挂 EPT 视图 —— 帧换了人，视图就挂在别人身上了。
-        static_cast<volatile unsigned char*>(page)[0] = kRehearsalMarkerByte;
-        const BOOL locked =
-            ::VirtualLock(page, static_cast<SIZE_T>(kPageBytes));
         m_rehearsalPage = page;
 
         if (m_rehearsalLabel != nullptr)
@@ -1374,7 +1395,7 @@ namespace ks::ui
                     .arg(hexText(address))
                 : ks::i18n::sourceText(
                     QStringLiteral("排练页已分配，但 VirtualLock 失败（Win32 错误 %1）：这一页的物理帧随时可能换人，翻译到的页基址不可信。"))
-                    .arg(::GetLastError()));
+                    .arg(lockError));
             ApplyStatusRole(
                 m_rehearsalLabel,
                 locked ? StatusRole::Success : StatusRole::Warning);
@@ -1392,9 +1413,18 @@ namespace ks::ui
         {
             return;
         }
-        (void)::VirtualUnlock(m_rehearsalPage, static_cast<SIZE_T>(kPageBytes));
-        (void)::VirtualFree(m_rehearsalPage, 0, MEM_RELEASE);
+        if (m_rehearsalCleanup) m_rehearsalCleanup->requestCleanup();
         m_rehearsalPage = nullptr;
+        m_rehearsalCleanup.reset();
+        m_rehearsalResource.reset();
+    }
+
+    bool HvmHookWizard::retainRehearsalAccess(std::shared_ptr<HvmRehearsalResource::Reservation>& reservation)
+    {
+        if (m_plan.targetSource != HvmHookTargetSource::Rehearsal) return true;
+        if (!m_rehearsalResource) return false;
+        reservation = m_rehearsalResource->reserve(m_rehearsalCleanup);
+        return static_cast<bool>(reservation);
     }
 
     // =====================================================================
@@ -1546,6 +1576,8 @@ namespace ks::ui
             return;
         }
 
+        std::shared_ptr<HvmRehearsalResource::Reservation> rehearsalAccess;
+        if (!retainRehearsalAccess(rehearsalAccess)) return;
         m_installInFlight = true;
         setBusy(true);
         if (m_installStatusLabel != nullptr)
@@ -1558,9 +1590,9 @@ namespace ks::ui
         const quint64 pageBase = m_plan.pageBasePhysical;
         const QByteArray baseline = m_plan.baselinePage;
         QPointer<HvmHookWizard> safeThis(this);
-        std::thread([safeThis, pageBase, baseline, shadowPage]() {
+        std::thread([safeThis, pageBase, baseline, shadowPage, rehearsalAccess]() {
             const InstallOutcome outcome =
-                performInstallBlocking(pageBase, baseline, shadowPage);
+                performInstallBlocking(pageBase, baseline, shadowPage, rehearsalAccess);
             if (safeThis == nullptr)
             {
                 return;
@@ -1581,7 +1613,8 @@ namespace ks::ui
     HvmHookWizard::InstallOutcome HvmHookWizard::performInstallBlocking(
         const quint64 pageBasePhysical,
         const QByteArray& baselinePage,
-        const QByteArray& shadowPage)
+        const QByteArray& shadowPage,
+        const std::shared_ptr<HvmRehearsalResource::Reservation>& rehearsalAccess)
     {
         InstallOutcome outcome;
 
@@ -1614,6 +1647,10 @@ namespace ks::ui
         {
             return outcome;
         }
+
+        // Publish ownership before any subsequent query or GUI delivery. Closing
+        // during addView cannot lose a successfully accepted rehearsal view.
+        if (rehearsalAccess) rehearsalAccess->recordInstalledView(outcome.addResult.viewId);
 
         // 4) 立刻回读一次：ADD 的响应里没有 shadowPhysicalAddress。
         outcome.listAfter = ksword::hvm::listViews();

@@ -18,9 +18,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <regex>
+#include <cwctype>
+#include <cwchar>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,7 +56,7 @@ struct DebugRecordRow {
     std::uint32_t componentId = 0;
     std::uint32_t level = 0;
     std::uint32_t flags = 0;
-    std::wstring text;
+    std::vector<std::wstring> cells;
 };
 
 struct ControlSnapshot {
@@ -65,13 +69,25 @@ struct ControlSnapshot {
 struct DrainSnapshot {
     std::uint64_t captureSession = 0;
     ksword::ark::DebugOutputDrainResult result;
+    std::vector<std::shared_ptr<const DebugRecordRow>> rows;
 };
 
 struct FilterSnapshot {
     std::uint64_t generation = 0;
     std::wstring query;
     bool useRegex = false;
-    std::vector<std::size_t> visibleIndexes;
+    std::uint64_t captureSession = 0;
+    std::uint64_t throughSequence = 0;
+    std::vector<std::shared_ptr<const DebugRecordRow>> matches;
+};
+
+struct DebugControlLifetime final {
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::atomic_size_t pending{0};
+    std::atomic_bool retiring{false};
+    std::atomic_ulong stopError{0};
+    bool ownsCapture = false;
 };
 
 struct DriverDebugOutputViewState {
@@ -84,9 +100,14 @@ struct DriverDebugOutputViewState {
     HWND statusText = nullptr;
     HWND listView = nullptr;
     Ksword::Ui::VirtualListView virtualList;
-    std::deque<DebugRecordRow> records;
-    std::vector<DebugRecordRow> visibleRows;
-    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> filterRows;
+    std::deque<std::shared_ptr<const DebugRecordRow>> records;
+    std::vector<std::shared_ptr<const DebugRecordRow>> visibleRows;
+    std::uint64_t filteredThrough = 0;
+    std::uint64_t filterSession = 0;
+    std::uint64_t appliedFilterGeneration = 0;
+    bool projectionDirty = false;
+    std::wstring deferredSelectedKey;
+    std::wstring deferredTopKey;
     std::wstring filterQuery;
     bool filterUseRegex = false;
     std::uint64_t snapshotGeneration = 0;
@@ -95,6 +116,9 @@ struct DriverDebugOutputViewState {
     std::uint64_t nextSequence = 0;
     int contextColumn = 0;
     bool capturing = false;
+    std::shared_ptr<DebugControlLifetime> controlLifetime = std::make_shared<DebugControlLifetime>();
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> retirement;
+    bool retirementCancelled = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ControlSnapshot>> controlTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DrainSnapshot>> drainTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FilterSnapshot>> filterTask;
@@ -133,48 +157,41 @@ std::wstring DebugStableKey(const DebugRecordRow& row) {
     return std::to_wstring(row.sequence);
 }
 
-std::vector<std::wstring> DebugCells(const DebugRecordRow& row) {
-    return {
-        std::to_wstring(row.sequence),
-        std::to_wstring(row.interruptTime100ns),
-        Hex32(row.componentId),
-        Hex32(row.level),
-        Hex32(row.flags),
-        row.text
-    };
+const std::vector<std::wstring>& DebugCells(const DebugRecordRow& row) {
+    return row.cells;
 }
 
-std::vector<Ksword::Ui::VirtualListRow> BuildVirtualRows(const std::deque<DebugRecordRow>& records) {
-    std::vector<Ksword::Ui::VirtualListRow> rows;
-    rows.reserve(records.size());
-    for (const DebugRecordRow& record : records) {
-        Ksword::Ui::VirtualListRow row{};
-        row.stableKey = DebugStableKey(record);
-        row.cells = DebugCells(record);
-        rows.push_back(std::move(row));
+bool MatchesDebugRecord(const DebugRecordRow& row, const std::wstring& query, const std::wregex* pattern) {
+    if (query.empty()) return true;
+    for (const auto& cell : row.cells) {
+        if (pattern ? std::regex_search(cell, *pattern) :
+            std::search(cell.begin(), cell.end(), query.begin(), query.end(), [](wchar_t a, wchar_t b) {
+                return std::towlower(a) == std::towlower(b);
+            }) != cell.end()) return true;
     }
-    return rows;
+    return false;
 }
 
 std::wstring StableKeyAt(const DriverDebugOutputViewState& state, const int visibleIndex) {
     if (visibleIndex < 0 || visibleIndex >= static_cast<int>(state.visibleRows.size())) {
         return {};
     }
-    return DebugStableKey(state.visibleRows[static_cast<std::size_t>(visibleIndex)]);
+    return DebugStableKey(*state.visibleRows[static_cast<std::size_t>(visibleIndex)]);
 }
 
 void RestoreListPosition(DriverDebugOutputViewState& state, const std::wstring& selectedKey, const std::wstring& topKey) {
-    int selectedIndex = -1;
-    int topIndex = -1;
-    for (std::size_t index = 0; index < state.visibleRows.size(); ++index) {
-        const std::wstring key = DebugStableKey(state.visibleRows[index]);
-        if (!selectedKey.empty() && key == selectedKey) {
-            selectedIndex = static_cast<int>(index);
-        }
-        if (!topKey.empty() && key == topKey) {
-            topIndex = static_cast<int>(index);
-        }
-    }
+    const auto findKey = [&state](const std::wstring& key) {
+        if (key.empty()) return -1;
+        wchar_t* end = nullptr;
+        const auto sequence = std::wcstoull(key.c_str(), &end, 10);
+        if (end == key.c_str() || *end != L'\0') return -1;
+        const auto found = std::lower_bound(state.visibleRows.begin(), state.visibleRows.end(), sequence,
+            [](const auto& row, const auto value) { return row->sequence < value; });
+        return found != state.visibleRows.end() && (*found)->sequence == sequence
+            ? static_cast<int>(found - state.visibleRows.begin()) : -1;
+    };
+    const int selectedIndex = findKey(selectedKey);
+    const int topIndex = findKey(topKey);
     if (selectedIndex >= 0) {
         ListView_SetItemState(state.listView, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     }
@@ -190,9 +207,11 @@ void SetStatus(DriverDebugOutputViewState& state, const std::wstring& text) {
 }
 
 void UpdateControls(DriverDebugOutputViewState& state) {
-    const bool controlBusy = state.controlTask && state.controlTask->running();
+    const bool controlBusy = state.controlLifetime->retiring.load() ||
+        (state.controlTask && state.controlTask->running());
     ::EnableWindow(state.startButton, !controlBusy && !state.capturing);
-    ::EnableWindow(state.stopButton, !controlBusy && state.capturing);
+    const bool retryStop = state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation;
+    ::EnableWindow(state.stopButton, retryStop || (!controlBusy && state.capturing));
     ::EnableWindow(state.queryButton, !controlBusy);
 }
 
@@ -216,7 +235,7 @@ std::wstring BuildVisibleTsv(const DriverDebugOutputViewState& state, const bool
     const int start = selectedOnly ? selected : 0;
     const int end = selectedOnly ? selected + 1 : static_cast<int>(state.visibleRows.size());
     for (int index = start; index >= 0 && index < end; ++index) {
-        const std::vector<std::wstring> cells = DebugCells(state.visibleRows[static_cast<std::size_t>(index)]);
+        const auto& cells = DebugCells(*state.visibleRows[static_cast<std::size_t>(index)]);
         for (std::size_t cell = 0; cell < cells.size(); ++cell) {
             if (cell != 0) {
                 text += L'\t';
@@ -228,58 +247,98 @@ std::wstring BuildVisibleTsv(const DriverDebugOutputViewState& state, const bool
     return text;
 }
 
-void RequestFilter(DriverDebugOutputViewState& state, std::wstring query) {
-    if (!state.filterTask || !state.filterRows) {
+void CommitVisibleRows(DriverDebugOutputViewState& state, const std::wstring& selected, const std::wstring& top) {
+    if (!::IsWindowVisible(state.hwnd)) {
+        if (!state.projectionDirty) {
+            state.deferredSelectedKey = selected;
+            state.deferredTopKey = top;
+        }
+        state.projectionDirty = true;
         return;
     }
+    state.projectionDirty = false;
+    ListView_SetItemCountEx(state.listView, static_cast<int>(state.visibleRows.size()),
+        LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    ListView_SetItemState(state.listView, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    RestoreListPosition(state, selected, top);
+    ::InvalidateRect(state.listView, nullptr, FALSE);
+}
+
+void RequestFilter(DriverDebugOutputViewState& state, std::wstring query) {
+    if (!state.filterTask) return;
+    const bool useRegex = Ksword::Ui::GetFilterBarRegexEnabled(state.filterBar);
+    const bool changed = query != state.filterQuery || useRegex != state.filterUseRegex ||
+        state.filterSession != state.captureSession;
     state.filterQuery = std::move(query);
-    state.filterUseRegex = Ksword::Ui::GetFilterBarRegexEnabled(state.filterBar);
-    const std::uint64_t generation = state.snapshotGeneration;
-    const auto rows = state.filterRows;
-    const bool useRegex = state.filterUseRegex;
+    state.filterUseRegex = useRegex;
+    if (changed) {
+        ++state.snapshotGeneration;
+        state.filterSession = state.captureSession;
+        state.filteredThrough = 0;
+    }
+    if (!changed && state.filterTask->running()) return;
+    const auto first = std::upper_bound(state.records.begin(), state.records.end(), state.filteredThrough,
+        [](const auto sequence, const auto& row) { return sequence < row->sequence; });
+    auto rows = std::make_shared<std::vector<std::shared_ptr<const DebugRecordRow>>>(first, state.records.end());
+    if (rows->empty()) return;
+    const auto generation = state.snapshotGeneration;
+    const auto session = state.captureSession;
     state.filterTask->request(
-        [rows, generation, useRegex, query = state.filterQuery]() mutable {
-            FilterSnapshot result{};
+        [rows, generation, session, useRegex, query = state.filterQuery] {
+            FilterSnapshot result;
             result.generation = generation;
-            result.query = std::move(query);
+            result.captureSession = session;
+            result.query = query;
             result.useRegex = useRegex;
-            result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query, useRegex);
+            result.throughSequence = rows->back()->sequence;
+            std::wregex compiled;
+            bool regexReady = false;
+            if (useRegex && !query.empty()) {
+                try { compiled.assign(query, std::regex_constants::ECMAScript | std::regex_constants::icase); regexReady = true; }
+                catch (const std::regex_error&) { }
+            }
+            for (const auto& row : *rows) {
+                if (MatchesDebugRecord(*row, query, regexReady ? &compiled : nullptr)) result.matches.push_back(row);
+            }
             return result;
         },
         [&state](std::uint64_t, std::optional<FilterSnapshot>&& result, std::exception_ptr error) {
-            if (error || !result.has_value() || result->generation != state.snapshotGeneration ||
+            if (error || !result) return;
+            if (result->generation != state.snapshotGeneration || result->captureSession != state.captureSession ||
                 result->query != state.filterQuery || result->useRegex != state.filterUseRegex) {
+                RequestFilter(state, state.filterQuery);
                 return;
             }
-            const std::wstring selectedKey = StableKeyAt(state, ListView_GetNextItem(state.listView, -1, LVNI_SELECTED));
-            const std::wstring topKey = StableKeyAt(state, ListView_GetTopIndex(state.listView));
-            state.visibleRows.clear();
-            state.visibleRows.reserve(result->visibleIndexes.size());
-            for (const std::size_t index : result->visibleIndexes) {
-                if (index < state.records.size()) {
-                    state.visibleRows.push_back(state.records[index]);
-                }
+            const auto selected = state.projectionDirty ? state.deferredSelectedKey :
+                StableKeyAt(state, ListView_GetNextItem(state.listView, -1, LVNI_SELECTED));
+            const auto top = state.projectionDirty ? state.deferredTopKey : StableKeyAt(state, ListView_GetTopIndex(state.listView));
+            if (state.appliedFilterGeneration != result->generation) {
+                state.visibleRows.clear();
+                state.appliedFilterGeneration = result->generation;
             }
-            state.virtualList.setVisibleIndexes(std::move(result->visibleIndexes));
-            RestoreListPosition(state, selectedKey, topKey);
+            const auto first = state.records.empty() ? UINT64_MAX : state.records.front()->sequence;
+            for (auto& row : result->matches) if (row->sequence >= first) state.visibleRows.push_back(std::move(row));
+            state.filteredThrough = (std::max)(state.filteredThrough, result->throughSequence);
+            CommitVisibleRows(state, selected, top);
+            RequestFilter(state, state.filterQuery);
         });
 }
 
 void RebuildVirtualRows(DriverDebugOutputViewState& state) {
-    state.filterRows = std::make_shared<const std::vector<Ksword::Ui::VirtualListRow>>(BuildVirtualRows(state.records));
-    ++state.snapshotGeneration;
-    state.virtualList.setRows(*state.filterRows);
     RequestFilter(state, state.filterBar ? Ksword::Ui::GetFilterBarText(state.filterBar) : state.filterQuery);
 }
 
 void ClearRows(DriverDebugOutputViewState& state) {
     state.records.clear();
     state.visibleRows.clear();
-    RebuildVirtualRows(state);
+    ++state.snapshotGeneration;
+    state.filteredThrough = 0;
+    state.appliedFilterGeneration = state.snapshotGeneration;
+    CommitVisibleRows(state, {}, {});
 }
 
 void RequestDrain(DriverDebugOutputViewState& state) {
-    if (!state.capturing || !state.drainTask) {
+    if (!state.capturing || !state.drainTask || state.drainTask->running()) {
         return;
     }
     const std::uint64_t session = state.captureSession;
@@ -297,6 +356,17 @@ void RequestDrain(DriverDebugOutputViewState& state) {
                 return snapshot;
             }
             snapshot.result = client.drainDebugOutput(handle, afterSequence, KSWORD_ARK_DEBUG_OUTPUT_MAX_DRAIN_RECORDS);
+            for (const auto& record : snapshot.result.records) {
+                auto row = std::make_shared<DebugRecordRow>();
+                row->sequence = record.sequence;
+                row->interruptTime100ns = record.interruptTime100ns;
+                row->componentId = record.componentId;
+                row->level = record.level;
+                row->flags = record.flags;
+                row->cells = { std::to_wstring(row->sequence), std::to_wstring(row->interruptTime100ns),
+                    Hex32(row->componentId), Hex32(row->level), Hex32(row->flags), Utf8ToWide(record.text) };
+                snapshot.rows.push_back(std::move(row));
+            }
             return snapshot;
         },
         [&state](std::uint64_t, std::optional<DrainSnapshot>&& snapshot, std::exception_ptr error) {
@@ -314,19 +384,15 @@ void RequestDrain(DriverDebugOutputViewState& state) {
                 return;
             }
             state.nextSequence = result.nextSequence;
-            for (const ksword::ark::DebugOutputRecord& record : result.records) {
-                DebugRecordRow row{};
-                row.sequence = record.sequence;
-                row.interruptTime100ns = record.interruptTime100ns;
-                row.componentId = record.componentId;
-                row.level = record.level;
-                row.flags = record.flags;
-                row.text = Utf8ToWide(record.text);
-                state.records.push_back(std::move(row));
-            }
-            while (state.records.size() > kMaximumRecords) {
-                state.records.pop_front();
-            }
+            const auto selected = state.projectionDirty ? state.deferredSelectedKey :
+                StableKeyAt(state, ListView_GetNextItem(state.listView, -1, LVNI_SELECTED));
+            const auto top = state.projectionDirty ? state.deferredTopKey : StableKeyAt(state, ListView_GetTopIndex(state.listView));
+            for (auto& row : snapshot->rows) state.records.push_back(std::move(row));
+            while (state.records.size() > kMaximumRecords) state.records.pop_front();
+            const auto first = state.records.empty() ? UINT64_MAX : state.records.front()->sequence;
+            state.visibleRows.erase(std::remove_if(state.visibleRows.begin(), state.visibleRows.end(),
+                [first](const auto& row) { return row->sequence < first; }), state.visibleRows.end());
+            CommitVisibleRows(state, selected, top);
             if (!result.records.empty()) {
                 RebuildVirtualRows(state);
             }
@@ -338,13 +404,16 @@ void RequestDrain(DriverDebugOutputViewState& state) {
 }
 
 void RequestControl(DriverDebugOutputViewState& state, const unsigned long action, const std::uint64_t session) {
-    if (!state.controlTask) {
-        return;
-    }
+    if (!state.controlTask || state.controlTask->running() || state.controlLifetime->retiring.load()) return;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    const auto lifetime = state.controlLifetime;
+    const auto pending = Ksword::Ui::HoldPendingOperation(lifetime);
     const std::uint64_t requestId = ++state.controlRequestId;
     UpdateControls(state);
     state.controlTask->request(
-        [requestId, session, action] {
+        [requestId, session, action, lifetime, pending, lease] {
+            std::lock_guard lock(lifetime->mutex);
             ControlSnapshot snapshot{};
             snapshot.requestId = requestId;
             snapshot.captureSession = session;
@@ -358,6 +427,8 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
                 return snapshot;
             }
             snapshot.result = client.controlDebugOutput(handle, action);
+            if (snapshot.result.io.ok && action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_START) lifetime->ownsCapture = true;
+            if (snapshot.result.io.ok && action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP) lifetime->ownsCapture = false;
             return snapshot;
         },
         [&state](std::uint64_t, std::optional<ControlSnapshot>&& snapshot, std::exception_ptr error) {
@@ -367,6 +438,7 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
                 return;
             }
             const ControlSnapshot& completed = *snapshot;
+            if (state.controlLifetime->retiring.load()) { UpdateControls(state); return; }
             SetStatus(state, ControlStatusText(completed.result));
             if (completed.action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_START && completed.result.io.ok &&
                 completed.captureSession == state.captureSession) {
@@ -384,7 +456,52 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
     UpdateControls(state);
 }
 
+void BeginRetirement(DriverDebugOutputViewState& state) {
+    if (state.controlLifetime->retiring.exchange(true, std::memory_order_acq_rel)) return;
+    ::KillTimer(state.hwnd, kDrainTimerId);
+    const auto lifetime = state.controlLifetime;
+    state.retirement = Ksword::Ui::RunBackgroundRetirement([lifetime] {
+        std::unique_lock lock(lifetime->mutex);
+        lifetime->idle.wait(lock, [&] { return lifetime->pending.load(std::memory_order_acquire) == 0; });
+        if (!lifetime->ownsCapture) return true;
+        const ksword::ark::DriverClient client;
+        auto handle = client.open();
+        if (!handle.isValid()) { lifetime->stopError.store(::GetLastError()); return false; }
+        const auto result = client.controlDebugOutput(handle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
+        lifetime->stopError.store(result.io.win32Error);
+        if (!result.io.ok) return false;
+        lifetime->ownsCapture = false;
+        return true;
+    });
+    SetStatus(state, L"正在停止采集；现有记录保留。 / Stopping; retained records remain available.");
+    UpdateControls(state);
+}
+
+bool PollRetirement(DriverDebugOutputViewState& state) {
+    if (!state.retirement) return true;
+    Ksword::Ui::BackgroundWorkRegistry::global().retry();
+    if (!state.retirement->complete()) {
+        if (state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+            SetStatus(state, L"R0 停止失败：Win32=" + std::to_wstring(state.controlLifetime->stopError.load()));
+        }
+        return false;
+    }
+    if ((state.controlTask && state.controlTask->running()) || (state.drainTask && state.drainTask->running())) return false;
+    state.capturing = false;
+    SetStatus(state, L"已停止本页采集。 / Capture stopped; start manually to resume.");
+    if (state.retirementCancelled) {
+        state.controlLifetime->retiring.store(false, std::memory_order_release);
+        state.retirementCancelled = false;
+        state.retirement.reset();
+        ::KillTimer(state.hwnd, kDrainTimerId);
+    }
+    UpdateControls(state);
+    return true;
+}
+
 void StartCapture(DriverDebugOutputViewState& state) {
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing() ||
+        !state.controlTask || state.controlTask->running()) return;
     if (state.capturing) {
         return;
     }
@@ -396,6 +513,12 @@ void StartCapture(DriverDebugOutputViewState& state) {
 }
 
 void StopCapture(DriverDebugOutputViewState& state) {
+    if (state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+        return;
+    }
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing() ||
+        !state.controlTask || state.controlTask->running()) return;
     ++state.captureSession;
     state.capturing = false;
     ::KillTimer(state.hwnd, kDrainTimerId);
@@ -441,7 +564,7 @@ void ShowContextMenu(DriverDebugOutputViewState& state, POINT screenPoint) {
     const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, state.hwnd, nullptr);
     ::DestroyMenu(menu);
     if (command == kMenuCopyCell && selected >= 0 && selected < static_cast<int>(state.visibleRows.size())) {
-        const std::vector<std::wstring> cells = DebugCells(state.visibleRows[static_cast<std::size_t>(selected)]);
+        const auto& cells = DebugCells(*state.visibleRows[static_cast<std::size_t>(selected)]);
         const std::size_t column = static_cast<std::size_t>(std::max(0, state.contextColumn));
         DriverActions::CopyTextToClipboard(state.hwnd, column < cells.size() ? cells[column] : std::wstring{});
     } else if (command == kMenuCopyRow && selected >= 0) {
@@ -522,12 +645,25 @@ bool RegisterViewClass() {
             Layout(*state);
             QueryCapability(*state);
             return 0;
+        case WM_SHOWWINDOW:
+            if (state && wParam && state->projectionDirty)
+                CommitVisibleRows(*state, state->deferredSelectedKey, state->deferredTopKey);
+            break;
         case WM_SIZE:
             if (state) {
                 Layout(*state);
             }
             return 0;
+        case Ksword::Ui::kBeginNativeRetirementMessage:
+            if (state) { state->retirementCancelled = false; BeginRetirement(*state); }
+            return 0;
+        case Ksword::Ui::kPollNativeRetirementMessage:
+            return state && !PollRetirement(*state) ? 1 : 0;
+        case Ksword::Ui::kCancelNativeRetirementMessage:
+            if (state) { state->retirementCancelled = true; PollRetirement(*state); if (state->retirementCancelled) ::SetTimer(hwnd, kDrainTimerId, kDrainIntervalMs, nullptr); }
+            return 0;
         case WM_TIMER:
+            if (state && state->retirementCancelled) { PollRetirement(*state); return 0; }
             if (state && wParam == kDrainTimerId) {
                 RequestDrain(*state);
                 return 0;
@@ -569,9 +705,15 @@ bool RegisterViewClass() {
         case WM_NOTIFY:
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-                LRESULT result = 0;
-                if (header && state->virtualList.handleNotify(*header, result)) {
-                    return result;
+                if (header && header->hwndFrom == state->listView && header->code == LVN_GETDISPINFOW) {
+                    auto* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
+                    if ((info->item.mask & LVIF_TEXT) && info->item.iItem >= 0 && info->item.iSubItem >= 0 &&
+                        static_cast<std::size_t>(info->item.iItem) < state->visibleRows.size()) {
+                        const auto& cells = state->visibleRows[static_cast<std::size_t>(info->item.iItem)]->cells;
+                        if (static_cast<std::size_t>(info->item.iSubItem) < cells.size())
+                            info->item.pszText = const_cast<LPWSTR>(cells[static_cast<std::size_t>(info->item.iSubItem)].c_str());
+                    }
+                    return 0;
                 }
                 if (header && header->hwndFrom == state->listView && header->code == NM_RCLICK) {
                     POINT point{};
@@ -595,15 +737,7 @@ bool RegisterViewClass() {
             break;
         case WM_NCDESTROY:
             if (state) {
-                if (state->capturing) {
-                    std::thread([] {
-                        ksword::ark::DriverClient client;
-                        ksword::ark::DriverHandle handle = client.open();
-                        if (handle.isValid()) {
-                            (void)client.controlDebugOutput(handle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
-                        }
-                    }).detach();
-                }
+                BeginRetirement(*state);
                 ++state->captureSession;
                 ::KillTimer(hwnd, kDrainTimerId);
                 if (state->controlTask) state->controlTask->cancel();

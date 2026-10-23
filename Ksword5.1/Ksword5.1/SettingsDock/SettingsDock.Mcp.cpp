@@ -17,6 +17,10 @@
 #include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
+#include <QSignalBlocker>
+#include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -26,22 +30,41 @@
 
 namespace
 {
-    // 返回当前安装位置对应的 sidecar；只检查约定落点，不递归扫描或运行脚本。
-    QString DefaultMcpSidecarPath()
+    struct McpPathValidationResult
     {
-        const QDir executableDir(QCoreApplication::applicationDirPath()); // 当前 exe 所在目录。
-        const QStringList candidates{ // 发布目录与仓库标准 Release 目录的相对位置。
+        quint64 revision = 0;
+        QString defaultSidecar;
+        QString script;
+        QString cli;
+        bool scriptAvailable = false;
+    };
+
+    // 仅后台读取约定路径元数据；不运行 Python 或 CLI。
+    McpPathValidationResult ValidateMcpPaths(const quint64 revision,
+        const QString& requestedScript, const bool discoverDefault, const QString& executableDirectory)
+    {
+        McpPathValidationResult result;
+        result.revision = revision;
+        const QDir executableDir(executableDirectory);
+        const QStringList candidates{
             executableDir.filePath(QStringLiteral("tools/ksword_mcp/server.py")),
             executableDir.filePath(QStringLiteral("../../../tools/ksword_mcp/server.py"))};
         for (const QString& candidate : candidates)
         {
-            const QFileInfo script(candidate); // 单个约定路径的存在性与文件身份。
-            if (script.isFile())
+            if (QFileInfo(candidate).isFile())
             {
-                return QDir::cleanPath(script.absoluteFilePath());
+                result.defaultSidecar = QDir::cleanPath(candidate);
+                break;
             }
         }
-        return QString();
+        result.script = discoverDefault ? result.defaultSidecar : requestedScript;
+        result.scriptAvailable = !result.script.isEmpty() && QFileInfo(result.script).isFile();
+        const QString cli = executableDir.filePath(QStringLiteral("KswordCLI.exe"));
+        if (QFileInfo(cli).isFile())
+        {
+            result.cli = QDir::fromNativeSeparators(cli);
+        }
+        return result;
     }
 
     // 创建可换行说明；输入稳定语言键与中文回退，返回由父控件管理的标签。
@@ -67,6 +90,24 @@ namespace
         return button;
     }
 }
+
+// 全部成员仅由 GUI 访问；worker 只取得路径值，不捕获此状态或 QWidget。
+struct SettingsDock::McpPathValidationState
+{
+    QTimer* debounce = nullptr;
+    QFutureWatcher<McpPathValidationResult>* watcher = nullptr;
+    QString requestedScript;
+    QString defaultSidecar;
+    QString cli;
+    QString validatedScript;
+    quint64 revision = 0;
+    quint64 completedRevision = 0;
+    bool discoverDefault = true;
+    bool requestedDefault = true;
+    bool queued = false;
+    bool running = false;
+    bool scriptAvailable = false;
+};
 
 // 从顶部“设置 → MCP”进入；设置正文独立滚动，配置预览保留自己的文本滚动。
 void SettingsDock::initializeMcpTab()
@@ -247,6 +288,70 @@ void SettingsDock::initializeMcpTab()
     m_tabWidget->addTab(m_mcpTab, QStringLiteral("MCP"));
     language.bindTab(m_tabWidget, m_mcpTab, QStringLiteral("settings.tab.mcp"), QStringLiteral("MCP"));
 
+    m_mcpPathValidation = std::make_shared<McpPathValidationState>();
+    auto& paths = *m_mcpPathValidation;
+    paths.debounce = new QTimer(this);
+    paths.debounce->setSingleShot(true);
+    paths.debounce->setInterval(180);
+    paths.watcher = new QFutureWatcher<McpPathValidationResult>(this);
+    const auto launchPathCheck = [this]()
+    {
+        auto& paths = *m_mcpPathValidation;
+        if (!paths.queued || paths.running)
+        {
+            return;
+        }
+        paths.queued = false;
+        paths.running = true;
+        // 每个设置窗口最多一个元数据查询在途；路径变化只覆盖尚未启动的请求。
+        const auto revision = paths.revision;
+        const auto script = paths.requestedScript;
+        const auto discoverDefault = paths.requestedDefault;
+        const auto executableDirectory = QCoreApplication::applicationDirPath();
+        paths.watcher->setFuture(QtConcurrent::run([revision, script, discoverDefault, executableDirectory]()
+        {
+            return ValidateMcpPaths(revision, script, discoverDefault, executableDirectory);
+        }));
+    };
+    connect(paths.debounce, &QTimer::timeout, this, launchPathCheck);
+    connect(paths.watcher, &QFutureWatcher<McpPathValidationResult>::finished, this,
+        [this, launchPathCheck]()
+    {
+        auto& paths = *m_mcpPathValidation;
+        const auto result = paths.watcher->result();
+        paths.running = false;
+        if (result.revision == paths.revision)
+        {
+            paths.completedRevision = result.revision;
+            paths.defaultSidecar = result.defaultSidecar;
+            paths.cli = result.cli;
+            paths.validatedScript = result.script;
+            paths.scriptAvailable = result.scriptAvailable;
+            if (paths.discoverDefault)
+            {
+                const QSignalBlocker blocker(m_mcpSidecarPathEdit);
+                m_mcpSidecarPathEdit->setText(result.script);
+                paths.requestedScript = result.script;
+            }
+            refreshMcpClientConfiguration();
+        }
+        if (paths.queued && !paths.debounce->isActive())
+        {
+            launchPathCheck();
+        }
+    });
+    // 可见时异步确认安装目录内容变化；预览热更新复用上次结果，不逐按键查 CLI。
+    auto* revalidate = new QTimer(this);
+    revalidate->setInterval(5000);
+    connect(revalidate, &QTimer::timeout, this, [this]()
+    {
+        if (m_mcpTab->isVisible() && !m_mcpPathValidation->running)
+        {
+            requestMcpPathValidation(true);
+        }
+    });
+    revalidate->start();
+
     // 所有持久化编辑复用“应用/取消”；预览格式与本次启停不产生待保存改动。
     connect(m_mcpAutoStartCheckBox, &QCheckBox::toggled, this, [this]()
     {
@@ -258,7 +363,11 @@ void SettingsDock::initializeMcpTab()
         markPendingChanges(QStringLiteral("MCP 客户端路径变化"));
     };
     connect(m_mcpPythonCommandEdit, &QLineEdit::textChanged, this, pathChanged);
-    connect(m_mcpSidecarPathEdit, &QLineEdit::textChanged, this, pathChanged);
+    connect(m_mcpSidecarPathEdit, &QLineEdit::textChanged, this, [this, pathChanged]()
+    {
+        m_mcpPathValidation->discoverDefault = false;
+        pathChanged();
+    });
     connect(m_mcpConfigFormatCombo, &QComboBox::currentIndexChanged,
         this, &SettingsDock::refreshMcpClientConfiguration);
     connect(m_mcpStartButton, &QPushButton::clicked, this, [this]()
@@ -372,8 +481,12 @@ void SettingsDock::applyMcpSettingsToUi(const ks::settings::AppearanceSettings& 
 {
     m_mcpAutoStartCheckBox->setChecked(settings.mcpAutoStart);
     m_mcpPythonCommandEdit->setText(settings.mcpPythonCommand);
-    m_mcpSidecarPathEdit->setText(settings.mcpSidecarScriptPath.isEmpty()
-        ? DefaultMcpSidecarPath() : settings.mcpSidecarScriptPath);
+    m_mcpPathValidation->discoverDefault = settings.mcpSidecarScriptPath.isEmpty();
+    {
+        const QSignalBlocker blocker(m_mcpSidecarPathEdit);
+        m_mcpSidecarPathEdit->setText(m_mcpPathValidation->discoverDefault
+            ? m_mcpPathValidation->defaultSidecar : settings.mcpSidecarScriptPath);
+    }
     refreshMcpClientConfiguration();
 }
 
@@ -383,7 +496,41 @@ void SettingsDock::collectMcpSettingsFromUi(ks::settings::AppearanceSettings& se
     settings.mcpAutoStart = m_mcpAutoStartCheckBox->isChecked();
     settings.mcpPythonCommand = m_mcpPythonCommandEdit->text().trimmed();
     const QString path = QDir::fromNativeSeparators(m_mcpSidecarPathEdit->text().trimmed()); // 规范路径。
-    settings.mcpSidecarScriptPath = path == DefaultMcpSidecarPath() ? QString() : path;
+    settings.mcpSidecarScriptPath = m_mcpPathValidation->discoverDefault
+        || path == m_mcpPathValidation->defaultSidecar ? QString() : path;
+}
+
+// 路径读取延迟合并，且在一次慢查询结束前不再占用额外线程。
+void SettingsDock::requestMcpPathValidation(const bool forceRefresh)
+{
+    if (!m_mcpPathValidation)
+    {
+        return;
+    }
+    auto& paths = *m_mcpPathValidation;
+    const QString text = m_mcpSidecarPathEdit->text().trimmed();
+    const QString script = text.isEmpty() ? QString()
+        : QDir::fromNativeSeparators(QDir::current().absoluteFilePath(text));
+    const bool sameInput = paths.revision != 0 && paths.requestedScript == script
+        && paths.requestedDefault == paths.discoverDefault;
+    if (!forceRefresh && sameInput)
+    {
+        return;
+    }
+    paths.requestedScript = script;
+    paths.requestedDefault = paths.discoverDefault;
+    ++paths.revision;
+    paths.queued = true;
+    paths.debounce->start();
+    if (forceRefresh && sameInput)
+    {
+        // 已确认的同一路径在后台重新确认时保留可用性，避免每五秒闪动复制动作。
+        paths.completedRevision = paths.revision;
+        return;
+    }
+    m_mcpCopyButton->setEnabled(false);
+    m_mcpConfigHintLabel->setText(ks::i18n::sourceText(QStringLiteral("正在检查 MCP 脚本路径…")));
+    ks::ui::ApplyStatusRole(m_mcpConfigHintLabel, ks::ui::StatusRole::Idle);
 }
 
 // 配置唯一文档来自当前输入和当前 PID；JSON 转义同时用于 TOML 基础字符串。
@@ -393,19 +540,19 @@ void SettingsDock::refreshMcpClientConfiguration()
     {
         return;
     }
+    requestMcpPathValidation();
+    const auto& paths = *m_mcpPathValidation;
     const QString command = m_mcpPythonCommandEdit->text().trimmed(); // 一个命令，无 shell 拼接。
     const QString path = m_mcpSidecarPathEdit->text().trimmed(); // 用户明确输入的脚本位置。
     const QString script = path.isEmpty() ? QString() // 相对路径也按当前位置生成绝对路径。
-        : QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath());
+        : QDir::fromNativeSeparators(QDir::current().absoluteFilePath(path));
     QJsonArray args{script, QStringLiteral("--pid"),
         QString::number(QCoreApplication::applicationPid())}; // 本次 GUI 的真实进程身份。
     // 发行目录提供原生 CLI 时，JSON/TOML 的同一参数文档同时启用 CLI/IOCTL 工具。
-    const QFileInfo cli(QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("KswordCLI.exe")));
-    if (cli.isFile())
+    if (!paths.cli.isEmpty())
     {
         args.append(QStringLiteral("--ksword-cli-exe"));
-        args.append(QDir::fromNativeSeparators(cli.absoluteFilePath()));
+        args.append(paths.cli);
     }
     QString configuration; // 预览、复制与编辑器导出的同一规范正文。
     if (m_mcpConfigFormatCombo->currentIndex() == 0)
@@ -427,7 +574,15 @@ void SettingsDock::refreshMcpClientConfiguration()
     {
         m_mcpConfigPreview->setRawText(configuration);
     }
-    const bool usable = !command.isEmpty() && QFileInfo(script).isFile(); // 不声称已安装 Python 依赖。
+    if (paths.completedRevision != paths.revision)
+    {
+        m_mcpCopyButton->setEnabled(false);
+        m_mcpConfigHintLabel->setText(ks::i18n::sourceText(QStringLiteral("正在检查 MCP 脚本路径…")));
+        ks::ui::ApplyStatusRole(m_mcpConfigHintLabel, ks::ui::StatusRole::Idle);
+        return;
+    }
+    const bool usable = !command.isEmpty() && paths.scriptAvailable
+        && paths.validatedScript == script; // 不声称已安装 Python 依赖。
     m_mcpCopyButton->setEnabled(usable);
     m_mcpConfigHintLabel->setText(ks::i18n::sourceText(usable
         ? QStringLiteral("仅限本机、同用户与同会话；默认匹配权限，UAC 启动仅授权本次客户端。路径点击“应用”后保存；主程序不会自动安装依赖。")

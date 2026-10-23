@@ -12,6 +12,7 @@
 #include "KernelDeviceDriverObjectsWorker.h"
 
 #include <QWidget>
+#include <limits>
 
 #include <atomic>  // std::atomic_bool：控制后台刷新互斥。
 #include <vector>  // std::vector：缓存枚举结果与过滤结果。
@@ -24,6 +25,7 @@ class QPushButton;
 class QPoint;
 class QTableWidget;
 class QTableWidgetItem;
+class QTimer;
 class QVBoxLayout;
 
 // ============================================================
@@ -75,7 +77,7 @@ private:
     // rebuildVisibleRows：
     // - 处理：根据当前过滤器筛选可见行并重建表格；
     // - 返回：无返回值。
-    void rebuildVisibleRows();
+    void rebuildVisibleRows(bool allowDeferred = true);
 
     // populateFilterCombos：
     // - 输入 rows：当前全量结果；
@@ -87,12 +89,14 @@ private:
     // - 输入 entry：待判断行；
     // - 处理：按目录、对象类型和关键字做只读筛选；
     // - 返回：true 表示该行应显示。
-    bool matchesCurrentFilters(const KernelDeviceDriverObjectEntry& entry) const;
+    bool matchesCurrentFilters(const KernelDeviceDriverObjectEntry& entry, const QString& directoryFilterText,
+        const QString& typeFilterText, const QString& keywordText) const;
 
     // rebuildTableWidget：
     // - 处理：把当前可见行写入表格控件；
     // - 返回：无返回值。
     void rebuildTableWidget();
+    std::size_t sourceIndexForTableRow(int row) const;
 
     // updateStatusText：
     // - 输入 errorText：可选错误文本；
@@ -159,6 +163,13 @@ private:
     QTableWidget* m_tableWidget = nullptr;        // m_tableWidget：结果表格。
 
     std::vector<KernelDeviceDriverObjectEntry> m_allRows;     // m_allRows：后台枚举得到的全量结果。
-    std::vector<KernelDeviceDriverObjectEntry> m_visibleRows;  // m_visibleRows：当前过滤后可见结果。
+    std::vector<std::size_t> m_visibleIndexes; // Canonical source indexes in filter order.
+    QTimer* m_filterTimer = nullptr;
+    bool m_projectionDirty = true;
+    bool m_filterActive = false;
+    std::size_t m_unfilteredSourceIndex = std::numeric_limits<std::size_t>::max();
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    QString m_lastDirectoryFilter, m_lastTypeFilter, m_lastKeywordFilter;
     std::atomic_bool m_refreshRunning = false;                 // m_refreshRunning：刷新互斥标记。
 };

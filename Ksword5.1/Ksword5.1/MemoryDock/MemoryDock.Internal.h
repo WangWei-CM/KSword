@@ -133,7 +133,7 @@ namespace ksword::memory_dock_internal
     // 调用方法：在 menu.exec() 之前调用即可，不需要再比较 exec 的返回值。
     QAction* addOpenInWorkbenchAction(
         QMenu& menu,
-        QTableWidget* table,
+        QTableView* table,
         int row,
         int addressColumn,
         bool kernelAddress);

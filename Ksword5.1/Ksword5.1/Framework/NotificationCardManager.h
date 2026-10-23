@@ -63,8 +63,7 @@ namespace ks::ui
         QWidget* m_clientAnchor = nullptr;
         QTimer* m_refreshTimer = nullptr;
         ks::settings::AppearanceSettings m_settings;
-        std::size_t m_lastLogRevision = 0;
-        std::size_t m_knownLogCount = 0;
+        ks::log::ArchiveCursor m_logCursor; // Only newly archived records are notification candidates.
         std::size_t m_lastProgressRevision = 0;
         std::vector<std::unique_ptr<NotificationCardRecord>> m_cards;
         std::vector<int> m_overflowProgressTaskIds;

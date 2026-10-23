@@ -6,11 +6,12 @@
 #include "CksBackend.h"
 
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
+#include <QByteArray>
+#include <array>
 
 #include <functional>
-#include <atomic>
-#include <memory>
-#include <thread>
+
 
 class CodeEditorWidget;
 class QEvent;
@@ -19,11 +20,16 @@ class QPushButton;
 class QShowEvent;
 class QTableWidget;
 
+namespace ks::ui { class AsyncOperation; }
+
 namespace ks::misc
 {
     class CksPage final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const CksPage* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造时只建页面；真正的系统状态在首次显示时后台刷新。
         explicit CksPage(QWidget* parent = nullptr);
         ~CksPage() override;
@@ -35,6 +41,8 @@ namespace ks::misc
         void changeEvent(QEvent* event) override;
 
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         // initializeUi：建立共享状态区以及微软、SSDE、免重置研究三个子页。
         void initializeUi();
         // refresh：后台查询 Windows 许可、CI、SCM 和 CiTool，结果回到 UI 线程。
@@ -45,10 +53,10 @@ namespace ks::misc
         void updateButtons();
         // chooseFile：只在用户手势下打开文件选择器并显示 SHA-256。
         void chooseFile(const QString& kind);
+        void showSelectedFiles();
+        void queueFileHash(int slot, const QString& path);
         // runOperation：后台执行一次具体操作，然后重新读取系统状态。
         void runOperation(const std::function<bool(QString*)>& operation);
-        // startWorker：统一拥有后台线程；页面析构时请求取消并等待线程离开，禁止 detached 回投。
-        void startWorker(std::function<void(const std::shared_ptr<std::atomic_bool>&)> task);
         // confirm：不可逆或影响重启的操作需在不透明对话框中确认。
         bool confirm(const QString& text);
         // showResult：显示一次操作结论与系统回读边界。
@@ -57,15 +65,16 @@ namespace ks::misc
         cks::Snapshot m_snapshot; // m_snapshot：最近一次系统状态回读。
         bool m_hasSnapshot = false; // m_hasSnapshot：状态卡是否有真实数据。
         bool m_busy = false; // m_busy：防止刷新与操作并发重入。
+        std::array<ks::ui::AsyncOperation*, 3> m_fileHashOperations{};
+        std::array<QByteArray, 3> m_fileDigests{};
+        std::array<bool, 3> m_fileHashPending{};
         QString m_policyPath; // m_policyPath：用户选择的已签名 .cip 路径。
         QString m_helperPath; // m_helperPath：用户选择的 SSDE 启用程序路径。
         QString m_driverPath; // m_driverPath：用户选择的已签名 ssde.sys 路径。
         QString m_resultRaw; // m_resultRaw：未翻译的后台回执，语言变化时重绘。
         bool m_resultSuccess = false; // m_resultSuccess：最近一次操作是否成功。
         bool m_hasResult = false; // m_hasResult：是否已有可重绘的操作回执。
-        std::shared_ptr<std::atomic_bool> m_cancelRequested =
-            std::make_shared<std::atomic_bool>(false); // 每次操作独立门禁，队列中的旧回投也安全失效。
-        std::thread m_worker; // m_worker：当前刷新/操作线程，始终可等待回收。
+        ks::ui::AsyncOperation* m_backendOperation = nullptr; // Value-owned tool/transaction lane.
 
         QLabel* m_status = nullptr; // m_status：许可与安全启动摘要。
         QLabel* m_service = nullptr; // m_service：SSDE 服务与启动类型摘要。

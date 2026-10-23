@@ -1,4 +1,5 @@
 #include "ScannerDock.h"
+#include "../UI/MemoryWorkbench/SnapshotWorkbenchWidget.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/ParameterWorkspace.h"
@@ -9,6 +10,10 @@
 #include "ksword/scanner/binary_scanner.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QTableView>
+#include <functional>
 #include <QApplication>
 #include <QByteArray>
 #include <QCheckBox>
@@ -32,17 +37,27 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QStyle>
+#include <QShowEvent>
 #include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <limits>
 #include <mutex>
 #include <utility>
 #include <vector>
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kScannerNavigation[] = {
+    {"analysis", "", "scanner.tab.analysis", "可视化分析", true},
+    {"inspection", "", "scanner.tab.inspection", "结构化扫描", false},
+    {"editor", "", "scanner.tab.editor", "安全字节编辑", false}
+};
+}
 
 // ScannerAsyncState 作用：把 worker 的回投目标放在共享互斥状态中。
 // 析构函数先清空 owner；worker 只有在同一把锁保护下才能提交 queued 调用，
@@ -55,6 +70,42 @@ struct ScannerAsyncState
 
 namespace
 {
+    class ScannerTableModel final : public QAbstractTableModel
+    {
+    public:
+        using Value = std::function<QString(int, int)>;
+        using Header = std::function<QString(int)>;
+        ScannerTableModel(const int rows, const int columns, Value value, Header header, QObject* parent)
+            : QAbstractTableModel(parent), m_rows(rows), m_columns(columns),
+              m_value(std::move(value)), m_header(std::move(header)) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : m_rows; }
+        int columnCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : m_columns; }
+        QVariant data(const QModelIndex& index, const int role) const override
+        {
+            if (!index.isValid() || index.row() >= m_rows || index.column() >= m_columns ||
+                (role != Qt::DisplayRole && role != Qt::ToolTipRole)) return {};
+            return m_value(index.row(), index.column());
+        }
+        QVariant headerData(const int section, const Qt::Orientation orientation, const int role) const override
+        {
+            return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_columns
+                ? QVariant(m_header(section)) : QVariant();
+        }
+        void refreshLanguage()
+        {
+            if (m_columns > 0) emit headerDataChanged(Qt::Horizontal, 0, m_columns - 1);
+            if (m_rows > 0 && m_columns > 0)
+                emit dataChanged(index(0, 0), index(m_rows - 1, m_columns - 1), {Qt::DisplayRole, Qt::ToolTipRole});
+        }
+    private:
+        int m_rows;
+        int m_columns;
+        Value m_value;
+        Header m_header;
+    };
+
     // fromUtf8 作用：将扫描后端的 UTF-8 文本安全转换为 Qt 字符串。
     // 参数 value：后端文本；返回值：可直接显示的 QString。
     QString fromUtf8(const std::string& value)
@@ -224,7 +275,7 @@ void ScannerDock::buildUi()
     m_resultTabs->setDocumentMode(true);
     ks::ui::StylePageTabsContentFrame(m_resultTabs);
     inspectionLayout->addWidget(m_resultTabs);
-    m_mainTabs->addTab(m_inspectionPage, QString());
+    m_navigationTabs.add(navigationDefinition(1), m_mainTabs, m_inspectionPage);
 
     // 编辑页没有独立结果面板，保留单栏；参数正文滚动，确认动作固定在底部。
     m_editorPage = new QWidget(m_mainTabs);
@@ -295,7 +346,7 @@ void ScannerDock::buildUi()
     ks::ui::NormalizeToolbarRow(applyLayout);
     ks::ui::ApplyFlatButtonTheme(m_applyPatchButton, ks::ui::FlatButtonTone::Danger);
     editorLayout->addLayout(applyLayout);
-    m_mainTabs->addTab(m_editorPage, QString());
+    m_navigationTabs.add(navigationDefinition(2), m_mainTabs, m_editorPage);
 
     // 所有按钮和回车动作都通过 ScannerDock 方法进入同一套校验流程。
     connect(m_browseButton, &QPushButton::clicked, this, [this]() { chooseFile(); });
@@ -328,10 +379,10 @@ void ScannerDock::retranslateUi()
         "在后台只读解析 PE、ELF、Mach-O 或 ISO9660/Joliet 结构与攻击路径"));
     m_mainTabs->setTabText(
         m_mainTabs->indexOf(m_inspectionPage),
-        translated("scanner.tab.inspection", "结构化扫描"));
+        ks::ui::PageNavigationTabDescriptor(navigationDefinition(1)).title);
     m_mainTabs->setTabText(
         m_mainTabs->indexOf(m_editorPage),
-        translated("scanner.tab.editor", "安全字节编辑"));
+        ks::ui::PageNavigationTabDescriptor(navigationDefinition(2)).title);
     m_offsetLabel->setText(translated("scanner.editor.offset", "文件偏移"));
     m_replacementLabel->setText(translated("scanner.editor.replacement", "替换字节（十六进制）"));
     m_replacementEdit->setToolTip(translated(
@@ -357,7 +408,30 @@ void ScannerDock::retranslateUi()
 
     if (m_lastResult)
     {
+        m_resultLanguageDirty = true;
+        prepareResultPresentation();
+    }
+}
+
+void ScannerDock::showEvent(QShowEvent* event)
+{
+    prepareResultPresentation();
+    QWidget::showEvent(event);
+}
+
+void ScannerDock::prepareResultPresentation()
+{
+    if (!isVisible() || !m_lastResult) return;
+    if (m_resultPresentationDirty)
+    {
         renderResult(*m_lastResult);
+        m_resultPresentationDirty = false;
+        m_resultLanguageDirty = false;
+    }
+    else if (m_resultLanguageDirty)
+    {
+        refreshResultLanguage();
+        m_resultLanguageDirty = false;
     }
 }
 
@@ -467,7 +541,8 @@ void ScannerDock::finishScan(
 
     setScanBusy(false);
     m_lastResult = std::move(result);
-    renderResult(*m_lastResult);
+    m_resultPresentationDirty = true;
+    prepareResultPresentation();
 
     if (m_lastResult->success && m_lastResult->attackPath.matched)
     {
@@ -524,6 +599,8 @@ QTableWidget* ScannerDock::createReadOnlyTable(QWidget* parent) const
 
 void ScannerDock::clearResultTabs()
 {
+    for (const auto& page : m_resultNavigationSchema) m_navigationTabs.remove(page.id);
+    m_resultNavigationSchema.clear();
     while (m_resultTabs->count() > 0)
     {
         QWidget* page = m_resultTabs->widget(0);
@@ -536,6 +613,9 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
 {
     renderAnalysisResult();
     clearResultTabs();
+    auto retired = std::move(m_presentedResult);
+    m_presentedResult = m_lastResult;
+    if (retired) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
 
     auto* summaryTable = createReadOnlyTable(m_resultTabs);
     // 摘要字段只是短属性表，复制单元格即可，无需再占一行操作栏。
@@ -568,17 +648,18 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
     {
         const auto& field = summaryFields[static_cast<std::size_t>(row)];
         summaryTable->setItem(row, 0, new QTableWidgetItem(localizedColumnTitle(field.name)));
+        summaryTable->item(row, 0)->setData(Qt::UserRole, row);
         summaryTable->setItem(
             row,
             1,
             new QTableWidgetItem(ks::i18n::sourceText(fromUtf8(field.value))));
     }
     summaryTable->resizeColumnsToContents();
-    m_resultTabs->addTab(summaryTable, translated("scanner.result.summary", "摘要"));
+    addResultNavigationTab(summaryTable, translated("scanner.result.summary", "摘要"));
 
     if (!result.attackPath.evidence.empty())
     {
-        m_resultTabs->addTab(
+        addResultNavigationTab(
             createAttackPathPage(result),
             translated("scanner.result.attack_path", "攻击路径"));
     }
@@ -595,64 +676,77 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
     {
         const auto& field = result.headers[static_cast<std::size_t>(row)];
         headerTable->setItem(row, 0, new QTableWidgetItem(localizedColumnTitle(field.name)));
+        headerTable->item(row, 0)->setData(Qt::UserRole, row);
         headerTable->setItem(
             row,
             1,
             new QTableWidgetItem(ks::i18n::sourceText(fromUtf8(field.value))));
     }
     headerTable->resizeColumnsToContents();
-    m_resultTabs->addTab(headerTable, translated("scanner.result.headers", "文件头"));
+    addResultNavigationTab(headerTable, translated("scanner.result.headers", "文件头"));
 
-    for (const ks::scanner::BinaryTable& sourceTable : result.tables)
+    const auto snapshot = m_lastResult;
+    for (std::size_t tableIndex = 0; tableIndex < result.tables.size(); ++tableIndex)
     {
-        // table：按后端稳定列顺序创建，行数已由 ScanOptions 在后端限制。
-        auto* table = createReadOnlyTable(m_resultTabs);
-        table->setColumnCount(static_cast<int>(sourceTable.columns.size()));
-        QStringList columnTitles;
-        for (const std::string& column : sourceTable.columns)
-        {
-            columnTitles.push_back(localizedColumnTitle(column));
-        }
-        table->setHorizontalHeaderLabels(columnTitles);
-        table->setRowCount(static_cast<int>(sourceTable.rows.size()));
-        for (int row = 0; row < table->rowCount(); ++row)
-        {
-            const auto& sourceRow = sourceTable.rows[static_cast<std::size_t>(row)];
-            for (int column = 0; column < table->columnCount(); ++column)
-            {
-                const QString value = column < static_cast<int>(sourceRow.size())
-                    ? localizedTableValue(
-                        sourceTable.id,
-                        column,
-                        sourceRow[static_cast<std::size_t>(column)])
-                    : QString();
-                table->setItem(row, column, new QTableWidgetItem(value));
-            }
-        }
+        const auto& sourceTable = result.tables[tableIndex];
+        auto* table = new ks::ui::TableActionTableView(m_resultTabs);
+        ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        table->setAlternatingRowColors(true);
+        table->setWordWrap(false);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setSectionsMovable(true);
+        table->horizontalHeader()->setStretchLastSection(true);
+        auto* model = new ScannerTableModel(static_cast<int>(sourceTable.rows.size()),
+            static_cast<int>(sourceTable.columns.size()),
+            [this, snapshot, tableIndex](const int row, const int column) {
+                const auto& source = snapshot->tables[tableIndex];
+                const auto& values = source.rows[static_cast<std::size_t>(row)];
+                return column < static_cast<int>(values.size())
+                    ? localizedTableValue(source.id, column, values[static_cast<std::size_t>(column)]) : QString();
+            },
+            [this, snapshot, tableIndex](const int column) {
+                return localizedColumnTitle(snapshot->tables[tableIndex].columns[static_cast<std::size_t>(column)]);
+            }, table);
+        auto* proxy = new QSortFilterProxyModel(table);
+        proxy->setSourceModel(model);
+        proxy->setDynamicSortFilter(false);
+        table->setModel(proxy);
+        table->horizontalHeader()->setSectionsClickable(true);
+        // A source row stays the same section after a user sort.
+        connect(table->horizontalHeader(), &QHeaderView::sectionClicked, table,
+            [table, proxy](const int column) {
+                const auto* header = table->horizontalHeader();
+                const auto order = proxy->sortColumn() == column &&
+                    header->sortIndicatorOrder() == Qt::AscendingOrder ? Qt::DescendingOrder : Qt::AscendingOrder;
+                proxy->sort(column, order);
+                table->horizontalHeader()->setSortIndicator(column, order);
+                table->horizontalHeader()->setSortIndicatorShown(true);
+            });
+        // Bound automatic measurement to a small sample; all rows remain available to copy/export.
+        table->horizontalHeader()->setResizeContentsPrecision(64);
         table->resizeColumnsToContents();
         if (sourceTable.id == "sections" &&
-            (result.format == ks::scanner::BinaryFormat::Pe32 ||
-             result.format == ks::scanner::BinaryFormat::Pe32Plus))
+            (result.format == ks::scanner::BinaryFormat::Pe32 || result.format == ks::scanner::BinaryFormat::Pe32Plus))
         {
-            // The rows correspond to PE sections; headers occupy region zero.
-            connect(table, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
-                if (!m_lastResult || row < 0) return;
-                const auto regionIndex = static_cast<std::size_t>(row) + 1;
-                if (regionIndex >= m_lastResult->mappedRegions.size()) return;
-                const auto& region = m_lastResult->mappedRegions[regionIndex];
+            connect(table, &QTableView::doubleClicked, this, [this, proxy, snapshot](const QModelIndex& index) {
+                if (snapshot != m_lastResult || !index.isValid()) return;
+                const auto sourceIndex = proxy->mapToSource(index);
+                const auto regionIndex = static_cast<std::size_t>(sourceIndex.row()) + 1;
+                if (regionIndex >= snapshot->mappedRegions.size()) return;
+                const auto& region = snapshot->mappedRegions[regionIndex];
                 if (region.fileSize != 0)
                     navigateAnalysisOffset(region.fileOffset,
-                        (region.characteristics & 0x20000000U) != 0 && m_lastResult->x86Compatible);
+                        (region.characteristics & 0x20000000U) != 0 && snapshot->x86Compatible);
             });
         }
         QString title = localizedTableTitle(sourceTable.id, sourceTable.title);
-        if (sourceTable.truncated)
-        {
-            title += translated("scanner.result.truncated_suffix", "（已截断）");
-        }
-        m_resultTabs->addTab(
-            createStructuredTablePage(table, table->columnCount()),
-            title);
+        if (sourceTable.truncated) title += translated("scanner.result.truncated_suffix", "（已截断）");
+        QWidget* page = createStructuredTablePage(table, static_cast<int>(sourceTable.columns.size()));
+        page->setProperty("scanner_source_table_index", static_cast<int>(tableIndex));
+        addResultNavigationTab(page, title);
     }
 
     auto* diagnosticsTable = createReadOnlyTable(m_resultTabs);
@@ -685,10 +779,114 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
                     ? QStringLiteral("0x%1").arg(diagnostic.offset, 0, 16).toUpper()
                     : QString()));
     }
+    for (int row = 0; row < diagnosticsTable->rowCount(); ++row)
+        diagnosticsTable->item(row, 0)->setData(Qt::UserRole, row);
     diagnosticsTable->resizeColumnsToContents();
-    m_resultTabs->addTab(
+    addResultNavigationTab(
         diagnosticsTable,
         translated("scanner.result.diagnostics", "诊断"));
+}
+
+void ScannerDock::refreshResultLanguage()
+{
+    if (!m_presentedResult || m_presentedResult != m_lastResult || m_resultTabs->count() == 0) return;
+    const auto& result = *m_presentedResult;
+    // Translation changes display roles without replacing views, selection, columns or the analysis snapshot.
+    for (auto* model : m_resultTabs->findChildren<QAbstractItemModel*>())
+        if (auto* scannerModel = dynamic_cast<ScannerTableModel*>(model)) scannerModel->refreshLanguage();
+    for (auto* button : m_resultTabs->findChildren<QPushButton*>())
+        if (button->property("scanner_column_group").toBool())
+            button->setToolTip(translated("scanner.column_view.tooltip",
+                "列组 %1：显示一组互补字段；可在表头右键自定义列。").arg(button->text()));
+    int tab = 0;
+    auto* summary = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab++, translated("scanner.result.summary", "摘要"));
+    std::vector<ks::scanner::BinaryField> summaryFields{
+        {"Format", ks::scanner::FormatName(result.format)},
+        {"Byte order", ks::scanner::ByteOrderName(result.byteOrder)},
+        {"File size", std::to_string(result.fileSize)}};
+    for (const auto& field : result.summary)
+    {
+        const QString name = fromUtf8(field.name).trimmed().toLower();
+        if (name != QStringLiteral("format") && name != QStringLiteral("byte order") && name != QStringLiteral("file size"))
+            summaryFields.push_back(field);
+    }
+    const QStringList fieldHeaders{translated("scanner.column.field", "字段"), translated("scanner.column.value", "值")};
+    if (summary)
+    {
+        summary->setHorizontalHeaderLabels(fieldHeaders);
+        for (int row = 0; row < summary->rowCount(); ++row)
+        {
+            const int sourceRow = summary->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(summaryFields.size())) continue;
+            const auto& field = summaryFields[static_cast<std::size_t>(sourceRow)];
+            summary->item(row, 0)->setText(localizedColumnTitle(field.name));
+            summary->item(row, 1)->setText(ks::i18n::sourceText(fromUtf8(field.value)));
+        }
+    }
+    if (!result.attackPath.evidence.empty())
+    {
+        auto* page = m_resultTabs->widget(tab);
+        m_resultTabs->setTabText(tab++, translated("scanner.result.attack_path", "攻击路径"));
+        auto* label = page->findChild<QLabel*>();
+        if (label) label->setText((result.attackPath.matched
+            ? translated("scanner.attack.verdict.detected", "检测到 EXIT / GhostSystemDriver 攻击路径：评分 %1/100，规则 %2。")
+            : translated("scanner.attack.verdict.below_threshold", "发现相关静态证据，但未达到攻击路径阈值：评分 %1/100，规则 %2。"))
+            .arg(result.attackPath.score).arg(fromUtf8(result.attackPath.ruleId)));
+        auto* table = page->findChild<QTableWidget*>();
+        if (table)
+        {
+            table->setHorizontalHeaderLabels({translated("scanner.column.severity", "级别"),
+                translated("scanner.attack.column.stage", "阶段"), translated("scanner.attack.column.evidence", "静态证据"),
+                translated("scanner.attack.column.artifact", "对象"), QStringLiteral("MITRE ATT&CK"),
+                translated("scanner.attack.column.score", "评分"), translated("scanner.column.offset", "偏移")});
+            for (int row = 0; row < table->rowCount(); ++row)
+            {
+                const int sourceRow = table->item(row, 0)->data(Qt::UserRole).toInt();
+                if (sourceRow < 0 || sourceRow >= static_cast<int>(result.attackPath.evidence.size())) continue;
+                const auto& evidence = result.attackPath.evidence[static_cast<std::size_t>(sourceRow)];
+                table->item(row, 0)->setText(attackPathSeverityText(static_cast<int>(evidence.severity)));
+                table->item(row, 1)->setText(attackPathStageText(evidence.stage));
+                table->item(row, 2)->setText(attackPathEvidenceText(evidence.code));
+                if (!evidence.hasOffset) table->item(row, 6)->setText(translated("scanner.attack.offset.decoded", "解码后对象"));
+            }
+        }
+    }
+    auto* headers = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab++, translated("scanner.result.headers", "文件头"));
+    if (headers)
+    {
+        headers->setHorizontalHeaderLabels(fieldHeaders);
+        for (int row = 0; row < headers->rowCount(); ++row)
+        {
+            const int sourceRow = headers->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(result.headers.size())) continue;
+            const auto& field = result.headers[static_cast<std::size_t>(sourceRow)];
+            headers->item(row, 0)->setText(localizedColumnTitle(field.name));
+            headers->item(row, 1)->setText(ks::i18n::sourceText(fromUtf8(field.value)));
+        }
+    }
+    for (const auto& source : result.tables)
+    {
+        QString title = localizedTableTitle(source.id, source.title);
+        if (source.truncated) title += translated("scanner.result.truncated_suffix", "（已截断）");
+        m_resultTabs->setTabText(tab++, title);
+    }
+    auto* diagnostics = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab, translated("scanner.result.diagnostics", "诊断"));
+    if (diagnostics)
+    {
+        diagnostics->setHorizontalHeaderLabels({translated("scanner.column.severity", "级别"),
+            translated("scanner.column.code", "代码"), translated("scanner.column.message", "说明"), translated("scanner.column.offset", "偏移")});
+        for (int row = 0; row < diagnostics->rowCount(); ++row)
+        {
+            const int sourceRow = diagnostics->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(result.diagnostics.size())) continue;
+            const auto& diagnostic = result.diagnostics[static_cast<std::size_t>(sourceRow)];
+            diagnostics->item(row, 0)->setText(diagnosticSeverityText(static_cast<int>(diagnostic.severity)));
+            diagnostics->item(row, 2)->setText(localizedDiagnosticMessage(diagnostic.code, diagnostic.message));
+        }
+    }
 }
 
 void ScannerDock::beginPatch()
@@ -1014,3 +1212,63 @@ void ScannerDock::setPatchBusy(const bool busy)
     m_backupCheckBox->setEnabled(!busy);
     m_riskCheckBox->setEnabled(!busy);
 }
+
+const ks::ui::PageNavigationTabDefinition& ScannerDock::navigationDefinition(const int index)
+{
+    return kScannerNavigation[index];
+}
+void ScannerDock::addResultNavigationTab(QWidget* page, const QString& title)
+{
+    const QString id = QStringLiteral("result:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QByteArray idBytes = id.toUtf8();
+    const QByteArray titleBytes = title.toUtf8();
+    const ks::ui::PageNavigationTabDefinition definition{idBytes.constData(), "inspection", "", titleBytes.constData(),
+        m_resultNavigationSchema.isEmpty()};
+    m_navigationTabs.add(definition, m_resultTabs, page);
+    m_resultTabs->setTabText(m_resultTabs->indexOf(page), title);
+    m_resultNavigationSchema.append(ks::ui::PageNavigationTabDescriptor(definition));
+}
+ks::ui::PageNavigationCatalog ScannerDock::navigationCatalog(const ScannerDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (int index = 0; index < 3; ++index)
+    {
+        schema.append(ks::ui::PageNavigationTabDescriptor(navigationDefinition(index)));
+        if (index == 1 && existing) schema += existing->m_resultNavigationSchema;
+    }
+    if (existing) schema = existing->m_navigationTabs.describe(std::move(schema));
+    // 子目录由原编辑器拥有，不送入本页Tab表重写状态。
+    auto children = ks::ui::SnapshotWorkbenchWidget::navigationCatalog(existing ? existing->m_analysisEditor : nullptr);
+    for (auto& child : children)
+    {
+        child.id.prepend(QStringLiteral("analysis:"));
+        child.parentId = child.parentId.isEmpty() ? QStringLiteral("analysis") : QStringLiteral("analysis:") + child.parentId;
+    }
+    for (qsizetype index = children.size(); index > 0; --index) schema.insert(1, children[index - 1]);
+    return schema;
+}
+QWidget* ScannerDock::activateNavigationDescriptor(const QString& id)
+{
+    const QString prefix = QStringLiteral("analysis:");
+    if (!id.startsWith(prefix)) return m_navigationTabs.activate(id, navigationCatalog(this));
+    const QPointer<ScannerDock> self(this);
+    const QPointer<QWidget> root(m_analysisPage);
+    const QPointer<ks::ui::SnapshotWorkbenchWidget> editor(m_analysisEditor);
+    const auto permitted = [self, &id](bool current) {
+        if (!self) return false;
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        if (!resolved) return false;
+        for (const auto& page : *resolved)
+            if (page.page.id == id) return page.page.visible && page.page.enabled && (!current || page.page.current);
+        return false;
+    };
+    if (!root || !editor || !permitted(false)) return nullptr;
+    if (!m_navigationTabs.activate(QStringLiteral("analysis"), navigationCatalog(this))) return nullptr;
+    if (!self || !root || !editor || self->m_analysisPage != root || self->m_analysisEditor != editor || !permitted(false)) return nullptr;
+    const QPointer<QWidget> target(editor->activateNavigationDescriptor(id.mid(prefix.size())));
+    if (!self || !root || !editor || !target || self->m_analysisPage != root || self->m_analysisEditor != editor
+        || !self->m_mainTabs || self->m_mainTabs->currentWidget() != root || !permitted(true)) return nullptr;
+    return target.data();
+}
+namespace { const bool kScannerNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ScannerDock>(QStringLiteral("misc.scanner")); }

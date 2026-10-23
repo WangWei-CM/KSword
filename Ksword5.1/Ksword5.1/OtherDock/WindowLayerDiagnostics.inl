@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // This module is compiled once through OtherDock.WindowProtection.cpp and injects
 // a diagnostics tab with guarded, reversible layer operations. WindowDetailDialog
@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QEvent>
 #include <QFile>
+#include "../UI/CompleteExport.h"
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QGridLayout>
@@ -44,10 +45,21 @@
 
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/StructuredFieldView.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/ThemeBinding.h"
 
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <memory>
+#include <thread>
+#include <exception>
+#include <atomic>
+#include <deque>
+#include <chrono>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -71,8 +83,15 @@ namespace ks::window::layerdiag
     constexpr DWORD kWindowBandDefault = 0;
     constexpr DWORD kWindowBandUiAccess = 2;
 
+    using FrozenUiTexts = QHash<QString, QString>;
+    thread_local const FrozenUiTexts* workerTexts = nullptr;
+    thread_local const ks::ui::AsyncOperationToken* workerToken = nullptr;
+    bool readCanceled() { return workerToken != nullptr && workerToken->isCanceled(); }
+
     QString uiText(const char* key, const char* fallback)
     {
+        if (workerTexts != nullptr)
+            return workerTexts->value(QString::fromLatin1(key), QString::fromUtf8(fallback));
         return ks::i18n::text(QString::fromLatin1(key), QString::fromUtf8(fallback));
     }
 
@@ -284,6 +303,7 @@ namespace ks::window::layerdiag
         HWND current = ::GetTopWindow(nullptr);
         for (int index = 0; current != nullptr && index < kWalkLimit; ++index)
         {
+            if (readCanceled()) break;
             const quintptr raw = reinterpret_cast<quintptr>(current);
             if (visited.contains(raw))
             {
@@ -614,31 +634,35 @@ namespace ks::window::layerdiag
         return fields.nodes.first();
     }
 
-    struct OwnedWindowEnumContext
+    // One value adjacency snapshot per relationship document. Enumeration order
+    // is retained within each owner, including owner 0; no per-node desktop scan.
+    struct OwnedWindowIndex
     {
-        HWND owner = nullptr;
-        std::vector<HWND>* windows = nullptr;
+        QHash<quintptr, std::vector<HWND>> children;
     };
 
-    std::vector<HWND> directOwnedWindows(HWND owner)
+    OwnedWindowIndex captureOwnedWindows()
     {
-        std::vector<HWND> windows;
-        OwnedWindowEnumContext context{ owner, &windows };
+        OwnedWindowIndex index;
         ::EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL {
-            auto* current = reinterpret_cast<OwnedWindowEnumContext*>(parameter);
-            if (current != nullptr && current->windows != nullptr && ::GetWindow(hwnd, GW_OWNER) == current->owner)
+            if (readCanceled()) return FALSE;
+            auto* current = reinterpret_cast<OwnedWindowIndex*>(parameter);
+            if (current != nullptr)
             {
-                current->windows->push_back(hwnd);
+                const quintptr owner = reinterpret_cast<quintptr>(::GetWindow(hwnd, GW_OWNER));
+                current->children[owner].push_back(hwnd);
             }
             return TRUE;
-        }, reinterpret_cast<LPARAM>(&context));
-        return windows;
+        }, reinterpret_cast<LPARAM>(&index));
+        return index;
     }
 
-    void appendOwnedTree(HWND owner, int depth, QSet<quintptr>& visited,
+    void appendOwnedTree(const OwnedWindowIndex& index, HWND owner, int depth, QSet<quintptr>& visited,
         QVector<ks::ui::FieldNode>& nodes)
     {
-        const std::vector<HWND> children = directOwnedWindows(owner);
+        const auto found = index.children.constFind(reinterpret_cast<quintptr>(owner));
+        if (found == index.children.cend()) return;
+        const std::vector<HWND>& children = found.value();
         if (depth > 12)
         {
             if (!children.empty())
@@ -653,6 +677,7 @@ namespace ks::window::layerdiag
 
         for (HWND child : children)
         {
+            if (readCanceled()) return;
             ks::ui::FieldNode node = windowNode(child);
             const quintptr raw = reinterpret_cast<quintptr>(child);
             if (visited.contains(raw))
@@ -665,7 +690,7 @@ namespace ks::window::layerdiag
             else
             {
                 visited.insert(raw);
-                appendOwnedTree(child, depth + 1, visited, node.children);
+                appendOwnedTree(index, child, depth + 1, visited, node.children);
             }
             nodes.push_back(node);
         }
@@ -673,6 +698,7 @@ namespace ks::window::layerdiag
 
     ks::ui::FieldDocument relationshipDocument(HWND target)
     {
+        const OwnedWindowIndex index = captureOwnedWindows();
         ks::ui::FieldDocument document;
         document.nodes.push_back(windowNode(target, uiText("window.layer.relations.target", "[目标]")));
         auto appendChain = [&document](const QString& title, HWND first, auto next) {
@@ -687,7 +713,8 @@ namespace ks::window::layerdiag
                 children->push_back(windowNode(current));
                 auto& node = children->last();
                 children = &node.children;
-                const quintptr raw = reinterpret_cast<quintptr>(current);
+                if (readCanceled()) break;
+            const quintptr raw = reinterpret_cast<quintptr>(current);
                 if (visited.contains(raw))
                 {
                     ks::ui::FieldNode cycle;
@@ -718,7 +745,7 @@ namespace ks::window::layerdiag
         document.nodes.last().children.push_back(windowNode(::GetLastActivePopup(target), QStringLiteral("GetLastActivePopup")));
         document.section(uiText("window.layer.relations.owned_tree", "[直接/间接 Owned 窗口树]"));
         QSet<quintptr> visited{ reinterpret_cast<quintptr>(target) };
-        appendOwnedTree(target, 0, visited, document.nodes.last().children);
+        appendOwnedTree(index, target, 0, visited, document.nodes.last().children);
         if (document.nodes.last().children.isEmpty()) document.note(QStringLiteral("<none>"));
         return document;
     }
@@ -1029,8 +1056,9 @@ namespace ks::window::layerdiag
         return document;
     }
 
-    QJsonArray zOrderJson()
+    QJsonArray zOrderJson(bool* complete = nullptr)
     {
+        if (complete != nullptr) *complete = true;
         QJsonArray array;
         QSet<quintptr> visited;
         QHash<DWORD, int> bandPositions;
@@ -1039,7 +1067,7 @@ namespace ks::window::layerdiag
         for (int index = 0; hwnd != nullptr && index < kWalkLimit; ++index)
         {
             const quintptr raw = reinterpret_cast<quintptr>(hwnd);
-            if (visited.contains(raw)) break;
+            if (visited.contains(raw)) { if (complete != nullptr) *complete = false; break; }
             visited.insert(raw);
 
             DWORD pid = 0;
@@ -1080,6 +1108,7 @@ namespace ks::window::layerdiag
             array.append(item);
             hwnd = ::GetWindow(hwnd, GW_HWNDNEXT);
         }
+        if (hwnd != nullptr && complete != nullptr) *complete = false;
         return array;
     }
 
@@ -1102,11 +1131,441 @@ namespace ks::window::layerdiag
         }
     }
 
-    class Page;
-    QMutex& hookMutex() { static QMutex mutex; return mutex; }
-    QHash<quintptr, QPointer<Page>>& hookOwners()
+
+    struct DesktopValue
     {
-        static QHash<quintptr, QPointer<Page>> owners;
+        HDESK handle = nullptr;
+        DWORD error = ERROR_SUCCESS;
+        ~DesktopValue() { if (handle != nullptr) ::CloseDesktop(handle); }
+    };
+
+    std::shared_ptr<DesktopValue> captureDesktopValue()
+    {
+        auto desktop = std::make_shared<DesktopValue>();
+        HANDLE duplicate = nullptr;
+        if (::DuplicateHandle(::GetCurrentProcess(), ::GetThreadDesktop(::GetCurrentThreadId()),
+            ::GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            desktop->handle = static_cast<HDESK>(duplicate);
+        else desktop->error = ::GetLastError();
+        return desktop;
+    }
+
+    enum class ReadKind { Refresh, Compare, Analysis };
+    struct ReadRequest
+    {
+        HWND target = nullptr;
+        HWND other = nullptr;
+        DWORD initialPid = 0, initialTid = 0;
+        QString initialClass;
+        ReadKind kind = ReadKind::Refresh;
+        std::optional<Snapshot> seed;
+        QString reason;
+        FrozenUiTexts texts;
+        std::shared_ptr<DesktopValue> desktop;
+    };
+    struct ReadReply
+    {
+        DWORD error = ERROR_SUCCESS;
+        bool invalidCompare = false;
+        Snapshot snapshot;
+        ks::ui::FieldDocument output, relationships, diagnosis;
+    };
+
+    FrozenUiTexts freezeReadTexts()
+    {
+        FrozenUiTexts texts;
+        texts.insert(QStringLiteral("window.layer.relations.target"), uiText("window.layer.relations.target", "[目标]"));
+        texts.insert(QStringLiteral("window.layer.relations.parent_chain"), uiText("window.layer.relations.parent_chain", "[Parent 链]"));
+        texts.insert(QStringLiteral("window.layer.relations.owner_chain"), uiText("window.layer.relations.owner_chain", "[Owner 链]"));
+        texts.insert(QStringLiteral("window.layer.relations.roots"), uiText("window.layer.relations.roots", "[Root / RootOwner / LastActivePopup]"));
+        texts.insert(QStringLiteral("window.layer.relations.owned_tree"), uiText("window.layer.relations.owned_tree", "[直接/间接 Owned 窗口树]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.invalid"), uiText("window.layer.diagnosis.invalid", "目标 HWND 已失效，不能执行层级操作。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.child"), uiText("window.layer.diagnosis.child", "目标是子窗口；Z 序只在同一父窗口的兄弟窗口之间有意义，不能设置 Window Band。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.session"), uiText("window.layer.diagnosis.session", "目标与 KSword 位于不同 Session，User32 层级操作不会跨 Session 生效。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.desktop"), uiText("window.layer.diagnosis.desktop", "目标与 KSword 位于不同 Desktop；当前线程不能直接调整其 Z 序。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uipi"), uiText("window.layer.diagnosis.uipi", "目标完整性级别高于 KSword，且当前令牌没有 UIAccess；操作可能被 UIPI 拒绝。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.app_container"), uiText("window.layer.diagnosis.app_container", "目标属于 AppContainer；部分窗口属性和跨进程操作会被限制。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.special_band"), uiText("window.layer.diagnosis.special_band", "目标位于系统或沉浸式 Window Band；Band ID 不能按数字比较，系统可能拒绝移动。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.cloaked"), uiText("window.layer.diagnosis.cloaked", "目标被 DWM Cloak；改变 Z 序不一定会让它出现在屏幕上。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.owner"), uiText("window.layer.diagnosis.owner", "目标存在 Owner/Owned 关系；TopMost 变化可能连带影响整个所有者窗口组。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.no_activate"), uiText("window.layer.diagnosis.no_activate", "目标带 WS_EX_NOACTIVATE；置顶不代表能够获得前台焦点。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.band_api_missing"), uiText("window.layer.diagnosis.band_api_missing", "当前系统未导出 GetWindowBand，无法验证 Band 操作结果。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.set_band_missing"), uiText("window.layer.diagnosis.set_band_missing", "当前系统未导出 SetWindowBand，UIAccess Band 操作不可用。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.capabilities"), uiText("window.layer.diagnosis.capabilities", "[能力状态]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uiaccess_ready"), uiText("window.layer.diagnosis.uiaccess_ready", "当前 KSword 令牌已带 UIAccess，可尝试实验性 UIAccess Band 操作。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uiaccess_missing"), uiText("window.layer.diagnosis.uiaccess_missing", "当前 KSword 令牌没有 UIAccess；请使用主窗口 UIAccess 按钮重启后再试 UIAccess Band。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.blockers"), uiText("window.layer.diagnosis.blockers", "[可能阻断项]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.none"), uiText("window.layer.diagnosis.none", "未发现明确阻断项；最终以 API 返回值和回读结果为准。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.cautions"), uiText("window.layer.diagnosis.cautions", "[风险提示]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.no_cautions"), uiText("window.layer.diagnosis.no_cautions", "未发现额外结构风险。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.foreground_note"), uiText("window.layer.diagnosis.foreground_note", "说明：置顶、前台激活和实际像素命中是不同状态；本页分别验证，不将其合并为一个“层级”。"));
+        return texts;
+    }
+
+    ReadReply collectRead(const ReadRequest& request, const ks::ui::AsyncOperationToken& token)
+    {
+        ReadReply reply;
+        std::exception_ptr failure;
+        // A fresh native thread binds the caller's duplicated desktop before
+        // any User32 query. Only the pool worker waits; a closing page never joins.
+        std::thread collector([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle && ::SetThreadDesktop(request.desktop->handle);
+            if (!bound) {
+                reply.error = request.desktop && request.desktop->error != ERROR_SUCCESS
+                    ? request.desktop->error : ::GetLastError();
+                if (reply.error == ERROR_SUCCESS) reply.error = ERROR_INVALID_HANDLE;
+                return;
+            }
+            workerTexts = &request.texts;
+            workerToken = &token;
+            try {
+                if (!token.isCanceled()) {
+                    reply.snapshot = request.seed.has_value() ? *request.seed : capture(request.target);
+                    if (reply.snapshot.valid && !sameWindowIdentity(reply.snapshot, request.target)) reply.snapshot.valid = false;
+                    if (!token.isCanceled()) {
+                        if (request.kind == ReadKind::Compare) {
+                            const Snapshot other = capture(request.other);
+                            reply.invalidCompare = !other.valid || !sameWindowIdentity(other, request.other);
+                            reply.output = compareDocument(reply.snapshot, other);
+                            ks::ui::FieldNode aNode, bNode;
+                            aNode.kind = bNode.kind = ks::ui::FieldNode::Kind::Section;
+                            aNode.name = QStringLiteral("A"); bNode.name = QStringLiteral("B");
+                            aNode.children = snapshotDocument(reply.snapshot, request.initialPid, request.initialTid, request.initialClass).nodes;
+                            bNode.children = snapshotDocument(other, other.pid, other.tid, other.cls).nodes;
+                            reply.output.nodes.push_back(aNode); reply.output.nodes.push_back(bNode);
+                        } else reply.output = snapshotDocument(reply.snapshot, request.initialPid, request.initialTid, request.initialClass);
+                    }
+                    if (!token.isCanceled()) reply.relationships = relationshipDocument(request.target);
+                    if (!token.isCanceled()) reply.diagnosis = diagnosisDocument(reply.snapshot, tokenInfo(::GetCurrentProcessId()),
+                        objectName(::GetThreadDesktop(::GetCurrentThreadId())), resolveSetWindowBandFunction() != nullptr);
+                }
+            } catch (...) { failure = std::current_exception(); }
+            workerTexts = nullptr; workerToken = nullptr;
+            ::SetThreadDesktop(previous);
+        });
+        collector.join();
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+
+    // Append-only immutable chunks keep export capture and later GUI appends
+    // constant in total history size. Destruction walks unique tails iteratively.
+    template<class T> struct HistoryChunk
+    {
+        std::shared_ptr<const HistoryChunk<T>> previous;
+        QVector<T> values;
+        quint64 count = 0;
+        ~HistoryChunk()
+        {
+            auto cursor = std::move(previous);
+            while (cursor && cursor.use_count() == 1) {
+                auto owned = std::const_pointer_cast<HistoryChunk<T>>(std::move(cursor));
+                cursor = std::move(owned->previous);
+                owned.reset();
+            }
+        }
+    };
+    template<class T> using HistoryRoot = std::shared_ptr<const HistoryChunk<T>>;
+    template<class T> void appendHistory(HistoryRoot<T>& root, QVector<T> values)
+    {
+        if (values.isEmpty()) return;
+        auto chunk = std::make_shared<HistoryChunk<T>>();
+        chunk->previous = root;
+        chunk->count = (root ? root->count : 0) + static_cast<quint64>(values.size());
+        chunk->values = std::move(values);
+        root = ks::ui::RetainCompleteExportSnapshot<HistoryChunk<T>>(chunk);
+    }
+    template<class T> QVector<T> historyValues(const HistoryRoot<T>& root)
+    {
+        QVector<T> values;
+        if (!root) return values;
+        if (root->count > static_cast<quint64>(std::numeric_limits<qsizetype>::max()))
+            throw std::length_error("history size");
+        values.reserve(static_cast<qsizetype>(root->count));
+        QVector<const HistoryChunk<T>*> chunks;
+        for (auto cursor = root.get(); cursor != nullptr; cursor = cursor->previous.get()) chunks.append(cursor);
+        for (auto it = chunks.crbegin(); it != chunks.crend(); ++it) values += (*it)->values;
+        return values;
+    }
+    QStringList historyTail(const HistoryRoot<QString>& root, qsizetype maximum)
+    {
+        QStringList lines;
+        for (auto cursor = root.get(); cursor != nullptr && lines.size() < maximum; cursor = cursor->previous.get())
+            for (qsizetype index = cursor->values.size(); index > 0 && lines.size() < maximum; --index)
+                lines.append(cursor->values[index - 1]);
+        std::reverse(lines.begin(), lines.end());
+        return lines;
+    }
+
+    struct ZOrderTraversal
+    {
+        std::atomic_bool known{false}, complete{false};
+    };
+    struct ZOrderExportValue
+    {
+        std::shared_ptr<DesktopValue> desktop;
+        std::shared_ptr<ZOrderTraversal> traversal;
+    };
+    struct ZOrderExportPayload
+    {
+        DWORD desktopError = ERROR_SUCCESS;
+        QByteArray bytes;
+        quint64 rows = 0;
+    };
+    ZOrderExportPayload collectZOrderExport(const ZOrderExportValue& request)
+    {
+        ZOrderExportPayload reply;
+        std::exception_ptr failure;
+        std::thread collector([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle && ::SetThreadDesktop(request.desktop->handle);
+            if (!bound) {
+                reply.desktopError = request.desktop && request.desktop->error != ERROR_SUCCESS ? request.desktop->error : ::GetLastError();
+                if (reply.desktopError == ERROR_SUCCESS) reply.desktopError = ERROR_INVALID_HANDLE;
+                return;
+            }
+            try {
+                QJsonObject root;
+                root.insert(QStringLiteral("generatedAt"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+                root.insert(QStringLiteral("warning"), QStringLiteral("Band IDs are identifiers, not linear z-height."));
+                bool complete = true;
+                const QJsonArray windows = zOrderJson(&complete);
+                request.traversal->complete.store(complete);
+                request.traversal->known.store(true);
+                root.insert(QStringLiteral("windows"), windows);
+                root.insert(QStringLiteral("complete"), complete);
+                root.insert(QStringLiteral("walkLimit"), kWalkLimit);
+                root.insert(QStringLiteral("enumeratedCount"), windows.size());
+                reply.rows = static_cast<quint64>(windows.size());
+                reply.bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+            } catch (...) { failure = std::current_exception(); }
+            ::SetThreadDesktop(previous);
+        });
+        collector.join();
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+    struct ZOrderExportFormatter
+    {
+        bool operator()(const ZOrderExportValue& value, ks::ui::CompleteExportSink& sink,
+            const ks::i18n::SourceTextSnapshot&) const
+        {
+            const auto payload = collectZOrderExport(value);
+            if (payload.desktopError != ERROR_SUCCESS) {
+                sink.fail(ks::ui::CompleteExportError::FormatFailed,
+                    QStringLiteral("SetThreadDesktop: %1").arg(payload.desktopError)); return false;
+            }
+            return sink.writeUtf8(QByteArrayView(payload.bytes)) && sink.rowsCompleted(payload.rows);
+        }
+    };
+
+    class Page;
+    constexpr std::size_t kEventIngressLimit = 8192;
+    constexpr std::size_t kEventBatchLimit = 256;
+    constexpr qint64 kEventSampleIntervalMs = 100;
+    struct RawWinEvent
+    {
+        quint64 sequence = 0, session = 0;
+        QDateTime receivedAt;
+        DWORD event = 0;
+        HWND hwnd = nullptr;
+        LONG objectId = 0, childId = 0;
+        DWORD tid = 0, nativeTime = 0;
+        bool baseline = false;
+    };
+    struct DroppedWinEvents
+    {
+        quint64 session = 0, count = 0, first = 0, last = 0;
+    };
+    struct SnapshotExportValue
+    {
+        Snapshot snapshot;
+        bool rollbackPending = false;
+        ks::ui::FieldDocument output, relationships, diagnosis;
+        HistoryRoot<RawWinEvent> events;
+        HistoryRoot<DroppedWinEvents> drops;
+        HistoryRoot<QString> eventLog, operationLog;
+        QVector<RawWinEvent> pendingEvents;
+        QVector<DroppedWinEvents> pendingDrops;
+        DWORD initialPid = 0, initialTid = 0;
+        QString initialClass;
+        quint64 expectedRows() const
+        {
+            return 1 + (events ? events->count : 0) + static_cast<quint64>(pendingEvents.size()) +
+                (drops ? drops->count : 0) + static_cast<quint64>(pendingDrops.size());
+        }
+    };
+    struct SnapshotExportFormatter
+    {
+        bool operator()(const SnapshotExportValue& value, ks::ui::CompleteExportSink& sink,
+            const ks::i18n::SourceTextSnapshot& frozen) const
+        {
+            const auto translate = [frozen](const QString& source) { return frozen.sourceText(source); };
+            const auto& current = value.snapshot;
+            QJsonObject root;
+            root.insert(QStringLiteral("schemaVersion"), 2);
+            root.insert(QStringLiteral("capturedAt"), current.time.toString(Qt::ISODateWithMs));
+            root.insert(QStringLiteral("hwnd"), hwndText(current.hwnd));
+            root.insert(QStringLiteral("bandSuccess"), current.band.ok);
+            root.insert(QStringLiteral("band"), static_cast<double>(current.band.value));
+            root.insert(QStringLiteral("bandName"), bandName(current.band.value));
+            root.insert(QStringLiteral("zOrderIndex"), current.z);
+            root.insert(QStringLiteral("bandZOrderIndex"), current.bandZ);
+            root.insert(QStringLiteral("topMostGroupZOrderIndex"), current.topMostGroupZ);
+            root.insert(QStringLiteral("topMostGroupWindowCount"), current.topMostGroupWindowCount);
+            root.insert(QStringLiteral("rollbackPending"), value.rollbackPending);
+            root.insert(QStringLiteral("relationships"), value.relationships.toPlainText(translate));
+            root.insert(QStringLiteral("diagnosis"), value.diagnosis.toPlainText(translate));
+            auto raw = historyValues(value.events); raw += value.pendingEvents;
+            auto drops = historyValues(value.drops); drops += value.pendingDrops;
+            QJsonArray events, lost;
+            for (const auto& record : raw) {
+                QJsonObject item;
+                item.insert(QStringLiteral("sequence"), QString::number(record.sequence));
+                item.insert(QStringLiteral("session"), QString::number(record.session));
+                item.insert(QStringLiteral("receivedAt"), record.receivedAt.toString(Qt::ISODateWithMs));
+                item.insert(QStringLiteral("event"), static_cast<double>(record.event));
+                item.insert(QStringLiteral("hwnd"), hwndText(record.hwnd));
+                item.insert(QStringLiteral("objectId"), static_cast<int>(record.objectId));
+                item.insert(QStringLiteral("childId"), static_cast<int>(record.childId));
+                item.insert(QStringLiteral("tid"), static_cast<double>(record.tid));
+                item.insert(QStringLiteral("nativeTime"), static_cast<double>(record.nativeTime));
+                events.append(item);
+            }
+            for (const auto& drop : drops) {
+                QJsonObject item;
+                item.insert(QStringLiteral("session"), QString::number(drop.session));
+                item.insert(QStringLiteral("count"), QString::number(drop.count));
+                item.insert(QStringLiteral("firstSequence"), QString::number(drop.first));
+                item.insert(QStringLiteral("lastSequence"), QString::number(drop.last)); lost.append(item);
+            }
+            root.insert(QStringLiteral("events"), events); root.insert(QStringLiteral("droppedEvents"), lost);
+            root.insert(QStringLiteral("eventLog"), historyValues(value.eventLog).join(QChar::LineFeed));
+            root.insert(QStringLiteral("eventTargetPid"), static_cast<double>(value.initialPid));
+            root.insert(QStringLiteral("eventTargetTid"), static_cast<double>(value.initialTid));
+            root.insert(QStringLiteral("eventTargetClass"), value.initialClass);
+            root.insert(QStringLiteral("operationLog"), historyValues(value.operationLog).join(QChar::LineFeed));
+            root.insert(QStringLiteral("text"), value.output.toPlainText(translate));
+            const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+            return sink.writeUtf8(QByteArrayView(bytes)) && sink.rowsCompleted(1 + static_cast<quint64>(raw.size()) + static_cast<quint64>(drops.size()));
+        }
+    };
+
+    struct EventMailbox
+    {
+        enum class Wake { Idle, Queued, Blocked };
+        QMutex mutex;
+        std::deque<RawWinEvent> pending;
+        QVector<DroppedWinEvents> dropped;
+        quint64 nextSequence = 0;
+        Wake wake = Wake::Idle;
+        bool closed = false;
+        const std::shared_ptr<ks::ui::AsyncUiDispatcher> dispatcher;
+        Page* const receiver; // Dereferenced only inside dispatcher-gated UI delivery.
+        EventMailbox(std::shared_ptr<ks::ui::AsyncUiDispatcher> gate, Page* owner)
+            : dispatcher(std::move(gate)), receiver(owner) {}
+    };
+    struct TrackingRoute
+    {
+        std::shared_ptr<EventMailbox> mailbox;
+        quint64 session = 0;
+        std::atomic_bool active{true};
+    };
+    void postEventDrain(const std::shared_ptr<EventMailbox>& mailbox);
+    void queueEvent(const std::shared_ptr<TrackingRoute>& route, RawWinEvent event);
+
+    qint64 eventClockMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    struct EventReadRequest
+    {
+        HWND target = nullptr;
+        QVector<RawWinEvent> records;
+        std::optional<Snapshot> previous;
+        FrozenUiTexts texts;
+        std::shared_ptr<DesktopValue> desktop;
+        qint64 notBefore = 0;
+        DWORD initialPid = 0, initialTid = 0;
+        QString initialClass;
+    };
+    struct EventReadReply
+    {
+        DWORD error = ERROR_SUCCESS;
+        bool targetIdentityChanged = false;
+        quint64 session = 0;
+        std::optional<Snapshot> snapshot;
+        QStringList lines;
+        qint64 sampledClock = 0;
+    };
+
+    EventReadReply collectEventRead(const EventReadRequest& request, const ks::ui::AsyncOperationToken& token)
+    {
+        EventReadReply reply;
+        std::exception_ptr failure;
+        std::thread collector([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle && ::SetThreadDesktop(request.desktop->handle);
+            if (!bound) {
+                reply.error = request.desktop && request.desktop->error != ERROR_SUCCESS ? request.desktop->error : ::GetLastError();
+                if (reply.error == ERROR_SUCCESS) reply.error = ERROR_INVALID_HANDLE;
+                return;
+            }
+            workerTexts = &request.texts; workerToken = &token;
+            try {
+                QVector<RawWinEvent> relevant;
+                bool baseline = false;
+                for (const auto& record : request.records) {
+                    if (token.isCanceled()) break;
+                    reply.session = record.session;
+                    if (record.baseline) { baseline = true; continue; }
+                    const bool related = record.event == EVENT_SYSTEM_FOREGROUND || (record.hwnd != nullptr &&
+                        (record.hwnd == request.target || ::GetAncestor(record.hwnd, GA_ROOT) == request.target ||
+                         ::GetAncestor(record.hwnd, GA_ROOTOWNER) == request.target));
+                    if (!related) continue;
+                    relevant.append(record);
+                    reply.lines << QStringLiteral("[%1] %2 hwnd=%3 object=%4 child=%5 tid=%6 time=%7")
+                        .arg(record.receivedAt.toString(QStringLiteral("HH:mm:ss.zzz")))
+                        .arg(winEventName(record.event), hwndText(record.hwnd))
+                        .arg(record.objectId).arg(record.childId).arg(record.tid).arg(record.nativeTime);
+                }
+                if ((baseline || !relevant.isEmpty()) && !token.isCanceled()) {
+                    while (!token.isCanceled() && eventClockMs() < request.notBefore)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    if (!token.isCanceled()) {
+                        const Snapshot now = capture(request.target);
+                        if (now.valid && (now.pid != request.initialPid || now.tid != request.initialTid ||
+                            now.cls != request.initialClass || !sameWindowIdentity(now, request.target))) {
+                            reply.targetIdentityChanged = true;
+                        } else reply.snapshot = now;
+                        reply.sampledClock = eventClockMs();
+                        reply.lines << uiText("window.layer.events.sample",
+                            "采样 %1；关联事件序号 %2–%3（%4 个相关事件），不是逐事件瞬时状态。")
+                            .arg(now.time.toString(QStringLiteral("HH:mm:ss.zzz")))
+                            .arg(relevant.isEmpty() ? 0 : relevant.first().sequence)
+                            .arg(relevant.isEmpty() ? 0 : relevant.last().sequence).arg(relevant.size());
+                        if (request.previous.has_value() && !reply.targetIdentityChanged) {
+                            const QStringList changes = diff(*request.previous, now);
+                            if (changes.isEmpty()) reply.lines << QStringLiteral("change: <无关键字段变化>");
+                            else for (const QString& change : changes) reply.lines << QStringLiteral("change: %1").arg(change);
+                        }
+                    }
+                }
+            } catch (...) { failure = std::current_exception(); }
+            workerTexts = nullptr; workerToken = nullptr;
+            ::SetThreadDesktop(previous);
+        });
+        collector.join();
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+
+    QMutex& hookMutex() { static QMutex mutex; return mutex; }
+    QHash<quintptr, std::shared_ptr<TrackingRoute>>& hookOwners()
+    {
+        static QHash<quintptr, std::shared_ptr<TrackingRoute>> owners;
         return owners;
     }
 
@@ -1118,55 +1577,122 @@ namespace ks::window::layerdiag
         explicit Page(HWND target, QWidget* parent = nullptr)
             : QWidget(parent), m_target(target)
         {
+            // Keep the original identity boundary while deferring all controls
+            // and desktop services until this stable shell is actually visited.
             m_initialTid = ::GetWindowThreadProcessId(m_target, &m_initialPid);
             m_initialClass = className(m_target);
-            buildUi();
-            refresh(uiText("window.layer.status.initial_snapshot", "初始快照"));
         }
 
         ~Page() override
         {
+            if (!m_initialRequested) return;
+            m_exportOperation->close();
+            m_eventDispatcher->close();
+            m_eventOperation->close();
+            { QMutexLocker locker(&m_eventMailbox->mutex); m_eventMailbox->closed = true; }
+            m_readOperation->close();
             if (m_rollbackBaseline.has_value())
             {
                 restoreOriginalState(false);
             }
             stopTracking();
+            // Each immutable history root owns an independent retirement alias.
+            // Fields are value documents too; hold their last backing owners in
+            // the same retire service before QObject/member destruction.
+            replaceReportDocument(m_outputDocument, {});
+            replaceReportDocument(m_relationshipDocument, {});
+            replaceReportDocument(m_diagnosisDocument, {});
         }
 
-        void onWinEvent(DWORD event, HWND eventHwnd, LONG objectId, LONG childId, DWORD eventTid, DWORD eventTime)
+        void drainEventIngress(const std::shared_ptr<EventMailbox>& mailbox)
         {
-            if (!m_tracking) return;
-            bool relevant = event == EVENT_SYSTEM_FOREGROUND;
-            if (!relevant && eventHwnd != nullptr)
-            {
-                relevant = eventHwnd == m_target ||
-                    ::GetAncestor(eventHwnd, GA_ROOT) == m_target ||
-                    ::GetAncestor(eventHwnd, GA_ROOTOWNER) == m_target;
+            if (mailbox != m_eventMailbox) return;
+            QVector<RawWinEvent> records;
+            QVector<DroppedWinEvents> dropped;
+            { QMutexLocker locker(&mailbox->mutex);
+              if (mailbox->closed) return;
+              if (m_eventOperation->isBusy()) { mailbox->wake = EventMailbox::Wake::Blocked; return; }
+              dropped.swap(mailbox->dropped);
+              if (!mailbox->pending.empty()) {
+                  const quint64 session = mailbox->pending.front().session;
+                  while (!mailbox->pending.empty() && records.size() < static_cast<qsizetype>(kEventBatchLimit) &&
+                      mailbox->pending.front().session == session) {
+                      const bool baseline = mailbox->pending.front().baseline;
+                      records.append(std::move(mailbox->pending.front())); mailbox->pending.pop_front();
+                      if (baseline) break;
+                  }
+              }
+              mailbox->wake = mailbox->pending.empty() ? EventMailbox::Wake::Idle : EventMailbox::Wake::Blocked;
             }
-            if (!relevant) return;
+            // Publish the complete canonical batch before any widget signal can
+            // reenter export/STOP/close. Locals must never temporarily hide data.
+            QVector<RawWinEvent> accepted;
+            for (const auto& record : records) if (!record.baseline) accepted.append(record);
+            appendHistory(m_eventArchiveRoot, std::move(accepted));
+            appendHistory(m_droppedEventsRoot, dropped);
+            QStringList dropLines;
+            for (const auto& drop : dropped) {
+                dropLines << uiText("window.layer.events.dropped",
+                    "事件入口队列溢出：丢弃 %1 条（序号 %2–%3）；原始事件导出保留该计数。")
+                    .arg(drop.count).arg(drop.first).arg(drop.last);
+            }
+            const QPointer<Page> guard(this);
+            appendEventLines(dropLines);
+            if (!guard) return;
+            if (records.isEmpty()) return;
+            FrozenUiTexts texts = freezeReadTexts();
+            texts.insert(QStringLiteral("window.layer.events.sample"), uiText("window.layer.events.sample",
+                "采样 %1；关联事件序号 %2–%3（%4 个相关事件），不是逐事件瞬时状态。"));
+            const auto baseline = m_eventBaselines.constFind(records.first().session);
+            const EventReadRequest request{ m_target, records,
+                baseline != m_eventBaselines.cend() ? std::optional<Snapshot>(baseline.value()) : std::nullopt,
+                texts, m_desktop, m_nextEventSampleMs, m_initialPid, m_initialTid, m_initialClass };
+            m_eventOperation->submit<EventReadRequest, EventReadReply>(request,
+                [](const EventReadRequest& value, const ks::ui::AsyncOperationToken& token) { return collectEventRead(value, token); },
+                [this](const EventReadReply& reply, std::uint64_t) {
+                    if (reply.sampledClock > 0) m_nextEventSampleMs = reply.sampledClock + kEventSampleIntervalMs;
+                    if (reply.targetIdentityChanged) {
+                        const QString message = uiText("window.layer.status.identity_changed",
+                            "目标 HWND 已失效或已被复用；为避免修改错误窗口，操作已取消。");
+                        m_status->setText(message);
+                        appendEventLines(reply.lines + QStringList{message});
+                        return true;
+                    }
+                    if (reply.error != ERROR_SUCCESS) {
+                        const QString message = uiText("window.layer.status.operation_failed",
+                            "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                            .arg(QStringLiteral("WinEvent")).arg(reply.error);
+                        m_status->setText(message);
+                        appendEventLines({message}); return true;
+                    }
+                    if (reply.snapshot.has_value()) {
+                        m_eventBaselines.insert(reply.session, *reply.snapshot);
+                        if (m_tracking && m_trackingRoute && reply.session == m_trackingRoute->session) m_eventSnapshot = reply.snapshot;
+                    }
+                    appendEventLines(reply.lines);
+                    return true;
+                }, [this](std::exception_ptr) {
+                    const QString message = uiText("window.layer.status.operation_failed",
+                        "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                        .arg(QStringLiteral("WinEvent")).arg(ERROR_GEN_FAILURE);
+                    m_status->setText(message); appendEventLines({message});
+                });
+        }
 
-            const Snapshot now = capture(m_target);
-            QStringList lines;
-            lines << QStringLiteral("[%1] %2 hwnd=%3 object=%4 child=%5 tid=%6 time=%7")
-                .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")))
-                .arg(winEventName(event), hwndText(eventHwnd))
-                .arg(objectId).arg(childId).arg(eventTid).arg(eventTime);
-            if (m_eventSnapshot.has_value())
-            {
-                const QStringList changes = diff(*m_eventSnapshot, now);
-                if (changes.isEmpty()) lines << QStringLiteral("change: <无关键字段变化>");
-                else for (const QString& change : changes) lines << QStringLiteral("change: %1").arg(change);
+    protected:
+        void showEvent(QShowEvent* event) override
+        {
+            QWidget::showEvent(event);
+            const QPointer<Page> self(this);
+            if (!m_initialRequested) {
+                m_initialRequested = true;
+                const ks::ui::ScopedWidgetThemePreparation themePreparation(this);
+                initializePage();
+                if (!self) return;
+                refresh(uiText("window.layer.status.initial_snapshot", "初始快照"));
+                if (!self) return;
             }
-            m_eventSnapshot = now;
-            m_events->appendPlainText(lines.join(QChar::LineFeed) + QStringLiteral("\n"));
-            while (m_events->document()->blockCount() > kEventBlockLimit)
-            {
-                QTextCursor cursor(m_events->document());
-                cursor.movePosition(QTextCursor::Start);
-                cursor.select(QTextCursor::BlockUnderCursor);
-                cursor.removeSelectedText();
-                cursor.deleteChar();
-            }
+            projectVisibleDocuments();
         }
 
     private:
@@ -1181,6 +1707,38 @@ namespace ks::window::layerdiag
             MoveUiAccessBand,
             MoveDefaultBand
         };
+
+        void initializePage()
+        {
+            m_readOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_desktop = captureDesktopValue();
+            m_exportOperation = std::make_unique<ks::ui::CompleteExportOperation>(this);
+            m_exportOperation->setStateChangedCallback([this] {
+                const QPointer<Page> guard(this);
+                const bool busy = m_exportOperation->isBusy();
+                if (m_exportZButton != nullptr) m_exportZButton->setEnabled(!busy);
+                if (!guard) return;
+                if (m_snapshotExportButton != nullptr) m_snapshotExportButton->setEnabled(!busy);
+                if (guard && !busy && m_exportAfterRead && !m_reportBusy) {
+                    m_exportAfterRead = false;
+                    QTimer::singleShot(0, this, [this] { exportSnapshot(); });
+                }
+            });
+            m_eventOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_eventDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+            m_eventMailbox = std::make_shared<EventMailbox>(m_eventDispatcher, this);
+            m_eventOperation->setStateChangedCallback([this] {
+                if (m_eventOperation->isBusy()) return;
+                bool post = false;
+                { QMutexLocker locker(&m_eventMailbox->mutex);
+                  if (!m_eventMailbox->closed && m_eventMailbox->wake == EventMailbox::Wake::Blocked) {
+                      m_eventMailbox->wake = EventMailbox::Wake::Queued; post = true;
+                  } }
+                if (post) postEventDrain(m_eventMailbox);
+            });
+            buildUi();
+            // Hidden WindowDetailDialog tabs perform no desktop-wide query.
+        }
 
         void buildUi()
         {
@@ -1295,6 +1853,7 @@ namespace ks::window::layerdiag
             m_relationships->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
             m_diagnostics = new ks::ui::StructuredFieldView(tabs);
             m_events = new CodeTextEdit(tabs);
+            m_events->setMaximumBlockCount(kEventBlockLimit);
             for (QPlainTextEdit* edit : { m_events })
             {
                 static_cast<CodeTextEdit*>(edit)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
@@ -1332,7 +1891,9 @@ namespace ks::window::layerdiag
             bindUiText(refreshButton, "window.layer.action.refresh", "刷新");
             bindUiText(delayedButton, "window.layer.action.delayed_snapshot", "3 秒后快照");
             bindUiText(copyButton, "window.layer.action.copy", "复制");
+            m_snapshotExportButton = exportButton;
             bindUiText(exportButton, "window.layer.action.export_snapshot", "导出快照");
+            m_exportZButton = exportZButton;
             bindUiText(exportZButton, "window.layer.action.export_z_order", "导出完整 Z 序");
             bindUiText(pickButton, "window.layer.action.pick_top_window", "取鼠标下顶层窗口");
             bindUiText(compareButton, "window.layer.action.compare", "对比");
@@ -1364,6 +1925,8 @@ namespace ks::window::layerdiag
                 tabs, m_diagnostics, QStringLiteral("window.layer.tab.diagnostics"), QStringLiteral("失败原因诊断"));
             ks::i18n::LanguageManager::instance().bindTab(
                 tabs, m_events, QStringLiteral("window.layer.tab.events"), QStringLiteral("事件时间线"));
+            m_tabs = tabs;
+            connect(tabs, &QTabWidget::currentChanged, this, [this](int) { projectVisibleDocuments(); });
             updateTrackButtonText();
 
             connect(refreshButton, &QPushButton::clicked, this, [this]() { refresh(uiText("window.layer.status.manual_refresh", "手动刷新")); });
@@ -1377,7 +1940,7 @@ namespace ks::window::layerdiag
                 });
             });
             connect(copyButton, &QPushButton::clicked, this, [this]() {
-                QApplication::clipboard()->setText(m_output->plainText());
+                QApplication::clipboard()->setText(m_outputDocument.toPlainText(true));
                 m_status->setText(uiText("window.layer.status.copied", "已复制。"));
             });
             connect(exportButton, &QPushButton::clicked, this, [this]() { exportSnapshot(); });
@@ -1445,56 +2008,133 @@ namespace ks::window::layerdiag
             {
                 return;
             }
-            m_operationLog->appendPlainText(lines.join(QChar::LineFeed) + QStringLiteral("\n"));
+            const QString block = lines.join(QChar::LineFeed) + QStringLiteral("\n");
+            appendHistory(m_operationLogRoot, QVector<QString>{block});
+            m_operationLog->appendPlainText(block);
+        }
+
+        void invalidateRead()
+        {
+            ++m_readRevision;
+            m_reportBusy = false;
+            m_analysisCoherent = false;
+            m_readOperation->cancel();
+        }
+
+        void projectVisibleDocuments()
+        {
+            if (!isVisible() || m_tabs == nullptr) return;
+            QWidget* current = m_tabs->currentWidget();
+            if (current == m_events && m_eventsDirty) {
+                m_eventsDirty = false;
+                m_events->setPlainText(historyTail(m_eventLogRoot, kEventBlockLimit).join(QChar::LineFeed));
+                return;
+            }
+            if (current == m_output && m_outputDirty) {
+                m_outputDirty = false; m_output->setDocument(m_outputDocument);
+            } else if (current == m_relationships && m_relationshipsDirty) {
+                m_relationshipsDirty = false; m_relationships->setDocument(m_relationshipDocument);
+            } else if (current == m_diagnostics && m_diagnosticsDirty) {
+                m_diagnosticsDirty = false; m_diagnostics->setDocument(m_diagnosisDocument);
+            }
+        }
+
+        void appendEventLines(const QStringList& lines)
+        {
+            if (lines.isEmpty()) return;
+            appendHistory(m_eventLogRoot, lines);
+            m_eventsDirty = true;
+            projectVisibleDocuments();
+        }
+
+        static void replaceReportDocument(ks::ui::FieldDocument& destination,
+            const ks::ui::FieldDocument& document)
+        {
+            auto previous = std::make_shared<const ks::ui::FieldDocument>(destination);
+            const auto retired = ks::ui::RetainCompleteExportSnapshot(previous);
+            previous.reset();
+            destination = document;
+        }
+
+        void publishOutput(const ks::ui::FieldDocument& document)
+        {
+            replaceReportDocument(m_outputDocument, document); m_outputDirty = true;
+            projectVisibleDocuments();
+        }
+
+        void submitRead(ReadKind kind, const QString& reason, HWND other = nullptr,
+            std::optional<Snapshot> seed = std::nullopt)
+        {
+            const auto revision = ++m_readRevision;
+            m_reportBusy = true;
+            m_analysisCoherent = false;
+            const ReadRequest request{ m_target, other, m_initialPid, m_initialTid, m_initialClass,
+                kind, seed, reason, freezeReadTexts(), m_desktop };
+            if (kind != ReadKind::Analysis) m_status->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
+            m_readOperation->submit<ReadRequest, ReadReply>(request,
+                [](const ReadRequest& value, const ks::ui::AsyncOperationToken& token) { return collectRead(value, token); },
+                [this, revision, kind, reason](const ReadReply& reply, std::uint64_t) {
+                    if (revision != m_readRevision) return true;
+                    m_reportBusy = false;
+                    if (reply.invalidCompare) {
+                        m_exportAfterRead = false; m_pendingSnapshotPath.clear();
+                        m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。"));
+                        return true;
+                    }
+                    if (reply.error != ERROR_SUCCESS) {
+                        m_exportAfterRead = false; m_pendingSnapshotPath.clear();
+                        m_status->setText(uiText("window.layer.status.operation_failed",
+                            "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                            .arg(reason).arg(reply.error));
+                        return true;
+                    }
+                    QThreadPool::globalInstance()->start([relationships = std::move(m_relationshipDocument),
+                        diagnosis = std::move(m_diagnosisDocument)] {});
+                    replaceReportDocument(m_relationshipDocument, reply.relationships); m_relationshipsDirty = true;
+                    replaceReportDocument(m_diagnosisDocument, reply.diagnosis); m_diagnosticsDirty = true;
+                    m_analysisCoherent = true;
+                    if (kind != ReadKind::Analysis) {
+                        m_current = reply.snapshot; replaceReportDocument(m_outputDocument, reply.output); m_outputDirty = true;
+                    }
+                    const QPointer<Page> guard(this);
+                    projectVisibleDocuments();
+                    if (!guard || revision != m_readRevision) return true;
+                    if (kind != ReadKind::Analysis) m_status->setText(kind == ReadKind::Compare
+                        ? uiText("window.layer.status.compare_complete", "A/B 对比完成。")
+                        : uiText("window.layer.status.completed", "%1完成：%2").arg(reason,
+                            reply.snapshot.time.toString(QStringLiteral("HH:mm:ss.zzz"))));
+                    if (m_exportAfterRead) {
+                        m_exportAfterRead = false;
+                        QTimer::singleShot(0, this, [this] { exportSnapshot(); });
+                    }
+                    return true;
+                }, [this, revision, reason](std::exception_ptr) {
+                    if (revision == m_readRevision) {
+                        m_reportBusy = false; m_exportAfterRead = false; m_pendingSnapshotPath.clear();
+                        m_status->setText(uiText("window.layer.status.operation_failed",
+                        "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                        .arg(reason).arg(ERROR_GEN_FAILURE));
+                    }
+                });
         }
 
         void updateAnalysisViews(const Snapshot& snapshot)
         {
-            if (m_relationships != nullptr)
-            {
-                m_relationships->setDocument(relationshipDocument(m_target));
-            }
-            if (m_diagnostics != nullptr)
-            {
-                m_diagnostics->setDocument(diagnosisDocument(snapshot, tokenInfo(::GetCurrentProcessId()),
-                    ks::window::layerdiag::objectName(::GetThreadDesktop(::GetCurrentThreadId())), resolveSetWindowBandFunction() != nullptr));
-            }
+            submitRead(ReadKind::Analysis, QStringLiteral("Snapshot"), nullptr, snapshot);
         }
 
         void refresh(const QString& reason)
         {
-            m_current = capture(m_target);
-            m_output->setDocument(snapshotDocument(*m_current, m_initialPid, m_initialTid, m_initialClass));
-            updateAnalysisViews(*m_current);
-            m_status->setText(uiText("window.layer.status.completed", "%1完成：%2")
-                .arg(reason, m_current->time.toString(QStringLiteral("HH:mm:ss.zzz"))));
+            submitRead(ReadKind::Refresh, reason);
         }
 
         void compareNow()
         {
             const std::optional<HWND> other = parseHwnd(m_compare->text());
-            if (!other.has_value() || ::IsWindow(*other) == FALSE)
-            {
-                m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。"));
-                return;
+            if (!other.has_value()) {
+                m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。")); return;
             }
-            const Snapshot a = capture(m_target);
-            const Snapshot b = capture(*other);
-            m_current = a;
-            updateAnalysisViews(a);
-            ks::ui::FieldDocument document = compareDocument(a, b);
-            ks::ui::FieldNode aNode;
-            aNode.kind = ks::ui::FieldNode::Kind::Section;
-            aNode.name = QStringLiteral("A");
-            aNode.children = snapshotDocument(a, m_initialPid, m_initialTid, m_initialClass).nodes;
-            document.nodes.push_back(aNode);
-            ks::ui::FieldNode bNode;
-            bNode.kind = ks::ui::FieldNode::Kind::Section;
-            bNode.name = QStringLiteral("B");
-            bNode.children = snapshotDocument(b, b.pid, b.tid, b.cls).nodes;
-            document.nodes.push_back(bNode);
-            m_output->setDocument(document);
-            m_status->setText(uiText("window.layer.status.compare_complete", "A/B 对比完成。"));
+            submitRead(ReadKind::Compare, uiText("window.layer.status.compare_complete", "A/B 对比完成。"), *other);
         }
 
         bool validateMutationTarget(const Snapshot& snapshot)
@@ -1581,6 +2221,7 @@ namespace ks::window::layerdiag
 
         void applyLayerAction(const LayerAction action)
         {
+            invalidateRead();
             const Snapshot before = capture(m_target);
             if (!validateMutationTarget(before))
             {
@@ -1737,9 +2378,10 @@ namespace ks::window::layerdiag
             HWND referenceHwnd,
             int attempt = 0)
         {
+            invalidateRead();
             const Snapshot after = capture(m_target);
             m_current = after;
-            m_output->setDocument(snapshotDocument(after, m_initialPid, m_initialTid, m_initialClass));
+            publishOutput(snapshotDocument(after, m_initialPid, m_initialTid, m_initialClass));
             updateAnalysisViews(after);
 
             bool verified = false;
@@ -1874,6 +2516,7 @@ namespace ks::window::layerdiag
 
         void restoreOriginalState(const bool notify)
         {
+            invalidateRead();
             if (!m_rollbackBaseline.has_value())
             {
                 return;
@@ -1953,9 +2596,10 @@ namespace ks::window::layerdiag
             }
 
             QTimer::singleShot(150, this, [this, baseline, bandResult, groupError, positionError, previousStillCompatible]() {
+                invalidateRead();
                 const Snapshot restored = capture(m_target);
                 m_current = restored;
-                m_output->setDocument(snapshotDocument(restored, m_initialPid, m_initialTid, m_initialClass));
+                publishOutput(snapshotDocument(restored, m_initialPid, m_initialTid, m_initialClass));
                 updateAnalysisViews(restored);
                 const bool bandRestored = !baseline.band.ok || (restored.band.ok && restored.band.value == baseline.band.value);
                 const bool topMostRestored = hasExStyleFlag(restored, WS_EX_TOPMOST) == hasExStyleFlag(baseline, WS_EX_TOPMOST);
@@ -1984,72 +2628,121 @@ namespace ks::window::layerdiag
             });
         }
 
+        std::shared_ptr<const SnapshotExportValue> captureSnapshotExport() const
+        {
+            auto value = std::make_shared<SnapshotExportValue>();
+            value->snapshot = *m_current; value->rollbackPending = m_rollbackBaseline.has_value();
+            value->output = m_outputDocument; value->relationships = m_relationshipDocument; value->diagnosis = m_diagnosisDocument;
+            value->events = m_eventArchiveRoot; value->drops = m_droppedEventsRoot;
+            value->eventLog = m_eventLogRoot; value->operationLog = m_operationLogRoot;
+            value->initialPid = m_initialPid; value->initialTid = m_initialTid; value->initialClass = m_initialClass;
+            { QMutexLocker locker(&m_eventMailbox->mutex);
+              for (const auto& record : m_eventMailbox->pending) if (!record.baseline) value->pendingEvents.append(record);
+              value->pendingDrops = m_eventMailbox->dropped; }
+            return value;
+        }
+
         void exportSnapshot()
         {
-            if (!m_current.has_value()) refresh(uiText("window.layer.status.refresh_before_export", "导出前刷新"));
-            const QString path = QFileDialog::getSaveFileName(
+            const QPointer<Page> guard(this);
+            m_exportOperation->reconcile();
+            if (!guard) return;
+            if (m_exportOperation->isBusy()) { m_exportAfterRead = true; return; }
+            if (!m_current.has_value() || m_reportBusy || !m_analysisCoherent) {
+                m_exportAfterRead = true;
+                if (!m_reportBusy) {
+                    if (m_current.has_value()) updateAnalysisViews(*m_current);
+                    else refresh(uiText("window.layer.status.refresh_before_export", "导出前刷新"));
+                }
+                return;
+            }
+            QString path = std::exchange(m_pendingSnapshotPath, {});
+            if (path.isEmpty()) path = QFileDialog::getSaveFileName(
                 this, uiText("window.layer.export.snapshot_title", "导出窗口层级快照"),
                 QStringLiteral("window-layer-%1.json").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
                 QStringLiteral("JSON (*.json)"));
-            if (path.isEmpty()) return;
-
-            QJsonObject root;
-            root.insert(QStringLiteral("schemaVersion"), 2);
-            root.insert(QStringLiteral("capturedAt"), m_current->time.toString(Qt::ISODateWithMs));
-            root.insert(QStringLiteral("hwnd"), hwndText(m_current->hwnd));
-            root.insert(QStringLiteral("bandSuccess"), m_current->band.ok);
-            root.insert(QStringLiteral("band"), static_cast<double>(m_current->band.value));
-            root.insert(QStringLiteral("bandName"), bandName(m_current->band.value));
-            root.insert(QStringLiteral("zOrderIndex"), m_current->z);
-            root.insert(QStringLiteral("bandZOrderIndex"), m_current->bandZ);
-            root.insert(QStringLiteral("topMostGroupZOrderIndex"), m_current->topMostGroupZ);
-            root.insert(QStringLiteral("topMostGroupWindowCount"), m_current->topMostGroupWindowCount);
-            root.insert(QStringLiteral("rollbackPending"), m_rollbackBaseline.has_value());
-            root.insert(QStringLiteral("relationships"), m_relationships != nullptr ? m_relationships->plainText() : QString());
-            root.insert(QStringLiteral("diagnosis"), m_diagnostics != nullptr ? m_diagnostics->plainText() : QString());
-            root.insert(QStringLiteral("operationLog"), m_operationLog != nullptr ? m_operationLog->toPlainText() : QString());
-            root.insert(QStringLiteral("text"), m_output != nullptr ? m_output->plainText() : QString());
-            QFile file(path);
-            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            {
-                QMessageBox::warning(this, uiText("window.layer.export.failed_title", "导出失败"), uiText("window.layer.export.failed_message", "无法写入文件。"));
+            if (!guard || path.isEmpty()) return;
+            if (m_exportOperation->isBusy() || m_reportBusy || !m_analysisCoherent) {
+                m_pendingSnapshotPath = path; m_exportAfterRead = true;
+                if (!m_exportOperation->isBusy() && !m_reportBusy) updateAnalysisViews(*m_current);
                 return;
             }
-            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            m_status->setText(uiText("window.layer.status.snapshot_exported", "快照已导出。"));
+            const auto value = captureSnapshotExport();
+            auto input = ks::ui::MakeCompleteExportInput(value, QStringLiteral("WindowLayerDiagnostics/Snapshot"),
+                m_readRevision, value->expectedRows(), ks::i18n::LanguageManager::instance().sourceTextSnapshot(), SnapshotExportFormatter{});
+            input.fileMode = ks::ui::CompleteExportFileMode::Binary;
+            const auto id = m_exportOperation->startFile(path, std::move(input),
+                [this](const ks::ui::CompleteExportReceipt& receipt) {
+                    const auto journal = m_exportOperation->journal();
+                    const bool unknown = receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable ||
+                        receipt.error == ks::ui::CompleteExportError::ResultUnavailable;
+                    const QString message = unknown
+                        ? uiText("window.layer.export.receipt_unknown", "导出结果尚未确认；请检查目标文件并保留回执。")
+                        : receipt.succeeded() ? uiText("window.layer.status.snapshot_exported", "快照已导出。")
+                        : uiText("window.layer.export.failed_title", "导出失败") + QStringLiteral(": ") + receipt.nativeError;
+                    const QPointer<Page> self(this);
+                    appendOperationLog({message, receipt.outputPath});
+                    if (!self) return;
+                    m_status->setText(message);
+                    if (!unknown && !receipt.succeeded()) QMessageBox::warning(this,
+                        uiText("window.layer.export.failed_title", "导出失败"), message);
+                    if (self && !unknown) journal->acknowledge(receipt.id);
+                });
+            if (guard && id != 0) m_status->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
         }
 
         void exportZOrder()
         {
+            const QPointer<Page> guard(this);
+            m_exportOperation->reconcile();
+            if (!guard || m_exportOperation->isBusy()) return;
             const QString path = QFileDialog::getSaveFileName(
                 this, uiText("window.layer.export.z_order_title", "导出完整顶层 Z 序"),
                 QStringLiteral("window-z-order-%1.json").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
                 QStringLiteral("JSON (*.json)"));
-            if (path.isEmpty()) return;
-            QJsonObject root;
-            root.insert(QStringLiteral("generatedAt"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-            root.insert(QStringLiteral("warning"), QStringLiteral("Band IDs are identifiers, not linear z-height."));
-            root.insert(QStringLiteral("windows"), zOrderJson());
-            QFile file(path);
-            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            {
-                QMessageBox::warning(this, uiText("window.layer.export.failed_title", "导出失败"), uiText("window.layer.export.failed_message", "无法写入文件。"));
-                return;
-            }
-            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            m_status->setText(uiText("window.layer.status.z_order_exported", "完整 Z 序已导出。"));
+            if (!guard || path.isEmpty() || m_exportOperation->isBusy()) return;
+            const auto traversal = std::make_shared<ZOrderTraversal>();
+            const auto value = std::make_shared<const ZOrderExportValue>(ZOrderExportValue{m_desktop, traversal});
+            auto input = ks::ui::MakeCompleteExportInput(value, QStringLiteral("WindowLayerDiagnostics/ZOrder"),
+                ++m_exportVersion, std::nullopt, ks::i18n::LanguageManager::instance().sourceTextSnapshot(), ZOrderExportFormatter{});
+            input.fileMode = ks::ui::CompleteExportFileMode::Binary;
+            const auto id = m_exportOperation->startFile(path, std::move(input),
+                [this, traversal](const ks::ui::CompleteExportReceipt& receipt) {
+                    const auto journal = m_exportOperation->journal();
+                    const bool unknown = receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable ||
+                        receipt.error == ks::ui::CompleteExportError::ResultUnavailable;
+                    const QString message = unknown
+                        ? uiText("window.layer.export.receipt_unknown", "导出结果尚未确认；请检查目标文件并保留回执。")
+                        : receipt.succeeded()
+                        ? (traversal->known.load() && !traversal->complete.load()
+                            ? uiText("window.layer.status.z_order_exported_incomplete", "Z 序已导出，但遍历不完整；请查看 complete 与 walkLimit 字段。")
+                            : uiText("window.layer.status.z_order_exported", "完整 Z 序已导出。"))
+                        : uiText("window.layer.export.failed_title", "导出失败") + QStringLiteral(": ") + receipt.nativeError;
+                    const QPointer<Page> self(this);
+                    appendOperationLog({message, receipt.outputPath});
+                    if (!self) return;
+                    m_status->setText(message);
+                    if (!unknown && !receipt.succeeded()) QMessageBox::warning(this,
+                        uiText("window.layer.export.failed_title", "导出失败"), message);
+                    if (self && !unknown) journal->acknowledge(receipt.id);
+                });
+            // Reconciliation/state notifications may synchronously close this page.
+            if (guard && id != 0) m_status->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
         }
 
         void startTracking()
         {
             if (m_tracking) return;
+            m_trackingRoute = std::make_shared<TrackingRoute>();
+            m_trackingRoute->mailbox = m_eventMailbox;
+            m_trackingRoute->session = ++m_trackingSession;
             auto addHook = [this](DWORD first, DWORD last) {
                 const HWINEVENTHOOK hook = ::SetWinEventHook(
                     first, last, nullptr, winEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
                 if (hook == nullptr) return;
                 {
                     QMutexLocker locker(&hookMutex());
-                    hookOwners().insert(reinterpret_cast<quintptr>(hook), QPointer<Page>(this));
+                    hookOwners().insert(reinterpret_cast<quintptr>(hook), m_trackingRoute);
                 }
                 m_hooks.push_back(hook);
             };
@@ -2058,7 +2751,11 @@ namespace ks::window::layerdiag
             addHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE);
             addHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE);
             m_tracking = !m_hooks.empty();
-            m_eventSnapshot = capture(m_target);
+            if (m_tracking) {
+                RawWinEvent baseline; baseline.session = m_trackingRoute->session;
+                baseline.receivedAt = QDateTime::currentDateTime(); baseline.baseline = true;
+                queueEvent(m_trackingRoute, std::move(baseline));
+            } else m_trackingRoute->active.store(false);
             updateTrackButtonText();
             m_status->setText(m_tracking
                 ? uiText("window.layer.status.track_started", "事件追踪已启动。")
@@ -2067,6 +2764,7 @@ namespace ks::window::layerdiag
 
         void stopTracking()
         {
+            if (m_trackingRoute) m_trackingRoute->active.store(false);
             for (HWINEVENTHOOK hook : m_hooks)
             {
                 {
@@ -2094,6 +2792,30 @@ namespace ks::window::layerdiag
             }
         }
 
+        std::unique_ptr<ks::ui::CompleteExportOperation> m_exportOperation;
+        quint64 m_exportVersion = 0;
+        QPushButton* m_snapshotExportButton = nullptr;
+        QPushButton* m_exportZButton = nullptr;
+        std::unique_ptr<ks::ui::AsyncOperation> m_eventOperation;
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_eventDispatcher;
+        std::shared_ptr<EventMailbox> m_eventMailbox;
+        std::shared_ptr<TrackingRoute> m_trackingRoute;
+        quint64 m_trackingSession = 0;
+        qint64 m_nextEventSampleMs = 0;
+        QHash<quint64, Snapshot> m_eventBaselines;
+        HistoryRoot<RawWinEvent> m_eventArchiveRoot;
+        HistoryRoot<DroppedWinEvents> m_droppedEventsRoot;
+        HistoryRoot<QString> m_eventLogRoot, m_operationLogRoot;
+        QString m_pendingSnapshotPath;
+        bool m_eventsDirty = false;
+        std::unique_ptr<ks::ui::AsyncOperation> m_readOperation;
+        std::shared_ptr<DesktopValue> m_desktop;
+        QTabWidget* m_tabs = nullptr;
+        quint64 m_readRevision = 0;
+        bool m_initialRequested = false, m_exportAfterRead = false;
+        bool m_reportBusy = false, m_analysisCoherent = false;
+        ks::ui::FieldDocument m_outputDocument, m_relationshipDocument, m_diagnosisDocument;
+        bool m_outputDirty = false, m_relationshipsDirty = false, m_diagnosticsDirty = false;
         HWND m_target = nullptr;
         DWORD m_initialPid = 0;
         DWORD m_initialTid = 0;
@@ -2118,20 +2840,43 @@ namespace ks::window::layerdiag
         std::optional<Snapshot> m_rollbackBaseline;
     };
 
+    void postEventDrain(const std::shared_ptr<EventMailbox>& mailbox)
+    {
+        mailbox->dispatcher->post([mailbox] { mailbox->receiver->drainEventIngress(mailbox); });
+    }
+
+    void queueEvent(const std::shared_ptr<TrackingRoute>& route, RawWinEvent event)
+    {
+        if (!route || !route->active.load()) return;
+        const auto mailbox = route->mailbox;
+        bool post = false;
+        { QMutexLocker locker(&mailbox->mutex);
+          if (mailbox->closed || !route->active.load()) return;
+          event.session = route->session;
+          if (!event.baseline) event.sequence = ++mailbox->nextSequence;
+          if (mailbox->pending.size() < kEventIngressLimit) mailbox->pending.push_back(std::move(event));
+          else if (!event.baseline) {
+              if (mailbox->dropped.isEmpty() || mailbox->dropped.last().session != event.session ||
+                  mailbox->dropped.last().last + 1 != event.sequence)
+                  mailbox->dropped.append({ event.session, 0, event.sequence, event.sequence });
+              auto& drop = mailbox->dropped.last(); ++drop.count; drop.last = event.sequence;
+          }
+          if (mailbox->wake == EventMailbox::Wake::Idle) { mailbox->wake = EventMailbox::Wake::Queued; post = true; }
+        }
+        if (post) postEventDrain(mailbox);
+    }
+
     void CALLBACK winEventProc(
         HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG objectId,
         LONG childId, DWORD eventTid, DWORD eventTime)
     {
-        QPointer<Page> owner;
-        {
-            QMutexLocker locker(&hookMutex());
-            owner = hookOwners().value(reinterpret_cast<quintptr>(hook));
-        }
-        QCoreApplication* app = QCoreApplication::instance();
-        if (owner.isNull() || app == nullptr) return;
-        QMetaObject::invokeMethod(app, [owner, event, hwnd, objectId, childId, eventTid, eventTime]() {
-            if (!owner.isNull()) owner->onWinEvent(event, hwnd, objectId, childId, eventTid, eventTime);
-        }, Qt::QueuedConnection);
+        std::shared_ptr<TrackingRoute> route;
+        { QMutexLocker locker(&hookMutex()); route = hookOwners().value(reinterpret_cast<quintptr>(hook)); }
+        if (!route) return;
+        RawWinEvent record;
+        record.receivedAt = QDateTime::currentDateTime(); record.event = event; record.hwnd = hwnd;
+        record.objectId = objectId; record.childId = childId; record.tid = eventTid; record.nativeTime = eventTime;
+        queueEvent(route, std::move(record));
     }
 
     std::optional<HWND> targetFromDialog(const QDialog* dialog)

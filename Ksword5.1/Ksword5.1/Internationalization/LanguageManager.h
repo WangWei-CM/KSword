@@ -9,6 +9,7 @@
 
 #include <memory>
 
+class QAbstractItemModel;
 class QComboBox;
 class QLineEdit;
 class QSpinBox;
@@ -27,6 +28,30 @@ namespace ks::i18n
         bool rightToLeft = false;
     };
 
+    // Immutable translation value captured on the LanguageManager owner thread.
+    // Copies retain the active pack and complete fallback chain. Querying a copy
+    // from a worker never reads a QObject, singleton or mutable language state.
+    // Default construction supplies the same pass-through behavior as no packs.
+    class SourceTextSnapshot final
+    {
+    public:
+        SourceTextSnapshot() = default;
+        QString languageId() const;
+        QString sourceText(const QString& sourceText) const;
+        QString packedSourceText(const QString& sourceText) const;
+        // Exact context-key/fallback semantics, including historical Chinese.
+        QString contextText(const QString& contextKey, const QString& sourceText) const;
+        // Same unique rendered-source reversal and normal source/template
+        // semantics as LanguageManager::displayText, using only frozen packs.
+        QString displayText(const QString& renderedOrSourceText) const;
+
+    private:
+        struct Data;
+        explicit SourceTextSnapshot(std::shared_ptr<const Data> data);
+        std::shared_ptr<const Data> m_data;
+        friend class LanguageManager;
+    };
+
     class LanguageManager final : public QObject
     {
     public:
@@ -43,6 +68,9 @@ namespace ks::i18n
         // 强制查询当前语言包的 source_translations；用于以英文作为规范源文本的独立页面。
         // 与 sourceText() 不同，中文模式下也会查包，而不是直接返回调用点文本。
         QString packedSourceText(const QString& sourceText) const;
+        // Capture before dispatching background serialization; the returned
+        // value stays valid after subsequent language activations or reloads.
+        SourceTextSnapshot sourceTextSnapshot() const;
         QString sourceForRenderedText(const QString& renderedText) const;
         QString displayText(const QString& renderedOrSourceText) const;
 
@@ -61,6 +89,16 @@ namespace ks::i18n
             int itemIndex,
             const QString& key,
             const QString& fallbackText);
+        // Opt in only after every producer in this subtree handles source
+        // templates, dynamic text and LanguageChange explicitly. Ordinary
+        // repaint/layout compatibility scans then stop at this boundary.
+        // Descendants owned by an unknown producer must remain outside it.
+        void setRuntimeTranslationManaged(QObject* object, bool managed = true);
+        // A legacy producer can explicitly dirty a small subtree after a text
+        // mutation. Visible work is coalesced; hidden widgets retain the dirty
+        // bit and are translated synchronously on their next Show before paint.
+        // Both mutation APIs run on the LanguageManager owner/GUI thread.
+        void markRuntimeTranslationDirty(QObject* object);
         void retranslateAll();
 
     private:
@@ -89,6 +127,7 @@ namespace ks::i18n
             const QString& contextKey,
             const QString& sourceText,
             QStringList* visitedLanguageIds) const;
+        QString cachedSourceText(const QString& sourceText, bool preserveHistoricalChineseSource) const;
         QString resolveSourceText(
             const QString& languageId,
             const QString& sourceText,
@@ -96,7 +135,13 @@ namespace ks::i18n
             bool preserveHistoricalChineseSource) const;
         void ensureApplicationEventFilter();
         void scheduleRuntimeTranslation(QObject* object);
-        void applyRuntimeTranslations(QObject* object);
+        void observeRuntimeModel(QAbstractItemModel* model, QObject* owner);
+        // Ordinary compatibility work is visible-only; true language switches
+        // retain full source capture and complete hidden-page LanguageChange.
+        void applyRuntimeTranslations(QObject* object, bool visibleOnly = false,
+            bool includeDescendants = true);
+        // Binding registration updates only its declared property; language switches traverse the tree.
+        void applyTextBinding(QObject* object) const;
         void applyBindings(QObject* object) const;
         void applyApplicationDirection() const;
         bool eventFilter(QObject* watched, QEvent* event) override;

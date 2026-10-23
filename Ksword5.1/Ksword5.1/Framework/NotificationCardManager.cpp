@@ -553,8 +553,7 @@ namespace ks::ui
         , m_clientAnchor(clientAnchor)
     {
         g_notificationCardManager = this;
-        m_lastLogRevision = KswordARKEventEntry.Revision();
-        m_knownLogCount = KswordARKEventEntry.Snapshot().size();
+        m_logCursor = KswordARKEventEntry.TailCursor();
         m_lastProgressRevision = 0;
 
         m_refreshTimer = new QTimer(this);
@@ -589,8 +588,7 @@ namespace ks::ui
         }
         if (!wasEnabled)
         {
-            m_lastLogRevision = KswordARKEventEntry.Revision();
-            m_knownLogCount = KswordARKEventEntry.Snapshot().size();
+            m_logCursor = KswordARKEventEntry.TailCursor();
             m_lastProgressRevision = 0;
         }
         for (const std::unique_ptr<NotificationCardRecord>& record : m_cards)
@@ -661,28 +659,16 @@ namespace ks::ui
 
     void NotificationCardManager::refreshLogCards()
     {
-        const std::size_t revision = KswordARKEventEntry.Revision();
-        if (revision == m_lastLogRevision)
+        // Bound each timer's archive copy/card projection to new rows. Complete
+        // history remains owned by LogEntry; a busy producer is consumed in order
+        // over subsequent ticks rather than recopying its entire retained prefix.
+        const ks::log::IncrementalSnapshot snapshot = KswordARKEventEntry.SnapshotAfter(
+            m_logCursor, 128, m_settings.notificationMinimumLevel);
+        m_logCursor = snapshot.cursor;
+        for (const kEvent& eventItem : snapshot.events)
         {
-            return;
+            appendLogCard(eventItem);
         }
-        const std::vector<kEvent> snapshot = KswordARKEventEntry.Snapshot();
-        if (snapshot.size() < m_knownLogCount)
-        {
-            // 日志被清空后不补发清空前后的历史记录，下一条新日志再正常显示。
-            m_knownLogCount = snapshot.size();
-            m_lastLogRevision = revision;
-            return;
-        }
-        for (std::size_t index = m_knownLogCount; index < snapshot.size(); ++index)
-        {
-            if (static_cast<int>(snapshot[index].level) >= m_settings.notificationMinimumLevel)
-            {
-                appendLogCard(snapshot[index]);
-            }
-        }
-        m_knownLogCount = snapshot.size();
-        m_lastLogRevision = revision;
     }
 
     void NotificationCardManager::refreshProgressCards(

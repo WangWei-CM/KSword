@@ -4,6 +4,8 @@
 #include <QResizeEvent>
 #include <QStyle>
 #include "RegistryDock.h"
+#include "RegistryNavigationSchema.h"
+#include "../UI/AsyncOperation.h"
 #include "RegistryValueEditorWidget.h"
 #include "RegistryWorkbenchAccess.h"
 #include "RegistryDocument.h"
@@ -12,6 +14,7 @@
 #include "../UI/FlowLayout.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -47,6 +50,7 @@
 #include <QTreeWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace
 {
@@ -297,6 +301,9 @@ void RegistryDock::initializeWorkbenchControls()
     m_mainSplitter->setSizes({240, 760, 340});
     m_keyTree->installEventFilter(this);
     m_valueTable->installEventFilter(this);
+    // This producer owns every business hide through the canonical identity layer.
+    ks::ui::SetTableRowFilterBusinessOwnership(m_valueTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     m_keyTree->setProperty("ks_i18n_preserve_model_data", true);
     connect(details, &QPushButton::toggled, m_detailScroll, &QWidget::setVisible);
     connect(m_valueTable, &QTableWidget::currentItemChanged, this,
@@ -339,7 +346,7 @@ void RegistryDock::initializeWorkbenchControls()
     m_changesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_changesTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     changesLayout->addWidget(m_changesTable, 1);
-    m_rightTabWidget->addTab(changes, ks::i18n::sourceText(QStringLiteral("待应用")));
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Pending], m_rightTabWidget, changes);
     for (auto* table : {m_valueTable, m_searchResultTable, m_changesTable})
     {
         table->setProperty("ks_i18n_preserve_model_data", true);
@@ -397,6 +404,17 @@ void RegistryDock::initializeWorkbenchControls()
 
 bool RegistryDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_valueTable && event->type() == QEvent::Show && m_deferredValueListing)
+    {
+        auto listing = std::move(m_deferredValueListing);
+        const int offset = m_deferredValueOffset;
+        const quint64 generation = m_deferredValueGeneration;
+        const QString selectedName = std::move(m_deferredValueSelection);
+        const QPointer<RegistryDock> guarded(this);
+        QTimer::singleShot(0, this, [guarded, listing = std::move(listing), offset, generation, selectedName]() {
+            if (guarded) guarded->appendValueRows(listing, offset, generation, selectedName);
+        });
+    }
     if (event->type() == QEvent::FocusIn)
     {
         if (watched == m_keyTree) m_valuesActive = false;
@@ -568,65 +586,93 @@ void RegistryDock::updatePendingChanges()
     m_applyChangesButton->setEnabled(!m_pendingChanges.isEmpty() && !m_applyingChanges);
 }
 
+ks::ui::AsyncOperation& RegistryDock::applyOperation()
+{
+    if (!m_applyOperation)
+    {
+        m_applyOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_applyOperation->setStateChangedCallback([this] {
+            if (m_applyingChanges && !m_applyOperation->isBusy() && !m_applyReceipt) finishApplyWithoutReceipt();
+        });
+    }
+    return *m_applyOperation;
+}
+
+void RegistryDock::finishApplyWithoutReceipt()
+{
+    m_applyingChanges = false;
+    m_valueEditor->setEnabled(true);
+    m_viewCombo->setEnabled(true);
+    m_editorReady = false;
+    m_valueEditor->hide();
+    updatePendingChanges();
+    updateStatusBar(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+}
+
+RegistryDock::PendingApplyResult RegistryDock::applyPendingValueBatch(const QVector<PendingValueChange>& changes,
+    const std::shared_ptr<std::atomic_bool>& closed)
+{
+    PendingApplyResult output;
+    for (qsizetype index = 0; index < changes.size(); ++index)
+    {
+        auto change = changes.at(index); // 每项草稿保留各自的原始目标、视图和通道。
+        if (closed->load())
+        {
+            for (; index < changes.size(); ++index) output.remaining.push_back(changes.at(index));
+            break; // 取消不丢弃还没执行的草稿。
+        }
+        const RegistryAccessContext context{change.viewBits, change.useR0};
+        const RegistryApplyValueState before{change.beforeExists, change.beforeType, change.beforeData};
+        const RegistryApplyValueState after{!change.deleteValue, change.afterType, change.afterData};
+        RegistryApplyResult result; // 共用状态机检查原值、处理取消并记录真实回读。
+        const bool ok = RegistryValueTransactions::apply(change.keyPath, change.name,
+            before, after, context, result, closed.get());
+        if (ok)
+        {
+            change.result = QStringLiteral("已应用并回读验证");
+            output.applied.push_back(change);
+            output.recoverable.push_back(change);
+        }
+        else
+        {
+            change.result = result.error.isEmpty()
+                ? QStringLiteral("回读不一致，请重新读取后核对") : result.error;
+            // 只有成功且实际回读过的回执才能用于自动恢复，失败的未知写入保留诊断。
+            output.remaining.push_back(change);
+        }
+    }
+    return output;
+}
+
 void RegistryDock::applyPendingChanges()
 {
     if (m_applyingChanges || !preserveEditorDraft() || m_pendingChanges.isEmpty()) return;
-    const auto changes = m_pendingChanges;
+    auto& operation = applyOperation();
     m_applyingChanges = true;
+    m_applyReceipt = false;
     m_valueEditor->setEnabled(false);
     m_viewCombo->setEnabled(false);
     m_applyChangesButton->setEnabled(false);
-    const QPointer<RegistryDock> guarded(this);
-    const auto dispatcher = m_uiDispatcher;
-    const auto closed = m_operationsClosed;
-    QThreadPool::globalInstance()->start([guarded, dispatcher, closed, changes]() mutable {
-        QVector<PendingValueChange> applied;
-        QVector<PendingValueChange> recoverable;
-        QVector<PendingValueChange> remaining;
-        for (qsizetype index = 0; index < changes.size(); ++index)
-        {
-            auto change = changes.at(index); // 每项草稿保留各自的原始目标、视图和通道。
-            if (closed->load())
-            {
-                for (; index < changes.size(); ++index) remaining.push_back(changes.at(index));
-                break; // 取消不丢弃还没执行的草稿。
-            }
-            const RegistryAccessContext context{change.viewBits, change.useR0};
-            const RegistryApplyValueState before{change.beforeExists, change.beforeType, change.beforeData};
-            const RegistryApplyValueState after{!change.deleteValue, change.afterType, change.afterData};
-            RegistryApplyResult result; // 共用状态机检查原值、处理取消并记录真实回读。
-            const bool ok = RegistryValueTransactions::apply(change.keyPath, change.name,
-                before, after, context, result, closed.get());
-            if (ok)
-            {
-                change.result = QStringLiteral("已应用并回读验证");
-                applied.push_back(change);
-                recoverable.push_back(change);
-            }
-            else
-            {
-                change.result = result.error.isEmpty()
-                    ? QStringLiteral("回读不一致，请重新读取后核对") : result.error;
-                // 只有成功且实际回读过的回执才能用于自动恢复，失败的未知写入保留诊断。
-                remaining.push_back(change);
-            }
-        }
-        dispatcher->post([guarded, applied, remaining, recoverable]() {
-            if (!guarded) return;
-            guarded->m_applyingChanges = false;
-            guarded->m_valueEditor->setEnabled(true);
-            guarded->m_viewCombo->setEnabled(true);
-            guarded->m_pendingChanges = remaining;
-            guarded->m_lastChanges = recoverable;
-            guarded->m_lastDocumentResult.reset();
-            guarded->m_editorReady = false;
-            guarded->m_valueEditor->hide();
-            guarded->updatePendingChanges();
-            guarded->refreshValueTable();
-            guarded->updateStatusBar(QStringLiteral("提交完成：成功 %1 项，未完成 %2 项。")
-                .arg(applied.size()).arg(remaining.size()));
-        });
-    });
+    struct Request { QVector<PendingValueChange> changes; std::shared_ptr<std::atomic_bool> closed; };
+    const auto ticket = operation.submitTransaction<Request, PendingApplyResult>({m_pendingChanges, m_operationsClosed},
+        [](const Request& request) { return applyPendingValueBatch(request.changes, request.closed); },
+        [this](const PendingApplyResult& result, std::uint64_t) {
+            m_applyReceipt = true;
+            m_applyingChanges = false;
+            m_valueEditor->setEnabled(true);
+            m_viewCombo->setEnabled(true);
+            m_pendingChanges = result.remaining;
+            m_lastChanges = result.recoverable;
+            m_lastDocumentResult.reset();
+            m_editorReady = false;
+            m_valueEditor->hide();
+            updatePendingChanges();
+            refreshValueTable();
+            updateStatusBar(QStringLiteral("提交完成：成功 %1 项，未完成 %2 项。")
+                .arg(result.applied.size()).arg(result.remaining.size()));
+            return true;
+        }, [this](std::exception_ptr) { m_applyReceipt = true; finishApplyWithoutReceipt(); });
+    if (!ticket) finishApplyWithoutReceipt();
 }
 
 void RegistryDock::restoreLastChanges()
@@ -645,26 +691,30 @@ void RegistryDock::restoreLastChanges()
         m_documentCancel = std::make_shared<std::atomic_bool>(false);
         const auto cancel = m_documentCancel;
         const auto previous = m_lastDocumentResult;
-        const QPointer<RegistryDock> guarded(this);
-        const auto dispatcher = m_uiDispatcher;
-        QThreadPool::globalInstance()->start([guarded, dispatcher, cancel, previous]() {
-            auto result = std::make_shared<RegistryApplyResult>();
-            RegistryDocumentApplyService::undoAccess(*previous, *result, cancel.get());
-            dispatcher->post([guarded, result]() {
-                if (!guarded) return;
-                guarded->m_applyingChanges = false;
-                guarded->m_viewCombo->setEnabled(true);
-                guarded->m_valueEditor->setEnabled(true);
-                guarded->m_editorReady = false;
-                guarded->m_valueEditor->hide();
-                guarded->m_lastChanges.clear();
-                guarded->m_lastDocumentResult = result->completed ? nullptr : result;
-                guarded->updatePendingChanges();
-                guarded->refreshCurrentKey(true);
-                guarded->updateStatusBar(result->completed ? QStringLiteral("上次提交已恢复并回读验证。")
+        auto& operation = applyOperation();
+        m_applyReceipt = false;
+        struct Request { std::shared_ptr<RegistryApplyResult> previous; std::shared_ptr<std::atomic_bool> cancel; };
+        const auto ticket = operation.submitTransaction<Request, std::shared_ptr<RegistryApplyResult>>({previous, cancel},
+            [](const Request& request) {
+                auto result = std::make_shared<RegistryApplyResult>();
+                RegistryDocumentApplyService::undoAccess(*request.previous, *result, request.cancel.get());
+                return result;
+            }, [this](const std::shared_ptr<RegistryApplyResult>& result, std::uint64_t) {
+                m_applyReceipt = true;
+                m_applyingChanges = false;
+                m_viewCombo->setEnabled(true);
+                m_valueEditor->setEnabled(true);
+                m_editorReady = false;
+                m_valueEditor->hide();
+                m_lastChanges.clear();
+                m_lastDocumentResult = result->completed ? nullptr : result;
+                updatePendingChanges();
+                refreshCurrentKey(true);
+                updateStatusBar(result->completed ? QStringLiteral("上次提交已恢复并回读验证。")
                     : QStringLiteral("恢复未全部完成：%1").arg(result->error));
-            });
-        });
+                return true;
+            }, [this](std::exception_ptr) { m_applyReceipt = true; finishApplyWithoutReceipt(); });
+        if (!ticket) finishApplyWithoutReceipt();
         return;
     }
     if (m_lastChanges.isEmpty()) return;
@@ -686,20 +736,43 @@ void RegistryDock::restoreLastChanges()
 
 void RegistryDock::filterCurrentValues()
 {
+    filterValueRows(0, m_valueTable->rowCount(), true);
+}
+
+void RegistryDock::filterValueRows(const int firstRow, const int endRow, const bool replaceFilter)
+{
     const QString query = m_filterEdit->text();
-    for (int row = 0; row < m_valueTable->rowCount(); ++row)
+    QSet<QPersistentModelIndex> excluded, included;
+    for (int row = firstRow; row < endRow; ++row)
     {
         bool match = query.isEmpty();
         for (int column = 0; !match && column < m_valueTable->columnCount(); ++column)
             if (auto* item = m_valueTable->item(row, column)) match = item->text().contains(query, Qt::CaseInsensitive);
-        m_valueTable->setRowHidden(row, !match);
+        const QPersistentModelIndex identity = m_valueTable->model()->index(row, 0, m_valueTable->rootIndex());
+        if (!match) excluded.insert(identity);
+        else if (!replaceFilter) included.insert(identity);
     }
+    if (replaceFilter)
+        ks::ui::ApplyTableRowFilterIncrementally(m_valueTable, excluded);
+    else
+        ks::ui::ApplyTableRowFilterDelta(m_valueTable, excluded, included);
 }
 
 void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListing>& listing,
     int offset, quint64 generation, const QString& selectedName)
 {
     if (generation != m_valueLoadGeneration) return;
+    if (!m_valueTable->isVisible())
+    {
+        // Keep the full canonical listing; hidden value pages do not materialize more cells.
+        auto retired = std::exchange(m_deferredValueListing, listing);
+        if (retired && retired != listing)
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        m_deferredValueOffset = offset;
+        m_deferredValueGeneration = generation;
+        m_deferredValueSelection = selectedName;
+        return;
+    }
     const QPointer<RegistryDock> guarded(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-value-batch"),
         {m_valueTable}, [guarded, listing, offset, generation, selectedName]() {
@@ -730,7 +803,7 @@ void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListin
         }
         m_valueTable->setUpdatesEnabled(true);
     }
-    filterCurrentValues();
+    filterValueRows(offset, end);
     if (end < count)
     {
         QTimer::singleShot(0, this, [guarded, listing, end, generation, selectedName]() {
@@ -745,7 +818,7 @@ void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListin
         if (m_valueTable->item(row, 0)->data(Qt::UserRole).toString() == selectedName)
         { selectedRow = row; break; }
     if (selectedRow < 0)
-        for (int row = 0; row < count; ++row) if (!m_valueTable->isRowHidden(row)) { selectedRow = row; break; }
+        for (int row = 0; row < count; ++row) if (!ks::ui::IsTableRowExcludedByFilter(m_valueTable, row)) { selectedRow = row; break; }
     if (selectedRow >= 0)
     {
         QSignalBlocker blocked(m_valueTable);

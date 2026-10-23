@@ -9,12 +9,17 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "MemoryDock.ReadOnlyModels.h"
+#include "../UI/AsyncCleanupRegistry.h"
+#include "../UI/StructuredFieldView.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../UI/KernelDisassemblyDialog.h" // ks::ui::DisassemblyRow：驱动读写页反汇编视图的行缓存需要完整类型。
 #include "../UI/WindowPickerButton.h" // ks::ui::WindowPickerButton：十字准星拾取按钮，按值出现在成员指针里。
+#include "../UI/MemoryWorkbench/WorkbenchContinuation.h"
 #include "MemoryAccessBackend.h" // 访问后端枚举与 DDMA 会话：按值出现在成员与返回类型里。
 #include "TamperDetectionPage.h" // ksword::memory_dock::TamperDetectionPage：按值出现在成员指针与模块同步调用里。
 
+#include "../UI/PageNavigationCatalog.h"
 #include <QVector>     // QVector：保存反汇编解码结果行。
 #include <QWidget>
 
@@ -89,16 +94,25 @@ public:
     // 构造函数：
     // - 作用：初始化全部 UI、连接信号槽、加载初始进程列表。
     // - 参数 parent：Qt 父控件指针，可为空。
-    explicit MemoryDock(QWidget* parent = nullptr);
+    enum class PageScope { Main, ProcessDetail };
+    explicit MemoryDock(QWidget* parent = nullptr, PageScope scope = PageScope::Main);
 
     // 析构函数：
     // - 作用：在控件销毁前释放进程句柄、停止定时器与后台扫描状态。
     ~MemoryDock() override;
 
+    // The existing host status worker publishes actual window observations;
+    // DDMA broadcasts never request HVM IO. Hidden pages consume no polling.
+    bool needsHvmMemoryAvailability() const;
+    quint64 hvmMemoryAvailabilityEpoch() const;
+    void invalidateHvmMemoryAvailability();
+    void applyHvmMemoryAvailability(quint64 epoch, bool usable, const QString& reason);
+    std::function<void()> requestHvmMemoryAvailability;
+
     // focusProcessForOperations：
     // - 作用：从进程页跳转到内存页后自动定位并附加目标 PID；
     // - 调用方式：MainWindow::focusMemoryDockByPid 调用。
-    void focusProcessForOperations(std::uint32_t pid, bool showMessage = false);
+    void focusProcessForOperations(std::uint32_t pid, bool showMessage = false, ks::ui::LeaveCompletion completion = {});
 
     // focusProcessForSearch：
     // - 作用：附加指定 PID 后切换到“内存搜索”页；
@@ -118,11 +132,12 @@ public:
     // confirmWorkbenchQuit：
     // - 作用：主窗口关闭前问一次内存工作台（暂存的未提交补丁、未还原的 int3 补丁）；
     // - 调用方式：MainWindow::closeEvent 最前调用（其后半段会停 R0 驱动，晚了 int3 还原必失败）；
-    // - 返回：true=可以继续退出（工作台未创建时恒为 true）；false=用户取消，应放弃本次关闭。
-    bool confirmWorkbenchQuit();
+    // - Completed 才允许退出；Pending 保留原关闭请求并异步回报许可；Rejected/Busy 放弃本次关闭。
+    ks::ui::LeaveEntryStatus confirmWorkbenchQuit(ks::ui::LeaveCompletion completion = {});
     // 全局退出拆成许可和释放两阶段；详情窗仍使用上面的单宿主兼容包装。
-    bool prepareWorkbenchQuit();
+    ks::ui::LeaveEntryStatus prepareWorkbenchQuit(ks::ui::LeaveCompletion completion = {});
     bool releaseWorkbenchExecutionForQuit();
+    bool workbenchQuitPreparationCurrent();
     // 全局退出被取消时，撤销这次退出专用的保留补丁许可。
     void cancelWorkbenchQuit();
 
@@ -139,7 +154,13 @@ public:
     // - 返回：true=已跳转；false=工作台不可用或被拒绝（原因在工作台状态条里）。
     bool openAddressInWorkbench(std::uint64_t address, bool kernelAddress = false);
     // prepareNavigationPages：按需准备工作台与内存调试页的真实控件树，供全局导航索引。
-    void prepareNavigationPages();
+    // singleStep limits full search preparation to one existing page factory.
+    // Complete cold bodies can skip an unvisited factory; compatibility callers
+    // keep the original default that prepares actual controls.
+    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr,
+        bool includeColdSearchBody = true);
+    QWidget* activateNavigationDescriptor(const QString& id);
     std::function<void(const QString&)> openPoolModuleDetails;
 
 protected:
@@ -166,6 +187,7 @@ private:
     struct ProcessEntry
     {
         std::uint32_t pid = 0;          // 进程 PID。
+        std::uint64_t creationTime100ns = 0; // 同一枚举快照的进程强身份。
         std::uint32_t sessionId = 0;    // 会话 ID。
         QString processName;            // 进程名。
         // CPU 占用率。需要两次采样相减才算得出，所以"这一轮算不出来"是一个真实
@@ -174,6 +196,8 @@ private:
         // 就等于把"不知道"显示成"空闲"。
         double cpuPercent = 0.0;
         bool cpuPercentValid = false;
+        QString imagePath;
+        int exactNameCount = 0, foldedNameCount = 0;
         double workingSetMB = 0.0;      // 工作集内存（MB）。
     };
 
@@ -182,6 +206,7 @@ private:
     {
         std::uint64_t cpuTime100ns = 0;
         std::uint64_t sampleTime100ns = 0;
+        std::uint64_t creationTime100ns = 0;
     };
 
     // ModuleEntry：
@@ -308,6 +333,22 @@ private:
     // - 作用：初始化全部 MemoryDock Tab 页。
     // - 返回：无。
     void initializeTabs();
+    struct PageFactory;
+    static const std::vector<PageFactory>& pageFactories();
+    struct LazyPage { QString id; QWidget* widget = nullptr; bool ready = false, constructing = false; };
+    std::vector<LazyPage> m_lazyPages;
+    bool m_pageConnectionsReady = false;
+    QWidget* ensureLazyPage(const QString& id);
+    void ensureCurrentLazyPage();
+    void initializeProcessConnections();
+    void initializeRegionConnections();
+    void initializeSearchConnections();
+    void initializeKernelExecutableConnections();
+    void initializeKernelEvidenceConnections();
+    void initializePteConnections();
+    void initializeProcessEvidenceConnections();
+    void initializeHvciBypassTab();
+    void initializeRxpfTab();
 
     // initializeProcessModuleTab：
     // - 作用：构建 Tab1（进程与模块）界面。
@@ -339,6 +380,8 @@ private:
     // - 作用：构建 Tab9（PTE / VA 翻译）界面。
     // - 处理逻辑：只读取当前附加进程的工作集 / 虚拟内存属性，不提供任何写入动作。
     // - 返回：无。
+    static QVector<ks::ui::PageSearchBodyText> coldProcessPteSearchBody();
+    static QVector<ks::ui::PageSearchBodyText> coldMemorySearchBody();
     void initializeProcessPteTranslateTab();
 
     // initializeProcessMemoryEvidenceTab：
@@ -351,6 +394,11 @@ private:
     // - 作用：构建 Tab11（系统内存审计）界面；
     // - 处理逻辑：聚合物理分布、内核进程快照、Pool Tag 与 Big Pool 证据。
     void initializeSystemMemoryAuditTab();
+
+    // ensureSystemMemoryAuditPage：
+    // - 作用：首次切入系统内存审计 Tab 时，把轻量占位页替换为真实页面；
+    // - 约束：保持原 Tab 索引、标题、语言绑定和 DDMA 会话接线。
+    void ensureSystemMemoryAuditPage();
 
     // initializeDdmaTab：
     // - 作用：构建 Tab12（DDMA）界面；
@@ -449,18 +497,71 @@ private:
     // - 参数 pid：目标进程 PID。
     // - 返回：true 表示枚举成功；false 表示失败。
     bool refreshModuleListForPid(std::uint32_t pid);
+    void startPendingModuleRefresh();
+    void pollModuleRefresh();
 
     // rebuildModuleTableFromCache：
     // - 作用：按当前过滤条件把 m_moduleCache 重绘到模块表。
     // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
     // - 返回：无。
     void rebuildModuleTableFromCache();
+    enum class CoreKind { Modules, Regions, Processes, KernelExecutable, KernelEvidence, PteEvidence, ProcessEvidence, SearchResults };
+    struct PreparedProcessSnapshot;
+    static void prepareProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared);
+    void commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared, std::uint64_t generation, std::uint32_t previousPid);
+    struct CoreProjectionData {
+        CoreKind kind;
+        std::shared_ptr<const std::vector<ProcessEntry>> processes;
+        std::shared_ptr<const std::vector<ModuleEntry>> modules;
+        std::shared_ptr<const std::vector<RegionEntry>> regions;
+        QString filter, languageId, statusTemplate;
+        ks::i18n::SourceTextSnapshot language;
+        std::uint32_t pid = 0;
+        std::uint64_t target = 0, localeGeneration = 0;
+        bool committed = false, image = false, readable = false;
+        int sortColumn = 0;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+        std::shared_ptr<std::vector<std::size_t>> rows;
+        std::shared_ptr<const void> extraSource;
+        std::size_t extraCount = 0;
+        bool extraRisk = false;
+        bool extraDiagnosticRow = true;
+        QString extraDiagnostic;
+        std::function<bool(std::size_t)> extraMatches;
+        std::function<QString(std::size_t)> extraKey;
+        std::function<QVariant(std::size_t, int, int)> extraCell;
+        QString selectedKey;
+        int selectedRow = -1, selectedColumn = 0;
+    };
+    MemoryTableView* extraCoreTable(CoreKind kind) const;
+    void captureKernelExecutableProjection(CoreProjectionData& data) const;
+    void captureKernelMemoryProjection(CoreProjectionData& data) const;
+    void capturePteProjection(CoreProjectionData& data) const;
+    void captureProcessEvidenceProjection(CoreProjectionData& data) const;
+    void captureSearchResultProjection(CoreProjectionData& data) const;
+
+    struct CoreProjectionJob;
+    struct RegionRefreshJob;
+    void initializeCoreProjection(CoreKind kind);
+    void requestCoreProjection(CoreKind kind, bool debounce = false);
+    void pollCoreProjection();
+    void publishCoreProjection(const std::shared_ptr<CoreProjectionData>& data);
+    std::shared_ptr<CoreProjectionData> captureCoreRequest(CoreKind kind) const;
+    static bool sameCoreRequest(const CoreProjectionData& left, const CoreProjectionData& right);
+    static QString coreRowKey(const CoreProjectionData& data, std::size_t row);
+    static QVariant coreCell(const CoreProjectionData& data, std::size_t row, int column, int role);
+    static void buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& job);
+    bool coreProjectionIsCurrent(CoreKind kind) const;
+    void startPendingRegionRefresh();
+    void pollRegionRefresh();
+    void cancelCoreProjection(bool closing);
 
     // syncTamperDetectionTargets：
     // - 作用：把当前附加进程与模块列表同步给“篡改检测”页；
     // - 说明：附加成功与模块缓存落地两处都要调用。少了任一处，那一页的目标下拉
     //   就会停在上一个进程的模块上——而它会照样跑，只是扫的是别的进程的地址。
     void syncTamperDetectionTargets();
+    static std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> prepareTamperModuleCandidates(const std::vector<ModuleEntry>& modules);
 
     // applyProcessTableFilter：
     // - 作用：按 m_processFilterEdit 的关键字隐藏/显示进程表的行，并更新计数标签；
@@ -474,7 +575,9 @@ private:
     // - 参数 processName：目标进程名（用于状态栏展示）。
     // - 参数 showMessage：是否弹出提示框反馈结果。
     // - 返回：true 附加成功；false 附加失败。
-    bool attachToProcess(std::uint32_t pid, const QString& processName, bool showMessage);
+    ks::ui::LeaveEntryStatus attachToProcess(std::uint32_t pid, const QString& processName, bool showMessage, ks::ui::LeaveCompletion completion = {});
+    bool attachToProcessAfterLeave(std::uint32_t pid, const QString& processName, bool showMessage, std::uint64_t expectedCreateTime);
+    bool m_workbenchProcessChangePending = false;
 
     // detachProcess：
     // - 作用：分离当前进程并清理依赖该句柄的数据。
@@ -534,6 +637,7 @@ private:
     // - 参数 forceRequery：是否强制重新调用 VirtualQueryEx。
     // - 返回：无。
     void refreshMemoryRegionList(bool forceRequery);
+    void requestFirstScanRegions();
 
     // requestDumpMemoryRegion：菜单前冻结进程句柄/创建时间和区域，选择路径后异步导出。
     // pid/processName 用于身份和提示；targetProcess 为独立租约；region/backend 固定导出范围和通道。
@@ -601,9 +705,21 @@ private:
     // - 参数 regionsOut：输出区域数组。
     // - 参数 errorTextOut：失败原因文本。
     // - 返回：true 成功；false 失败。
-    bool collectSearchRegionsFromUi(
-        std::vector<RegionEntry>& regionsOut,
-        QString& errorTextOut);
+    struct FirstScanOptions {
+        bool custom = false, image = false, heap = false, stack = false;
+        std::uint64_t start = 0, end = UINT64_MAX, generation = 0;
+        std::uint32_t pid = 0, threads = 1, chunkKB = 64;
+        ksword::memory_backend::MemoryAccessBackend backend{};
+        ksword::memory_backend::DdmaSession ddma;
+    };
+    bool captureFirstScanOptions(FirstScanOptions& options, QString& error) const;
+    static bool filterFirstScanRegions(const FirstScanOptions& options, const std::vector<RegionEntry>& source, std::vector<RegionEntry>& rows, QString& error, const std::function<bool()>& cancelled);
+    struct FirstScanPreparation;
+    std::shared_ptr<FirstScanPreparation> m_firstScanPreparation;
+    void acceptFirstScanRegionSnapshot(const std::shared_ptr<const std::vector<RegionEntry>>& rows, std::uint32_t error);
+    void pollFirstScanPreparation();
+    void finishFirstScanPreparation(const QString& error, bool cancelled = false);
+    void cancelFirstScanPreparation();
 
     // startFirstScan：
     // - 作用：执行“首次扫描”。
@@ -625,10 +741,10 @@ private:
     // - 返回：无。
     void cancelCurrentScan();
 
-    // cancelAndWaitForMemoryScanTasks：
-    // - 作用：请求所有内存扫描停止，并在关闭句柄或析构前等待后台任务退出。
+    // cancelMemoryScanTasks：
+    // - 作用：请求所有内存扫描停止，解绑 UI 后由物理任务独立完成资源收尾。
     // - 返回：无。
-    void cancelAndWaitForMemoryScanTasks();
+    void cancelMemoryScanTasks();
 
     // rebuildSearchResultTable：
     // - 作用：按 m_searchResultCache 重建结果表格。
@@ -641,8 +757,8 @@ private:
     // - 参数 pattern：本轮匹配模式。
     // - 返回：无。
     void scanMemoryRegionsInBackground(
-        const std::vector<RegionEntry>& scanRegions,
-        const ParsedSearchPattern& pattern);
+        std::vector<RegionEntry> scanRegions,
+        const ParsedSearchPattern& pattern, const FirstScanOptions& options);
 
 private:
     // ========================================================
@@ -841,15 +957,17 @@ private:
     // ========================================================
 
     QWidget* m_tabProcessModule = nullptr;    // Tab1 页面容器。
-    QTableWidget* m_processTable = nullptr;   // 进程列表表格。
-    QHash<std::uint32_t, ProcessCpuSample> m_previousCpuSamples; // 上一轮 CPU 采样，按 PID。
+    MemoryTableView* m_processTable = nullptr;   // 进程列表表格。
+    std::shared_ptr<const QHash<std::uint32_t, ProcessCpuSample>> m_previousCpuSamples = ks::memory_detail::ValueStorage<QHash<std::uint32_t, ProcessCpuSample>>();
+    std::shared_ptr<const QHash<std::uint32_t, int>> m_processRowsByPid = ks::memory_detail::ValueStorage<QHash<std::uint32_t, int>>();
+    ks::memory_detail::CoreListModel* m_processComboModel = nullptr; // 上一轮 CPU 采样，按 PID。
     QLineEdit* m_processFilterEdit = nullptr; // 进程名/PID 过滤输入框。
     QLabel* m_processCountLabel = nullptr;    // 进程表"显示 N / 共 M"计数。
     QLineEdit* m_moduleFilterEdit = nullptr;  // 模块名称过滤输入框。
     QPushButton* m_moduleRefreshButton = nullptr; // 模块刷新按钮。
     QCheckBox* m_moduleSignatureCheck = nullptr;  // 模块刷新时是否校验签名。
     QLabel* m_moduleStatusLabel = nullptr;        // 模块刷新状态标签。
-    QTreeWidget* m_moduleTable = nullptr;         // 模块列表表格（树形表头风格）。
+    MemoryTreeView* m_moduleTable = nullptr;         // 模块列表表格（树形表头风格）。
 
     // ========================================================
     // Tab2：内存区域
@@ -862,7 +980,7 @@ private:
     QCheckBox* m_regionCommittedOnlyCheck = nullptr; // 仅已提交区域过滤。
     QCheckBox* m_regionImageOnlyCheck = nullptr;     // 仅 IMAGE 类型过滤。
     QCheckBox* m_regionReadableOnlyCheck = nullptr;  // 仅可读区域过滤。
-    QTableWidget* m_regionTable = nullptr;    // 内存区域表格。
+    MemoryTableView* m_regionTable = nullptr;    // 内存区域表格。
 
     // ========================================================
     // Tab3：内存搜索
@@ -884,7 +1002,7 @@ private:
     QComboBox* m_nextScanCompareCombo = nullptr; // 再次扫描条件下拉框。
     QLineEdit* m_nextScanValueEdit = nullptr;    // 再次扫描值输入框。
     QLineEdit* m_nextScanValueBEdit = nullptr;   // Between 上界输入框。
-    QTableWidget* m_searchResultTable = nullptr; // 扫描结果表格。
+    MemoryTableView* m_searchResultTable = nullptr; // 扫描结果表格。
     QProgressBar* m_scanProgressBar = nullptr;   // 扫描进度条。
     QLabel* m_scanStatusLabel = nullptr;         // 扫描状态文本。
 
@@ -897,7 +1015,7 @@ private:
     QCheckBox* m_kernelExecutableRiskOnlyCheck = nullptr;   // 仅风险项过滤。
     QLineEdit* m_kernelExecutableModuleFilterEdit = nullptr; // 模块路径过滤输入框。
     QLabel* m_kernelExecutableStatusLabel = nullptr;         // 刷新状态标签。
-    QTableWidget* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
+    MemoryTableView* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
     ks::ui::StructuredFieldView* m_kernelExecutableDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -913,7 +1031,7 @@ private:
     QLineEdit* m_kernelMemoryEvidenceEndEdit = nullptr;      // 非模块扫描结束地址。
     QSpinBox* m_kernelMemoryEvidenceMaxRowsSpin = nullptr;   // 单次最大返回行数。
     QLabel* m_kernelMemoryEvidenceStatusLabel = nullptr;     // 查询状态标签。
-    QTableWidget* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
+    MemoryTableView* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
     ks::ui::StructuredFieldView* m_kernelMemoryEvidenceDetailEditor = nullptr; // 证据详情编辑器。
 
     // ========================================================
@@ -926,7 +1044,7 @@ private:
     QLineEdit* m_processPteTranslateAddressEdit = nullptr;      // VA 输入框。
     QSpinBox* m_processPteTranslatePageCountSpin = nullptr;     // 采样页数。
     QLabel* m_processPteTranslateStatusLabel = nullptr;         // 状态标签。
-    QTableWidget* m_processPteTranslateTable = nullptr;         // 翻译结果表。
+    MemoryTableView* m_processPteTranslateTable = nullptr;         // 翻译结果表。
     ks::ui::StructuredFieldView* m_processPteTranslateDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -942,7 +1060,7 @@ private:
     QLineEdit* m_processMemoryEvidenceFilterEdit = nullptr;       // 文本过滤。
     QSpinBox* m_processMemoryEvidenceMaxRowsSpin = nullptr;       // 最大行数。
     QLabel* m_processMemoryEvidenceStatusLabel = nullptr;         // 状态标签。
-    QTableWidget* m_processMemoryEvidenceTable = nullptr;         // 证据结果表。
+    MemoryTableView* m_processMemoryEvidenceTable = nullptr;         // 证据结果表。
     ks::ui::StructuredFieldView* m_processMemoryEvidenceDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -950,6 +1068,8 @@ private:
     // ========================================================
 
     SystemMemoryAuditPage* m_systemMemoryAuditPage = nullptr; // 系统级物理内存归因页面。
+    QWidget* m_systemMemoryAuditPlaceholder = nullptr;       // 首次切页前的轻量占位页。
+    bool m_systemMemoryAuditPageConstructing = false;        // 防止切页/刷新重入构造。
 
     // ========================================================
     // Tab12：DDMA（磁盘直接内存访问）
@@ -968,14 +1088,24 @@ private:
     // ========================================================
 
     // MemoryScanTaskState：
-    // - 作用：独立保存扫描任务计数与等待条件，避免 detached worker 依赖 QWidget 生命周期；
+    // - 作用：独立保存扫描取消、进度与物理完成状态，避免 detached worker 依赖 QWidget 生命周期；
     // - 生命周期：MemoryDock 与所有已启动扫描任务共同持有。
     struct MemoryScanTaskState
     {
-        std::mutex mutex;                         // mutex：保护 activeTaskCount 的读写。
-        std::condition_variable completion;       // completion：最后一个任务退出时唤醒关闭路径。
-        std::size_t activeTaskCount = 0;          // activeTaskCount：当前尚未退出的扫描协调线程数。
+        std::atomic_bool cancelRequested{false}, done{false};
+        std::atomic<std::size_t> progressDone{0}, progressTotal{0};
+        std::atomic_int progressPercent{-1};
+        std::shared_ptr<void> processLease;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> cleanupLease;
+        std::shared_ptr<const std::vector<SearchResultEntry>> results;
+        std::uint64_t elapsedMs = 0, skippedBytes = 0, skippedEntries = 0;
+        QString firstReadFailure, failureText;
+        bool next = false, cancelled = false;
     };
+    std::function<void()> m_scanCompletion;
+    int m_scanLastProgress = -1;
+    void pollMemoryScanTask();
+
 
     HANDLE m_attachedProcessHandle = nullptr; // 当前附加的目标进程句柄。
     std::uint32_t m_attachedPid = 0;          // 当前附加 PID。
@@ -983,42 +1113,48 @@ private:
     bool m_canReadWriteMemory = false;        // 当前句柄是否可读写内存。
     std::atomic<std::uint64_t> m_processAttachmentGeneration{ 0 }; // 附加上下文代次（丢弃旧句柄任务结果）。
 
-    std::vector<ProcessEntry> m_processCache; // 进程缓存（Tab1/工具栏复用）。
-    std::vector<ModuleEntry> m_moduleCache;   // 模块缓存（Tab1 使用）。
+    std::shared_ptr<const std::vector<ProcessEntry>> m_processCache = ks::memory_detail::ValueStorage<std::vector<ProcessEntry>>(); // 进程缓存（Tab1/工具栏复用）。
+    std::shared_ptr<const std::vector<ModuleEntry>> m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>();   // 模块缓存（Tab1 使用）。
     std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
     std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
+    struct ModuleRefreshRequest { std::uint32_t pid = 0; std::uint64_t creation = 0; bool signatures = false; };
+    struct ModuleRefreshJob;
+    std::shared_ptr<ModuleRefreshJob> m_moduleRefreshJob;
+    std::shared_ptr<std::atomic_bool> m_moduleRefreshLifetime = std::make_shared<std::atomic_bool>(false);
+    std::optional<ModuleRefreshRequest> m_moduleRefreshPending;
+    QTimer* m_moduleRefreshPoll = nullptr;
     int m_dumpMemoryProgressPid = 0;        // Dump 内存任务的进度条 PID。
     ks::ui::AsyncOperation* m_regionDumpOperation = nullptr; // QObject 子对象，串行管理区域转储。
     std::shared_ptr<std::atomic<RegionDumpPhase>> m_regionDumpPhase; // 提交与取消的仲裁状态。
     int m_regionDumpProgressPid = 0;         // 区域转储独立进度，避免与整进程 Dump 互相覆盖。
-    std::vector<RegionEntry> m_regionCache;   // 区域缓存（Tab2/Tab3 复用）。
+    std::shared_ptr<const std::vector<RegionEntry>> m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>();   // 区域缓存（Tab2/Tab3 复用）。
 
-    std::vector<SearchResultEntry> m_searchResultCache; // 扫描结果缓存（Tab3）。
+    std::shared_ptr<const std::vector<SearchResultEntry>> m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>(); // 扫描结果缓存（Tab3）。
     std::size_t m_searchResultVisibleCount = 0;         // 当前结果表实际显示条数（可能小于缓存总数）。
     SearchValueType m_lastSearchValueType = SearchValueType::Byte; // 最近一次扫描类型。
     std::atomic<bool> m_scanInProgress{ false };       // 当前是否正在扫描。
     std::atomic<bool> m_scanCancelRequested{ false };  // 扫描取消标志。
     std::shared_ptr<MemoryScanTaskState> m_scanTaskState = std::make_shared<MemoryScanTaskState>();
-                                                        // m_scanTaskState：跨线程存活的扫描任务计数器。
+                                                        // m_scanTaskState：跨线程存活的扫描值任务。
     std::uint32_t m_scanThreadCount = 4;               // 扫描线程数（设置可调）。
     std::uint32_t m_scanChunkSizeKB = 1024;            // 单次读取块大小（KB，设置可调）。
 
-    std::vector<ksword::ark::KernelExecutableMemoryPageEntry> m_kernelExecutableCache; // Tab7 扫描缓存。
+    std::shared_ptr<const std::vector<ksword::ark::KernelExecutableMemoryPageEntry>> m_kernelExecutableCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelExecutableMemoryPageEntry>>(); // Tab7 扫描缓存。
     std::atomic<bool> m_kernelExecutableRefreshInProgress{ false }; // Tab7 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelExecutableRefreshTicket{ 0 }; // Tab7 刷新票据。
     std::size_t m_kernelExecutableVisibleCount = 0; // Tab7 当前可见行数。
 
-    std::vector<ksword::ark::KernelMemoryEvidenceEntry> m_kernelMemoryEvidenceCache; // Tab8 证据缓存。
+    std::shared_ptr<const std::vector<ksword::ark::KernelMemoryEvidenceEntry>> m_kernelMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelMemoryEvidenceEntry>>(); // Tab8 证据缓存。
     std::atomic<bool> m_kernelMemoryEvidenceRefreshInProgress{ false }; // Tab8 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelMemoryEvidenceRefreshTicket{ 0 }; // Tab8 刷新票据。
     std::size_t m_kernelMemoryEvidenceVisibleCount = 0; // Tab8 当前可见行数。
 
-    std::vector<ProcessMemoryEvidenceEntry> m_processPteTranslateCache; // Tab9 证据缓存。
+    std::shared_ptr<const std::vector<ProcessMemoryEvidenceEntry>> m_processPteTranslateCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>(); // Tab9 证据缓存。
     std::atomic<bool> m_processPteTranslateRefreshInProgress{ false }; // Tab9 是否正在刷新。
     std::atomic<std::uint64_t> m_processPteTranslateRefreshTicket{ 0 }; // Tab9 刷新票据。
     std::size_t m_processPteTranslateVisibleCount = 0; // Tab9 当前可见行数。
 
-    std::vector<ProcessMemoryEvidenceEntry> m_processMemoryEvidenceCache; // Tab10 证据缓存。
+    std::shared_ptr<const std::vector<ProcessMemoryEvidenceEntry>> m_processMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>(); // Tab10 证据缓存。
     std::atomic<bool> m_processMemoryEvidenceRefreshInProgress{ false }; // Tab10 是否正在刷新。
     std::atomic<std::uint64_t> m_processMemoryEvidenceRefreshTicket{ 0 }; // Tab10 刷新票据。
     std::size_t m_processMemoryEvidenceVisibleCount = 0; // Tab10 当前可见行数。
@@ -1046,7 +1182,8 @@ private:
     bool navigateWorkbench(const ks::ui::NavRequest& request);
     // workbenchAllowsProcessChange：附加/分离目标进程之前问一次工作台的离开守卫；
     // 视图尚未创建返回 true，守卫被用户否决返回 false。
-    bool workbenchAllowsProcessChange();
+    ks::ui::LeaveEntryStatus workbenchAllowsProcessChange(ks::ui::LeaveCompletion completion = {});
+    ks::ui::LeaveEntryStatus prepareMemoryDebugQuit(ks::ui::LeaveCompletion completion);
     // shutdownWorkbench：析构路径上先于子对象销毁调用：权威视图把设置落盘，并断开对视图的引用。
     void shutdownWorkbench();
     // applyProcessDetailTabVisibility：按"内嵌进程详情窗口"的规则重新设置各页签的显隐
@@ -1060,12 +1197,34 @@ private:
     ks::ui::MemoryWorkbenchView* m_workbenchView = nullptr; // 工作台视图（懒创建，容器页的子对象）。
     QTimer* m_workbenchLivenessTimer = nullptr; // 每秒核验工作台锚定目标。
     bool m_workbenchEmbedded = false;                     // 是否是进程详情窗口里的内嵌实例（视图以内嵌模式创建）。
+    int m_navigationPrepareCursor = 0;
+    bool m_navigationPagePreparing = false;
+    bool m_navigationSkippedColdBodies = false;
     bool m_navigationPagesPrepared = false;               // 导航索引已完成一次嵌套懒页准备。
     bool m_workbenchQuitPrepared = false;                 // 普通工作台退出许可通过后保持冻结。
     bool m_workbenchEnabledBeforeQuit = true;             // 取消退出时恢复该视图自己的原启用状态。
 
     // 模块表当前缓存对应的进程：模块表可以预览一个并未附加的进程，双击模块基址时必须按
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。
+    QTimer* m_coreProjectionPoll = nullptr;
+    QTimer* m_coreProjectionDebounce = nullptr;
+    std::array<QString, 4> m_extraStatusTemplates;
+    std::array<ks::ui::FieldDocument, 4> m_extraDiagnosticDocuments;
+    std::array<bool, 8> m_coreInitialized{};
+    std::array<int, 8> m_coreSortColumns{0, 0, 0, 0, 0, 0, 0, 0};
+    std::array<Qt::SortOrder, 8> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder};
+    std::array<std::shared_ptr<CoreProjectionData>, 8> m_corePublished, m_coreReady, m_coreFailed;
+    std::shared_ptr<CoreProjectionJob> m_coreProjectionJob;
+    std::shared_ptr<RegionRefreshJob> m_regionRefreshJob, m_regionRefreshPendingJob;
+    std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);
+    std::uint64_t m_coreLocaleGeneration = 0;
+    QString m_moduleCacheStatusTemplate;
+    std::shared_ptr<const std::vector<RegionEntry>> m_regionSearchSnapshot;
+    std::uint64_t m_regionSearchGeneration = UINT64_MAX;
+    std::uint32_t m_regionSearchError = 0;
+    bool m_regionCachePartial = false;
+    std::uint32_t m_regionCacheError = 0;
+    std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
     std::uint32_t m_moduleCachePid = 0;
     // 上面那个进程在缓存落地时的创建时间（100ns，0=没取到）：钉住预览进程时用它核对"仍是同一个进程实例"。
     std::uint64_t m_moduleCacheCreateTime = 0;

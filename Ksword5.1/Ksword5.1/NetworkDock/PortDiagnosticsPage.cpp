@@ -12,14 +12,22 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QFormLayout>
+#include <QFontMetrics>
 #include <QHeaderView>
+#include <QHash>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPixmap>
+#include <QScopeGuard>
 #include <QSpinBox>
 #include <QStringList>
 #include <QVBoxLayout>
+#include <Shellapi.h>
+#include <objbase.h>
+#include <vector>
 
 namespace
 {
@@ -76,6 +84,7 @@ namespace
 PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
 {
     m_operation = new ks::ui::AsyncOperation(this);
+    m_iconOperation = new ks::ui::AsyncOperation(this);
     auto* root = new QVBoxLayout(this); // 查询、占用与绑定各自分区，保持主要结果可伸展。
     root->setContentsMargins(0, 0, 0, 0);
     auto* workspace = new ks::ui::ParameterWorkspace(this, 380); // 参数与诊断结果独立使用空间。
@@ -123,6 +132,15 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
     ownersLayout->addLayout(ownerActions);
     m_owners = createEvidenceTable(ownersGroup,
         {portText("协议 / 地址族"), portText("本地端点"), portText("状态"), QStringLiteral("PID"), portText("进程")});
+    // 协议是短枚举；把剩余宽度交给端点与进程，而不是最后一列独占余量。
+    auto* ownersHeader = m_owners->horizontalHeader();
+    ownersHeader->setStretchLastSection(false);
+    ownersHeader->setSectionResizeMode(0, QHeaderView::Interactive);
+    ownersHeader->resizeSection(0,
+        m_owners->fontMetrics().horizontalAdvance(QStringLiteral("TCP / IPv6")) + 24);
+    m_owners->horizontalHeaderItem(0)->setToolTip(m_owners->horizontalHeaderItem(0)->text());
+    ownersHeader->setSectionResizeMode(1, QHeaderView::Stretch);
+    ownersHeader->setSectionResizeMode(4, QHeaderView::Stretch);
     ownersLayout->addWidget(m_owners, 1);
     m_details = new QLabel(ownersGroup);
     m_details->setWordWrap(true);
@@ -164,6 +182,7 @@ PortDiagnosticsPage::PortDiagnosticsPage(QWidget* parent) : QWidget(parent)
 PortDiagnosticsPage::~PortDiagnosticsPage()
 {
     m_operation->close(); // 先关闭异步投递，后台仅保留值请求和取消令牌。
+    m_iconOperation->close();
 }
 
 void PortDiagnosticsPage::setBusy(bool busy)
@@ -178,6 +197,7 @@ void PortDiagnosticsPage::setBusy(bool busy)
 
 void PortDiagnosticsPage::invalidateSnapshot()
 {
+    m_iconOperation->cancel();
     m_hasSnapshot = false;
     m_snapshot = {};
     m_owners->setRowCount(0);
@@ -225,6 +245,7 @@ void PortDiagnosticsPage::updateSelection()
 
 void PortDiagnosticsPage::showSnapshot(const ks::network::PortDiagnosticSnapshot& snapshot)
 {
+    m_iconOperation->cancel();
     m_hasSnapshot = false;
     m_snapshot = snapshot;
     m_owners->setRowCount(static_cast<int>(snapshot.occupants.size()));
@@ -239,6 +260,7 @@ void PortDiagnosticsPage::showSnapshot(const ks::network::PortDiagnosticSnapshot
             auto* item = new QTableWidgetItem(cells[column]); // 索引随单元格排序移动，保持目标身份。
             item->setData(Qt::UserRole, row);
             item->setToolTip(cells[column]);
+            if (column == 4) item->setIcon(QIcon(QStringLiteral(":/Icon/process_main.svg")));
             m_owners->setItem(row, column, item);
         }
     }
@@ -268,6 +290,56 @@ void PortDiagnosticsPage::showSnapshot(const ks::network::PortDiagnosticSnapshot
         m_owners->selectRow(0);
     }
     updateSelection();
+
+    // 与网络审计页相同：Shell 查询在后台，QImage 跨线程，QPixmap 只在 GUI 创建。
+    // 使用诊断快照中的映像路径，不再按可能已复用的 PID 查询另一个进程。
+    QStringList imagePaths;
+    imagePaths.reserve(static_cast<qsizetype>(snapshot.occupants.size()));
+    for (const auto& owner : snapshot.occupants)
+        imagePaths.push_back(QString::fromUtf8(owner.imagePath.c_str()));
+    if (imagePaths.isEmpty()) return;
+    m_iconOperation->submit<QStringList, std::vector<QImage>>(imagePaths,
+        [](const QStringList& paths, const ks::ui::AsyncOperationToken& token)
+        {
+            std::vector<QImage> icons;
+            icons.reserve(static_cast<std::size_t>(paths.size()));
+            QHash<QString, QImage> cached;
+            const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            const auto comGuard = qScopeGuard([comResult]() {
+                if (SUCCEEDED(comResult)) ::CoUninitialize();
+            });
+            for (const auto& path : paths)
+            {
+                if (token.isCanceled()) break;
+                if (path.isEmpty()) { icons.emplace_back(); continue; }
+                const auto found = cached.constFind(path);
+                if (found != cached.constEnd()) { icons.push_back(found.value()); continue; }
+                SHFILEINFOW fileInfo{};
+                const auto result = ::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(path.utf16()),
+                    0, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_SMALLICON);
+                const auto iconGuard = qScopeGuard([&fileInfo]() {
+                    if (fileInfo.hIcon != nullptr) ::DestroyIcon(fileInfo.hIcon);
+                });
+                QImage image;
+                if (result != 0 && fileInfo.hIcon != nullptr)
+                    image = QImage::fromHICON(fileInfo.hIcon);
+                cached.insert(path, image);
+                icons.push_back(std::move(image));
+            }
+            return icons;
+        }, [this](const std::vector<QImage>& icons, std::uint64_t)
+        {
+            if (!m_hasSnapshot) return true;
+            for (int row = 0; row < m_owners->rowCount(); ++row)
+            {
+                auto* item = m_owners->item(row, 4);
+                if (item == nullptr) continue;
+                const int index = item->data(Qt::UserRole).toInt();
+                if (index >= 0 && static_cast<std::size_t>(index) < icons.size() && !icons[index].isNull())
+                    item->setIcon(QIcon(QPixmap::fromImage(icons[index])));
+            }
+            return true;
+        }, [](std::exception_ptr) {}); // 解析失败保留原占位图标，诊断与动作仍可用。
 }
 
 void PortDiagnosticsPage::diagnose()

@@ -1,10 +1,13 @@
 #include "../UI/StructuredFieldView.h"
 #include "TamperDetectionPage.h"
+#include "MemoryDock.ReadOnlyModels.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/FlowLayout.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -25,6 +28,8 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRunnable>
+#include <QShowEvent>
+#include <QHideEvent>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidgetItem>
@@ -370,10 +375,29 @@ namespace ksword::memory_dock
         buildUi();
         wireSignals();
         refreshChannelAvailability();
-        updateRunButtonState();
+        invalidateHvmAvailability();
     }
 
     TamperDetectionPage::~TamperDetectionPage() = default;
+
+    void TamperDetectionPage::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        requestHvmAvailability();
+    }
+
+    void TamperDetectionPage::hideEvent(QHideEvent* event)
+    {
+        QWidget::hideEvent(event);
+        // Reject the late observation of a previous visible branch.
+        invalidateHvmAvailability();
+    }
+
+    void TamperDetectionPage::setHvmAvailabilityRequester(std::function<void()> request)
+    {
+        m_requestHvmAvailability = std::move(request);
+        if (isVisible()) requestHvmAvailability();
+    }
 
     void TamperDetectionPage::buildUi()
     {
@@ -396,6 +420,13 @@ namespace ksword::memory_dock
 
         formLayout->addWidget(new QLabel(QStringLiteral("扫描目标"), this), 0, 0);
         m_targetCombo = new QComboBox(this);
+        m_candidateModel = new ks::memory_detail::CoreListModel(m_targetCombo);
+        m_targetCombo->setProperty("ks_i18n_preserve_model_data", true);
+        m_targetCombo->setModel(m_candidateModel);
+        m_candidateModel->publish(1, [](int, int role) -> QVariant {
+            if (role == Qt::UserRole) { return -1; }
+            return role == Qt::DisplayRole ? QVariant(ks::i18n::sourceText(QStringLiteral("自定义范围"))) : QVariant();
+        });
         ks::ui::StylePrimaryCombo(m_targetCombo);
         // 长模块名称交给下拉列表展示，不能由sizeHint撑宽整页。
         m_targetCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -521,27 +552,40 @@ namespace ksword::memory_dock
     void TamperDetectionPage::setAttachedProcess(
         const std::uint32_t processId, const QString& processName)
     {
+        ++m_candidateContextGeneration;
         m_attachedPid = processId;
         m_attachedProcessName = processName;
+        if (m_channelPublishedVersion != m_channelQueryVersion) requestHvmAvailability();
         updateRunButtonState();
     }
 
-    void TamperDetectionPage::setModuleCandidates(const std::vector<ModuleCandidate>& candidates)
+    void TamperDetectionPage::setModuleCandidates(const std::shared_ptr<const ModuleCandidateSnapshot>& candidates)
     {
-        m_moduleCandidates = candidates;
-        const QString previousText = m_targetCombo->currentText();
-        {
-            const QSignalBlocker blocker(m_targetCombo);
-            m_targetCombo->clear();
-            m_targetCombo->addItem(QStringLiteral("自定义范围"), QVariant::fromValue(-1));
-            for (int index = 0; index < static_cast<int>(candidates.size()); ++index)
-            {
-                m_targetCombo->addItem(candidates[static_cast<std::size_t>(index)].displayText, index);
-            }
-            const int restoredIndex = m_targetCombo->findText(previousText);
-            m_targetCombo->setCurrentIndex(restoredIndex >= 0 ? restoredIndex : 0);
-        }
-        updateRunButtonState();
+        if (!candidates) { return; }
+        const QPointer<TamperDetectionPage> owner(this);
+        const auto generation = m_candidateContextGeneration;
+        const auto commit = [owner, candidates, generation] {
+            if (!owner || owner->m_candidateContextGeneration != generation) { return; }
+            if (candidates == owner->m_moduleCandidates) { return; }
+            const int selected = owner->m_targetCombo->currentData().toInt();
+            const auto previous = selected >= 0 && selected < static_cast<int>(owner->m_moduleCandidates->entries.size())
+                ? ModuleCandidateSnapshot::identity(owner->m_moduleCandidates->entries[static_cast<std::size_t>(selected)]) : QString();
+            QSignalBlocker blocker(owner->m_targetCombo);
+            owner->m_moduleCandidates = candidates;
+            owner->m_candidateModel->publish(static_cast<int>(candidates->entries.size()) + 1, [candidates](const int row, const int role) -> QVariant {
+                if (role == Qt::UserRole) { return row - 1; }
+                if (row == 0) { return role == Qt::DisplayRole ? QVariant(ks::i18n::sourceText(QStringLiteral("自定义范围"))) : QVariant(); }
+                const auto& candidate = candidates->entries[static_cast<std::size_t>(row - 1)];
+                return role == Qt::DisplayRole || role == Qt::ToolTipRole ? QVariant(candidate.displayText) : QVariant();
+            });
+            if (!owner) { blocker.dismiss(); return; }
+            owner->m_targetCombo->setCurrentIndex(candidates->rowsByKey.contains(previous) ? candidates->rowsByKey.value(previous) + 1 : 0);
+            if (!owner) { blocker.dismiss(); return; }
+            owner->updateRunButtonState();
+            if (!owner) { blocker.dismiss(); }
+        };
+        if (ks::ui::DeferUiCommitIfComboBoxPopupOpen(this, QStringLiteral("memory-tamper-module-candidates"), commit)) { return; }
+        commit();
     }
 
     void TamperDetectionPage::refreshChannelAvailability()
@@ -551,39 +595,65 @@ namespace ksword::memory_dock
             ksword::memory_backend::currentDdmaSession(), &reason);
         m_useDmaCheck->setEnabled(ddmaUsable);
 
-        // HVM 的可用性与 DDMA 无关，单独问一次。窗口没标定出来时这条通道
-        // 仍会返回数据（回退 MmCopyMemory），但那时它与 R0 不再独立——
-        // 两者一致就不能用来排除内存管理器被挂钩，所以判为不可用而不是
-        // 让它带着一个悄悄失效的性质继续参与比对。
-        QString hvmReason;
-        const bool hvmUsable = ksword::memory_backend::isHvmMemoryUsable(&hvmReason);
-        m_useHvmCheck->setEnabled(hvmUsable);
-        if (!hvmUsable)
-        {
-            m_useHvmCheck->setChecked(false);
-            m_useHvmCheck->setToolTip(hvmReason);
-        }
-        else
-        {
-            m_useHvmCheck->setToolTip(QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。"));
-        }
+        // HVM observations arrive independently from the host status worker.
+        // Even a visible DDMA-only update must not invalidate or query HVM.
         if (ddmaUsable)
         {
-            m_channelHintLabel->setText(QStringLiteral("DDMA 通道就绪，本页可以判定 SLAT / EPT 级别的重定向。"));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+            const auto hint=ks::i18n::packedSourceText(QStringLiteral("DDMA 通道就绪，本页可以判定 SLAT / EPT 级别的重定向。"));
+            const auto style=QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex());
+            if(m_channelHintLabel->text()!=hint)m_channelHintLabel->setText(hint);
+            if(m_channelHintLabel->styleSheet()!=style)m_channelHintLabel->setStyleSheet(style);
         }
         else
         {
             // 这里必须说清楚"少了 DDMA 会少掉哪一类结论"，而不是只说它不可用。
             // 否则用户会以为没有 DDMA 时这一页照样能回答同一个问题。
             m_useDmaCheck->setChecked(false);
-            m_channelHintLabel->setText(
-                QStringLiteral("DDMA 暂不可用：%1。没有这条路径时，其余几条都经过 CPU 页表、会被同一个隐藏者一起骗过，本页只能发现普通补丁，无法判定 SLAT / EPT 重定向。").arg(reason));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            const auto hint=ks::i18n::packedSourceText(QStringLiteral("DDMA 暂不可用：%1。没有这条路径时，其余几条都经过 CPU 页表、会被同一个隐藏者一起骗过，本页只能发现普通补丁，无法判定 SLAT / EPT 重定向。").arg(reason));
+            const auto style=QStringLiteral("color:%1;").arg(KswordTheme::WarningHex());
+            if(m_channelHintLabel->text()!=hint)m_channelHintLabel->setText(hint);
+            if(m_channelHintLabel->styleSheet()!=style)m_channelHintLabel->setStyleSheet(style);
         }
         updateRunButtonState();
+    }
+
+    void TamperDetectionPage::invalidateHvmAvailability()
+    {
+        ++m_channelQueryVersion;
+        const QPointer<TamperDetectionPage> guard(this);
+        // Preserve the user's preference while the authoritative result is
+        // pending, but exclude the disabled path from all new scan requests.
+        m_useHvmCheck->setEnabled(false);
+        if (!guard) return;
+        m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("正在查询 HVM 私有页表窗口。")));
+        if (guard) updateRunButtonState();
+    }
+
+    void TamperDetectionPage::requestHvmAvailability()
+    {
+        const QPointer<TamperDetectionPage> guard(this);
+        invalidateHvmAvailability();
+        if (guard && isVisible() && m_requestHvmAvailability) m_requestHvmAvailability();
+    }
+
+    void TamperDetectionPage::applyHvmAvailability(const std::uint64_t epoch,
+        const bool usable, const QString& reason)
+    {
+        if (epoch != m_channelQueryVersion) return;
+        m_channelPublishedVersion = epoch;
+        const QPointer<TamperDetectionPage> guard(this);
+        if (m_useHvmCheck->isEnabled() != usable) m_useHvmCheck->setEnabled(usable);
+        if (!guard) return;
+        if (!usable)
+        {
+            m_useHvmCheck->setChecked(false);
+            if (!guard) return;
+        }
+        const QString tooltip = ks::i18n::packedSourceText(usable
+            ? QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。")
+            : reason);
+        if (m_useHvmCheck->toolTip() != tooltip) m_useHvmCheck->setToolTip(tooltip);
+        if (guard) updateRunButtonState();
     }
 
     void TamperDetectionPage::updateRunButtonState()
@@ -593,7 +663,7 @@ namespace ksword::memory_dock
         // 归一化出了问题。
         const int targetIndex = m_targetCombo->currentData().toInt();
         const bool moduleSelected =
-            targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates.size());
+            targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates->entries.size());
         m_useOnDiskImageCheck->setEnabled(moduleSelected);
         if (!moduleSelected)
         {
@@ -632,10 +702,10 @@ namespace ksword::memory_dock
         const int targetIndex = m_targetCombo->currentData().toInt();
         const std::uint64_t maxPages = static_cast<std::uint64_t>(m_maxPageSpin->value());
 
-        if (targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates.size()))
+        if (targetIndex >= 0 && targetIndex < static_cast<int>(m_moduleCandidates->entries.size()))
         {
             const ModuleCandidate& candidate =
-                m_moduleCandidates[static_cast<std::size_t>(targetIndex)];
+                m_moduleCandidates->entries[static_cast<std::size_t>(targetIndex)];
             startOut = candidate.baseAddress & ~(kPageBytes - 1ULL);
             const std::uint64_t modulePages =
                 (candidate.sizeBytes + kPageBytes - 1ULL) / kPageBytes;
@@ -685,10 +755,10 @@ namespace ksword::memory_dock
             m_useOnDiskImageCheck->isEnabled() && m_useOnDiskImageCheck->isChecked();
         const int selectedTargetIndex = m_targetCombo->currentData().toInt();
         if (selectedTargetIndex >= 0
-            && selectedTargetIndex < static_cast<int>(m_moduleCandidates.size()))
+            && selectedTargetIndex < static_cast<int>(m_moduleCandidates->entries.size()))
         {
             const ModuleCandidate& candidate =
-                m_moduleCandidates[static_cast<std::size_t>(selectedTargetIndex)];
+                m_moduleCandidates->entries[static_cast<std::size_t>(selectedTargetIndex)];
             request.moduleBaseAddress = candidate.baseAddress;
             request.moduleFilePath = candidate.filePath;
         }

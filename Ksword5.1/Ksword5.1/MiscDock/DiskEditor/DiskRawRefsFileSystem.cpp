@@ -2237,24 +2237,43 @@ namespace ks::misc::rawfs
         const std::uint64_t offset,
         const std::uint32_t length)
     {
-        RawFileReadResult result = makeFileResult(path, offset);
-        RefsVolume volume(reader);
-        if (!volume.mount(result.errorText))
+        struct FileState
         {
-            return result;
-        }
-        RefsEntry file;
-        QString canonicalPath;
-        if (!volume.resolvePath(
-                path,
-                file,
-                canonicalPath,
-                result.errorText))
+            RefsVolume volume;
+            RefsEntry data;
+            RawFileReadResult basis;
+            explicit FileState(const VolumeReader& reader) : volume(reader) {}
+        };
+        auto state = reader.fileSessionState<FileState>();
+        if (!state)
         {
-            return result;
+            state = std::make_shared<FileState>(reader);
+            auto& volume = state->volume;
+            auto& file = state->data;
+
+            RawFileReadResult result = makeFileResult(path, offset);
+            if (!volume.mount(result.errorText))
+            {
+                return result;
+            }
+            QString canonicalPath;
+            if (!volume.resolvePath(
+                    path,
+                    file,
+                    canonicalPath,
+                    result.errorText))
+            {
+                return result;
+            }
+            result.filePath = canonicalPath;
+            result.fileSizeBytes = file.dataSize;
+            state->basis = result;
+            reader.setFileSessionState(state);
         }
-        result.filePath = canonicalPath;
-        result.fileSizeBytes = file.dataSize;
+        RawFileReadResult result = state->basis;
+        result.requestedOffset = offset;
+        auto& volume = state->volume;
+        auto& file = state->data;
         if (!volume.readFile(file, offset, length, result))
         {
             return result;

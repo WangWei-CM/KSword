@@ -87,6 +87,7 @@ namespace ks::minidump
         };
 
         void* m_handle = nullptr;                    // m_handle：SymInitialize 用的伪进程句柄。
+        std::unique_lock<std::mutex> m_dbgHelpLock; // Owns serialization even before SymInitialize.
         bool m_initialized = false;                  // m_initialized：会话是否已建立。
         std::vector<Loaded> m_loaded;                // m_loaded：按 base 升序的已登记模块。
         std::vector<ModuleSymbolStatus> m_status;    // m_status：逐模块结论，供 UI 展示。
@@ -101,7 +102,9 @@ namespace ks::minidump
     // 传入 searchPath 符号搜索路径（空串则用默认路径）、result 解析结果（就地修改）；
     // 会填充 result.symbolStatus / symbolSearchPath，并在发现映像不匹配时追加
     // 一条 diagnostics 告警——这类告警必须让用户看见，否则他会拿错行号去改代码。
-    void ApplySymbols(const QString& searchPath, DumpParseResult& result);
+    void ApplySymbols(
+        const QString& searchPath, DumpParseResult& result,
+        const DumpCancellationToken& cancellation = {});
 
     // SymbolMatchStateText 作用：把匹配结论转成中文短语。
     // 传入 state；返回可直接进表格的文本。

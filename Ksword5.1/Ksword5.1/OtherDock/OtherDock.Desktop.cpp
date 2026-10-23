@@ -1,6 +1,10 @@
 #include "OtherDock.h"
 #include "../theme.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/ResultTableHost.h"
+#include "../Internationalization/LanguageManager.h"
 
 // ============================================================
 // OtherDock.Desktop.cpp
@@ -10,6 +14,10 @@
 // 3) 保持 SwitchDesktop 逻辑仅作用于当前进程窗口站，避免影响 Qt 主界面上下文。
 // ============================================================
 
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QDateTime>
+#include <QHash>
 #include <QColor>
 #include <QFont>
 #include <QLabel>
@@ -29,6 +37,8 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <array>
+#include <mutex>
 
 namespace
 {
@@ -300,6 +310,14 @@ namespace
         }
 
         sidDescription.sidText = sidToStringText(sidValue);
+        struct CachedSid { SidDescription value; qint64 expires = 0; };
+        static std::mutex cacheMutex;
+        static QHash<QString, CachedSid> cache;
+        const std::lock_guard<std::mutex> cacheLock(cacheMutex);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const auto cached = cache.constFind(sidDescription.sidText);
+        if (cached != cache.cend() && cached->expires > now) return cached->value;
+
 
         // 先走一轮空缓冲查询，拿到名字与域名所需字符数。
         DWORD accountNameLength = 0;
@@ -351,6 +369,9 @@ namespace
         {
             sidDescription.detailText.prepend(QStringLiteral("账户=%1；").arg(sidDescription.accountText));
         }
+        if (cache.size() >= 512) cache.clear();
+        cache.insert(sidDescription.sidText, {sidDescription,
+            now + (sidDescription.accountText.startsWith(QLatin1Char('<')) ? 5000 : 300000)});
         return sidDescription;
     }
 
@@ -579,69 +600,118 @@ namespace
         return nameList;
     }
 
-    // applyDesktopRowStyle：给当前桌面、当前窗口站和不可读行设置视觉区分。
-    void applyDesktopRowStyle(QTableWidgetItem* item, const DesktopRowData& rowData)
-    {
-        if (item == nullptr)
-        {
-            return;
-        }
-
-        if (rowData.isCurrentDesktop)
-        {
-            QFont currentFont = item->font();
-            currentFont.setBold(true);
-            item->setFont(currentFont);
-            item->setBackground(KswordTheme::SuccessBackgroundColor());
-            item->setForeground(KswordTheme::SuccessColor());
-            return;
-        }
-
-        if (rowData.isCurrentWindowStation)
-        {
-            item->setBackground(KswordTheme::PrimaryBlueSubtleColor());
-        }
-
-        if (rowData.readCapability == DesktopCapabilityState::No)
-        {
-            item->setForeground(KswordTheme::ErrorColor());
-        }
-    }
-
-    // setDesktopTableItem：统一创建表格项，并写入右键菜单与切换所需元数据。
-    void setDesktopTableItem(
-        QTableWidget* table,
-        const int row,
-        const int column,
-        const QString& text,
-        const DesktopRowData& rowData)
-    {
-        if (table == nullptr)
-        {
-            return;
-        }
-
-        QTableWidgetItem* item = new QTableWidgetItem(text);
-        item->setToolTip(text);
-        item->setData(kDesktopRoleWindowStationName, rowData.windowStationName);
-        item->setData(kDesktopRoleDesktopName, rowData.desktopName);
-        item->setData(kDesktopRoleIsCurrentWindowStation, rowData.isCurrentWindowStation);
-        item->setData(kDesktopRoleOwnerSidText, rowData.ownerSidText);
-        item->setData(kDesktopRoleOwnerSidDetailText, rowData.ownerSidDetailText);
-
-        if (column >= kDesktopColumnCurrentWindowStation
-            && column <= kDesktopColumnHeapKb
-            && column != kDesktopColumnSidDetail)
-        {
-            item->setTextAlignment(Qt::AlignCenter);
-        }
-
-        applyDesktopRowStyle(item, rowData);
-        table->setItem(row, column, item);
-    }
 }
 
-void OtherDock::refreshDesktopList()
+namespace ks::desktoplist
+{
+    struct Snapshot
+    {
+        std::vector<DesktopRowData> rows;
+        std::vector<std::array<QString, 13>> cells;
+        QHash<QString, int> byIdentity;
+        int selectRow = -1;
+        QString status, statusSource, languageId;
+        bool failed = false;
+    };
+    struct Request
+    {
+        QString currentStation, currentDesktop;
+        std::uint32_t session = 0;
+        std::vector<OtherDock::CreatedDesktopRecord> retained; // each handle carries an owning value lease
+        ks::i18n::SourceTextSnapshot language;
+    };
+    template<class Value, class... Args>
+    std::shared_ptr<Value> backgroundValue(Args&&... args)
+    {
+        return std::shared_ptr<Value>(new Value(std::forward<Args>(args)...), [](Value* value) {
+            QThreadPool::globalInstance()->start(QRunnable::create([value] { delete value; }));
+        });
+    }
+    static QString key(const DesktopRowData& row)
+    { return row.windowStationName.trimmed().toCaseFolded() + QLatin1Char('\\') + row.desktopName.trimmed().toCaseFolded(); }
+    class Model final : public QAbstractTableModel
+    {
+    public:
+        explicit Model(QObject* parent) : QAbstractTableModel(parent) {}
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() || !snapshot ? 0 : static_cast<int>(snapshot->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 13; }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!snapshot || !index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 || index.column() >= 13) return {};
+            const auto& row = snapshot->rows[index.row()];
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return snapshot->cells[index.row()][index.column()];
+            if (role == kDesktopRoleWindowStationName) return row.windowStationName;
+            if (role == kDesktopRoleDesktopName) return row.desktopName;
+            if (role == kDesktopRoleIsCurrentWindowStation) return row.isCurrentWindowStation;
+            if (role == kDesktopRoleOwnerSidText) return row.ownerSidText;
+            if (role == kDesktopRoleOwnerSidDetailText) return row.ownerSidDetailText;
+            if (role == Qt::TextAlignmentRole && index.column() >= 2 && index.column() <= 11 && index.column() != 10) return Qt::AlignCenter;
+            if (role == Qt::FontRole && row.isCurrentDesktop) { QFont font; font.setBold(true); return font; }
+            if (role == Qt::BackgroundRole)
+            {
+                if (row.isCurrentDesktop) return QBrush(KswordTheme::SuccessBackgroundColor());
+                if (row.isCurrentWindowStation) return QBrush(KswordTheme::PrimaryBlueSubtleColor());
+            }
+            if (role == Qt::ForegroundRole)
+            {
+                if (row.isCurrentDesktop) return QBrush(KswordTheme::SuccessColor());
+                if (row.readCapability == DesktopCapabilityState::No) return QBrush(KswordTheme::ErrorColor());
+            }
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            if (orientation == Qt::Horizontal) return headerRoles.value(section).value(role);
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size()) return false;
+            if (role != Qt::DisplayRole && role != Qt::EditRole) { headerRoles[section].insert(role, value); return true; }
+            if (headers[section] == value.toString()) return true;
+            headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
+        }
+        void publish(std::shared_ptr<const Snapshot> value)
+        {
+            const QPointer<Model> alive(this);
+            beginResetModel(); if (!alive) return;
+            snapshot = std::move(value); endResetModel();
+        }
+        QHash<int, QHash<int, QVariant>> headerRoles;
+        QStringList headers;
+        std::shared_ptr<const Snapshot> snapshot;
+    };
+}
+
+static void formatDesktopSnapshot(ks::desktoplist::Snapshot& snapshot,
+    const ks::i18n::SourceTextSnapshot& language)
+{
+    snapshot.cells.clear();
+    snapshot.byIdentity.clear();
+    snapshot.cells.reserve(snapshot.rows.size());
+    for (int row = 0; row < static_cast<int>(snapshot.rows.size()); ++row)
+    {
+        const auto& value = snapshot.rows[row];
+        std::array<QString, 13> cells{value.windowStationName, value.desktopName,
+            value.isCurrentWindowStation ? QStringLiteral("是") : QStringLiteral("否"),
+            value.isCurrentDesktop ? QStringLiteral("是") : QStringLiteral("否"),
+            value.isInteractiveWindowStation ? QStringLiteral("是") : QStringLiteral("否"),
+            capabilityStateText(value.readCapability), capabilityStateText(value.switchCapability),
+            formatSessionIdText(value.sessionId), value.ownerAccountText, value.ownerSidText,
+            value.ownerSidDetailText, value.heapSizeText, value.remarkText};
+        for (auto& cell : cells) cell = language.sourceText(cell);
+        snapshot.cells.push_back(std::move(cells));
+        snapshot.byIdentity.insert(ks::desktoplist::key(value), row);
+    }
+
+    snapshot.languageId = language.languageId();
+    snapshot.status = language.sourceText(snapshot.statusSource);
+}
+
+static std::shared_ptr<const ks::desktoplist::Snapshot> collectDesktopSnapshot(
+    const ks::desktoplist::Request& request, const ks::ui::AsyncOperationToken& token)
+
 {
     // refreshEvent：整条“窗口站枚举 -> 桌面枚举 -> UI 刷新”链路共用一个事件 GUID。
     kLogEvent refreshEvent;
@@ -649,35 +719,12 @@ void OtherDock::refreshDesktopList()
         << "[OtherDock] 开始刷新桌面列表（窗口站/桌面扩展模式）。"
         << eol;
 
-    if (m_desktopTable == nullptr || m_desktopStatusLabel == nullptr)
-    {
-        err << refreshEvent
-            << "[OtherDock] 刷新桌面列表失败：桌面管理控件未初始化。"
-            << eol;
-        return;
-    }
-
-    const QPointer<OtherDock> safeThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("desktop-management-table-refresh"),
-        {m_desktopTable},
-        [safeThis]()
-        {
-            if (!safeThis.isNull())
-            {
-                safeThis->refreshDesktopList();
-            }
-        }))
-    {
-        return;
-    }
-
+    auto snapshot = ks::desktoplist::backgroundValue<ks::desktoplist::Snapshot>();
     // currentWindowStationHandle/currentWindowStationName/currentDesktopName：记录当前上下文，用于高亮和切换限制。
     HWINSTA currentWindowStationHandle = ::GetProcessWindowStation();
-    const QString currentWindowStationName = queryUserObjectName(currentWindowStationHandle);
-    const QString currentDesktopName = queryUserObjectName(::GetThreadDesktop(::GetCurrentThreadId()));
-    const std::uint32_t currentSessionId = queryCurrentSessionId();
+    const QString currentWindowStationName = request.currentStation;
+    const QString currentDesktopName = request.currentDesktop;
+    const std::uint32_t currentSessionId = request.session;
 
     if (currentWindowStationHandle == nullptr)
     {
@@ -686,10 +733,10 @@ void OtherDock::refreshDesktopList()
             << "[OtherDock] 刷新桌面列表失败：GetProcessWindowStation失败, code="
             << errorCode
             << eol;
-        m_desktopTable->clearContents();
-        m_desktopTable->setRowCount(0);
-        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：无法获取当前窗口站，错误码=%1").arg(errorCode));
-        return;
+        snapshot->failed = true;
+        snapshot->statusSource = (QStringLiteral("刷新失败：无法获取当前窗口站，错误码=%1").arg(errorCode));
+        formatDesktopSnapshot(*snapshot, request.language);
+        return snapshot;
     }
 
     // windowStationEnumError/windowStationNameList：先枚举窗口站；若失败则至少保留当前窗口站。
@@ -712,16 +759,16 @@ void OtherDock::refreshDesktopList()
             << "[OtherDock] 刷新桌面列表失败：未能获取任何窗口站名称, enumCode="
             << windowStationEnumError
             << eol;
-        m_desktopTable->clearContents();
-        m_desktopTable->setRowCount(0);
-        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：无法枚举窗口站，错误码=%1").arg(windowStationEnumError));
-        return;
+        snapshot->failed = true;
+        snapshot->statusSource = (QStringLiteral("刷新失败：无法枚举窗口站，错误码=%1").arg(windowStationEnumError));
+        formatDesktopSnapshot(*snapshot, request.language);
+        return snapshot;
     }
 
     // rowDataList：缓存最终要写进表格的所有行；selectRowIndex：优先选中当前桌面所在行。
-    std::vector<DesktopRowData> rowDataList;
+    auto& rowDataList = snapshot->rows;
     rowDataList.reserve(32);
-    int selectRowIndex = -1;
+    int& selectRowIndex = snapshot->selectRow;
     int desktopCountForStatus = 0;
     int accessibleWindowStationCount = 0;
     QStringList enumeratedDesktopKeyList; // 已由 EnumDesktopsW 枚举出的真实桌面键，后续用于补齐私有保留句柄行。
@@ -739,8 +786,8 @@ void OtherDock::refreshDesktopList()
     // - 作用：按窗口站/桌面名称查找本进程保留的新建桌面句柄；
     // - 输入：windowStationName/desktopName 来自当前枚举行；
     // - 输出：命中时返回只读记录指针，否则返回 nullptr。
-    auto findRetainedRecord = [this](const QString& windowStationName, const QString& desktopName) -> const CreatedDesktopRecord* {
-        for (const CreatedDesktopRecord& createdRecord : m_createdDesktopHandles)
+    auto findRetainedRecord = [&request](const QString& windowStationName, const QString& desktopName) -> const OtherDock::CreatedDesktopRecord* {
+        for (const OtherDock::CreatedDesktopRecord& createdRecord : request.retained)
         {
             if (createdRecord.desktopHandle == nullptr)
             {
@@ -755,11 +802,12 @@ void OtherDock::refreshDesktopList()
                 return &createdRecord;
             }
         }
-        return static_cast<const CreatedDesktopRecord*>(nullptr);
+        return static_cast<const OtherDock::CreatedDesktopRecord*>(nullptr);
     };
 
     for (const QString& windowStationName : windowStationNameList)
     {
+        if (token.isCanceled()) return {};
         // isCurrentWindowStation：标识当前循环处理的窗口站是否就是当前进程窗口站。
         const bool isCurrentWindowStation = !currentWindowStationName.isEmpty()
             && QString::compare(windowStationName, currentWindowStationName, Qt::CaseInsensitive) == 0;
@@ -776,6 +824,8 @@ void OtherDock::refreshDesktopList()
             needCloseWindowStation = windowStationHandle != nullptr;
         }
 
+        const auto stationLease = std::shared_ptr<void>(needCloseWindowStation ? windowStationHandle : nullptr,
+            [](void* handle) { if (handle) ::CloseWindowStation(reinterpret_cast<HWINSTA>(handle)); });
         // stationFlags/stationFlagsText/stationOwnerInfo：窗口站级别的上下文。
         USEROBJECTFLAGS stationFlags{};
         const bool stationFlagsOk = windowStationHandle != nullptr
@@ -855,10 +905,6 @@ void OtherDock::refreshDesktopList()
                     << eol;
             }
 
-            if (needCloseWindowStation)
-            {
-                ::CloseWindowStation(windowStationHandle);
-            }
             continue;
         }
 
@@ -866,6 +912,7 @@ void OtherDock::refreshDesktopList()
 
         for (const QString& desktopName : desktopNameList)
         {
+            if (token.isCanceled()) return {};
             DesktopRowData rowData;
             rowData.windowStationName = windowStationName;
             rowData.desktopName = desktopName;
@@ -883,7 +930,7 @@ void OtherDock::refreshDesktopList()
             // remarkList：聚合本行的工作站标志、输入能力、错误码与限制说明。
             QStringList remarkList;
             remarkList << QStringLiteral("工作站标志=%1").arg(stationFlagsText);
-            const CreatedDesktopRecord* retainedRecord = findRetainedRecord(
+            const OtherDock::CreatedDesktopRecord* retainedRecord = findRetainedRecord(
                 rowData.windowStationName,
                 rowData.desktopName);
             const DesktopOpenResult readOpenResult = tryOpenDesktopHandle(
@@ -1001,16 +1048,13 @@ void OtherDock::refreshDesktopList()
             }
         }
 
-        if (needCloseWindowStation)
-        {
-            ::CloseWindowStation(windowStationHandle);
-        }
     }
 
     // 私有 DACL 桌面可能无法被 OpenDesktopW 重新打开，极端情况下也可能无法稳定枚举。
     // 因此把本进程保留的创建句柄补成合成行，保证用户仍可在表格中看到并执行切换。
-    for (const CreatedDesktopRecord& createdRecord : m_createdDesktopHandles)
+    for (const OtherDock::CreatedDesktopRecord& createdRecord : request.retained)
     {
+        if (token.isCanceled()) return {};
         if (createdRecord.desktopHandle == nullptr || createdRecord.desktopName.trimmed().isEmpty())
         {
             continue;
@@ -1072,67 +1116,6 @@ void OtherDock::refreshDesktopList()
         }
     }
 
-    // 清空旧表格内容后统一写入，避免残留上一轮的宽表数据。
-    m_desktopTable->clearContents();
-    m_desktopTable->setRowCount(static_cast<int>(rowDataList.size()));
-
-    for (int row = 0; row < static_cast<int>(rowDataList.size()); ++row)
-    {
-        const DesktopRowData& rowData = rowDataList[static_cast<std::size_t>(row)];
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnWindowStation, rowData.windowStationName, rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnDesktopName, rowData.desktopName, rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnCurrentWindowStation,
-            rowData.isCurrentWindowStation ? QStringLiteral("是") : QStringLiteral("否"),
-            rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnCurrentDesktop,
-            rowData.isCurrentDesktop ? QStringLiteral("是") : QStringLiteral("否"),
-            rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnInteractive,
-            rowData.isInteractiveWindowStation ? QStringLiteral("是") : QStringLiteral("否"),
-            rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnReadable,
-            capabilityStateText(rowData.readCapability),
-            rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnSwitchable,
-            capabilityStateText(rowData.switchCapability),
-            rowData);
-        setDesktopTableItem(
-            m_desktopTable,
-            row,
-            kDesktopColumnSessionId,
-            formatSessionIdText(rowData.sessionId),
-            rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnOwner, rowData.ownerAccountText, rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnSid, rowData.ownerSidText, rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnSidDetail, rowData.ownerSidDetailText, rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnHeapKb, rowData.heapSizeText, rowData);
-        setDesktopTableItem(m_desktopTable, row, kDesktopColumnRemark, rowData.remarkText, rowData);
-    }
-
-    if (selectRowIndex >= 0 && selectRowIndex < m_desktopTable->rowCount())
-    {
-        m_desktopTable->selectRow(selectRowIndex);
-    }
-    else if (m_desktopTable->rowCount() > 0)
-    {
-        m_desktopTable->selectRow(0);
-    }
-
     const QString statusText = QStringLiteral(
         "已枚举 %1 个窗口站（可访问 %2 个）、%3 个桌面；当前站：%4；当前桌面：%5；SessionId：%6")
         .arg(windowStationNameList.size())
@@ -1141,7 +1124,8 @@ void OtherDock::refreshDesktopList()
         .arg(currentWindowStationName.isEmpty() ? QStringLiteral("<未知>") : currentWindowStationName)
         .arg(currentDesktopName.isEmpty() ? QStringLiteral("<未知>") : currentDesktopName)
         .arg(formatSessionIdText(currentSessionId));
-    m_desktopStatusLabel->setText(statusText);
+    snapshot->statusSource = statusText;
+    formatDesktopSnapshot(*snapshot, request.language);
 
     info << refreshEvent
         << "[OtherDock] 桌面列表刷新完成, windowStationCount="
@@ -1155,4 +1139,113 @@ void OtherDock::refreshDesktopList()
         << ", currentDesktop="
         << currentDesktopName.toStdString()
         << eol;
+    return snapshot;
+}
+void OtherDock::initializeDesktopTableModel()
+{
+    auto* source = new ks::desktoplist::Model(m_desktopTable);
+    source->headers = {QStringLiteral("窗口站"), QStringLiteral("桌面名称"), QStringLiteral("当前站"),
+        QStringLiteral("当前桌面"), QStringLiteral("交互式"), QStringLiteral("可读"), QStringLiteral("可切换"),
+        QStringLiteral("SessionId"), QStringLiteral("所有者"), QStringLiteral("SID"), QStringLiteral("SID详情"),
+        QStringLiteral("堆(KB)"), QStringLiteral("备注")};
+    m_desktopSourceModel = source;
+    auto* proxy = new QSortFilterProxyModel(m_desktopTable);
+    proxy->setSortRole(Qt::DisplayRole);
+    proxy->setSortCaseSensitivity(Qt::CaseSensitive);
+    proxy->setSortLocaleAware(true);
+    proxy->setDynamicSortFilter(false);
+    proxy->setSourceModel(source);
+    m_desktopDisplayModel = proxy;
+    m_desktopTable->setProperty("ks_i18n_preserve_model_data", true);
+    ks::ui::ResultTableCapabilities capabilities;
+    capabilities.actionBar = ks::ui::TableActionBarMode::Full;
+    ks::ui::ResultTableHost::ensure(m_desktopTable)->bindModel(proxy,
+        {{0, QStringLiteral("station")}, {1, QStringLiteral("desktop")}, {2, QStringLiteral("current_station")},
+         {3, QStringLiteral("current_desktop")}, {4, QStringLiteral("interactive")}, {5, QStringLiteral("readable")},
+         {6, QStringLiteral("switchable")}, {7, QStringLiteral("session")}, {8, QStringLiteral("owner")},
+         {9, QStringLiteral("sid")}, {10, QStringLiteral("sid_detail")}, {11, QStringLiteral("heap")},
+         {12, QStringLiteral("remark")}}, capabilities);
+    ks::ui::InstallTableHeaderClickSorting(m_desktopTable);
+    m_desktopTable->horizontalHeader()->setResizeContentsPrecision(100);
+}
+
+void OtherDock::refreshDesktopList()
+{
+    if (!m_desktopTable || !m_desktopStatusLabel || !m_desktopOperation) return;
+    m_desktopLoaded = true;
+    ks::desktoplist::Request request;
+    // Capture caller context as values. Enumeration never switches the process
+    // window station or borrows a GUI vector/created-desktop raw pointer.
+    request.currentStation = queryUserObjectName(::GetProcessWindowStation());
+    request.currentDesktop = queryUserObjectName(::GetThreadDesktop(::GetCurrentThreadId()));
+    request.session = queryCurrentSessionId();
+    request.retained = m_createdDesktopHandles;
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    m_desktopStatusLabel->setText(QStringLiteral("读取中…"));
+    m_desktopOperation->submit<ks::desktoplist::Request, std::shared_ptr<const ks::desktoplist::Snapshot>>(
+        std::move(request), collectDesktopSnapshot,
+        [this](const std::shared_ptr<const ks::desktoplist::Snapshot>& snapshot, std::uint64_t) {
+            if (!snapshot) return true;
+            m_desktopSnapshot = snapshot;
+            m_desktopProjectionDirty = true;
+            m_desktopStatusLabel->setText(snapshot->status);
+            publishDesktopSnapshot();
+            return true;
+        }, [this](std::exception_ptr) { m_desktopStatusLabel->setText(QStringLiteral("刷新失败")); });
+}
+
+void OtherDock::publishDesktopSnapshot()
+{
+    if (!m_desktopProjectionDirty || !m_desktopSnapshot || !m_desktopTable->isVisible()) return;
+    if (m_desktopSnapshot->languageId != ks::i18n::LanguageManager::instance().currentLanguageId())
+    { refreshDesktopPresentation(); return; }
+    const auto snapshot = m_desktopSnapshot;
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("desktop-management-table-refresh"),
+        {m_desktopTable}, [this] { publishDesktopSnapshot(); })) return;
+    auto* source = static_cast<ks::desktoplist::Model*>(m_desktopSourceModel);
+    auto* proxy = static_cast<QSortFilterProxyModel*>(m_desktopDisplayModel);
+    const auto current = m_desktopTable->currentIndex();
+    const QString currentKey = current.data(kDesktopRoleWindowStationName).toString().trimmed().toCaseFolded()
+        + QLatin1Char('\\') + current.data(kDesktopRoleDesktopName).toString().trimmed().toCaseFolded();
+    int sourceRow = snapshot->byIdentity.value(currentKey, snapshot->selectRow);
+    if (sourceRow < 0 && !snapshot->rows.empty()) sourceRow = 0;
+    const QPointer<OtherDock> alive(this);
+    source->publish(snapshot);
+    if (!alive) return;
+    if (sourceRow >= 0)
+    {
+        const auto target = proxy->mapFromSource(source->index(sourceRow, 0));
+        if (target.isValid()) m_desktopTable->selectRow(target.row());
+        if (!alive) return;
+    }
+    m_desktopProjectionDirty = false;
+}
+
+void OtherDock::refreshDesktopPresentation()
+{
+    if (!m_desktopSnapshot) return;
+    const auto language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    if (m_desktopSnapshot->languageId == language.languageId())
+    {
+        m_desktopStatusLabel->setText(m_desktopSnapshot->status);
+        publishDesktopSnapshot();
+        return;
+    }
+    m_desktopProjectionDirty = true;
+    if (!m_desktopTable->isVisible()) return;
+    struct Request { std::shared_ptr<const ks::desktoplist::Snapshot> source; ks::i18n::SourceTextSnapshot language; };
+    m_desktopPresentationOperation->submit<Request, std::shared_ptr<const ks::desktoplist::Snapshot>>(
+        {m_desktopSnapshot, language},
+        [](const Request& request, const ks::ui::AsyncOperationToken&) {
+            auto translated = ks::desktoplist::backgroundValue<ks::desktoplist::Snapshot>(*request.source);
+            formatDesktopSnapshot(*translated, request.language);
+            return translated;
+        },
+        [this, source = m_desktopSnapshot](const std::shared_ptr<const ks::desktoplist::Snapshot>& translated, std::uint64_t) {
+            if (source != m_desktopSnapshot) return true;
+            m_desktopSnapshot = translated;
+            m_desktopStatusLabel->setText(translated->status);
+            publishDesktopSnapshot();
+            return true;
+        }, [](std::exception_ptr) {});
 }

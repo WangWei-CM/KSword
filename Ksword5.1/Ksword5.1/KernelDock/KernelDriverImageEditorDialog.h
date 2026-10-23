@@ -6,7 +6,7 @@
 #include <array>
 #include <cstdint>
 
-namespace ks::ui { class StructuredFieldView; }
+namespace ks::ui { class StructuredFieldView; class AsyncOperation; }
 class QLabel;
 class QPushButton;
 class QCheckBox;
@@ -14,6 +14,7 @@ class QTableWidget;
 
 namespace ksword::ark
 {
+    struct DriverObjectQueryResult;
     struct DriverImageControlResult;
     struct DriverImageValues;
 }
@@ -26,12 +27,15 @@ public:
     explicit KernelDriverImageEditorDialog(
         const QString& driverObjectName,
         QWidget* parent = nullptr);
+    ~KernelDriverImageEditorDialog() override;
 
 private:
     // initializeUi：构建不透明对话框、五字段表格、详情编辑器和高风险动作栏。
     void initializeUi();
     // refreshSnapshot：先确定 DriverObject 身份，再查询 R0 事务/加载链同锁快照。
     void refreshSnapshot();
+    void applyReadSnapshot(const ksword::ark::DriverObjectQueryResult& identity, const ksword::ark::DriverImageControlResult& transaction);
+    bool applyTransactionResult(const ksword::ark::DriverImageControlResult& result, bool resetDesiredValues);
     // queryTransaction：按已建立身份刷新事务，并可选择是否覆盖用户目标值。
     bool queryTransaction(
         ksword::ark::DriverImageControlResult& resultOut,
@@ -82,6 +86,9 @@ private:
         const QString& text,
         std::uint64_t& valueOut);
 
+    ks::ui::AsyncOperation* m_readOperation = nullptr;
+    bool m_queryInFlight = false;
+    bool m_mutationBusy = false;
     QString m_requestedDriverName;              // 用户从对象目录选择的原始名称。
     QString m_canonicalDriverName;              // R0 返回的 canonical DriverObject 名称。
     QLabel* m_riskLabel = nullptr;              // 永久可见的高风险说明。

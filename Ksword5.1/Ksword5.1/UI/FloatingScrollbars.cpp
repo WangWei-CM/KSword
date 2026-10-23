@@ -1,10 +1,12 @@
 #include "./FloatingScrollbars.h"
+#include "./UiAnimationGate.h"
 
 #include "../theme.h"
 
 #include <QAbstractScrollArea>
 #include <QApplication>
 #include <QEvent>
+#include <QDynamicPropertyChangeEvent>
 #include <QHash>
 #include <QHoverEvent>
 #include <QMouseEvent>
@@ -72,6 +74,14 @@ namespace
             || area->property(kFrozenPaneProperty).toBool();
     }
 
+    // 仅显式策略属性影响浮条；探针、业务状态与其它主题拥有者的属性由各自处理。
+    bool affectsFloatingScrollbars(const QEvent* event)
+    {
+        const QByteArray name = static_cast<const QDynamicPropertyChangeEvent*>(event)->propertyName();
+        return name == kPreserveNativeProperty || name == kFrozenPaneProperty
+            || name == kComparisonSourceProperty;
+    }
+
     // 视觉条保留 QAbstractSlider 的信号协议，仅替换鼠标映射和绘制。
     class FloatingScrollbar final : public QScrollBar
     {
@@ -99,7 +109,17 @@ namespace
                 {
                     m_fade.setStartValue(m_opacity);
                     m_fade.setEndValue(0.0);
-                    m_fade.start();
+                    if (ks::ui::AreUiAnimationsEnabled())
+                    {
+                        m_fade.start();
+                    }
+                    else
+                    {
+                        // 关闭界面动画时直接淡出到位，不做逐帧过渡。
+                        m_opacity = 0.0;
+                        refreshBackdrop();
+                        update();
+                    }
                 }
             });
             connect(&m_fade, &QVariantAnimation::valueChanged, this, [this](const QVariant& value)
@@ -515,6 +535,7 @@ namespace
                     }
                 }
                 m_viewport = m_area->viewport();
+                m_stackingDirty = true;
                 if (!m_viewport.isNull())
                 {
                     // 悬停事件可沿内容子控件传播；不修改页面自身的 mouseTracking。
@@ -597,11 +618,16 @@ namespace
             case QEvent::PaletteChange:
             case QEvent::FontChange:
             case QEvent::LayoutDirectionChange:
-            case QEvent::ChildAdded:
-            case QEvent::ChildRemoved:
-            case QEvent::DynamicPropertyChange:
             case QEvent::EnabledChange:
                 scheduleRefresh();
+                break;
+            case QEvent::ChildAdded:
+            case QEvent::ChildRemoved:
+                m_stackingDirty = true;
+                scheduleRefresh();
+                break;
+            case QEvent::DynamicPropertyChange:
+                if (affectsFloatingScrollbars(event)) scheduleRefresh();
                 break;
             case QEvent::Paint:
                 // 原生条的步长/追踪开关没有变化信号；只在实际状态落后时补同步。
@@ -758,14 +784,16 @@ namespace
                     : QRect(content.left() + (rightToLeft ? verticalWidth : 0),
                         content.bottom() - horizontalHeight + 1,
                         std::max(0, content.width() - verticalWidth), horizontalHeight);
+                const bool geometryChanged = overlay->geometry() != geometry;
                 overlay->setGeometry(geometry);
                 overlay->setAvailable(!geometry.isEmpty());
-                if (overlay->isVisible())
+                if (overlay->isVisible() && (geometryChanged || m_stackingDirty))
                 {
                     overlay->raise();
                 }
-                overlay->update();
+                // 数值、palette、倍率、显隐与几何的 setter 自己失效；无变化不重绘透明覆盖层。
             }
+            m_stackingDirty = false;
         }
 
         void scheduleRefresh()
@@ -790,6 +818,7 @@ namespace
         QVector<QMetaObject::Connection> m_connections[2]; // 原条更换时解除自己的连接。
         QMargins m_insets;                        // 页面右缘动作等显式避让距离。
         qreal m_scale = 1.0;                       // 当前浮窗内容倍率。
+        bool m_stackingDirty = true;              // 仅子控件/视口身份或几何变化才恢复覆盖次序。
         bool m_pending = false;                   // 合并同一轮事件循环的布局刷新。
         bool m_updating = false;                  // 屏蔽样式应用产生的同步事件。
         bool m_viewportHadHover = false;          // 视口替换时恢复原先的悬停事件开关。
@@ -826,6 +855,10 @@ namespace
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
+            if (event->type() == QEvent::DynamicPropertyChange && !affectsFloatingScrollbars(event))
+            {
+                return false;
+            }
             switch (event->type())
             {
             case QEvent::Polish:
@@ -859,7 +892,8 @@ namespace
     private:
         void queueInstall(QAbstractScrollArea* area)
         {
-            if (m_pending.contains(area))
+            // 已安装区域由自己的控制器合并刷新；全局发现器不再成为第二个刷新拥有者。
+            if (controllerFor(area) != nullptr || m_pending.contains(area))
             {
                 return;
             }

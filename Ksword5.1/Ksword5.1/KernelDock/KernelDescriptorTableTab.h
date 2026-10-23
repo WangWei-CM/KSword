@@ -5,6 +5,7 @@
 
 #include <QString>
 #include <QWidget>
+#include <QPersistentModelIndex>
 
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@ class QPoint;
 class QPushButton;
 class QShowEvent;
 class QTableWidget;
+class QTimer;
 #include "../UI/StructuredFieldView.h"
 
 // KernelDescriptorTableKind：
@@ -55,6 +57,7 @@ private:
         std::vector<ks::kernel::TrustedIdtBaselineResult>
             trustedIdtBaselines);
     void rebuildTable();
+    void applyFilter(bool allowDeferred = true);
     void showCurrentDetail();
     void restoreSelectedIdtBaseline();
     void showCopyMenu(const QPoint& position);
@@ -88,7 +91,8 @@ private:
     WatchPlan buildWatchPlan(std::size_t sourceIndex) const;
     bool rowMatchesFilter(
         const ksword::ark::DriverIntegrityEvidenceEntry& row,
-        std::size_t sourceIndex) const;
+        std::size_t sourceIndex,
+        const QString& keyword) const;
     QString columnText(
         const ksword::ark::DriverIntegrityEvidenceEntry& row,
         int column,
@@ -101,12 +105,19 @@ private:
     static QString hex64(std::uint64_t value);
     static QString hex32(std::uint32_t value);
     static QString rowClipboardText(QTableWidget* table, int row, bool includeHeader);
+    static QString filteredClipboardText(QTableWidget* table);
 
     KernelDescriptorTableKind m_tableKind; // m_tableKind：当前实例固定展示 IDT 或 GDT。
     QLineEdit* m_filterEdit = nullptr;      // m_filterEdit：当前类型表项的关键词筛选框。
     QPushButton* m_refreshButton = nullptr; // m_refreshButton：重新读取当前描述符表。
     QPushButton* m_restoreIdtButton = nullptr; // m_restoreIdtButton：仅 IDT 页创建的启动期基线恢复按钮。
     QLabel* m_statusLabel = nullptr;        // m_statusLabel：异步查询状态和表项数量。
+    QTimer* m_filterTimer = nullptr;
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    bool m_filterActive = false;
+    bool m_columnsSized = false;
     QTableWidget* m_table = nullptr;        // m_table：描述符结构化结果表。
     ks::ui::StructuredFieldView* m_detailEdit = nullptr; // m_detailEdit：当前表项的只读诊断详情。
     std::vector<ksword::ark::DriverIntegrityEvidenceEntry> m_rows; // m_rows：当前类型的 R0 快照。

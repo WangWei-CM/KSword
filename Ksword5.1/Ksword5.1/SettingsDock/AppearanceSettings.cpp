@@ -391,6 +391,7 @@ namespace
         defaultSettings.uiLanguage = QStringLiteral("system");
         defaultSettings.backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
+        defaultSettings.controlBackgroundOpacityPercent = 75;
         defaultSettings.backgroundTransparencyEnabled = false;
         defaultSettings.utilizationFloatingScalePercent = 100;
         defaultSettings.utilizationFloatingBackgroundOpacityPercent = 100;
@@ -413,6 +414,7 @@ namespace
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
         defaultSettings.unlockerShellContextMenuEnabled = false;
+        defaultSettings.uiAnimationsEnabled = true;
         defaultSettings.smoothScrollingEnabled = true;
         defaultSettings.sliderWheelAdjustEnabled = false;
         defaultSettings.fontFamily.clear();
@@ -648,6 +650,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     const int backgroundOpacityPercentValue = rootObject.value(QStringLiteral("background_opacity_percent"))
         .toInt(loadedSettings.backgroundOpacityPercent);
     loadedSettings.backgroundOpacityPercent = clampOpacityPercent(backgroundOpacityPercentValue);
+    loadedSettings.controlBackgroundOpacityPercent = clampOpacityPercent(rootObject
+        .value(QStringLiteral("control_background_opacity_percent"))
+        .toInt(loadedSettings.controlBackgroundOpacityPercent));
 
     loadedSettings.backgroundTransparencyEnabled = rootObject
         .value(QStringLiteral("background_transparency_enabled"))
@@ -779,6 +784,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.unlockerShellContextMenuEnabled = rootObject
         .value(QStringLiteral("unlocker_shell_context_menu_enabled"))
         .toBool(loadedSettings.unlockerShellContextMenuEnabled);
+    loadedSettings.uiAnimationsEnabled = rootObject
+        .value(QStringLiteral("ui_animations_enabled"))
+        .toBool(loadedSettings.uiAnimationsEnabled);
     loadedSettings.smoothScrollingEnabled = rootObject
         .value(QStringLiteral("smooth_scrolling_enabled"))
         .toBool(loadedSettings.smoothScrollingEnabled);
@@ -936,6 +944,8 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
         settings.uiLanguage.trimmed().isEmpty() ? QStringLiteral("system") : settings.uiLanguage.trimmed());
     rootObject.insert(QStringLiteral("background_image_path"), settings.backgroundImagePath);
     rootObject.insert(QStringLiteral("background_opacity_percent"), clampOpacityPercent(settings.backgroundOpacityPercent));
+    rootObject.insert(QStringLiteral("control_background_opacity_percent"),
+        clampOpacityPercent(settings.controlBackgroundOpacityPercent));
     rootObject.insert(QStringLiteral("background_transparency_enabled"), settings.backgroundTransparencyEnabled);
     rootObject.insert(QStringLiteral("utilization_floating_scale_percent"),
         std::clamp(settings.utilizationFloatingScalePercent, 25, 300));
@@ -991,6 +1001,9 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("unlocker_shell_context_menu_enabled"),
         settings.unlockerShellContextMenuEnabled);
+    rootObject.insert(
+        QStringLiteral("ui_animations_enabled"),
+        settings.uiAnimationsEnabled);
     rootObject.insert(
         QStringLiteral("smooth_scrolling_enabled"),
         settings.smoothScrollingEnabled);

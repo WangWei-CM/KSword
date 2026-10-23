@@ -292,6 +292,10 @@ public:
     // Replaces the buffer content with the provided text; returns no value.
     void set_text(const char* text);
 
+    // Appends UTF-8 without replacing existing text, selection or scroll.
+    // Readers at the end continue following new text; history readers stay put.
+    void append_text(const char* text);
+
 private:
     Fl_Text_Buffer buffer_;
 };

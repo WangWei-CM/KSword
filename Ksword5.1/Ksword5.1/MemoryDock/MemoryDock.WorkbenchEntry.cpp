@@ -234,7 +234,7 @@ namespace ksword::memory_dock_internal
     // addOpenInWorkbenchAction：见 MemoryDock.Internal.h。
     QAction* addOpenInWorkbenchAction(
         QMenu& menu,
-        QTableWidget* const table,
+        QTableView* const table,
         const int row,
         const int addressColumn,
         const bool kernelAddress)
@@ -247,10 +247,10 @@ namespace ksword::memory_dock_internal
         // address：点击行地址列的文本解析结果；没有行/解析失败时动作置灰而不是隐藏，用户能看到它存在。
         std::uint64_t address = 0;
         bool hasAddress = false;
-        if (table != nullptr && row >= 0 && row < table->rowCount())
+        if (table != nullptr && row >= 0 && table->model() && row < table->model()->rowCount())
         {
-            const QTableWidgetItem* const item = table->item(row, addressColumn);
-            hasAddress = (item != nullptr) && parseHexAddress(item->text(), address);
+            const QModelIndex item = table->model()->index(row, addressColumn);
+            hasAddress = item.isValid() && parseHexAddress(item.data(Qt::DisplayRole).toString(), address);
         }
 
         QAction* const action = menu.addAction(

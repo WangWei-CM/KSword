@@ -64,8 +64,10 @@
 #include <QVector>
 
 #include <cstdint>
+#include <memory>
 
 #include "HvmControl.h"
+#include "HvmRehearsalResource.h"
 #include "HvmEptLeafProbe.h"
 #include "HvmHookPlan.h"
 
@@ -89,6 +91,8 @@ namespace ks::ui
 namespace ks::ui
 {
     class SnapshotWorkbenchWidget;
+    class HvmRehearsalResource;
+    class RetainedCleanupJob;
     // readTargetPage：把 pageBasePhysical 那一页 4096 字节读回来。            [P]
     //
     // R-1 通道单次上限 1024 字节，所以固定切成 4 片顺序读。任何一片失败都返回空
@@ -138,6 +142,10 @@ namespace ks::ui
         const HvmHookPlan& plan() const noexcept { return m_plan; }
         // currentStep：当前停在哪一步。
         Step currentStep() const noexcept { return m_currentStep; }
+
+    protected:
+        void showEvent(QShowEvent* event) override;
+        void changeEvent(QEvent* event) override;
 
     private:
         // -------------------------------------------------------------
@@ -308,6 +316,8 @@ namespace ks::ui
         // 释放在析构里做，且必须在移除视图之后。
         bool allocateRehearsalPage();
         void releaseRehearsalPage();
+        // A true result may contain no reservation for non-rehearsal targets.
+        bool retainRehearsalAccess(std::shared_ptr<HvmRehearsalResource::Reservation>& reservation);
 
         // =============================================================
         // 第 2 步：编补丁 —— 全部 [P]
@@ -453,7 +463,8 @@ namespace ks::ui
         static InstallOutcome performInstallBlocking(
             quint64 pageBasePhysical,
             const QByteArray& baselinePage,
-            const QByteArray& shadowPage);
+            const QByteArray& shadowPage,
+            const std::shared_ptr<HvmRehearsalResource::Reservation>& rehearsalAccess);
 
         // =============================================================
         // 第 5 步：校验 —— 全部 [V]
@@ -575,12 +586,17 @@ namespace ks::ui
 
         // m_eventCursor：B 段读事件用的消费游标（HvmEventEntry::sequence 单调递增）。
         unsigned long long m_eventCursor = 0;
+        VerifyResidentSnapshot m_residentSnapshot;
+        bool m_residentProjectionDirty = false;
+        void presentResidentEvidence();
 
         // m_rehearsalPage：排练入口自己分配的一页。
         // VirtualAlloc 出来的，天然 4 KiB 对齐；分配后要写一字节并 VirtualLock，
         // 否则翻译到的帧随时会换人。所有权在本对话框，析构时释放（且必须在移除
         // 视图之后）。
-        void* m_rehearsalPage = nullptr;
+        void* m_rehearsalPage = nullptr; // UI address only; resource owns allocation.
+        std::shared_ptr<HvmRehearsalResource> m_rehearsalResource;
+        std::shared_ptr<RetainedCleanupJob> m_rehearsalCleanup;
 
         Step m_currentStep = Step::Target;
         bool m_busy = false;

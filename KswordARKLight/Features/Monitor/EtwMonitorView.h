@@ -2,6 +2,7 @@
 
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
+#include "../../Ui/AsyncShellIconLoader.h"
 #include "EtwFilterModel.h"
 #include "EtwSessionController.h"
 
@@ -15,14 +16,33 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <condition_variable>
 
 namespace Ksword::Features::Monitor {
+
+struct EtwSessionLifetime final {
+    EtwSessionController controller;
+    std::mutex operationMutex;
+    std::condition_variable idle;
+    std::atomic_size_t pending{0};
+    std::atomic_ulong stopError{ERROR_SUCCESS};
+    std::atomic_bool retiring{false};
+};
+
+struct EtwEventInbox final {
+    std::mutex mutex;
+    std::deque<EtwEvent> events;
+    std::optional<std::wstring> status;
+    bool accepting = true;
+};
 
 struct EtwEventFilterResult {
     std::uint64_t generation = 0;
     std::wstring query;
     bool useRegex = false;
-    std::vector<std::size_t> visibleIndexes;
+    std::uint64_t firstSequence = 0;
+    std::uint64_t endSequence = 0;
+    std::vector<std::uint64_t> visibleSequences;
 };
 
 // EtwMonitorView is the ETW-only monitoring page. Inputs are parent HWND and
@@ -57,6 +77,8 @@ private:
     void layout();
     void startSession();
     void stopSession();
+    void retireSession();
+    bool pollRetirement();
     void openFilterDialog();
     // enqueueEventFromWorker receives ETW rows from the controller callback.
     // Input is one compact event row from the ETW worker thread; processing only
@@ -72,14 +94,20 @@ private:
     // inputs; processing is mutex-protected; there is no return value.
     void clearPendingEvents();
 
-    void appendEventsToView(const std::vector<EtwEvent>& events);
+    void appendEventsToView(std::vector<EtwEvent> events);
+    struct ViewAnchor {
+        std::vector<std::uint64_t> selected;
+        std::uint64_t top = UINT64_MAX;
+        bool followTail = false;
+    };
+    ViewAnchor captureViewAnchor() const;
+    void commitEventProjection(const ViewAnchor& anchor);
     void requestLocalFilter(std::wstring query);
     void applyLocalFilter(EtwEventFilterResult result);
     void clearEventList();
     void updateStatusText(const std::wstring& text);
     void updateButtonState();
     int iconIndexForProcessId(std::uint32_t processId);
-    std::wstring processImagePath(std::uint32_t processId) const;
     void openSelectedEventDetail();
     void openSelectedEventProcess();
     void showEventDetail(const EtwEvent& eventRow);
@@ -104,7 +132,14 @@ private:
     HWND localFilterBar_ = nullptr;
     HWND eventList_ = nullptr;
     HIMAGELIST eventImageList_ = nullptr;
-    std::vector<EtwEvent> eventRows_;
+    std::vector<std::shared_ptr<const EtwEvent>> eventRows_;
+    std::uint64_t firstEventSequence_ = 0;
+    std::uint64_t nextEventSequence_ = 0;
+    std::uint64_t filteredThroughSequence_ = 0;
+    std::uint64_t localFilterGeneration_ = 0;
+    std::uint64_t appliedFilterGeneration_ = 0;
+    bool eventProjectionDirty_ = false;
+    ViewAnchor deferredViewAnchor_;
     std::vector<std::size_t> visibleEventIndexes_;
     std::wstring localFilterQuery_;
     bool localFilterUseRegex_ = false;
@@ -112,10 +147,14 @@ private:
     int eventContextColumn_ = 0;
     std::wstring eventTextScratch_;
     EtwFilterModel filterModel_;
-    EtwSessionController controller_;
-    std::mutex pendingEventMutex_;
-    std::deque<EtwEvent> pendingEvents_;
-    std::unordered_map<std::uint32_t, int> processIconCache_;
+    std::shared_ptr<EtwSessionLifetime> session_ = std::make_shared<EtwSessionLifetime>();
+    std::shared_ptr<EtwEventInbox> inbox_ = std::make_shared<EtwEventInbox>();
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::wstring>> sessionTask_;
+    bool sessionControlPending_ = false;
+    bool sessionRetired_ = false;
+    bool retirementCancelled_ = false;
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> retirement_;
+    std::unique_ptr<Ksword::Ui::AsyncShellIconLoader> iconLoader_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>> localFilterTask_;
     bool deleteOnDestroy_ = false;
 };

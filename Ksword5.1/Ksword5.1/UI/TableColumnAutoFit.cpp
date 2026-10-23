@@ -11,6 +11,8 @@
 #include <QApplication>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QHash>
+#include <QPersistentModelIndex>
 #include <QHeaderView>
 #include <QModelIndex>
 #include <QMouseEvent>
@@ -21,6 +23,7 @@
 #include <QTimer>
 #include <QTreeView>
 #include <QVariant>
+#include <QVector>
 #include <QWidget>
 
 namespace
@@ -104,6 +107,248 @@ namespace
         int minimumWidth = 0;   // minimumWidth：必须保留的列宽下限。
         int preferredWidth = 0; // preferredWidth：内容舒适显示时的目标宽度。
     };
+
+    void scheduleColumnFit(QAbstractItemView* view);
+
+    // A view owns one cache. Geometry-only notifications reuse text/widget measurements;
+    // model and metrics changes invalidate them before the next visible fit.
+    class ColumnWidthCache final : public QObject
+    {
+    public:
+        explicit ColumnWidthCache(QAbstractItemView* view) : QObject(view), m_view(view)
+        {
+            setObjectName(QStringLiteral("KSWORD_TABLE_COLUMN_WIDTH_CACHE"));
+            if (view->viewport() != nullptr)
+            {
+                view->viewport()->installEventFilter(this);
+            }
+            if (auto* tree = qobject_cast<QTreeView*>(view))
+            {
+                connect(tree, &QTreeView::expanded, this, [this]() { invalidate(); });
+                connect(tree, &QTreeView::collapsed, this, [this]() { invalidate(); });
+            }
+        }
+
+        void invalidate()
+        {
+            ++m_revision;
+            content.clear();
+            headers.clear();
+            if (!m_view.isNull()) scheduleColumnFit(m_view.data());
+        }
+
+        void synchronize(QHeaderView* header)
+        {
+            auto* view = m_view.data();
+            if (view == nullptr) return;
+            if (m_viewport != view->viewport())
+            {
+                if (!m_viewport.isNull()) m_viewport->removeEventFilter(this);
+                m_viewport = view->viewport();
+                if (!m_viewport.isNull()) m_viewport->installEventFilter(this);
+                for (auto it = m_widgetMetrics.cbegin(); it != m_widgetMetrics.cend(); ++it)
+                    it.key()->removeEventFilter(this);
+                m_widgetMetrics.clear();
+                invalidate();
+            }
+            if (m_header != header)
+            {
+                if (!m_header.isNull()) m_header->removeEventFilter(this);
+                m_header = header;
+                header->installEventFilter(this);
+                invalidate();
+            }
+            auto* model = view->model();
+            auto* tree = qobject_cast<QTreeView*>(view);
+            const int indentation = tree != nullptr ? tree->indentation() : 0;
+            if (m_model != model)
+            {
+                if (!m_model.isNull()) disconnect(m_model.data(), nullptr, this, nullptr);
+                m_model = model;
+                invalidate();
+                if (model != nullptr)
+                {
+                    const auto changed = [this]() { invalidate(); };
+                    connect(model, &QAbstractItemModel::modelReset, this, changed);
+                    connect(model, &QAbstractItemModel::layoutChanged, this, changed);
+                    connect(model, &QAbstractItemModel::rowsInserted, this, changed);
+                    connect(model, &QAbstractItemModel::rowsRemoved, this, changed);
+                    connect(model, &QAbstractItemModel::rowsMoved, this, changed);
+                    connect(model, &QAbstractItemModel::columnsInserted, this, changed);
+                    connect(model, &QAbstractItemModel::columnsRemoved, this, changed);
+                    connect(model, &QAbstractItemModel::columnsMoved, this, changed);
+                    connect(model, &QAbstractItemModel::headerDataChanged, this, changed);
+                    connect(model, &QAbstractItemModel::dataChanged, this,
+                        [this](const QModelIndex&, const QModelIndex&, const QList<int>& roles) {
+                            if (roles.isEmpty() || roles.contains(Qt::DisplayRole)
+                                || roles.contains(Qt::DecorationRole) || roles.contains(Qt::CheckStateRole)
+                                || roles.contains(Qt::SizeHintRole) || roles.contains(Qt::FontRole))
+                            {
+                                invalidate();
+                            }
+                        });
+                }
+            }
+            if (m_root != view->rootIndex() || m_font != view->font()
+                || m_header != header || m_headerFont != header->font()
+                || m_headerStyle != header->style() || m_style != view->style()
+                || m_headerDpiX != header->logicalDpiX() || m_headerDpiY != header->logicalDpiY()
+                || m_headerDpr != header->devicePixelRatioF()
+                || m_iconSize != view->iconSize() || m_dpiX != view->logicalDpiX()
+                || m_dpiY != view->logicalDpiY() || m_dpr != view->devicePixelRatioF()
+                || m_indentation != indentation)
+            {
+                m_root = view->rootIndex();
+                m_font = view->font();
+                m_header = header;
+                m_headerFont = header->font();
+                m_headerStyle = header->style();
+                m_headerDpiX = header->logicalDpiX();
+                m_headerDpiY = header->logicalDpiY();
+                m_headerDpr = header->devicePixelRatioF();
+                m_style = view->style();
+                m_iconSize = view->iconSize();
+                m_dpiX = view->logicalDpiX();
+                m_dpiY = view->logicalDpiY();
+                m_dpr = view->devicePixelRatioF();
+                m_indentation = indentation;
+                invalidate();
+            }
+            // setMinimumSize()/custom sizeHint changes may only notify the viewport.
+            // Check the small sampled widget set without rereading model cells.
+            for (auto it = m_widgetMetrics.begin(); it != m_widgetMetrics.end(); ++it)
+            {
+                QWidget* widget = static_cast<QWidget*>(it.key());
+                const QSize minimum = widget->minimumSizeHint().expandedTo(widget->minimumSize());
+                const QSize preferred = widget->sizeHint();
+                const auto metrics = qMakePair(minimum, preferred);
+                if (it.value() != metrics)
+                {
+                    it.value() = metrics;
+                    invalidate();
+                }
+            }
+            const int sortSection = header->isSortIndicatorShown() ? header->sortIndicatorSection() : -1;
+            if (m_sortSection != sortSection)
+            {
+                m_sortSection = sortSection;
+                ++m_revision;
+                headers.clear();
+            }
+        }
+
+        bool fitInputsMatch(QHeaderView* header, const int availableWidth) const
+        {
+            return m_fitHeader == header && m_fitWidth == availableWidth
+                && m_fitRevision == m_revision && m_fitSections == sectionInputs(header)
+                && m_fitStretch == header->property(AutoFitStretchSectionsProperty).toList();
+        }
+
+        quint64 revision() const { return m_revision; }
+
+        void rememberFitInputs(QHeaderView* header, const int availableWidth, const quint64 measuredRevision)
+        {
+            // A synchronous model/style/widget invalidation during fit cannot
+            // certify the older measurement as the new generation.
+            if (measuredRevision != m_revision)
+            {
+                m_fitWidth = -1;
+                if (!m_view.isNull()) scheduleColumnFit(m_view.data());
+                return;
+            }
+            m_fitHeader = header;
+            m_fitWidth = availableWidth;
+            m_fitRevision = m_revision;
+            m_fitSections = sectionInputs(header);
+            m_fitStretch = header->property(AutoFitStretchSectionsProperty).toList();
+        }
+
+        void observeCellWidget(QWidget* widget)
+        {
+            if (widget == nullptr || m_widgetMetrics.contains(widget)) return;
+            m_widgetMetrics.insert(widget, qMakePair(
+                widget->minimumSizeHint().expandedTo(widget->minimumSize()), widget->sizeHint()));
+            widget->installEventFilter(this);
+            connect(widget, &QObject::destroyed, this, [this, widget]() {
+                m_widgetMetrics.remove(widget);
+                invalidate();
+            });
+        }
+
+        QHash<int, SectionWidthHints> content;
+        QHash<int, int> headers;
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event != nullptr && (event->type() == QEvent::ChildAdded
+                || event->type() == QEvent::ChildRemoved || event->type() == QEvent::StyleChange
+                || event->type() == QEvent::FontChange || event->type() == QEvent::DevicePixelRatioChange
+                || (m_widgetMetrics.contains(watched) && event->type() == QEvent::LayoutRequest)))
+            {
+                invalidate();
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        static QVector<int> sectionInputs(QHeaderView* header)
+        {
+            // Geometry/column policy only: never read text, model cells or size hints.
+            QVector<int> inputs{header->count(), header->minimumSectionSize(), header->maximumSectionSize(),
+                header->defaultSectionSize(), header->stretchLastSection() ? 1 : 0,
+                header->isSortIndicatorShown() ? 1 : 0, header->sortIndicatorSection(),
+                static_cast<int>(header->sortIndicatorOrder())};
+            inputs.reserve(inputs.size() + header->count() * 4);
+            for (int visual = 0; visual < header->count(); ++visual)
+            {
+                const int logical = header->logicalIndex(visual);
+                inputs.push_back(logical);
+                inputs.push_back(logical >= 0 && header->isSectionHidden(logical) ? 1 : 0);
+                inputs.push_back(logical >= 0 ? header->sectionSize(logical) : 0);
+                inputs.push_back(logical >= 0 ? static_cast<int>(header->sectionResizeMode(logical)) : -1);
+            }
+            return inputs;
+        }
+
+        quint64 m_revision = 0;
+        quint64 m_fitRevision = 0;
+        QPointer<QHeaderView> m_header;
+        const void* m_headerStyle = nullptr;
+        int m_headerDpiX = 0;
+        int m_headerDpiY = 0;
+        qreal m_headerDpr = 0;
+        QPointer<QHeaderView> m_fitHeader;
+        int m_fitWidth = -1;
+        QVector<int> m_fitSections;
+        QVariantList m_fitStretch;
+        QPointer<QAbstractItemView> m_view;
+        QPointer<QWidget> m_viewport;
+        QPointer<QAbstractItemModel> m_model;
+        QPersistentModelIndex m_root;
+        QFont m_font;
+        QFont m_headerFont;
+        const void* m_style = nullptr;
+        QSize m_iconSize;
+        QHash<QObject*, QPair<QSize, QSize>> m_widgetMetrics;
+        int m_dpiX = 0;
+        int m_dpiY = 0;
+        qreal m_dpr = 0;
+        int m_indentation = 0;
+        int m_sortSection = -2;
+    };
+
+    ColumnWidthCache* widthCacheForView(QAbstractItemView* view)
+    {
+        constexpr const char* cacheProperty = "_ksword_table_column_width_cache";
+        auto* cache = dynamic_cast<ColumnWidthCache*>(view->property(cacheProperty).value<QObject*>());
+        if (cache == nullptr)
+        {
+            cache = new ColumnWidthCache(view);
+            view->setProperty(cacheProperty, QVariant::fromValue<QObject*>(cache));
+        }
+        return cache;
+    }
 
     // horizontalHeaderForView 作用：
     // - 从 QTableView/QTreeView 统一取得横向表头；
@@ -340,6 +585,7 @@ namespace
         }
 
         QWidget* cellWidget = view == nullptr ? nullptr : view->indexWidget(index);
+        if (cellWidget != nullptr) widthCacheForView(view)->observeCellWidget(cellWidget);
         const int widgetMinimumWidth = widgetWidthHint(cellWidget, false);
         if (widgetMinimumWidth > 0)
         {
@@ -447,7 +693,14 @@ namespace
         const int logicalIndex,
         const int minimumWidth)
     {
-        SectionWidthHints hints = contentWidthHints(view, logicalIndex, minimumWidth);
+        auto* cache = widthCacheForView(view);
+        auto cached = cache->content.constFind(logicalIndex);
+        if (cached == cache->content.cend())
+        {
+            cache->content.insert(logicalIndex, contentWidthHints(view, logicalIndex, 0));
+            cached = cache->content.constFind(logicalIndex);
+        }
+        SectionWidthHints hints = cached.value();
         hints.minimumWidth = std::max(hints.minimumWidth, minimumWidth);
 
         if (header != nullptr &&
@@ -460,9 +713,15 @@ namespace
                 std::max(0, header->sectionSize(logicalIndex)));
         }
 
+        auto cachedHeader = cache->headers.constFind(logicalIndex);
+        if (cachedHeader == cache->headers.cend())
+        {
+            cache->headers.insert(logicalIndex, headerPreferredWidth(view, header, logicalIndex));
+            cachedHeader = cache->headers.constFind(logicalIndex);
+        }
         hints.preferredWidth = std::max(
             hints.minimumWidth,
-            std::max(headerPreferredWidth(view, header, logicalIndex), hints.preferredWidth));
+            std::max(cachedHeader.value(), hints.preferredWidth));
         return hints;
     }
 
@@ -891,6 +1150,10 @@ namespace
             return false;
         }
 
+        auto* cache = widthCacheForView(view);
+        cache->synchronize(header);
+        if (cache->fitInputsMatch(header, availableWidth)) return true;
+        const quint64 measuredRevision = cache->revision();
         const int visibleSectionCount = countVisibleSections(header);
         if (visibleSectionCount <= 0)
         {
@@ -931,6 +1194,7 @@ namespace
         // 当前列宽已经吻合时不能再次刷新几何，否则会形成 singleShot(0) 的空闲重排循环。
         if (!geometryRefreshRequired)
         {
+            cache->rememberFitInputs(header, availableWidth, measuredRevision);
             return true;
         }
 
@@ -949,8 +1213,15 @@ namespace
             }
         }
 
+        const QPointer<QAbstractItemView> viewGuard(view);
+        const QPointer<QHeaderView> headerGuard(header);
+        const QPointer<ColumnWidthCache> cacheGuard(cache);
         refreshViewGeometryAfterFit(view, header);
+        if (!viewGuard || !headerGuard || !cacheGuard) return true;
         view->setProperty(AutoFitApplyingProperty, false);
+        // Capture the actual final Interactive modes/widths/stretch policy, not
+        // the pre-fit values that this operation deliberately replaced.
+        cache->rememberFitInputs(header, availableWidth, measuredRevision);
         return true;
     }
 
@@ -1030,6 +1301,11 @@ namespace
                 {
                     scheduleColumnFit(guardedView.data());
                 }
+            });
+
+        QObject::connect(header, &QHeaderView::sectionMoved, header,
+            [guardedView](int, int, int) {
+                if (!guardedView.isNull()) scheduleColumnFit(guardedView.data());
             });
 
         // geometriesChanged 覆盖隐藏列、显示列、表头布局刷新等无 sectionResized 的情况。
@@ -1192,11 +1468,18 @@ namespace
                 installHeaderAutoFitHooks(view);
 
                 const QEvent::Type eventType = eventObject->type();
+                if (watchedObject == view && (eventType == QEvent::StyleChange
+                    || eventType == QEvent::FontChange || eventType == QEvent::LanguageChange
+                    || eventType == QEvent::DevicePixelRatioChange))
+                {
+                    widthCacheForView(view)->invalidate();
+                }
                 if (eventType == QEvent::Show ||
                     eventType == QEvent::Resize ||
                     eventType == QEvent::Polish ||
                     eventType == QEvent::LayoutRequest ||
-                    eventType == QEvent::StyleChange)
+                    eventType == QEvent::StyleChange || eventType == QEvent::FontChange ||
+                    eventType == QEvent::LanguageChange || eventType == QEvent::DevicePixelRatioChange)
                 {
                     scheduleColumnFit(view);
                 }
@@ -1224,6 +1507,8 @@ namespace ks::ui
 
     void RequestTableColumnAutoFit(QAbstractItemView* view)
     {
+        // Explicit requests may follow business changes that do not emit model signals.
+        if (isAutoFitEnabled(view)) widthCacheForView(view)->invalidate();
         scheduleColumnFit(view);
     }
 

@@ -44,9 +44,9 @@ void CodeEditorWidget::exportReadOnlyText()
     // 普通消息框接入应用级 ThemedMessageBox，不另建背景或按钮皮肤。
     const auto showFailure = [this](const QString& detail) // showFailure：同步显示状态回执和真实写入错误。
     {
-        const QString message = ks::i18n::text(QStringLiteral("ui.code_editor.export.failed"),
-            QStringLiteral("导出失败：%1")).arg(detail); // message：完整错误正文，不改文件会话。
-        m_statusLabel->setText(message);
+        setOperationStatus(QStringLiteral("导出失败：%1"), {detail}, 0,
+            QStringLiteral("ui.code_editor.export.failed"));
+        const QString message = m_statusLabel->text(); // Same explicit status, with the native error kept verbatim.
         QMessageBox::warning(this,
             ks::i18n::text(QStringLiteral("ui.code_editor.export.title"), QStringLiteral("导出完整文本")),
             message);
@@ -77,6 +77,6 @@ void CodeEditorWidget::exportReadOnlyText()
     }
 
     // 导出结果只更新回执，不修改当前路径、编码、原文缓存或文档 modified 状态。
-    m_statusLabel->setText(ks::i18n::text(QStringLiteral("ui.code_editor.export.success"),
-        QStringLiteral("已导出完整文本：%1（UTF-8）")).arg(targetPath));
+    setOperationStatus(QStringLiteral("已导出完整文本：%1（UTF-8）"), {targetPath}, 0,
+        QStringLiteral("ui.code_editor.export.success"));
 }

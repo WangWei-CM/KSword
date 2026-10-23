@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -109,6 +111,52 @@ namespace
         graphics.FillPath(&brush, &outline);
     }
 
+    // Own selected DIBs for the splash UI thread; pixels stay premultiplied.
+    struct DibSurface final
+    {
+        ~DibSurface() { reset(); }
+        DibSurface() = default;
+        DibSurface(const DibSurface&) = delete;
+        DibSurface& operator=(const DibSurface&) = delete;
+
+        void reset()
+        {
+            if (dc != nullptr && oldBitmap != nullptr) SelectObject(dc, oldBitmap);
+            if (bitmap != nullptr) DeleteObject(bitmap);
+            if (dc != nullptr) DeleteDC(dc);
+            dc = nullptr; bitmap = nullptr; oldBitmap = nullptr; pixels = nullptr;
+            width = height = 0;
+        }
+        bool ensure(int requestedWidth, int requestedHeight)
+        {
+            if (dc != nullptr && width == requestedWidth && height == requestedHeight) return true;
+            HDC nextDc = CreateCompatibleDC(nullptr);
+            if (nextDc == nullptr) return false;
+            BITMAPINFO info = {};
+            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = requestedWidth;
+            info.bmiHeader.biHeight = -requestedHeight;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            void* nextPixels = nullptr;
+            HBITMAP nextBitmap = CreateDIBSection(nextDc, &info, DIB_RGB_COLORS, &nextPixels, nullptr, 0);
+            if (nextBitmap == nullptr) { DeleteDC(nextDc); return false; }
+            HGDIOBJ nextOldBitmap = SelectObject(nextDc, nextBitmap);
+            if (nextOldBitmap == nullptr || nextOldBitmap == HGDI_ERROR)
+            { DeleteObject(nextBitmap); DeleteDC(nextDc); return false; }
+            reset();
+            dc = nextDc; bitmap = nextBitmap; oldBitmap = nextOldBitmap; pixels = nextPixels;
+            width = requestedWidth; height = requestedHeight;
+            return true;
+        }
+        HDC dc = nullptr;
+        HBITMAP bitmap = nullptr;
+        HGDIOBJ oldBitmap = nullptr;
+        void* pixels = nullptr;
+        int width = 0, height = 0;
+    };
+
     double cubic(double t, double p1, double p2)
     {
         const double inverse = 1.0 - t;
@@ -152,9 +200,12 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (m_email == email && m_buildDate == buildDate && m_repository == repository) return;
             m_email = email;
             m_buildDate = buildDate;
             m_repository = repository;
+            ++m_stateRevision;
+            ++m_staticRevision;
         }
         requestRedraw();
     }
@@ -165,6 +216,7 @@ public:
             std::lock_guard<std::mutex> lock(m_stateMutex);
             if (m_mode == mode) return;
             m_mode = mode;
+            ++m_stateRevision;
         }
         const HWND window = m_window.load();
         if (window != nullptr) PostMessageW(window, kResetAnimationMessage, 0, 0);
@@ -174,7 +226,11 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
-            m_accentRgb = rgb & 0x00FFFFFFU;
+            const unsigned int accent = rgb & 0x00FFFFFFU;
+            if (m_accentRgb == accent) return;
+            m_accentRgb = accent;
+            ++m_stateRevision;
+            ++m_staticRevision;
         }
         requestRedraw();
     }
@@ -184,8 +240,11 @@ public:
         const std::wstring status = utf8ToWide(initialStatusText);
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
-            m_status = status.empty() ? L"Ksword" : status;
+            const std::wstring nextStatus = status.empty() ? L"Ksword" : status;
+            if (m_status != nextStatus) ++m_staticRevision;
+            m_status = nextStatus;
             m_percent = 0;
+            ++m_stateRevision;
         }
         if (!m_thread.joinable())
         {
@@ -224,8 +283,15 @@ public:
         const std::wstring status = utf8ToWide(operationName);
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
-            if (!status.empty()) m_status = status;
-            m_percent = std::clamp(percent, 0, 100);
+            const int clamped = std::clamp(percent, 0, 100);
+            if ((status.empty() || m_status == status) && m_percent == clamped) return;
+            if (!status.empty() && m_status != status)
+            {
+                m_status = status;
+                ++m_staticRevision;
+            }
+            m_percent = clamped;
+            ++m_stateRevision;
         }
         requestRedraw();
     }
@@ -304,6 +370,8 @@ private:
             }
             m_window.store(nullptr);
         }
+        m_frame.reset();
+        m_staticSurface.reset();
         m_image.reset();
         Gdiplus::GdiplusShutdown(m_gdiplusToken);
         m_gdiplusToken = 0;
@@ -317,6 +385,8 @@ private:
             : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
         MONITORINFO info = {sizeof(info)};
         if (!GetMonitorInfoW(monitor, &info)) return;
+        const int oldX = m_x, oldY = m_y, oldWidth = m_width, oldHeight = m_height;
+        const UINT oldDpi = m_dpi;
         m_dpi = windowDpi(window);
         m_scale = static_cast<float>(m_dpi) / 96.0f;
         m_width = MulDiv(kBaseWidth, static_cast<int>(m_dpi), 96);
@@ -325,6 +395,8 @@ private:
         m_canvasHeight = m_height / m_scale;
         m_x = info.rcMonitor.left + ((info.rcMonitor.right - info.rcMonitor.left) - m_width) / 2;
         m_y = info.rcMonitor.top + ((info.rcMonitor.bottom - info.rcMonitor.top) - m_height) / 2;
+        if (oldX != m_x || oldY != m_y || oldWidth != m_width || oldHeight != m_height || oldDpi != m_dpi)
+            ++m_geometryRevision;
         if (window != nullptr)
             SetWindowPos(window, HWND_TOPMOST, m_x, m_y, m_width, m_height,
                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -333,13 +405,51 @@ private:
     void requestRedraw()
     {
         const HWND window = m_window.load();
-        if (window != nullptr) PostMessageW(window, kRedrawMessage, 0, 0);
+        if (window != nullptr && !m_redrawQueued.exchange(true))
+        {
+            if (!PostMessageW(window, kRedrawMessage, 0, 0)) m_redrawQueued.store(false);
+        }
     }
 
-    bool redraw()
+    void updateAnimationTimer(bool visible)
     {
         const HWND window = m_window.load();
-        return window != nullptr && paint(nullptr);
+        BOOL animations = TRUE;
+        if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0)) animations = TRUE;
+        m_animationsEnabled = animations != FALSE;
+        UINT refreshRate = 60;
+        MONITORINFOEXW info = {};
+        info.cbSize = sizeof(info);
+        const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
+        if (GetMonitorInfoW(monitor, &info))
+        {
+            DEVMODEW mode = {};
+            mode.dmSize = sizeof(mode);
+            if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+                mode.dmDisplayFrequency >= 24 && mode.dmDisplayFrequency <= 360)
+                refreshRate = mode.dmDisplayFrequency;
+        }
+        // Win32 timers have a minimum interval; animation position uses elapsed
+        // time, so a late/coalesced tick never slows the progress cycle.
+        const UINT interval = std::max<UINT>(USER_TIMER_MINIMUM, (1000U + refreshRate / 2U) / refreshRate);
+        SplashProgressMode mode;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            mode = m_mode;
+        }
+        if (window != nullptr)
+        {
+            if (visible && m_animationsEnabled && mode == SplashProgressMode::Indeterminate)
+                SetTimer(window, 1, interval, nullptr);
+            else
+                KillTimer(window, 1);
+        }
+    }
+
+    bool redraw(bool force = false)
+    {
+        const HWND window = m_window.load();
+        return window != nullptr && paint(nullptr, force);
     }
 
     Gdiplus::Color backgroundTextColor(const void* pixels, const Gdiplus::RectF& area) const
@@ -367,7 +477,7 @@ private:
             ? Gdiplus::Color(255, 0, 0, 0) : Gdiplus::Color(255, 255, 255, 255);
     }
 
-    bool paint(HDC target)
+    bool paint(HDC target, bool force = false)
     {
         std::wstring status;
         std::wstring email;
@@ -376,6 +486,7 @@ private:
         SplashProgressMode mode;
         unsigned int accentRgb;
         int percent;
+        std::uint64_t revision, staticRevision;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             status = m_status;
@@ -385,30 +496,30 @@ private:
             mode = m_mode;
             accentRgb = m_accentRgb;
             percent = m_percent;
+            revision = m_stateRevision;
+            staticRevision = m_staticRevision;
         }
+        // Layered windows retain their submitted pixels. Repeated state messages
+        // and WM_PAINT do not require resubmitting an unchanged determinate frame.
+        if (!force && target == nullptr && (mode == SplashProgressMode::Determinate || !m_animationsEnabled) &&
+            revision == m_paintedRevision && m_geometryRevision == m_paintedGeometryRevision)
+            return true;
 
-        HDC memory = CreateCompatibleDC(target);
-        if (memory == nullptr) return false;
-        BITMAPINFO info = {};
-        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = m_width;
-        info.bmiHeader.biHeight = -m_height;
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        void* pixels = nullptr;
-        HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-        if (bitmap == nullptr)
-        {
-            DeleteDC(memory);
-            return false;
-        }
-        HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
+        const bool resized = m_staticSurface.width != m_width || m_staticSurface.height != m_height ||
+            m_frame.width != m_width || m_frame.height != m_height;
+        if (!m_staticSurface.ensure(m_width, m_height) || !m_frame.ensure(m_width, m_height)) return false;
+        const bool rebuildStatic = resized || staticRevision != m_cachedStaticRevision ||
+            m_geometryRevision != m_cachedStaticGeometryRevision;
+        constexpr float trackX = 260.0f;
+        constexpr float trackWidth = 354.0f;
+        const float trackY = m_canvasHeight - 32.0f;
+        constexpr float trackHeight = 8.0f;
+        if (rebuildStatic)
         {
             // UpdateLayeredWindow requires premultiplied RGB and per-pixel alpha.
             // Drawing into this bitmap preserves alpha for both PNG and overlays.
             Gdiplus::Bitmap surface(m_width, m_height, m_width * 4,
-                PixelFormat32bppPARGB, static_cast<BYTE*>(pixels));
+                PixelFormat32bppPARGB, static_cast<BYTE*>(m_staticSurface.pixels));
             Gdiplus::Graphics graphics(&surface);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
@@ -423,15 +534,12 @@ private:
                 static_cast<float>(m_imageHeight), Gdiplus::UnitPixel);
 
             graphics.Flush(Gdiplus::FlushIntentionSync);
-            const Gdiplus::Color footerColor = backgroundTextColor(pixels,
+            const Gdiplus::Color footerColor = backgroundTextColor(m_staticSurface.pixels,
                 Gdiplus::RectF(28.0f, m_canvasHeight - 63.0f, 188.0f, 60.0f));
-            const Gdiplus::Color statusColor = backgroundTextColor(pixels,
+            const Gdiplus::Color statusColor = backgroundTextColor(m_staticSurface.pixels,
                 Gdiplus::RectF(260.0f, m_canvasHeight - 60.0f, 354.0f, 24.0f));
             Gdiplus::SolidBrush footerForeground(footerColor);
             Gdiplus::SolidBrush statusForeground(statusColor);
-            const int accentRed = static_cast<int>((accentRgb >> 16) & 0xFFU);
-            const int accentGreen = static_cast<int>((accentRgb >> 8) & 0xFFU);
-            const int accentBlue = static_cast<int>(accentRgb & 0xFFU);
             Gdiplus::Font footerFont(L"Microsoft YaHei UI", 14.0f,
                 Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
             Gdiplus::StringFormat singleLine;
@@ -450,8 +558,6 @@ private:
             }
 
             // Inset the status/progress area from the divider, keeping the right margin.
-            constexpr float trackX = 260.0f;
-            constexpr float trackWidth = 354.0f;
             float statusSize = 12.0f;
             Gdiplus::RectF bounds;
             for (; statusSize > 9.0f; statusSize -= 1.0f)
@@ -468,20 +574,46 @@ private:
                 Gdiplus::RectF(trackX, m_canvasHeight - 60.0f, trackWidth, 24.0f),
                 &singleLine, &statusForeground);
 
-            const float trackY = m_canvasHeight - 32.0f;
-            constexpr float trackHeight = 8.0f;
             Gdiplus::SolidBrush track(Gdiplus::Color(130,
                 statusColor.GetR(), statusColor.GetG(), statusColor.GetB()));
+            fillRoundedRectangle(graphics, track, trackX, trackY, trackWidth, trackHeight);
+            graphics.Flush(Gdiplus::FlushIntentionSync);
+            m_cachedStaticRevision = staticRevision;
+            m_cachedStaticGeometryRevision = m_geometryRevision;
+        }
+        const size_t stride = static_cast<size_t>(m_width) * 4;
+        if (rebuildStatic)
+            std::memcpy(m_frame.pixels, m_staticSurface.pixels, stride * m_height);
+        else
+        {
+            // Restore only the progress strip from the cached premultiplied
+            // background. This replaces alpha as well, avoiding animation trails.
+            const int top = std::clamp(static_cast<int>(std::floor(trackY * m_scale)) - 2, 0, m_height);
+            const int bottom = std::clamp(static_cast<int>(std::ceil((trackY + trackHeight) * m_scale)) + 2, top, m_height);
+            const size_t offset = static_cast<size_t>(top) * stride;
+            std::memcpy(static_cast<BYTE*>(m_frame.pixels) + offset,
+                static_cast<const BYTE*>(m_staticSurface.pixels) + offset,
+                static_cast<size_t>(bottom - top) * stride);
+        }
+        {
+            Gdiplus::Bitmap surface(m_width, m_height, m_width * 4,
+                PixelFormat32bppPARGB, static_cast<BYTE*>(m_frame.pixels));
+            Gdiplus::Graphics graphics(&surface);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.ScaleTransform(m_scale, m_scale);
+            const int accentRed = static_cast<int>((accentRgb >> 16) & 0xFFU);
+            const int accentGreen = static_cast<int>((accentRgb >> 8) & 0xFFU);
+            const int accentBlue = static_cast<int>(accentRgb & 0xFFU);
             Gdiplus::SolidBrush indicator(Gdiplus::Color(240,
                 static_cast<BYTE>(accentRed), static_cast<BYTE>(accentGreen),
                 static_cast<BYTE>(accentBlue)));
-            fillRoundedRectangle(graphics, track, trackX, trackY, trackWidth, trackHeight);
             graphics.SetClip(Gdiplus::RectF(trackX, trackY, trackWidth, trackHeight));
             if (mode == SplashProgressMode::Indeterminate)
             {
                 constexpr ULONGLONG kCycleMs = 1150;
                 constexpr ULONGLONG kTravelMs = 1000;
-                const ULONGLONG phase = (GetTickCount64() - m_animationStart) % kCycleMs;
+                const ULONGLONG phase = m_animationsEnabled
+                    ? (GetTickCount64() - m_animationStart) % kCycleMs : kTravelMs / 2;
                 if (phase < kTravelMs)
                 {
                     const float progress = static_cast<float>(winUiTravel(
@@ -510,17 +642,19 @@ private:
         }
         // Optional DC output is used by the offscreen rendering fixture.
         if (target != nullptr)
-            BitBlt(target, 0, 0, m_width, m_height, memory, 0, 0, SRCCOPY);
+            BitBlt(target, 0, 0, m_width, m_height, m_frame.dc, 0, 0, SRCCOPY);
         const HWND window = m_window.load();
         POINT position = {m_x, m_y};
         POINT source = {};
         SIZE size = {m_width, m_height};
         BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
         const bool submitted = window != nullptr && UpdateLayeredWindow(window, nullptr,
-            &position, &size, memory, &source, 0, &blend, ULW_ALPHA) != FALSE;
-        SelectObject(memory, oldBitmap);
-        DeleteObject(bitmap);
-        DeleteDC(memory);
+            &position, &size, m_frame.dc, &source, 0, &blend, ULW_ALPHA) != FALSE;
+        if (submitted)
+        {
+            m_paintedRevision = revision;
+            m_paintedGeometryRevision = m_geometryRevision;
+        }
         return submitted;
     }
 
@@ -540,10 +674,11 @@ private:
             {
                 self->m_animationStart = GetTickCount64();
                 self->layout();
-                if (self->redraw())
+                self->updateAnimationTimer(false);
+                if (self->redraw(true))
                 {
-                    SetTimer(window, 1, 16, nullptr);
                     ShowWindow(window, SW_SHOWNOACTIVATE);
+                    self->updateAnimationTimer(true);
                 }
             }
             return 0;
@@ -555,14 +690,20 @@ private:
             if (self != nullptr)
             {
                 self->m_animationStart = GetTickCount64();
-                self->redraw();
+                const bool visible = IsWindowVisible(window) != FALSE;
+                self->updateAnimationTimer(visible);
+                if (visible) self->redraw();
             }
             return 0;
         case kRedrawMessage:
-            if (self != nullptr) self->redraw();
+            if (self != nullptr)
+            {
+                self->m_redrawQueued.store(false);
+                if (IsWindowVisible(window)) self->redraw();
+            }
             return 0;
         case WM_TIMER:
-            if (self != nullptr && IsWindowVisible(window)) self->redraw();
+            if (wParam == 1 && self != nullptr && IsWindowVisible(window)) self->redraw();
             return 0;
         case WM_ERASEBKGND:
             return 1;
@@ -571,17 +712,20 @@ private:
             {
                 PAINTSTRUCT paint = {};
                 BeginPaint(window, &paint);
-                self->paint(nullptr);
+                if (IsWindowVisible(window)) self->paint(nullptr);
                 EndPaint(window, &paint);
                 return 0;
             }
             break;
+        case WM_SETTINGCHANGE:
         case WM_DPICHANGED:
         case WM_DISPLAYCHANGE:
             if (self != nullptr)
             {
                 self->layout();
-                self->redraw();
+                const bool visible = IsWindowVisible(window) != FALSE;
+                self->updateAnimationTimer(visible);
+                if (visible) self->redraw(true);
             }
             return 0;
         case WM_CLOSE:
@@ -597,6 +741,7 @@ private:
     std::thread m_thread;
     HDESK m_desktop = nullptr; // Borrowed from caller for UI thread startup.
     std::atomic<HWND> m_window{nullptr};
+    std::atomic<bool> m_redrawQueued{false};
     mutable std::mutex m_stateMutex;
     std::condition_variable m_created;
     bool m_threadReady = false;
@@ -609,7 +754,17 @@ private:
     SplashProgressMode m_mode = SplashProgressMode::Determinate;
     unsigned int m_accentRgb = 0x43A0FFU;
     int m_percent = 0;
+    std::uint64_t m_stateRevision = 1; // Protected by m_stateMutex.
+    std::uint64_t m_staticRevision = 1; // Background/text inputs only, under the same mutex.
+    std::uint64_t m_paintedRevision = 0; // Splash UI thread only.
+    std::uint64_t m_geometryRevision = 1;
+    std::uint64_t m_paintedGeometryRevision = 0;
 
+    std::uint64_t m_cachedStaticRevision = 0;
+    std::uint64_t m_cachedStaticGeometryRevision = 0;
+    DibSurface m_staticSurface;
+    DibSurface m_frame;
+    bool m_animationsEnabled = true;
     ULONG_PTR m_gdiplusToken = 0;
     std::unique_ptr<Gdiplus::Image> m_image;
     int m_imageWidth = 0;

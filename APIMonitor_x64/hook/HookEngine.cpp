@@ -43,11 +43,16 @@ namespace apimon
                 using NextThreadFn = LONG (NTAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
                 const auto nextThread = reinterpret_cast<NextThreadFn>(
                     ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtGetNextThread"));
-                if (!nextThread) return;
+                if (!nextThread)
+                {
+                    m_failureText = L"thread enumeration unavailable: NtGetNextThread export missing";
+                    return;
+                }
                 const DWORD tid = ::GetCurrentThreadId();
                 HANDLE cursor = nullptr;
                 HANDLE ownThread = nullptr;
                 bool complete = false;
+                LONG enumerationStatus = 0;
                 for (;;)
                 {
                     HANDLE next = nullptr;
@@ -55,24 +60,44 @@ namespace apimon
                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                         0, 0, &next);
                     if (status == static_cast<LONG>(0x8000001A)) { complete = true; break; }
-                    if (status < 0 || !next) break;
+                    if (status < 0 || !next) { enumerationStatus = status; break; }
                     cursor = next;
                     const DWORD threadId = ::GetThreadId(next);
-                    if (!threadId) { ::CloseHandle(next); break; }
+                    if (!threadId)
+                    {
+                        ::CloseHandle(next);
+                        enumerationStatus = static_cast<LONG>(::GetLastError());
+                        break;
+                    }
                     if (threadId == tid) ownThread = next;
                     else m_threads.push_back(next);
                 }
                 if (ownThread) ::CloseHandle(ownThread);
-                if (!complete) return;
+                if (!complete)
+                {
+                    wchar_t diagnostic[160]{};
+                    swprintf_s(diagnostic, L"thread enumeration failed: status=0x%08lX",
+                        static_cast<unsigned long>(enumerationStatus));
+                    m_failureText = diagnostic;
+                    return;
+                }
                 for (HANDLE thread : m_threads)
                 {
-                    if (::SuspendThread(thread) == static_cast<DWORD>(-1)) return;
+                    if (::SuspendThread(thread) == static_cast<DWORD>(-1))
+                    {
+                        wchar_t diagnostic[192]{};
+                        swprintf_s(diagnostic, L"SuspendThread failed: tid=%lu error=0x%08lX",
+                            static_cast<unsigned long>(::GetThreadId(thread)),
+                            static_cast<unsigned long>(::GetLastError()));
+                        m_failureText = diagnostic;
+                        return;
+                    }
                     ++m_suspendedCount;
                 }
                 m_ready = true;
             }
 
-            bool CanPatch(const void* address, const std::size_t length) const
+            bool CanPatch(const void* address, const std::size_t length)
             {
                 if (!m_ready) return false;
                 const auto first = reinterpret_cast<std::uintptr_t>(address);
@@ -80,15 +105,36 @@ namespace apimon
                 {
                     CONTEXT context{};
                     context.ContextFlags = CONTEXT_CONTROL;
-                    if (::GetThreadContext(thread, &context) == FALSE) return false;
+                    if (::GetThreadContext(thread, &context) == FALSE)
+                    {
+                        wchar_t diagnostic[192]{};
+                        swprintf_s(diagnostic, L"GetThreadContext failed: tid=%lu error=0x%08lX",
+                            static_cast<unsigned long>(::GetThreadId(thread)),
+                            static_cast<unsigned long>(::GetLastError()));
+                        m_failureText = diagnostic;
+                        return false;
+                    }
 #ifdef _M_IX86
                     const auto instructionPointer = context.Eip;
 #else
                     const auto instructionPointer = context.Rip;
 #endif
-                    if (instructionPointer >= first && instructionPointer < first + length) return false;
+                    if (instructionPointer >= first && instructionPointer < first + length)
+                    {
+                        wchar_t diagnostic[224]{};
+                        swprintf_s(diagnostic, L"active patch-region thread: tid=%lu ip=%p",
+                            static_cast<unsigned long>(::GetThreadId(thread)),
+                            reinterpret_cast<void*>(instructionPointer));
+                        m_failureText = diagnostic;
+                        return false;
+                    }
                 }
                 return true;
+            }
+
+            const std::wstring& FailureText() const
+            {
+                return m_failureText;
             }
 
             void Resume()
@@ -106,6 +152,7 @@ namespace apimon
             std::vector<HANDLE> m_threads;
             std::size_t m_suspendedCount = 0;
             bool m_ready = false;
+            std::wstring m_failureText;
         };
 
         enum class ControlFlow { Linear, Call, Jump, Conditional, LandingPad, Terminal };
@@ -619,13 +666,37 @@ namespace apimon
         { ::VirtualFree(allocation, 0, MEM_RELEASE); return fail(L"target protection failed", target, 0, false); }
         ScopedOtherThreadsSuspender suspended;
         unsigned char currentBytes[32]{};
-        if (!suspended.CanPatch(target, patchSize) || !SafeRead(target, currentBytes, patchSize)
-            || std::memcmp(currentBytes, saved, patchSize) != 0)
+        if (!suspended.FailureText().empty())
+        {
+            const std::wstring diagnostic = suspended.FailureText();
+            suspended.Resume();
+            ::VirtualProtect(target, patchSize, oldProtect, &ignored);
+            ::VirtualFree(allocation, 0, MEM_RELEASE);
+            return fail(diagnostic.c_str(), target, 0, false);
+        }
+        if (!suspended.CanPatch(target, patchSize))
+        {
+            const std::wstring diagnostic = suspended.FailureText().empty()
+                ? std::wstring(L"thread context could not be verified")
+                : suspended.FailureText();
+            suspended.Resume();
+            ::VirtualProtect(target, patchSize, oldProtect, &ignored);
+            ::VirtualFree(allocation, 0, MEM_RELEASE);
+            return fail(diagnostic.c_str(), target, 0, false);
+        }
+        if (!SafeRead(target, currentBytes, patchSize))
         {
             suspended.Resume();
             ::VirtualProtect(target, patchSize, oldProtect, &ignored);
             ::VirtualFree(allocation, 0, MEM_RELEASE);
-            return fail(L"entry changed, active patch-region thread, or unverifiable thread context", target, 0, false);
+            return fail(L"target unreadable while threads were suspended", target, 0, false);
+        }
+        if (std::memcmp(currentBytes, saved, patchSize) != 0)
+        {
+            suspended.Resume();
+            ::VirtualProtect(target, patchSize, oldProtect, &ignored);
+            ::VirtualFree(allocation, 0, MEM_RELEASE);
+            return fail(L"entry changed while preparing patch", target, 0, false);
         }
         hookOut->targetAddress = target; hookOut->detourAddress = detourAddress;
         hookOut->trampolineAddress = allocation; hookOut->patchSize = patchSize;

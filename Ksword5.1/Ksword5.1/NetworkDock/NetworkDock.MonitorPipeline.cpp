@@ -1,6 +1,9 @@
 #include "NetworkDock.InternalCommon.h"
 
 #include <QAbstractItemModel>
+#include <QItemSelection>
+#include "../UI/AsyncOperation.h"
+#include "../UI/CompleteExport.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
@@ -75,42 +78,6 @@ namespace
             ::CoUninitialize();
         }
         return processIconImage;
-    }
-
-    // applyResolvedProcessIconToPacketRows 作用：
-    // - 图标异步解析完成后，把已经落表的同 PID 行的进程列图标补齐；
-    // - 入参 packetTable：报文主表；
-    // - 入参 processIdColumn / processNameColumn：PID 列与进程名列索引（由调用方从列枚举换算）；
-    // - 入参 processIdKey：本次解析完成的 PID；
-    // - 入参 resolvedIcon：解析结果或占位图标；
-    // - 返回：无。该函数只能在 UI 线程调用。
-    void applyResolvedProcessIconToPacketRows(
-        QTableWidget* const packetTable,
-        const int processIdColumn,
-        const int processNameColumn,
-        const quint32 processIdKey,
-        const QIcon& resolvedIcon)
-    {
-        if (packetTable == nullptr || processIdColumn < 0 || processNameColumn < 0)
-        {
-            return;
-        }
-
-        const QString processIdText = QString::number(processIdKey);
-        for (int rowIndex = 0; rowIndex < packetTable->rowCount(); ++rowIndex)
-        {
-            const QTableWidgetItem* const processIdItem = packetTable->item(rowIndex, processIdColumn);
-            if (processIdItem == nullptr || processIdItem->text() != processIdText)
-            {
-                continue;
-            }
-
-            QTableWidgetItem* const processNameItem = packetTable->item(rowIndex, processNameColumn);
-            if (processNameItem != nullptr)
-            {
-                processNameItem->setIcon(resolvedIcon);
-            }
-        }
     }
 
     // kUnixMsTo100ns：
@@ -308,35 +275,76 @@ namespace
     }
 }
 
-void NetworkDock::onPacketCaptured(const ks::network::PacketRecord& packetRecord)
+bool NetworkDock::isPacketProjectionVisible() const
 {
+    return isVisible() && m_trafficMonitorPage != nullptr && m_trafficMonitorPage->isVisible();
+}
+
+void NetworkDock::synchronizeVisiblePacketProjection()
+{
+    if (!isPacketProjectionVisible())
+    {
+        return;
+    }
+    // Canonical packets, rate buckets and NIDS continue to advance while hidden.
+    // Apply the current range before rebuilding a timeline-filtered packet view.
+    if (m_packetTimelineProjectionDirty)
+    {
+        refreshPacketTimelineRange();
+        refreshPacketTimelinePoints();
+        refreshPacketTimelineRatePoints();
+    }
+    if (m_packetTableProjectionDirty)
+    {
+        rebuildMonitorTableByFilter();
+    }
+    drainPacketMetadata();
+}
+
+void NetworkDock::onPacketCaptured(ks::network::PacketRecord packetRecord)
+{
+    // One canonical payload owner serves the cache and every display version.
+    // Only remoteDomain is updated on GUI; workers read the separately captured
+    // PacketMonitorRecord::domain and never access that mutable string member.
+    auto storage = std::make_shared<ks::network::PacketRecord>(std::move(packetRecord));
+    const auto retained = ks::ui::RetainCompleteExportSnapshot<ks::network::PacketRecord>(storage);
+    const std::shared_ptr<ks::network::PacketRecord> canonical(retained, storage.get());
+    const auto& record = *canonical;
+
     // timelineTime100ns 是“只统计监控开启时间”的压缩时间：
     // - 停止监控后的等待时长不再占用横轴；
     // - 后续表格筛选、事件点、速率折线全部使用同一压缩时间。
-    const std::uint64_t timelineTime100ns = packetTimelineTimeForRecord(packetRecord);
+    const std::uint64_t timelineTime100ns = packetTimelineTimeForRecord(record);
 
     // 缓存报文实体：用于详情窗口通过序号回查完整字节内容。
-    m_packetSequenceOrder.push_back(packetRecord.sequenceId);
-    m_packetBySequence[packetRecord.sequenceId] = packetRecord;
-    m_packetTimelineTimeBySequence[packetRecord.sequenceId] = timelineTime100ns;
+    m_packetSequenceOrder.push_back(record.sequenceId);
+    m_packetBySequence[record.sequenceId] = canonical;
+    m_packetTimelineTimeBySequence[record.sequenceId] = timelineTime100ns;
 
     // 同步写入时间轴轻量点：
     // - 点列表只保存时间和类型，不保存表格行号；
     // - 裁剪时与报文序号缓存同步删除，避免时间轴显示已经不存在的历史点。
     ProcessTraceTimelineEventPoint timelinePoint;
     timelinePoint.time100ns = timelineTime100ns;
-    timelinePoint.typeText = packetTimelineTypeText(packetRecord);
+    timelinePoint.typeText = packetTimelineTypeText(record);
     // 协议与收发方向由后端枚举决定，展示文案只保留兼容用途。
-    timelinePoint.categoryId = ks::ui::TimelineCategoryForPacket(packetRecord.protocol, packetRecord.direction);
+    timelinePoint.categoryId = ks::ui::TimelineCategoryForPacket(record.protocol, record.direction);
     m_packetTimelineEventPoints.push_back(std::move(timelinePoint));
-    addPacketTimelineRateSample(packetRecord, timelineTime100ns);
-    processNidsPacket(packetRecord);
+    addPacketTimelineRateSample(record, timelineTime100ns);
+    processNidsPacket(record);
 
-    // 当前报文若通过“组合过滤条件”才追加到主表（过滤关闭时默认全部通过）。
-    if (packetPassesMonitorFilter(packetRecord.sequenceId, packetRecord))
-    {
-        appendPacketToMonitorTable(packetRecord);
-    }
+    // Canonical record handles are copied once per arriving packet; formatting,
+    // filtering, ordering and all commit maps are prepared on the value worker.
+    auto value = std::make_shared<PacketMonitorRecord>();
+    value->packet = canonical;
+    value->domain = toQString(record.remoteDomain);
+    value->timeline100ns = timelineTime100ns;
+    m_packetTableRecords[record.sequenceId] = ks::ui::RetainCompleteExportSnapshot<PacketMonitorRecord>(value);
+    m_packetSequencesByAddress[normalizeIpAddressText(toQString(record.remoteAddress))].insert(record.sequenceId);
+    ++m_packetTableContentVersion;
+    m_packetTableProjectionDirty = true;
+    if (m_packetTable != nullptr && !m_packetTable->isSortingEnabled())
+        m_packetTableProjection.sortColumn = -1;
     trimOldestPacketWhenNeeded();
 }
 
@@ -358,6 +366,14 @@ void NetworkDock::flushPendingPacketsToUi()
         }))
     {
         return;
+    }
+
+    if (isPacketProjectionVisible() && !m_packetTableProjectionDirty
+        && ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+            QStringLiteral("network-packet-filter-rebuild"), {m_packetTable},
+            [safeThis]() { if (safeThis) safeThis->rebuildMonitorTableByFilter(); }))
+    {
+        m_packetTableProjectionDirty = true;
     }
 
     // 先在锁内把待处理报文批量转移到局部容器，缩短锁持有时间。
@@ -400,7 +416,8 @@ void NetworkDock::flushPendingPacketsToUi()
         if (heartbeatSecond != m_packetTimelineLastHeartbeatSecond)
         {
             m_packetTimelineLastHeartbeatSecond = heartbeatSecond;
-            m_packetTimelineRateBucketBySecond.try_emplace(heartbeatSecond, PacketTimelineRateBucket{});
+            // Idle zeroes are implicit; elapsed idle duration must not allocate
+            // one permanent hash node per second. Projection supplies zero edges.
             refreshPacketTimelineRange();
             refreshPacketTimelineRatePoints();
         }
@@ -411,19 +428,12 @@ void NetworkDock::flushPendingPacketsToUi()
         }
     }
 
-    // 批量更新表格期间临时关闭重绘，减少 UI 抖动与卡顿。
-    const bool tableUpdateDisabled = !packetBatch.empty() && m_packetTable != nullptr;
-    const bool tableUpdatesEnabled = tableUpdateDisabled && m_packetTable->updatesEnabled();
-    if (tableUpdateDisabled)
-    {
-        m_packetTable->setUpdatesEnabled(false);
-    }
     QElapsedTimer budgetTimer;
     budgetTimer.start();
     std::size_t processedCount = 0;
-    for (const ks::network::PacketRecord& packetRecord : packetBatch)
+    for (auto& packetRecord : packetBatch)
     {
-        onPacketCaptured(packetRecord);
+        onPacketCaptured(std::move(packetRecord));
         ++processedCount;
         if (budgetTimer.elapsed() >= 4)
         {
@@ -431,18 +441,9 @@ void NetworkDock::flushPendingPacketsToUi()
         }
     }
 
-    if (tableUpdateDisabled)
-    {
-        m_packetTable->setUpdatesEnabled(tableUpdatesEnabled);
-        if (tableUpdatesEnabled && m_packetTable->viewport() != nullptr)
-        {
-            m_packetTable->viewport()->update();
-        }
-        if (processedCount > 0)
-        {
-            m_packetTable->scrollToBottom();
-        }
-    }
+    // One complete batch produces at most one model publication. There are no
+    // per-packet item notifications or layouts and no per-packet tail scroll.
+    if (processedCount > 0) requestPacketTableProjection();
 
     if (processedCount < packetBatch.size())
     {
@@ -582,38 +583,22 @@ void NetworkDock::onRateLimitActionArrived(const ks::network::RateLimitActionEve
         << eol;
 }
 
-void NetworkDock::appendPacketToMonitorTable(const ks::network::PacketRecord& packetRecord)
+void NetworkDock::requestPacketMetadata(const ks::network::PacketRecord& packetRecord)
 {
-    if (m_packetTable == nullptr)
-    {
-        return;
-    }
-
-    // 追加场景改用“直接扩容 rowCount”而非 insertRow：
-    // - insertRow 会触发后续行移动；
-    // - setRowCount 在尾部追加时更轻量，适合高频写入场景。
-    const int newRow = m_packetTable->rowCount();
-    m_packetTable->setRowCount(newRow + 1);
-    scheduleDomainResolutionForPacket(
-        packetRecord.sequenceId,
-        toQString(packetRecord.remoteAddress));
+    if (m_packetTable == nullptr) return;
     const auto cachedPacketIterator = m_packetBySequence.find(packetRecord.sequenceId);
     const ks::network::PacketRecord& displayRecord = cachedPacketIterator != m_packetBySequence.end()
-        ? cachedPacketIterator->second
+        ? *cachedPacketIterator->second
         : packetRecord;
 
     // 进程图标解析必须让出 50ms 批量刷新帧预算：
     // - 命中 PID 缓存时直接复用，稳态零开销；
     // - 未命中时先落占位图标，把 QueryProcessPathByPid + Shell 图标提取丢到线程池，
     //   结果回投后再按 PID 回补已经落表的行，与远端域名异步补齐是同一套模式。
+    if (displayRecord.remoteDomain.empty())
+        scheduleDomainResolutionForPacket(displayRecord.sequenceId, toQString(displayRecord.remoteAddress));
     const quint32 processIdKey = static_cast<quint32>(displayRecord.processId);
-    QIcon processIcon = packetProcessPlaceholderIcon();
-    const auto processIconCacheIterator = m_processIconCacheByPid.constFind(processIdKey);
-    if (processIconCacheIterator != m_processIconCacheByPid.constEnd())
-    {
-        processIcon = processIconCacheIterator.value();
-    }
-    else if (processIdKey != 0U)
+    if (processIdKey != 0U && !m_processIconCacheByPid.contains(processIdKey))
     {
         QSet<quint32>& pendingIconPidSet = g_pendingPacketProcessIconPidMap[this];
         if (!pendingIconPidSet.contains(processIdKey))
@@ -623,10 +608,8 @@ void NetworkDock::appendPacketToMonitorTable(const ks::network::PacketRecord& pa
             // ownerKey 只当身份标识用（绝不解引用），保证宿主析构后仍能定位并清理在途集合。
             const QPointer<NetworkDock> guardedSelf(this);
             const NetworkDock* const ownerKey = this;
-            const int processIdColumn = toPacketColumn(PacketTableColumn::Pid);
-            const int processNameColumn = toPacketColumn(PacketTableColumn::ProcessName);
             QThreadPool::globalInstance()->start(
-                [guardedSelf, ownerKey, processIdKey, processIdColumn, processNameColumn]()
+                [guardedSelf, ownerKey, processIdKey]()
                 {
                     QImage processIconImage = extractProcessIconImageForPid(processIdKey);
                     QCoreApplication* const appInstance = QCoreApplication::instance();
@@ -639,8 +622,6 @@ void NetworkDock::appendPacketToMonitorTable(const ks::network::PacketRecord& pa
                         [guardedSelf,
                             ownerKey,
                             processIdKey,
-                            processIdColumn,
-                            processNameColumn,
                             processIconImage = std::move(processIconImage)]() mutable
                         {
                             // 无论宿主是否存活都先摘掉在途标记，避免残留条目永久挡住该 PID 的解析。
@@ -663,24 +644,15 @@ void NetworkDock::appendPacketToMonitorTable(const ks::network::PacketRecord& pa
                                 ? packetProcessPlaceholderIcon()
                                 : QIcon(QPixmap::fromImage(processIconImage));
                             guardedSelf->m_processIconCacheByPid.insert(processIdKey, resolvedIcon);
-                            applyResolvedProcessIconToPacketRows(
-                                guardedSelf->m_packetTable,
-                                processIdColumn,
-                                processNameColumn,
-                                processIdKey,
-                                resolvedIcon);
+                            if (guardedSelf->isPacketProjectionVisible() && guardedSelf->m_packetTable != nullptr)
+                                guardedSelf->m_packetTable->refreshProcessIcons();
                         },
                         Qt::QueuedConnection);
                 });
         }
     }
 
-    populatePacketRow(
-        m_packetTable,
-        newRow,
-        displayRecord,
-        displayRecord.sequenceId,
-        processIcon);
+
 }
 
 void NetworkDock::scheduleDomainResolutionForPacket(
@@ -695,7 +667,11 @@ void NetworkDock::scheduleDomainResolutionForPacket(
         auto packetIterator = m_packetBySequence.find(sequenceId);
         if (packetIterator != m_packetBySequence.end())
         {
-            packetIterator->second.remoteDomain = "-";
+            if (packetIterator->second->remoteDomain != "-")
+            {
+                packetIterator->second->remoteDomain = "-";
+                replacePacketTableRecord(sequenceId);
+            }
         }
         return;
     }
@@ -706,7 +682,12 @@ void NetworkDock::scheduleDomainResolutionForPacket(
         auto packetIterator = m_packetBySequence.find(sequenceId);
         if (packetIterator != m_packetBySequence.end())
         {
-            packetIterator->second.remoteDomain = cachedIterator.value().toUtf8().constData();
+            const auto domain = cachedIterator.value().toUtf8().toStdString();
+            if (packetIterator->second->remoteDomain != domain)
+            {
+                packetIterator->second->remoteDomain = domain;
+                replacePacketTableRecord(sequenceId);
+            }
         }
         return;
     }
@@ -774,111 +755,313 @@ void NetworkDock::applyDomainResolutionResult(
         m_remoteDomainCache.erase(m_remoteDomainCache.begin());
     }
 
-    for (auto& packetPair : m_packetBySequence)
+    const auto sequences = m_packetSequencesByAddress.value(addressKey);
+    for (const auto sequence : sequences)
     {
-        if (normalizeIpAddressText(toQString(packetPair.second.remoteAddress)) == addressKey)
+        const auto packet = m_packetBySequence.find(sequence);
+        if (packet != m_packetBySequence.end())
         {
-            packetPair.second.remoteDomain = displayText.toUtf8().constData();
+            packet->second->remoteDomain = displayText.toUtf8().toStdString();
+            replacePacketTableRecord(sequence);
         }
     }
 
-    if (m_packetTable == nullptr)
+    requestPacketTableProjection();
+}
+
+void NetworkDock::replacePacketTableRecord(const std::uint64_t sequence)
+{
+    const auto packet = m_packetBySequence.find(sequence);
+    const auto old = m_packetTableRecords.find(sequence);
+    if (packet == m_packetBySequence.end() || old == m_packetTableRecords.end()) return;
+    auto next = std::make_shared<PacketMonitorRecord>(*old->second);
+    next->domain = toQString(packet->second->remoteDomain);
+    old->second = ks::ui::RetainCompleteExportSnapshot<PacketMonitorRecord>(next);
+    ++m_packetTableContentVersion;
+    m_packetTableProjectionDirty = true;
+    // Cached DNS answers may be discovered while data() serves a paint. Never
+    // enter a structural model transaction from inside that data request.
+    if (!m_packetTableKickScheduled)
     {
-        return;
+        m_packetTableKickScheduled = true;
+        const QPointer<NetworkDock> self(this);
+        QTimer::singleShot(0, this, [self]()
+        {
+            if (!self) return;
+            self->m_packetTableKickScheduled = false;
+            self->requestPacketTableProjection();
+        });
     }
-    const int domainColumn = toPacketColumn(PacketTableColumn::RemoteDomain);
-    for (int rowIndex = 0; rowIndex < m_packetTable->rowCount(); ++rowIndex)
+}
+
+void NetworkDock::drainPacketMetadata()
+{
+    if (m_packetMetadataScheduled || !isPacketProjectionVisible() || m_packetMetadataBatches.empty()) return;
+    m_packetMetadataScheduled = true;
+    const QPointer<NetworkDock> self(this);
+    QTimer::singleShot(0, this, [self]()
     {
-        QTableWidgetItem* domainItem = m_packetTable->item(rowIndex, domainColumn);
-        if (domainItem == nullptr)
+        if (!self) return;
+        self->m_packetMetadataScheduled = false;
+        if (!self->isPacketProjectionVisible()) return;
+        QElapsedTimer budget; budget.start();
+        int units = 0;
+        while (!self->m_packetMetadataBatches.empty() && units < 32 && budget.nsecsElapsed() < 3'000'000)
         {
-            continue;
+            auto& batch = self->m_packetMetadataBatches.front();
+            if (self->m_packetMetadataCursor == batch.size())
+            { self->m_packetMetadataBatches.pop_front(); self->m_packetMetadataCursor = 0; continue; }
+            const auto sequence = batch[self->m_packetMetadataCursor++];
+            ++units;
+            const auto record = self->m_packetBySequence.find(sequence);
+            if (record != self->m_packetBySequence.end()) self->requestPacketMetadata(*record->second);
+            if (!self) return;
         }
-        if (normalizeIpAddressText(domainItem->data(Qt::UserRole).toString()) == addressKey)
-        {
-            domainItem->setText(displayText);
-        }
-    }
+        self->drainPacketMetadata();
+    });
 }
 
 void NetworkDock::rebuildMonitorTableByFilter()
 {
-    if (m_packetTable == nullptr)
-    {
-        return;
-    }
+    ++m_packetTableProjection.generation;
+    m_packetTableProjectionDirty = true;
+    requestPacketTableProjection();
+}
 
-    const QPointer<NetworkDock> safeThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("network-packet-filter-rebuild"),
-        {m_packetTable},
-        [safeThis]()
+void NetworkDock::requestPacketTableProjection()
+{
+    auto& state = m_packetTableProjection;
+    if (!m_packetTableProjectionDirty || state.active || !isPacketProjectionVisible() || m_packetTable == nullptr) return;
+    const QPointer<NetworkDock> self(this);
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
+        QStringLiteral("network-packet-filter-rebuild"), {m_packetTable},
+        [self]() { if (self) self->requestPacketTableProjection(); })) return;
+    if (m_packetTableProjectionOperation == nullptr)
+        m_packetTableProjectionOperation = new ks::ui::AsyncOperation(this);
+    struct Input
+    {
+        std::vector<std::shared_ptr<const PacketMonitorRecord>> records;
+        std::vector<MonitorFilterRuleGroupCompiled> groups;
+        std::shared_ptr<const PacketMonitorValues> previous;
+        ks::i18n::SourceTextSnapshot language;
+        std::uint64_t start = 0, end = 0, version = 0;
+        bool timelineFilter = false;
+        int sortColumn = -1;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+    };
+    Input input;
+    input.records.reserve(m_packetSequenceOrder.size());
+    for (const auto sequence : m_packetSequenceOrder)
+    {
+        const auto row = m_packetTableRecords.find(sequence);
+        if (row != m_packetTableRecords.end()) input.records.push_back(row->second);
+    }
+    input.groups = m_activeMonitorFilterGroupList;
+    input.previous = m_packetTable->values();
+    input.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    const auto languageId = input.language.languageId();
+    input.timelineFilter = isPacketTimelineFilterActive();
+    input.start = m_packetTimelineSelectionStart100ns;
+    input.end = m_packetTimelineSelectionEnd100ns;
+    input.version = m_packetTableContentVersion;
+    input.sortColumn = state.sortColumn;
+    input.sortOrder = state.sortOrder;
+    const auto generation = state.generation;
+    // A live immutable version remains usable while its replacement is prepared.
+    // Disabling the view for every packet/DNS batch also disables its action bar
+    // and changes every icon's state, producing a full-view flash each tick.
+    if (!state.locked && !input.previous)
+    {
+        state.enabled = m_packetTable->isEnabled(); state.cursor = m_packetTable->cursor(); state.locked = true;
+    }
+    state.active = true;
+    m_packetTableProjectionDirty = false;
+    if (state.locked)
+    {
+        m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+        if (!self) return;
+        m_packetTable->setEnabled(false);
+        if (!self) return;
+        m_packetTable->setCursor(Qt::WaitCursor);
+        if (!self) return;
+    }
+    m_packetTableProjectionOperation->submit<Input, PacketMonitorCommit>(std::move(input),
+        [](const Input& input, const ks::ui::AsyncOperationToken& token)
         {
-            if (!safeThis.isNull())
+            PacketMonitorCommit result;
+            result.previous = input.previous;
+            auto next = std::make_shared<PacketMonitorValues>(); next->version = input.version;
+            QHash<qulonglong, PacketMonitorValues::Row> cached;
+            if (input.previous) for (const auto& row : input.previous->canonical)
+                cached.insert(row->sequenceId, row);
+            for (const auto& record : input.records)
             {
-                safeThis->rebuildMonitorTableByFilter();
+                if (token.isCanceled()) return PacketMonitorCommit{};
+                const auto& packet = *record->packet;
+                auto row = cached.value(packet.sequenceId);
+                if (!row || row->record.lock() != record)
+                {
+                    auto value = std::make_shared<PacketMonitorRow>(); value->record = record;
+                    value->sequenceId = packet.sequenceId; value->processId = packet.processId;
+                    value->remoteAddress = toQString(packet.remoteAddress); value->domainPending = record->domain.isEmpty();
+                    const QString source = packetSourceDisplayText(packet);
+                    value->cells = {toQString(ks::network::FormatUnixTimestampMs(packet.captureTimestampMs, false)),
+                        toQString(ks::network::PacketProtocolToString(packet.protocol)),
+                        toQString(ks::network::PacketDirectionToString(packet.direction)), source,
+                        QString::number(packet.processId), toQString(packet.processName),
+                        formatEndpointText(packet.localAddress, packet.localPort),
+                        formatEndpointText(packet.remoteAddress, packet.remotePort),
+                        record->domain.isEmpty() ? QStringLiteral("解析中…") : record->domain,
+                        packet.wfpAleEventNoPayload ? QStringLiteral("-") : QString::number(packet.totalPacketSize),
+                        packet.wfpAleEventNoPayload ? QStringLiteral("-") : QString::number(packet.payloadSize),
+                        packet.wfpAleEventNoPayload ? QStringLiteral("R0 WFP ALE 流事件不包含 packet payload") : buildPayloadAsciiPreviewText(packet)};
+                    row = ks::ui::RetainCompleteExportSnapshot<PacketMonitorRow>(value);
+                }
+                next->canonical.push_back(row);
+                if (input.timelineFilter && (record->timeline100ns < input.start || record->timeline100ns > input.end)) continue;
+                bool accepted = input.groups.empty();
+                for (const auto& group : input.groups)
+                    if (group.enabled && packetMatchesMonitorFilterGroup(packet, group)) { accepted = true; break; }
+                if (accepted)
+                {
+                    if (!input.previous || !input.previous->positions.contains(packet.sequenceId))
+                        result.metadata.push_back(packet.sequenceId);
+                    next->rows.push_back(std::move(row));
+                }
             }
-        }))
-    {
-        return;
-    }
-
-    // 先收集通过过滤的记录列表，再一次性 setRowCount，减少反复 insertRow 开销。
-    std::vector<const ks::network::PacketRecord*> visibleRecordList;
-    visibleRecordList.reserve(m_packetSequenceOrder.size());
-    for (const std::uint64_t sequenceId : m_packetSequenceOrder)
-    {
-        const auto iterator = m_packetBySequence.find(sequenceId);
-        if (iterator == m_packetBySequence.end())
+            // QTableWidget's original cells were strings: keep QString ordering
+            // (including PID/size lexical order), stable for equal values.
+            if (input.sortColumn >= 0 && input.sortColumn < 12)
+                std::stable_sort(next->rows.begin(), next->rows.end(), [&](const auto& left, const auto& right)
+                {
+                    const int compared = QString::localeAwareCompare(input.language.sourceText(left->cells[input.sortColumn]),
+                        input.language.sourceText(right->cells[input.sortColumn]));
+                    if (compared != 0) return input.sortOrder == Qt::AscendingOrder ? compared < 0 : compared > 0;
+                    if (!input.previous) return false;
+                    const auto missing = static_cast<int>(input.previous->rows.size());
+                    return input.previous->positions.value(left->sequenceId, missing)
+                        < input.previous->positions.value(right->sequenceId, missing);
+                });
+            const auto finish = [](std::shared_ptr<PacketMonitorValues> value)
+            {
+                for (int row = 0; row < static_cast<int>(value->rows.size()); ++row)
+                    value->positions.insert(value->rows[row]->sequenceId, row);
+                return ks::ui::RetainCompleteExportSnapshot<PacketMonitorValues>(value);
+            };
+            result.target = finish(next);
+            auto survivors = std::make_shared<PacketMonitorValues>();
+            auto reordered = std::make_shared<PacketMonitorValues>();
+            QSet<qulonglong> oldKeys;
+            if (input.previous) for (const auto& row : input.previous->rows)
+            {
+                const auto key = row->sequenceId;
+                oldKeys.insert(key);
+                const int target = result.target->positions.value(key, -1);
+                if (target >= 0)
+                {
+                    survivors->rows.push_back(result.target->rows[target]);
+                    const auto& changed = result.target->rows[target];
+                    if (row != changed) for (int column = 0; column < changed->cells.size(); ++column)
+                    {
+                        if (row->cells.value(column) == changed->cells[column]) continue;
+                        if (result.firstChangedRow < 0)
+                        {
+                            result.firstChangedRow = result.lastChangedRow = target;
+                            result.firstChangedColumn = result.lastChangedColumn = column;
+                        }
+                        else
+                        {
+                            result.firstChangedRow = std::min(result.firstChangedRow, target);
+                            result.lastChangedRow = std::max(result.lastChangedRow, target);
+                            result.firstChangedColumn = std::min(result.firstChangedColumn, column);
+                            result.lastChangedColumn = std::max(result.lastChangedColumn, column);
+                        }
+                    }
+                }
+            }
+            reordered->rows = survivors->rows;
+            if (input.previous) for (const auto& row : input.previous->rows)
+                if (!result.target->positions.contains(row->sequenceId)) reordered->rows.push_back(row);
+            auto appended = std::make_shared<PacketMonitorValues>(); appended->rows = survivors->rows;
+            for (const auto& row : result.target->rows)
+                if (!oldKeys.contains(row->sequenceId)) appended->rows.push_back(row);
+            const auto sameOrder = [](const auto& left, const auto& right)
+            {
+                if (left.size() != right.size()) return false;
+                for (std::size_t row = 0; row < left.size(); ++row)
+                    if (left[row]->sequenceId != right[row]->sequenceId) return false;
+                return true;
+            };
+            result.reorderOld = input.previous && !sameOrder(input.previous->rows, reordered->rows);
+            result.reorderTarget = !sameOrder(appended->rows, result.target->rows);
+            result.reordered = finish(reordered); result.survivors = finish(survivors); result.appended = finish(appended);
+            return result;
+        },
+        [self, generation, languageId](PacketMonitorCommit& result, std::uint64_t)
         {
-            continue;
-        }
-        const ks::network::PacketRecord& packetRecord = iterator->second;
-        if (!packetPassesMonitorFilter(sequenceId, packetRecord))
+            if (!self) return true;
+            auto& state = self->m_packetTableProjection;
+            if (!result.target || state.generation != generation || !self->isPacketProjectionVisible()
+                || ks::i18n::LanguageManager::instance().currentLanguageId() != languageId)
+            {
+                state.active = false;
+                self->m_packetTableProjectionDirty = true;
+                self->requestPacketTableProjection();
+                return true;
+            }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self,
+                QStringLiteral("network-packet-filter-rebuild"), {self->m_packetTable},
+                [self]() { if (self) self->requestPacketTableProjection(); }))
+            { state.active = false; self->m_packetTableProjectionDirty = true; return true; }
+            auto* table = self->m_packetTable;
+            const bool followTail = table->verticalScrollBar()->value() >= table->verticalScrollBar()->maximum() - 1;
+            const QPersistentModelIndex anchor(table->indexAt(QPoint(1, 1)));
+            const int anchorOffset = anchor.isValid() ? table->visualRect(anchor).top() : 0;
+            const auto previousVersion = table->values() ? table->values()->version : 0;
+            auto metadata = std::move(result.metadata);
+            if (!table->publish(std::move(result)))
+            { if (self) { state.active = false; self->m_packetTableProjectionDirty = true; self->requestPacketTableProjection(); } return true; }
+            if (!self) return true;
+            state.active = false;
+            if (state.generation != generation)
+            { self->m_packetTableProjectionDirty = true; self->requestPacketTableProjection(); return true; }
+            if (!metadata.empty()) self->m_packetMetadataBatches.push_back(std::move(metadata));
+            self->drainPacketMetadata();
+            if (state.locked)
+            {
+                state.locked = false;
+                table->setCursor(state.cursor);
+                if (!self) return true;
+                table->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                if (!self) return true;
+                table->setEnabled(state.enabled);
+                if (!self) return true;
+            }
+            // Tail follow is once per complete accepted version. Fixed natural
+            // section geometry avoids an all-record size pass at this boundary.
+            if (followTail && previousVersion != table->values()->version) table->scrollToBottom();
+            else if (anchor.isValid())
+            {
+                table->scrollTo(anchor, QAbstractItemView::PositionAtTop);
+                if (table->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+                    table->verticalScrollBar()->setValue(table->verticalScrollBar()->value() - anchorOffset);
+            }
+            self->requestPacketTableProjection();
+            return true;
+        },
+        [self](std::exception_ptr)
         {
-            continue;
-        }
-        visibleRecordList.push_back(&packetRecord);
-    }
-
-    m_packetTable->setUpdatesEnabled(false);
-    m_packetTable->setRowCount(static_cast<int>(visibleRecordList.size()));
-
-    int writeRow = 0;
-    for (const ks::network::PacketRecord* packetRecordPtr : visibleRecordList)
-    {
-        if (packetRecordPtr == nullptr)
-        {
-            continue;
-        }
-
-        const std::uint64_t sequenceId = packetRecordPtr->sequenceId;
-        scheduleDomainResolutionForPacket(
-            sequenceId,
-            toQString(packetRecordPtr->remoteAddress));
-        const auto cachedPacketIterator = m_packetBySequence.find(sequenceId);
-        const ks::network::PacketRecord& displayRecord =
-            cachedPacketIterator != m_packetBySequence.end()
-                ? cachedPacketIterator->second
-                : *packetRecordPtr;
-        const QIcon processIcon = resolveProcessIconByPid(
-            displayRecord.processId,
-            displayRecord.processName);
-        populatePacketRow(
-            m_packetTable,
-            writeRow,
-            displayRecord,
-            displayRecord.sequenceId,
-            processIcon);
-        ++writeRow;
-    }
-
-    m_packetTable->setUpdatesEnabled(true);
-    if (writeRow > 0)
-    {
-        m_packetTable->scrollToBottom();
-    }
+            if (!self) return;
+            self->m_packetTableProjection.active = false;
+            self->m_packetTableProjectionDirty = true;
+            if (self->m_packetTable != nullptr && self->m_packetTableProjection.locked)
+            {
+                self->m_packetTable->setCursor(self->m_packetTableProjection.cursor);
+                self->m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                self->m_packetTable->setEnabled(self->m_packetTableProjection.enabled);
+            }
+            self->m_packetTableProjection.locked = false;
+        });
 }
 
 void NetworkDock::applyPacketTimelineSelection(
@@ -888,7 +1071,8 @@ void NetworkDock::applyPacketTimelineSelection(
     // 时间轴控件负责把鼠标框选转换成时间戳；NetworkDock 只保存范围并重建表格。
     m_packetTimelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_packetTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_packetTimelineUserSelectionActive = true;
+    m_packetTimelineUserSelectionActive = m_packetTimelineWidget != nullptr
+        && m_packetTimelineWidget->hasUserAdjustedSelection();
 
     updateMonitorFilterStateLabel();
     rebuildMonitorTableByFilter();
@@ -923,18 +1107,13 @@ void NetworkDock::resetPacketTimelineToCurrentRange()
             m_packetTimelineRangeEnd100ns);
         m_packetTimelineSelectionStart100ns = m_packetTimelineWidget->selectionStart100ns();
         m_packetTimelineSelectionEnd100ns = m_packetTimelineWidget->selectionEnd100ns();
-        m_packetTimelineWidget->setEventPoints(m_packetTimelineEventPoints);
+        refreshPacketTimelinePoints();
     }
     refreshPacketTimelineRatePoints();
 }
 
 void NetworkDock::refreshPacketTimelineRange()
 {
-    if (m_packetTimelineWidget == nullptr)
-    {
-        return;
-    }
-
     std::uint64_t rangeStart100ns = 0;
     // 当前累计监控时长始终不早于已缓存报文的压缩时间戳，
     // 因此不必在每个刷新周期扫描整个报文缓存来重算右边界。
@@ -953,69 +1132,233 @@ void NetworkDock::refreshPacketTimelineRange()
 
     m_packetTimelineRangeStart100ns = rangeStart100ns;
     m_packetTimelineRangeEnd100ns = rangeEnd100ns;
-    m_packetTimelineWidget->setCaptureRange(rangeStart100ns, rangeEnd100ns);
-    m_packetTimelineSelectionStart100ns = m_packetTimelineWidget->selectionStart100ns();
-    m_packetTimelineSelectionEnd100ns = m_packetTimelineWidget->selectionEnd100ns();
+    if (!isPacketProjectionVisible())
+    {
+        m_packetTimelineProjectionDirty = true;
+        return;
+    }
+    if (m_packetTimelineWidget == nullptr)
+    {
+        return;
+    }
+    // The visible range is committed with its worker-prepared events and rates.
+    // Canonical full-range filtering still follows acquisition immediately.
+    if (!m_packetTimelineUserSelectionActive)
+    {
+        m_packetTimelineSelectionStart100ns = rangeStart100ns;
+        m_packetTimelineSelectionEnd100ns = rangeEnd100ns;
+    }
 }
 
 void NetworkDock::refreshPacketTimelinePoints()
 {
-    if (m_packetTimelineWidget == nullptr)
-    {
-        return;
-    }
-
-    m_packetTimelineWidget->setEventPoints(m_packetTimelineEventPoints);
+    // Events, rate values and range are one complete projection snapshot.
+    refreshPacketTimelineRatePoints();
 }
 
 void NetworkDock::refreshPacketTimelineRatePoints()
 {
-    if (m_packetTimelineWidget == nullptr)
+    m_packetTimelineProjectionDirty = true;
+    if (!isPacketProjectionVisible() || m_packetTimelineWidget == nullptr
+        || m_packetTimelineProjectionQueued) return;
+    m_packetTimelineProjectionQueued = true;
+    const QPointer<NetworkDock> self(this);
+    QTimer::singleShot(0, this, [self]()
     {
-        return;
-    }
-    if (m_packetTimelineRangeEnd100ns <= m_packetTimelineRangeStart100ns)
-    {
-        m_packetTimelineRangeStart100ns = 0;
-        m_packetTimelineRangeEnd100ns = std::max(
-            currentPacketTimelineEnd100ns(),
-            kFallbackTimelineRange100ns);
-    }
-
-    // 将 unordered_map 快照整理为按秒升序的折线点：
-    // - X 轴使用秒桶起点；
-    // - Y 值直接为该秒累计字节，等价于 B/s。
-    const std::uint64_t visibleEndSecond = m_packetTimelineRangeEnd100ns / kTimelineSecond100ns;
-    std::vector<std::uint64_t> secondIndexList;
-    secondIndexList.reserve(m_packetTimelineRateBucketBySecond.size() + 2);
-    for (const auto& bucketPair : m_packetTimelineRateBucketBySecond)
-    {
-        secondIndexList.push_back(bucketPair.first);
-    }
-    secondIndexList.push_back(0);
-    secondIndexList.push_back(visibleEndSecond);
-    std::sort(secondIndexList.begin(), secondIndexList.end());
-    secondIndexList.erase(
-        std::unique(secondIndexList.begin(), secondIndexList.end()),
-        secondIndexList.end());
-
-    std::vector<ProcessTraceTimelineRatePoint> ratePointList;
-    ratePointList.reserve(secondIndexList.size());
-    for (const std::uint64_t secondIndex : secondIndexList)
-    {
-        const auto iterator = m_packetTimelineRateBucketBySecond.find(secondIndex);
-
-        ProcessTraceTimelineRatePoint ratePoint;
-        ratePoint.time100ns = secondIndex * kTimelineSecond100ns;
-        if (iterator != m_packetTimelineRateBucketBySecond.end())
+        if (!self) return;
+        if (!self->isPacketProjectionVisible() || self->m_packetTimelineWidget == nullptr)
         {
-            ratePoint.uploadBytesPerSecond = static_cast<double>(iterator->second.uploadBytes);
-            ratePoint.downloadBytesPerSecond = static_cast<double>(iterator->second.downloadBytes);
+            self->m_packetTimelineProjectionQueued = false;
+            return;
         }
-        ratePointList.push_back(ratePoint);
-    }
-
-    m_packetTimelineWidget->setRateOverlayPoints(ratePointList);
+        self->m_packetTimelineProjectionDirty = false;
+        struct Input
+        {
+            std::vector<ProcessTraceTimelineEventPoint> points;
+            std::unordered_map<std::uint64_t, PacketTimelineRateBucket> buckets;
+            ProcessTraceTimelineWidget::EventProjectionParameters projection;
+            std::uint64_t epoch = 0;
+            std::uint64_t monitorGeneration = 0;
+            TrafficMonitorSource source = TrafficMonitorSource::Stopped;
+            std::uint64_t firstSequence = 0;
+            std::uint64_t lastSequence = 0;
+            std::size_t count = 0;
+        };
+        struct Output
+        {
+            ProcessTraceTimelineWidget::PreparedEventPoints events;
+            ProcessTraceTimelineWidget::PreparedRateOverlay rates;
+        };
+        auto owner = std::make_shared<Input>();
+        // The mutable alias is used only by GUI capture. Publishing below hands
+        // the same complete value to AsyncOperation without a second vector copy.
+        auto input = std::shared_ptr<Input>(ks::ui::RetainCompleteExportSnapshot(
+            std::shared_ptr<const Input>(owner)), owner.get());
+        owner.reset();
+        self->refreshPacketTimelineRange();
+        input->projection = self->m_packetTimelineWidget->eventProjectionParameters(
+            self->m_packetTimelineRangeStart100ns, self->m_packetTimelineRangeEnd100ns);
+        input->epoch = self->m_packetTimelineProjectionEpoch;
+        input->monitorGeneration = self->m_monitorGeneration.load();
+        input->source = self->m_monitorSource;
+        input->count = self->m_packetTimelineEventPoints.size();
+        if (!self->m_packetSequenceOrder.empty())
+        {
+            input->firstSequence = self->m_packetSequenceOrder.front();
+            input->lastSequence = self->m_packetSequenceOrder.back();
+        }
+        input->points.reserve(input->count);
+        // These counters already track packet arrival and retention removal.
+        // Snapshot them once instead of looking up every retained packet on GUI
+        // and rebuilding the same per-second sums on each trend refresh.
+        input->buckets = self->m_packetTimelineRateBucketBySecond;
+        const QPointer<ProcessTraceTimelineWidget> timeline(self->m_packetTimelineWidget);
+        const auto epochMatches = [self, timeline, input]()
+        {
+            return self && timeline && self->m_packetTimelineWidget == timeline
+                && input->epoch == self->m_packetTimelineProjectionEpoch
+                && input->monitorGeneration == self->m_monitorGeneration.load()
+                && input->source == self->m_monitorSource;
+        };
+        const auto capturePrefixMatches = [self, input, epochMatches]()
+        {
+            return epochMatches() && self->m_packetSequenceOrder.size() >= input->count
+                && self->m_packetTimelineEventPoints.size() >= input->count
+                && (input->count == 0 || (self->m_packetSequenceOrder.front() == input->firstSequence
+                    && self->m_packetSequenceOrder[input->count - 1] == input->lastSequence));
+        };
+        // A weak continuation owns no cycle. Every queued slice retains its
+        // complete partial value through the existing off-GUI retirement lane.
+        auto capture = std::make_shared<std::function<void()>>();
+        const std::weak_ptr<std::function<void()>> nextCapture(capture);
+        *capture = [self, timeline, input, epochMatches, capturePrefixMatches, nextCapture]()
+        {
+            if (!self) return;
+            const auto retry = [self]()
+            {
+                if (!self) return;
+                self->m_packetTimelineProjectionQueued = false;
+                self->refreshPacketTimelineRatePoints();
+            };
+            if (!capturePrefixMatches() || !self->isPacketProjectionVisible())
+            {
+                retry();
+                return;
+            }
+            QElapsedTimer budget;
+            budget.start();
+            const std::size_t stop = std::min(input->count, input->points.size() + 256);
+            while (input->points.size() < stop)
+            {
+                input->points.push_back(self->m_packetTimelineEventPoints[input->points.size()]);
+                if (budget.elapsed() >= 3) break;
+            }
+            if (input->points.size() != input->count)
+            {
+                if (const auto next = nextCapture.lock())
+                    QTimer::singleShot(0, self.data(), [next]() { (*next)(); });
+                return;
+            }
+            // Keep the existing gate held through worker completion and any
+            // deferred UI commit. A later tick marks dirty instead of canceling
+            // the in-flight trend snapshot before it can ever be displayed.
+            if (self->m_packetTimelineProjectionOperation == nullptr)
+                self->m_packetTimelineProjectionOperation = new ks::ui::AsyncOperation(self.data());
+            self->m_packetTimelineProjectionOperation->submit<std::shared_ptr<const Input>,
+                std::shared_ptr<const Output>>(input,
+                [](const std::shared_ptr<const Input>& value,
+                    const ks::ui::AsyncOperationToken& token) -> std::shared_ptr<const Output>
+                {
+                    Output output;
+                    if (token.isCanceled()) return {};
+                    output.events = ProcessTraceTimelineWidget::prepareEventPoints(
+                        value->points, value->projection);
+                    const auto endSecond = value->projection.end100ns / kTimelineSecond100ns;
+                    std::vector<std::uint64_t> seconds;
+                    seconds.reserve(value->buckets.size() * 3 + 2);
+                    for (const auto& bucket : value->buckets)
+                    {
+                        if (token.isCanceled()) return {};
+                        const auto second = bucket.first;
+                        seconds.push_back(second);
+                        if (second > 0) seconds.push_back(second - 1);
+                        if (second < endSecond) seconds.push_back(second + 1);
+                    }
+                    seconds.push_back(0);
+                    seconds.push_back(endSecond);
+                    std::sort(seconds.begin(), seconds.end());
+                    seconds.erase(std::unique(seconds.begin(), seconds.end()), seconds.end());
+                    std::vector<ProcessTraceTimelineRatePoint> rates;
+                    rates.reserve(seconds.size());
+                    for (const auto second : seconds)
+                    {
+                        if (token.isCanceled()) return {};
+                        const auto found = value->buckets.find(second);
+                        ProcessTraceTimelineRatePoint point;
+                        point.time100ns = second * kTimelineSecond100ns;
+                        if (found != value->buckets.end())
+                        {
+                            point.uploadBytesPerSecond = static_cast<double>(found->second.uploadBytes);
+                            point.downloadBytesPerSecond = static_cast<double>(found->second.downloadBytes);
+                        }
+                        rates.push_back(point);
+                    }
+                    output.rates = ProcessTraceTimelineWidget::prepareRateOverlayPoints(std::move(rates));
+                    return std::make_shared<Output>(std::move(output));
+                },
+                [self, timeline, input, epochMatches](const std::shared_ptr<const Output>& output,
+                    const std::uint64_t ticket)
+                {
+                    if (!self) return true;
+                    if (!output)
+                    {
+                        self->m_packetTimelineProjectionQueued = false;
+                        self->m_packetTimelineProjectionDirty = true;
+                        return true;
+                    }
+                    const auto apply = [self, timeline, input, epochMatches](const Output& value)
+                    {
+                        if (!self) return;
+                        self->m_packetTimelineProjectionQueued = false;
+                        if (!timeline) return;
+                        // Capture is complete: later appends or retention trims
+                        // must not starve this valid snapshot. A dirty follow-up
+                        // catches up; epoch/source and interactive view checks
+                        // still reject clears, restarts, source/range changes.
+                        if (!epochMatches() || !self->isPacketProjectionVisible()
+                            || !timeline->applyPreparedEventPoints(value.events))
+                        {
+                            self->refreshPacketTimelineRatePoints();
+                            return;
+                        }
+                        timeline->applyRateOverlayPoints(value.rates);
+                        self->m_packetTimelineSelectionStart100ns = timeline->selectionStart100ns();
+                        self->m_packetTimelineSelectionEnd100ns = timeline->selectionEnd100ns();
+                        if (self->m_packetTimelineProjectionDirty)
+                            self->refreshPacketTimelineRatePoints();
+                    };
+                    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self.data(),
+                        QStringLiteral("network-packet-timeline"), {self->m_packetTable},
+                        [self, output, ticket, apply]()
+                        {
+                            if (!self || self->m_packetTimelineProjectionOperation == nullptr) return;
+                            if (self->m_packetTimelineProjectionOperation->isCurrent(ticket)) apply(*output);
+                            self->m_packetTimelineProjectionOperation->completeDeferred(ticket);
+                        })) return false;
+                    apply(*output);
+                    return true;
+                },
+                [self](std::exception_ptr)
+                {
+                    if (self)
+                    {
+                        self->m_packetTimelineProjectionQueued = false;
+                        self->m_packetTimelineProjectionDirty = true;
+                    }
+                });
+        };
+        (*capture)();
+    });
 }
 
 bool NetworkDock::isPacketTimelineFilterActive() const
@@ -1124,6 +1467,9 @@ void NetworkDock::endPacketTimelineMonitorSession()
 
 void NetworkDock::resetPacketTimelineClockForCurrentState()
 {
+    ++m_packetTimelineProjectionEpoch;
+    // Epoch validation rejects the old value when its worker completes. Let it
+    // finish so the single in-flight gate is released before a fresh capture.
     // wasRunning 用途：在清理会话列表前捕获当前运行状态，避免下面清空状态后误判。
     const bool wasRunning = m_monitorRunning
         || (m_trafficService != nullptr && m_trafficService->IsRunning());
@@ -1260,7 +1606,7 @@ void NetworkDock::removePacketTimelineRateSample(
             : 0;
     }
 
-    if (bucket.uploadBytes == 0 && bucket.downloadBytes == 0 && !m_packetTimelineSessionActive)
+    if (bucket.uploadBytes == 0 && bucket.downloadBytes == 0)
     {
         m_packetTimelineRateBucketBySecond.erase(iterator);
     }
@@ -1289,7 +1635,6 @@ void NetworkDock::trimOldestPacketWhenNeeded()
 
     const std::size_t trimCount = std::max<std::size_t>(overflowCount, kTrimBatchCount);
 
-    std::size_t visibleTrimCount = 0;
     std::size_t timelineTrimCount = 0;
     for (std::size_t trimIndex = 0; trimIndex < trimCount; ++trimIndex)
     {
@@ -1310,14 +1655,18 @@ void NetworkDock::trimOldestPacketWhenNeeded()
         }
 
         const std::uint64_t timelineTime100ns =
-            packetTimelineTimeForSequence(oldestSequenceId, oldestIterator->second);
-        removePacketTimelineRateSample(oldestIterator->second, timelineTime100ns);
+            packetTimelineTimeForSequence(oldestSequenceId, *oldestIterator->second);
+        removePacketTimelineRateSample(*oldestIterator->second, timelineTime100ns);
         m_packetTimelineTimeBySequence.erase(oldestSequenceId);
 
-        if (packetPassesMonitorFilter(oldestSequenceId, oldestIterator->second))
+        const auto address = normalizeIpAddressText(toQString(oldestIterator->second->remoteAddress));
+        auto indexed = m_packetSequencesByAddress.find(address);
+        if (indexed != m_packetSequencesByAddress.end())
         {
-            ++visibleTrimCount;
+            indexed->remove(oldestSequenceId);
+            if (indexed->isEmpty()) m_packetSequencesByAddress.erase(indexed);
         }
+        m_packetTableRecords.erase(oldestSequenceId);
         m_packetBySequence.erase(oldestIterator);
     }
 
@@ -1329,26 +1678,9 @@ void NetworkDock::trimOldestPacketWhenNeeded()
             m_packetTimelineEventPoints.begin() + static_cast<std::ptrdiff_t>(timelineEraseCount));
     }
 
-    // 仅在当前表确有可见裁剪时才删除行，减少不必要的 UI 操作。
-    if (visibleTrimCount > 0 && m_packetTable != nullptr && m_packetTable->rowCount() > 0)
-    {
-        const int removeRows = std::min<int>(static_cast<int>(visibleTrimCount), m_packetTable->rowCount());
-        const bool updatesEnabled = m_packetTable->updatesEnabled();
-        m_packetTable->setUpdatesEnabled(false);
-        if (m_packetTable->model() != nullptr)
-        {
-            m_packetTable->model()->removeRows(0, removeRows);
-        }
-        m_packetTable->setUpdatesEnabled(updatesEnabled);
-
-        kLogEvent trimEvent;
-        dbg << trimEvent
-            << "[NetworkDock] 报文缓存批量裁剪, trimCount=" << trimCount
-            << ", visibleTrimCount=" << visibleTrimCount
-            << ", remainCache=" << m_packetSequenceOrder.size()
-            << eol;
-    }
-
+    ++m_packetTableContentVersion;
+    m_packetTableProjectionDirty = true;
+    m_packetTimelineProjectionDirty = true;
     refreshPacketTimelineRange();
     refreshPacketTimelinePoints();
     refreshPacketTimelineRatePoints();
@@ -1372,6 +1704,12 @@ void NetworkDock::clearAllPacketRows()
         return;
     }
 
+    ++m_packetTableProjection.generation;
+    ++m_packetTableContentVersion;
+    m_packetTableProjectionDirty = true;
+    m_packetTableRecords.clear();
+    m_packetSequencesByAddress.clear();
+    m_packetMetadataBatches.clear(); m_packetMetadataCursor = 0;
     // 同时清空后台待刷新队列，避免“刚清空又回填旧数据”。
     {
         std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
@@ -1390,10 +1728,8 @@ void NetworkDock::clearAllPacketRows()
     refreshPacketTimelineRatePoints();
     updateMonitorFilterStateLabel();
 
-    if (m_packetTable != nullptr)
-    {
-        m_packetTable->setRowCount(0);
-    }
+    m_packetTableProjectionDirty = true;
+    rebuildMonitorTableByFilter();
 
     kLogEvent clearEvent;
     info << clearEvent << "[NetworkDock] 用户清空了网络报文列表。" << eol;

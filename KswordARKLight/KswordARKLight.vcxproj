@@ -346,6 +346,9 @@
     <ClInclude Include="Features\Kernel\KernelObjectDirectoryRecursiveFeature.h" />
     <ClInclude Include="Features\Kernel\KernelObjectNamespaceFeature.h" />
     <ClInclude Include="Features\Kernel\KernelObjectTypeMatrixFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelDynamicProjection.h" />
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.h" />
+    <ClInclude Include="Features\Kernel\KernelProjectionValues.inl" />
     <ClInclude Include="Features\Kernel\KernelPage.h" />
     <ClInclude Include="Features\Kernel\KernelPageLayout.h" />
     <ClInclude Include="Features\Kernel\KernelR0ExtendedFeature.h" />
@@ -448,6 +451,9 @@
     <ClInclude Include="Ui\EvidenceSession.h" />
     <ClInclude Include="Ui\EvidenceSessionView.h" />
     <ClInclude Include="Ui\ExportUtil.h" />
+    <ClInclude Include="Ui\BackgroundWork.h" />
+    <ClInclude Include="Ui\ImmutableTextRows.h" />
+    <ClInclude Include="Ui\AsyncShellIconLoader.h" />
     <ClInclude Include="Ui\AsyncTask.h" />
     <ClInclude Include="Ui\FilterBar.h" />
     <ClInclude Include="Ui\IconUtil.h" />

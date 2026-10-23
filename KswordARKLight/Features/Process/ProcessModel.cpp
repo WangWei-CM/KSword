@@ -47,12 +47,15 @@ std::wstring PercentText(double value) {
 ProcessModel::ProcessModel() = default;
 
 void ProcessModel::setRows(std::vector<ProcessSnapshotRow> rows) {
-    rows_ = std::move(rows);
-    rebuildDisplayRows();
+    setSharedRows(std::make_shared<const std::vector<ProcessSnapshotRow>>(std::move(rows)));
+}
+
+void ProcessModel::setSharedRows(std::shared_ptr<const std::vector<ProcessSnapshotRow>> rows) {
+    rows_=rows?std::move(rows):std::make_shared<const std::vector<ProcessSnapshotRow>>();rebuildDisplayRows();
 }
 
 const std::vector<ProcessSnapshotRow>& ProcessModel::rows() const {
-    return rows_;
+    return *rows_;
 }
 
 const std::vector<ProcessDisplayRow>& ProcessModel::displayRows(ProcessViewMode mode) const {
@@ -60,10 +63,10 @@ const std::vector<ProcessDisplayRow>& ProcessModel::displayRows(ProcessViewMode 
 }
 
 const ProcessSnapshotRow* ProcessModel::rowForDisplayRow(const ProcessDisplayRow& displayRow) const {
-    if (displayRow.groupHeader || displayRow.sourceIndex >= rows_.size()) {
+    if (displayRow.groupHeader || displayRow.sourceIndex >= rows_->size()) {
         return nullptr;
     }
-    return &rows_[displayRow.sourceIndex];
+    return &(*rows_)[displayRow.sourceIndex];
 }
 
 std::wstring ProcessModel::textForColumn(const ProcessDisplayRow& displayRow, int column, ProcessViewMode mode) const {
@@ -158,15 +161,17 @@ void ProcessModel::rebuildDisplayRows() {
     friendlyRows_.clear();
     detailRows_.clear();
 
-    std::vector<std::size_t> indexes(rows_.size());
-    for (std::size_t i = 0; i < rows_.size(); ++i) {
-        indexes[i] = i;
+    std::vector<std::size_t> indexes(rows_->size());
+    std::vector<std::wstring> names;names.reserve(rows_->size());
+    std::vector<ProcessFriendlyGroup> groups;groups.reserve(rows_->size());
+    for (std::size_t i = 0; i < rows_->size(); ++i) {
+        indexes[i] = i;names.push_back(LowerText((*rows_)[i].imageName));groups.push_back(classifyRow((*rows_)[i],names.back()));
     }
-    std::sort(indexes.begin(), indexes.end(), [this](std::size_t left, std::size_t right) {
-        const ProcessSnapshotRow& a = rows_[left];
-        const ProcessSnapshotRow& b = rows_[right];
-        const std::wstring an = LowerText(a.imageName);
-        const std::wstring bn = LowerText(b.imageName);
+    std::sort(indexes.begin(), indexes.end(), [this,&names](std::size_t left, std::size_t right) {
+        const ProcessSnapshotRow& a = (*rows_)[left];
+        const ProcessSnapshotRow& b = (*rows_)[right];
+        const auto& an=names[left];
+        const auto& bn=names[right];
         if (an != bn) {
             return an < bn;
         }
@@ -174,14 +179,15 @@ void ProcessModel::rebuildDisplayRows() {
     });
 
     for (ProcessFriendlyGroup group : { ProcessFriendlyGroup::Applications, ProcessFriendlyGroup::Background, ProcessFriendlyGroup::WindowsSystem }) {
-        appendGroupRows(group, indexes);
+        appendGroupRows(group,indexes,names,groups);
     }
 }
 
-void ProcessModel::appendGroupRows(ProcessFriendlyGroup group, const std::vector<std::size_t>& sortedIndexes) {
+void ProcessModel::appendGroupRows(ProcessFriendlyGroup group,const std::vector<std::size_t>& sortedIndexes,
+    const std::vector<std::wstring>& names,const std::vector<ProcessFriendlyGroup>& groups) {
     std::vector<std::size_t> groupIndexes;
     for (std::size_t index : sortedIndexes) {
-        if (classifyRow(rows_[index]) == group) {
+        if (groups[index] == group) {
             groupIndexes.push_back(index);
         }
     }
@@ -196,13 +202,13 @@ void ProcessModel::appendGroupRows(ProcessFriendlyGroup group, const std::vector
 
     std::unordered_map<DWORD, std::size_t> sourceByPid;
     for (std::size_t sourceIndex : groupIndexes) {
-        sourceByPid.emplace(rows_[sourceIndex].processId, sourceIndex);
+        sourceByPid.emplace((*rows_)[sourceIndex].processId, sourceIndex);
     }
 
-    std::vector<std::vector<std::size_t>> childrenBySourceIndex(rows_.size());
+    std::vector<std::vector<std::size_t>> childrenBySourceIndex(rows_->size());
     std::vector<std::size_t> roots;
     for (std::size_t sourceIndex : groupIndexes) {
-        const DWORD parentPid = rows_[sourceIndex].parentProcessId;
+        const DWORD parentPid = (*rows_)[sourceIndex].parentProcessId;
         const auto parent = sourceByPid.find(parentPid);
         if (parent != sourceByPid.end() && parent->second != sourceIndex) {
             childrenBySourceIndex[parent->second].push_back(sourceIndex);
@@ -211,20 +217,20 @@ void ProcessModel::appendGroupRows(ProcessFriendlyGroup group, const std::vector
         }
     }
 
-    auto rowLess = [this](std::size_t left, std::size_t right) {
-        const std::wstring leftName = LowerText(rows_[left].imageName);
-        const std::wstring rightName = LowerText(rows_[right].imageName);
+    auto rowLess = [this,&names](std::size_t left, std::size_t right) {
+        const auto& leftName=names[left];
+        const auto& rightName=names[right];
         if (leftName != rightName) {
             return leftName < rightName;
         }
-        return rows_[left].processId < rows_[right].processId;
+        return (*rows_)[left].processId < (*rows_)[right].processId;
     };
     std::sort(roots.begin(), roots.end(), rowLess);
     for (std::vector<std::size_t>& children : childrenBySourceIndex) {
         std::sort(children.begin(), children.end(), rowLess);
     }
 
-    std::vector<bool> emitted(rows_.size(), false);
+    std::vector<bool> emitted(rows_->size(), false);
     for (std::size_t root : roots) {
         appendTreeRows(group, root, 1, childrenBySourceIndex, emitted);
     }
@@ -240,24 +246,23 @@ void ProcessModel::appendTreeRows(ProcessFriendlyGroup group,
     int depth,
     const std::vector<std::vector<std::size_t>>& childrenBySourceIndex,
     std::vector<bool>& emitted) {
-    if (sourceIndex >= rows_.size() || emitted[sourceIndex]) {
-        return;
-    }
-
-    emitted[sourceIndex] = true;
-    const ProcessDisplayRow row{ false, group, depth, sourceIndex, {}, {} };
-    friendlyRows_.push_back(row);
-    detailRows_.push_back(row);
-
-    if (sourceIndex < childrenBySourceIndex.size()) {
-        for (std::size_t child : childrenBySourceIndex[sourceIndex]) {
-            appendTreeRows(group, child, depth + 1, childrenBySourceIndex, emitted);
+    // Preserve the exact recursive pre-order while allowing a real process
+    // parent chain to exceed the native thread stack depth.
+    std::vector<std::pair<std::size_t,int>> pending{{sourceIndex,depth}};
+    while(!pending.empty()) {
+        const auto [source,currentDepth]=pending.back();pending.pop_back();
+        if(source>=rows_->size() || emitted[source])continue;
+        emitted[source]=true;
+        const ProcessDisplayRow row{false,group,currentDepth,source,{},{}};
+        friendlyRows_.push_back(row);detailRows_.push_back(row);
+        if(source<childrenBySourceIndex.size()) {
+            const auto& children=childrenBySourceIndex[source];
+            for(auto child=children.rbegin();child!=children.rend();++child)pending.emplace_back(*child,currentDepth+1);
         }
     }
 }
 
-ProcessFriendlyGroup ProcessModel::classifyRow(const ProcessSnapshotRow& row) {
-    const std::wstring name = LowerText(row.imageName);
+ProcessFriendlyGroup ProcessModel::classifyRow(const ProcessSnapshotRow& row,const std::wstring& name) {
     const std::wstring path = LowerText(row.imagePath);
     if (row.processId <= 4 || path.find(L"\\windows\\system32\\") != std::wstring::npos ||
         name == L"system" || name == L"smss.exe" || name == L"csrss.exe" || name == L"wininit.exe" ||

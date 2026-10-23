@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include "UacDesk.h"
+#include "UacScanWorker.h"
 #include "../Ksword5.1/Ksword5.1/theme.h"
 
 #include <QApplication>
@@ -92,6 +93,18 @@ namespace
     // rewrite those records to the individual SystemAlpcProvider GUID.
     const GUID kLegacyAlpcProvider = {0x45d8cccd, 0x539f, 0x4b72, {0xa8, 0xb7, 0x5c, 0x68, 0x31, 0x42, 0x60, 0x9a}};
     UacEventMonitor* g_eventMonitor = nullptr;
+
+    bool scanCanceled(const UacScanCancellation* cancel)
+    {
+        return cancel && cancel->canceled();
+    }
+
+    struct WindowScanContext
+    {
+        QVector<HWND> windows;
+        QStringList text;
+        const UacScanCancellation* budget = nullptr;
+    };
 
     QString winError(DWORD error = GetLastError())
     {
@@ -563,11 +576,12 @@ namespace
         return {};
     }
 
-    QString collectChildText(HWND hwnd)
+    QString collectChildText(HWND hwnd, const UacScanCancellation* cancel)
     {
-        QStringList values;
-        EnumChildWindows(hwnd, &UacWindowScanner::enumChildProc, reinterpret_cast<LPARAM>(&values));
-        return values.join(QStringLiteral(" | "));
+        WindowScanContext context;
+        context.budget = cancel;
+        EnumChildWindows(hwnd, &UacWindowScanner::enumChildProc, reinterpret_cast<LPARAM>(&context));
+        return context.text.join(QStringLiteral(" | "));
     }
 
     bool getTokenElevation(HANDLE token)
@@ -1153,14 +1167,14 @@ namespace
         return chars == 0 ? QString() : QString::fromUtf16(value, static_cast<qsizetype>(chars));
     }
 
-    DWORD discoverConsentPid(DWORD sessionId)
+    DWORD discoverConsentPid(DWORD sessionId, const UacScanCancellation* cancel)
     {
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == INVALID_HANDLE_VALUE)
             return 0;
         DWORD result = 0;
         PROCESSENTRY32W entry{sizeof(entry)};
-        for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry))
+        for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !scanCanceled(cancel); ok = Process32NextW(snapshot, &entry))
         {
             if (_wcsicmp(entry.szExeFile, L"consent.exe") == 0)
             {
@@ -1226,8 +1240,9 @@ namespace
         }
     }
 
-    QString verifyFileSignature(const QString& imagePath)
+    QString verifyFileSignature(const QString& imagePath, const UacScanCancellation* cancel)
     {
+        if (scanCanceled(cancel)) return {};
         if (imagePath.isEmpty()) return QStringLiteral("未取得");
         WINTRUST_FILE_INFO fileInfo{};
         fileInfo.cbStruct = sizeof(fileInfo);
@@ -1242,6 +1257,7 @@ namespace
         trustData.dwStateAction = WTD_STATEACTION_IGNORE;
         GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         const LONG status = WinVerifyTrust(nullptr, &action, &trustData);
+        if (scanCanceled(cancel)) return {};
         const QString trustText = status == ERROR_SUCCESS
             ? QStringLiteral("Trusted")
             : QStringLiteral("Untrusted (0x%1)").arg(static_cast<unsigned long>(status), 0, 16);
@@ -1254,7 +1270,7 @@ namespace
         DWORD contentType = 0;
         DWORD format = 0;
         QString signerText;
-        if (CryptQueryObject(CERT_QUERY_OBJECT_FILE,
+        if (!scanCanceled(cancel) && CryptQueryObject(CERT_QUERY_OBJECT_FILE,
                              path.c_str(),
                              CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
                              CERT_QUERY_FORMAT_FLAG_BINARY,
@@ -1267,16 +1283,16 @@ namespace
                              nullptr))
         {
             DWORD signerSize = 0;
-            if (CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signerSize) && signerSize != 0)
+            if (!scanCanceled(cancel) && CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signerSize) && signerSize != 0)
             {
                 std::vector<BYTE> signerBuffer(signerSize);
-                if (CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, signerBuffer.data(), &signerSize))
+                if (!scanCanceled(cancel) && CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, signerBuffer.data(), &signerSize))
                 {
                     const auto* signerInfo = reinterpret_cast<const CMSG_SIGNER_INFO*>(signerBuffer.data());
                     CERT_INFO certInfo{};
                     certInfo.Issuer = signerInfo->Issuer;
                     certInfo.SerialNumber = signerInfo->SerialNumber;
-                    PCCERT_CONTEXT certificate = CertFindCertificateInStore(
+                    PCCERT_CONTEXT certificate = scanCanceled(cancel) ? nullptr : CertFindCertificateInStore(
                         store,
                         encoding,
                         0,
@@ -1286,7 +1302,7 @@ namespace
                     if (certificate)
                     {
                         wchar_t signerName[512] = {};
-                        if (CertGetNameStringW(certificate,
+                        if (!scanCanceled(cancel) && CertGetNameStringW(certificate,
                                                CERT_NAME_SIMPLE_DISPLAY_TYPE,
                                                0,
                                                nullptr,
@@ -1324,13 +1340,14 @@ namespace
             .arg(seconds, 2, 10, QLatin1Char('0'));
     }
 
-    QString processLaunchChain(const ProcessIdentity& origin)
+    QString processLaunchChain(const ProcessIdentity& origin, const UacScanCancellation* cancel)
     {
         QStringList names;
         QVector<DWORD> visited;
         ProcessIdentity current = origin;
         for (int depth = 0; depth < 16 && current.isValid(); ++depth)
         {
+            if (scanCanceled(cancel)) return {};
             if (std::find(visited.cbegin(), visited.cend(), current.pid) != visited.cend())
                 break;
             visited.push_back(current.pid);
@@ -1598,36 +1615,52 @@ void UacEventMonitor::stop()
     if (g_eventMonitor == this) g_eventMonitor = nullptr;
 }
 
-std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessionId)
+namespace
 {
-    if (!m_running.load())
+// Collector-local indexing only. ETW remains owned by the companion; scanning
+// discovers consent directly and never borrows its monitor or g_eventMonitor.
+std::optional<UacOriginEvidence> readConsentOrigin(DWORD sessionId, DWORD companionPid,
+    const UacScanOriginHint& originHint, const UacScanCancellation* cancel)
+{
+    if (!originHint.monitorRunning || scanCanceled(cancel))
         return std::nullopt;
 
-    const quint64 now = GetTickCount64();
-    DWORD consentPid = m_consentPid.load();
-    if (consentPid == 0 || now - m_lastConsentDiscoveryMs.load() >= 500)
+    static DWORD cachedConsentPid = 0;
+    static quint64 lastConsentDiscoveryMs = 0;
+    // Preserve the monitor's latest consent identity as values. The collector
+    // never dereferences the host monitor or joins its lifetime.
+    if (originHint.consentPid != 0 && originHint.discoveredAtMs >= lastConsentDiscoveryMs)
     {
-        const DWORD discovered = discoverConsentPid(sessionId);
-        m_lastConsentDiscoveryMs.store(now);
+        cachedConsentPid = originHint.consentPid;
+        lastConsentDiscoveryMs = originHint.discoveredAtMs;
+    }
+    const quint64 now = GetTickCount64();
+    DWORD consentPid = cachedConsentPid;
+    if (consentPid == 0 || now - lastConsentDiscoveryMs >= 500)
+    {
+        const DWORD discovered = discoverConsentPid(sessionId, cancel);
+        if (scanCanceled(cancel)) return std::nullopt;
+        lastConsentDiscoveryMs = now;
         if (discovered != 0)
-            m_consentPid.store(discovered);
+            cachedConsentPid = discovered;
         else if (consentPid != 0)
         {
             QString ignored;
             if (!ProcessInspector::queryCommandLine(consentPid, ignored))
-                m_consentPid.store(0);
+                cachedConsentPid = 0;
         }
-        consentPid = m_consentPid.load();
+        consentPid = cachedConsentPid;
     }
-    if (consentPid == 0)
+    if (consentPid == 0 || scanCanceled(cancel))
         return std::nullopt;
 
     QString consentCommandLine;
     if (!ProcessInspector::queryCommandLine(consentPid, consentCommandLine))
     {
-        m_consentPid.store(0);
+        cachedConsentPid = 0;
         return std::nullopt;
     }
+    if (scanCanceled(cancel)) return std::nullopt;
 
     // Current Win10/Win11 consent.exe receives: AppInfo PID, declared byte
     // length, and a pointer into the AppInfo request buffer.  This is private
@@ -1664,6 +1697,7 @@ std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessio
         return std::nullopt;
     }
 
+    if (scanCanceled(cancel)) return std::nullopt;
     HANDLE appInfo = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, appInfoPid);
     if (!appInfo)
     {
@@ -1677,6 +1711,7 @@ std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessio
     const bool readOk = ReadProcessMemory(appInfo, reinterpret_cast<LPCVOID>(requestAddress),
                                           request.data(), request.size(), &bytesRead) != FALSE;
     CloseHandle(appInfo);
+    if (scanCanceled(cancel)) return std::nullopt;
     if (!readOk || bytesRead != request.size())
     {
         KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral(
@@ -1697,7 +1732,7 @@ std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessio
     std::memcpy(&originPid, request.data() + originPidOffset, sizeof(originPid));
     const QString targetPath = utf16BufferString(request, targetPathOffset);
     if (originPid == 0 || originPid == appInfoPid || originPid == consentPid ||
-        originPid == GetCurrentProcessId())
+        originPid == companionPid || originPid == GetCurrentProcessId())
     {
         KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral(
             "appinfo-origin: invalid origin pid=%1 consent=%2 appInfo=%3 target=%4")
@@ -1712,6 +1747,7 @@ std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessio
                                                .arg(originPid));
         return std::nullopt;
     }
+    if (scanCanceled(cancel)) return std::nullopt;
     if (origin.sessionId != sessionId || ProcessInspector::isProtectedName(origin.imagePath))
     {
         KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral(
@@ -1731,24 +1767,8 @@ std::optional<UacOriginEvidence> UacEventMonitor::readConsentOrigin(DWORD sessio
     evidence.targetPathOffset = static_cast<DWORD>(targetPathOffset);
     evidence.observedAtMs = now;
 
-    const QString key = QStringLiteral("%1/%2/%3/%4/%5")
-        .arg(consentPid).arg(appInfoPid).arg(originPid).arg(requestAddress, 0, 16).arg(targetPath);
-    bool logEvidence = false;
-    {
-        QMutexLocker locker(&m_consentMutex);
-        logEvidence = key != m_lastOriginKey;
-        if (logEvidence)
-            m_lastOriginKey = key;
-    }
-    if (logEvidence)
-    {
-        KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral(
-            "appinfo-origin: resolved consentPid=%1 appInfoPid=%2 length=%3 request=0x%4 originPid=%5 originPath=%6 targetPath=%7 pidOffset=0x%8 pathOffset=0x%9")
-                                               .arg(consentPid).arg(appInfoPid).arg(bufferLength)
-                                               .arg(requestAddress, 0, 16).arg(origin.pid).arg(origin.imagePath).arg(targetPath)
-                                               .arg(originPidOffset, 0, 16).arg(targetPathOffset, 0, 16));
-    }
     return evidence;
+}
 }
 
 void WINAPI UacEventMonitor::winEventCallback(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG objectId, LONG, DWORD, DWORD)
@@ -2215,9 +2235,10 @@ void UacEventMonitor::stopAlpcEtw()
     m_alpcTraceHandle.store(0);
 }
 
-UacApplicationIdentity UacWindowScanner::scan()
+UacApplicationIdentity UacWindowScanner::scan(const UacScanCancellation* cancel)
 {
     UacApplicationIdentity result;
+    if (scanCanceled(cancel)) return result;
     HDESK desktop = OpenDesktopW(kWinlogonDesktopName, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_ENUMERATE);
     bool closeDesktop = true;
     if (!desktop)
@@ -2231,9 +2252,11 @@ UacApplicationIdentity UacWindowScanner::scan()
         KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral("uac-scan: cannot open Winlogon desktop: %1").arg(winError()));
         return result;
     }
-    QVector<HWND> windows;
-    EnumDesktopWindows(desktop, &enumWindowProc, reinterpret_cast<LPARAM>(&windows));
+    WindowScanContext context;
+    context.budget = cancel;
+    EnumDesktopWindows(desktop, &enumWindowProc, reinterpret_cast<LPARAM>(&context));
     if (closeDesktop) CloseDesktop(desktop);
+    if (scanCanceled(cancel)) return result;
     struct Candidate
     {
         HWND hwnd = nullptr;
@@ -2255,8 +2278,9 @@ UacApplicationIdentity UacWindowScanner::scan()
     QVector<Candidate> candidates;
     const qint64 virtualArea = static_cast<qint64>(std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN))) *
                                static_cast<qint64>(std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN)));
-    for (HWND hwnd : windows)
+    for (HWND hwnd : context.windows)
     {
+        if (scanCanceled(cancel)) return {};
         const QString process = desktopProcessName(hwnd);
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
@@ -2287,8 +2311,10 @@ UacApplicationIdentity UacWindowScanner::scan()
         candidate.process = process;
         candidate.className = className;
         candidate.title = title;
-        candidate.children = collectChildText(hwnd);
-        candidate.automation = readUiAutomationName(hwnd);
+        candidate.children = collectChildText(hwnd, cancel);
+        if (scanCanceled(cancel)) return {};
+        candidate.automation = readUiAutomationName(hwnd, cancel);
+        if (scanCanceled(cancel)) return {};
         candidate.applicationName = uacApplicationNameFromText(candidate.automation);
         candidate.publisher = uacPublisherFromText(candidate.automation);
         candidate.imagePath = uacPathFromText(candidate.automation);
@@ -2345,7 +2371,7 @@ UacApplicationIdentity UacWindowScanner::scan()
     {
         previousWindowSummary = currentWindowSummary;
         KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral("uac-scan: enumerated=%1 consent=%2 %3")
-                                                .arg(windows.size())
+                                                .arg(context.windows.size())
                                                 .arg(sawConsentProcess ? 1 : 0)
                                                 .arg(currentWindowSummary));
     }
@@ -2354,12 +2380,13 @@ UacApplicationIdentity UacWindowScanner::scan()
 
 namespace
 {
-    ProcessActionState resolveTargetInWorker(UacApplicationIdentity& identity, DWORD sessionId)
+    ProcessActionState resolveTargetInWorker(UacApplicationIdentity& identity, DWORD sessionId,
+        DWORD companionPid, const UacScanOriginHint& originHint, const UacScanCancellation* cancel)
     {
         ProcessActionState state;
-        std::optional<UacOriginEvidence> appInfoEvidence;
-        if (g_eventMonitor)
-            appInfoEvidence = g_eventMonitor->readConsentOrigin(sessionId);
+        if (scanCanceled(cancel)) return state;
+        const auto appInfoEvidence = readConsentOrigin(sessionId, companionPid, originHint, cancel);
+        if (scanCanceled(cancel)) return state;
 
         // AppInfo evidence can arrive a little before the native window scan.
         // Keep it visible in that case, but do not pretend the target path is
@@ -2384,7 +2411,7 @@ namespace
             state.originResolved = true;
             state.unique = true;
             state.protectedProcess = ProcessInspector::isProtectedName(state.origin.imagePath) ||
-                                     state.origin.pid == GetCurrentProcessId();
+                                     state.origin.pid == companionPid || state.origin.pid == GetCurrentProcessId();
             state.reason = state.protectedProcess
                 ? QStringLiteral("发起者属于受保护进程，动作已拒绝")
                 : QStringLiteral("已读取 UAC 发起者");
@@ -2415,14 +2442,21 @@ namespace
             }
             if (!cacheHit)
             {
+                if (scanCanceled(cancel)) return state;
                 state.originIcon = processIcon(state.origin.imagePath);
-                state.launchChain = processLaunchChain(state.origin);
+                if (scanCanceled(cancel)) return state;
+                state.launchChain = processLaunchChain(state.origin, cancel);
+                if (scanCanceled(cancel)) return state;
                 state.integrityLevel = tokenIntegrityLevel(state.origin.pid);
+                if (scanCanceled(cancel)) return state;
                 state.elevationType = tokenElevationType(state.origin.pid);
                 state.startTime = formatFileTime(state.origin.creationTime);
                 state.runDuration = processRunDuration(state.origin.creationTime);
-                state.originSignature = verifyFileSignature(state.origin.imagePath);
-                state.targetSignature = verifyFileSignature(appInfoEvidence->targetPath);
+                if (scanCanceled(cancel)) return state;
+                state.originSignature = verifyFileSignature(state.origin.imagePath, cancel);
+                if (scanCanceled(cancel)) return state;
+                state.targetSignature = verifyFileSignature(appInfoEvidence->targetPath, cancel);
+                if (scanCanceled(cancel)) return state; // Never publish incomplete canceled details.
                 QMutexLocker locker(&detailCacheMutex);
                 cachedDetailKey = detailKey;
                 cachedDetails = state;
@@ -2464,22 +2498,24 @@ namespace
 
 BOOL CALLBACK UacWindowScanner::enumWindowProc(HWND hwnd, LPARAM lParam)
 {
-    auto* windows = reinterpret_cast<QVector<HWND>*>(lParam);
-    windows->push_back(hwnd);
+    auto* context = reinterpret_cast<WindowScanContext*>(lParam);
+    if (scanCanceled(context->budget)) return FALSE;
+    context->windows.push_back(hwnd);
     return TRUE;
 }
 
 BOOL CALLBACK UacWindowScanner::enumChildProc(HWND hwnd, LPARAM lParam)
 {
-    auto* values = reinterpret_cast<QStringList*>(lParam);
+    auto* context = reinterpret_cast<WindowScanContext*>(lParam);
+    if (scanCanceled(context->budget)) return FALSE;
     const QString text = windowText(hwnd).trimmed();
-    if (!text.isEmpty()) values->push_back(text);
+    if (!text.isEmpty()) context->text.push_back(text);
     return TRUE;
 }
 
-QString UacWindowScanner::readUiAutomationName(HWND hwnd)
+QString UacWindowScanner::readUiAutomationName(HWND hwnd, const UacScanCancellation* cancel)
 {
-    if (!hwnd)
+    if (!hwnd || scanCanceled(cancel))
         return {};
 
     KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral("uac-ui: probe begin hwnd=0x%1")
@@ -2495,16 +2531,17 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
     QStringList uiAutomationValues;
     IUIAutomation* automation = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+    HRESULT hr = scanCanceled(cancel) ? E_ABORT : CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&automation));
     if (SUCCEEDED(hr) && automation)
     {
         IUIAutomationElement* root = nullptr;
-        hr = automation->ElementFromHandle(hwnd, &root);
+        hr = scanCanceled(cancel) ? E_ABORT : automation->ElementFromHandle(hwnd, &root);
         if (SUCCEEDED(hr) && root)
         {
             auto readRootBstr = [&](const wchar_t* label, HRESULT (STDMETHODCALLTYPE IUIAutomationElement::*getter)(BSTR*))
             {
+                if (scanCanceled(cancel)) return;
                 BSTR value = nullptr;
                 const HRESULT valueResult = (root->*getter)(&value);
                 if (SUCCEEDED(valueResult) && value)
@@ -2522,24 +2559,24 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
             IUIAutomationCondition* condition = nullptr;
             IUIAutomationElementArray* elements = nullptr;
-            hr = automation->CreateTrueCondition(&condition);
-            if (SUCCEEDED(hr) && condition)
+            hr = scanCanceled(cancel) ? E_ABORT : automation->CreateTrueCondition(&condition);
+            if (!scanCanceled(cancel) && SUCCEEDED(hr) && condition)
                 hr = root->FindAll(TreeScope_Descendants, condition, &elements);
 
             int elementCount = 0;
             if (SUCCEEDED(hr) && elements)
             {
                 int length = 0;
-                if (SUCCEEDED(elements->get_Length(&length)))
+                if (!scanCanceled(cancel) && SUCCEEDED(elements->get_Length(&length)))
                     elementCount = std::min(length, 256);
-                for (int i = 0; i < elementCount; ++i)
+                for (int i = 0; i < elementCount && !scanCanceled(cancel); ++i)
                 {
                     IUIAutomationElement* element = nullptr;
                     if (FAILED(elements->GetElement(i, &element)) || !element)
                         continue;
 
                     BSTR name = nullptr;
-                    if (SUCCEEDED(element->get_CurrentName(&name)) && name)
+                    if (!scanCanceled(cancel) && SUCCEEDED(element->get_CurrentName(&name)) && name)
                     {
                         const QString elementName = QString::fromWCharArray(name).trimmed();
                         appendUniqueText(uiAutomationValues, QStringLiteral("Text=%1").arg(elementName));
@@ -2578,14 +2615,14 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
     QStringList msaaValues;
     IAccessible* accessible = nullptr;
-    hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
+    hr = scanCanceled(cancel) ? E_ABORT : AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
                                     reinterpret_cast<void**>(&accessible));
     if (SUCCEEDED(hr) && accessible)
     {
         LONG childCount = 0;
-        accessible->get_accChildCount(&childCount);
+        if (!scanCanceled(cancel)) accessible->get_accChildCount(&childCount);
         childCount = std::clamp<LONG>(childCount, 0, 256);
-        for (LONG child = 0; child <= childCount; ++child)
+        for (LONG child = 0; child <= childCount && !scanCanceled(cancel); ++child)
         {
             VARIANT childId{};
             VariantInit(&childId);
@@ -2623,9 +2660,21 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
     return result.join(QStringLiteral(" | "));
 }
 
+UacScanResult collectUacScan(DWORD companionPid, const UacScanOriginHint& originHint,
+    const UacScanCancellation& budget)
+{
+    UacScanResult result;
+    if (budget.canceled()) return result;
+    result.identity = UacWindowScanner::scan(&budget);
+    if (!budget.canceled())
+        result.actionState = resolveTargetInWorker(result.identity, PrivilegeStage::currentSessionId(), companionPid, originHint, &budget);
+    return budget.canceled() ? UacScanResult{} : result;
+}
+
 UacDeskWindow::UacDeskWindow(QWidget* parent)
     : QMainWindow(parent)
 {
+    m_scanWorker = std::make_unique<UacScanWorker>();
     setWindowTitle(QStringLiteral("Ksword UAC 诊断"));
     const QIcon applicationIcon(QStringLiteral(":/KswordUacDesk/KswordLogo.ico"));
     setWindowIcon(applicationIcon);
@@ -2742,10 +2791,10 @@ UacDeskWindow::~UacDeskWindow()
     m_refreshTimer.stop();
     m_scanStop = true;
     m_scanGeneration.fetch_add(1);
+    m_scanWorker->close();
     if (m_parentWatchStop) SetEvent(m_parentWatchStop);
     if (m_parentWatchThread.joinable()) m_parentWatchThread.join();
     if (m_parentWatchStop) CloseHandle(m_parentWatchStop);
-    if (m_scanThread.joinable()) m_scanThread.join();
     if (m_actionThread.joinable()) m_actionThread.join();
     if (m_launchThread.joinable()) m_launchThread.join();
     if (m_parentProcess) CloseHandle(m_parentProcess);
@@ -2767,12 +2816,17 @@ bool UacDeskWindow::setParentWatch(HANDLE processHandle, quint64 creationTime)
         const HANDLE waits[] = {m_parentWatchStop, m_parentProcess};
         const DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0 || m_scanStop.load()) return;
+        // Close admission immediately on this value-only boundary. A ready
+        // result already queued on Qt must not show a panel while quit waits.
+        m_scanStop = true;
+        m_scanGeneration.fetch_add(1);
         // A failed wait must not leave an unmonitored companion running.
         QMetaObject::invokeMethod(this, [this]
         {
             m_refreshTimer.stop();
             m_scanStop = true;
             m_scanGeneration.fetch_add(1);
+            m_scanWorker->close();
             close();
             qApp->quit();
         }, Qt::QueuedConnection);
@@ -2868,27 +2922,15 @@ void UacDeskWindow::refreshUacState()
         m_refreshTimer.setTimerType(Qt::CoarseTimer);
         m_refreshTimer.start();
     }
-    if (m_scanRunning.exchange(true)) return;
-    if (m_scanThread.joinable()) m_scanThread.join();
-    m_scanStop = false;
+    if (m_scanStop.load() || m_scanWorker->busy()) return;
     const quint64 generation = m_scanGeneration.fetch_add(1) + 1;
-    const DWORD sessionId = PrivilegeStage::currentSessionId();
-    m_scanThread = std::thread([this, generation, sessionId]
+    const UacScanOriginHint originHint = g_eventMonitor ? g_eventMonitor->scanOriginHint() : UacScanOriginHint{};
+    const bool admitted = m_scanWorker->request(originHint, [this, generation](UacScanResult result)
     {
-        UacApplicationIdentity identity = UacWindowScanner::scan();
-        ProcessActionState actionState = resolveTargetInWorker(identity, sessionId);
-        if (!m_scanStop.load())
-        {
-            QMetaObject::invokeMethod(this,
-                                      [this, generation, identity = std::move(identity), actionState = std::move(actionState)]() mutable
-                                      {
-                                          if (!m_scanStop.load() && generation == m_scanGeneration.load())
-                                              applyScanResult(identity, actionState);
-                                      },
-                                      Qt::QueuedConnection);
-        }
-        m_scanRunning = false;
+        if (!m_scanStop.load() && generation == m_scanGeneration.load())
+            applyScanResult(result.identity, result.actionState);
     });
+    if (!admitted && m_identity.isUac) applyScanResult({}, {});
 }
 
 void UacDeskWindow::applyScanResult(const UacApplicationIdentity& identity, const ProcessActionState& actionState)

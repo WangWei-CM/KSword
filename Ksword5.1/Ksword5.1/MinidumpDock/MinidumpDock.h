@@ -18,13 +18,18 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include "../UI/PageNavigationCatalog.h"
+#include <QSet>
 
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <functional>
+#include <unordered_map>
 
 class CodeEditorWidget;
 class QEvent;
+class QShowEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -33,6 +38,10 @@ class QTableWidget;
 class QTextBrowser;
 class DumpMemoryView;
 struct MinidumpAsyncState;
+struct MinidumpExportRequest;
+struct MinidumpExportResult;
+namespace ks::ui { class AsyncOperation; }
+struct MinidumpTableProjectionState;
 
 namespace ks::minidump
 {
@@ -43,6 +52,11 @@ namespace ks::minidump
 class MinidumpDock final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MinidumpDock* existing = nullptr);
+    // Complete initial searchable body; pure translated values, no page or dump creation.
+    static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：建立界面并进入“等待选择转储文件”状态。
     // 参数 parent：Qt 父控件；返回值：无。
     explicit MinidumpDock(QWidget* parent = nullptr);
@@ -59,6 +73,7 @@ protected:
     // changeEvent 作用：语言切换时重译固定控件并重绘已有解析结果。
     // 参数 event：Qt 事件；返回值：无。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     // 以下函数负责构建/重译界面、选择文件、启动异步解析与导出报告。
@@ -77,6 +92,20 @@ private:
     // renderResult 作用：把解析结果渲染为概览、异常、流、模块等页签。
     // 参数 result：解析结果；返回值：无。实现位于 MinidumpDock.Tables.cpp。
     void renderResult(const ks::minidump::DumpParseResult& result);
+    void projectResult(const ks::minidump::DumpParseResult& result, QWidget* targetPage);
+    void registerResultTab(QWidget* page, const char* key, const char* sourceTitle);
+    QString rawMemoryNavigationId(std::size_t index) const;
+    QString rawMemoryNavigationTitle(std::size_t index) const;
+    void renderCurrentResultPage();
+    void renderCurrentRawMemoryPage();
+    void retranslateResultPages();
+    void requestReportDocument();
+    void startResultTableFill(QTableWidget* table, int totalRows, std::function<void(int)> fillRow);
+    void scheduleResultTableFill();
+    void continueResultTableFill();
+    void cancelResultTableFills();
+    void restoreResultProjectionStatus();
+    QTableWidget* currentResultTable() const;
 
     // promptKswordRelatedCrash 作用：解析结果指向 KSword 自身组件时引导上报。
     // 参数 result：解析结果；返回值：无。
@@ -98,7 +127,8 @@ private:
 
     // buildReportText 作用：把解析结果拼成全文报告（中文规范文本）。
     // 参数 result：解析结果；返回值：报告文本。实现位于 MinidumpDock.Tables.cpp。
-    ks::ui::FieldDocument buildReportText(const ks::minidump::DumpParseResult& result) const;
+    static ks::ui::FieldDocument buildReportText(const ks::minidump::DumpParseResult& result);
+    static MinidumpExportResult exportReportSnapshot(const MinidumpExportRequest& request);
 
     // 以下辅助函数统一处理本地化与状态栏。
     QString translated(const char* key, const char* fallback) const;
@@ -151,5 +181,19 @@ private:
     QStringList m_statusArguments; // m_statusArguments：依次替换状态文本中的占位符。
     std::atomic<std::uint64_t> m_parseGeneration{ 0 }; // m_parseGeneration：淘汰过期解析回调。
     std::shared_ptr<MinidumpAsyncState> m_asyncState; // m_asyncState：跨线程投递时保护 owner 生命周期。
+    QSet<QWidget*> m_projectedResultPages;
+    QSet<int> m_projectedRawMemoryBlocks;
+    std::unordered_map<QTableWidget*, std::shared_ptr<MinidumpTableProjectionState>> m_resultTableProjections;
+    std::uint64_t m_resultProjectionGeneration = 0;
+    bool m_resultTableTickPending = false;
+    QString m_projectionPreviousStatusKey;
+    QString m_projectionPreviousStatusFallback;
+    QStringList m_projectionPreviousStatusArguments;
+    bool m_buildingResultCatalog = false;
+    bool m_buildingRawMemoryCatalog = false;
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_reportBuildOperation;
+    std::shared_ptr<const ks::minidump::DumpParseResult> m_cachedReportSource;
+    std::shared_ptr<const ks::ui::FieldDocument> m_cachedReportDocument;
     bool m_parseBusy = false;   // m_parseBusy：解析任务是否正在运行。
 };

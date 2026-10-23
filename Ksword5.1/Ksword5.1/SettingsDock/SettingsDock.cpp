@@ -371,6 +371,11 @@ void SettingsDock::bindAppearanceSignals()
         }
         });
 
+    connect(m_controlBackgroundOpacitySlider, &QSlider::valueChanged, this, [this](const int value) {
+        m_controlBackgroundOpacityValueLabel->setText(QStringLiteral("%1%").arg(value));
+        markPendingChanges(QString());
+        });
+
     connect(m_backgroundTransparencyCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
         markPendingChanges(QString());
         });
@@ -441,6 +446,10 @@ void SettingsDock::bindAppearanceSignals()
 
     connect(m_uninstallTaskmgrHijackButton, &QPushButton::clicked, this, [this]() {
         launchTaskmgrHijackScript(false);
+        });
+
+    connect(m_uiAnimationsCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("界面动画总开关切换"));
         });
 
     connect(m_smoothScrollingCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
@@ -559,6 +568,9 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
 
     m_backgroundPathEdit->setText(settings.backgroundImagePath);
     m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
+    m_controlBackgroundOpacitySlider->setValue(settings.controlBackgroundOpacityPercent);
+    m_controlBackgroundOpacityValueLabel->setText(
+        QStringLiteral("%1%").arg(m_controlBackgroundOpacitySlider->value()));
     if (m_backgroundTransparencyCheckBox != nullptr)
     {
         m_backgroundTransparencyCheckBox->setChecked(settings.backgroundTransparencyEnabled);
@@ -670,9 +682,15 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_dumpAutoCheckCheckBox->setChecked(settings.dumpAutoCheckEnabled);
     }
 
+    if (m_uiAnimationsCheckBox != nullptr)
+    {
+        m_uiAnimationsCheckBox->setChecked(settings.uiAnimationsEnabled);
+    }
     if (m_smoothScrollingCheckBox != nullptr)
     {
         m_smoothScrollingCheckBox->setChecked(settings.smoothScrollingEnabled);
+        // 总开关关闭时平滑滚动勾选框置灰，与创建时的从属关系保持一致。
+        m_smoothScrollingCheckBox->setEnabled(settings.uiAnimationsEnabled);
     }
     if (m_sliderWheelAdjustCheckBox != nullptr)
     {
@@ -804,6 +822,7 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         : rawPathText;
 
     collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
+    collectedSettings.controlBackgroundOpacityPercent = m_controlBackgroundOpacitySlider->value();
     collectedSettings.backgroundTransparencyEnabled = m_backgroundTransparencyCheckBox != nullptr
         && m_backgroundTransparencyCheckBox->isChecked();
     collectedSettings.backgroundTranslucencyMaterial = m_backgroundTranslucencyMaterialCombo != nullptr
@@ -848,6 +867,8 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         m_currentAppearanceSettings.dumpAutoCheckPromptedPath;
     collectedSettings.dumpAutoCheckPromptedTimeMsec =
         m_currentAppearanceSettings.dumpAutoCheckPromptedTimeMsec;
+    collectedSettings.uiAnimationsEnabled =
+        (m_uiAnimationsCheckBox != nullptr) && m_uiAnimationsCheckBox->isChecked();
     collectedSettings.smoothScrollingEnabled =
         (m_smoothScrollingCheckBox != nullptr) && m_smoothScrollingCheckBox->isChecked();
     collectedSettings.sliderWheelAdjustEnabled =
@@ -1194,6 +1215,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.uiLanguage.compare(m_currentAppearanceSettings.uiLanguage, Qt::CaseInsensitive) == 0
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
+        && nextSettings.controlBackgroundOpacityPercent == m_currentAppearanceSettings.controlBackgroundOpacityPercent
         && nextSettings.backgroundTransparencyEnabled == m_currentAppearanceSettings.backgroundTransparencyEnabled
         && nextSettings.backgroundTranslucencyMaterial == m_currentAppearanceSettings.backgroundTranslucencyMaterial
         && nextSettings.backgroundBlurRadiusPercent == m_currentAppearanceSettings.backgroundBlurRadiusPercent
@@ -1211,6 +1233,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled
         && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled
         && nextSettings.suppressR0FeaturePrompts == m_currentAppearanceSettings.suppressR0FeaturePrompts
+        && nextSettings.uiAnimationsEnabled == m_currentAppearanceSettings.uiAnimationsEnabled
         && nextSettings.smoothScrollingEnabled == m_currentAppearanceSettings.smoothScrollingEnabled
         && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled
         && nextSettings.detailDisplayScheme == m_currentAppearanceSettings.detailDisplayScheme
@@ -1352,6 +1375,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << (m_currentAppearanceSettings.startupScaleRecommendPromptDisabled ? "true" : "false")
         << "，系统右键文件解锁器菜单="
         << (m_currentAppearanceSettings.unlockerShellContextMenuEnabled ? "true" : "false")
+        << "，界面动画="
+        << (m_currentAppearanceSettings.uiAnimationsEnabled ? "true" : "false")
         << "，全局平滑滚动="
         << (m_currentAppearanceSettings.smoothScrollingEnabled ? "true" : "false")
         << "，滚轮调整滑块="

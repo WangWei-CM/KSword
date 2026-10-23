@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -155,6 +155,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ResourceCompile Include="AppIcon.rc" />
+    <ClCompile Include="PrivilegeDock\PrivilegeLegacyReadService.cpp" />
+    <ClCompile Include="UI\TableCompleteExport.cpp" />
+    <ClCompile Include="UI\CompleteExportCapture.cpp" />
+    <ClCompile Include="UI\CompleteExport.cpp" />
+    <ClCompile Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.cpp" />
     <ClCompile Include="DriverDock\DriverDock.cpp" />
     <ClCompile Include="DriverDock\DriverDock.Ui.cpp" />
     <ClCompile Include="DriverDock\DriverDock.Operation.cpp" />
@@ -171,6 +176,8 @@
     <ClCompile Include="FileDock\FileMappedProcessWindow.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />
     <ClCompile Include="HardwareDock\HardwareFieldDocuments.cpp" />
+    <ClCompile Include="UI\FieldTreeModel.cpp" />
+    <ClCompile Include="UI\StructuredFieldView.State.cpp" />
     <ClCompile Include="UI\StructuredFieldView.cpp" />
     <ClCompile Include="UI\TablePresentation.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />
@@ -236,6 +243,7 @@
     <ClCompile Include="KernelDock\KernelDock.DriverStatus.cpp" />
     <ClCompile Include="KernelDock\KernelDock.DynData.cpp" />
     <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp" />
+    <ClCompile Include="KernelDock\KernelResultModel.cpp" />
     <ClCompile Include="KernelDock\KernelCleanImageBaseline.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />
@@ -295,6 +303,7 @@
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationBackend.cpp" />
     <ClCompile Include="MiscDock\VirtualLocation\VirtualLocationPage.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\HvciBypassBackend.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchWriteLedger.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\HvciBypassPage.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\RxpfBackend.cpp" />
     <ClCompile Include="MiscDock\HvciBypass\RxpfPage.cpp" />
@@ -507,6 +516,7 @@
     <ClCompile Include="ServerDock\ServiceDock.Delete.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Enumerate.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Helpers.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchWriteOperationRunner.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Properties.Apply.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Properties.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Registry.cpp" />
@@ -523,9 +533,12 @@
     <ClCompile Include="StartupDock\StartupDock.Registry.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Services.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />
+    <ClCompile Include="UI\CodeEditorWidget.State.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.Export.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.Native.cpp" />
     <ClCompile Include="UI\CodeTextEdit.cpp" />
+    <ClCompile Include="UI\AsyncLogTextView.cpp" />
     <ClCompile Include="UI\CodeEditorFileSession.cpp" />
     <ClCompile Include="UI\EmbeddedRowDelegate.cpp" />
     <ClCompile Include="UI\DetailLayoutHost.cpp" />
@@ -567,6 +580,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.HvmWatch.cpp" />
     <ClCompile Include="UI\HvmEventDialog.cpp" />
     <ClCompile Include="UI\HvmCrPolicyDialog.cpp" />
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.cpp" />
     <ClCompile Include="UI\CommandExecutionPopup.cpp" />
     <ClCompile Include="UI\WindowChrome.cpp" />
     <ClCompile Include="UI\RescueDesktopSession.cpp" />
@@ -692,6 +706,7 @@
     <ClCompile Include="UI\TableFreezeSupport.cpp" />
     <ClCompile Include="UI\TableHeaderSortingSupport.cpp" />
     <ClCompile Include="UI\IntegrityRiskPresentation.cpp" />
+    <ClCompile Include="UI\ImmutableValueTable.cpp" />
     <ClCompile Include="UI\TableInteractionSupport.cpp" />
     <ClCompile Include="UI\TableContextMenu.cpp" />
     <ClCompile Include="UI\ThemeBinding.cpp" />
@@ -718,6 +733,8 @@
     <ClCompile Include="UI\SettingsPresentation.cpp" />
     <ClCompile Include="UI\PageControlStyle.cpp" />
     <ClCompile Include="UI\PageTabMotion.cpp" />
+    <ClCompile Include="UI\PerfTrace.cpp" />
+    <ClCompile Include="UI\UiAnimationGate.cpp" />
     <ClCompile Include="UI\PageTabFocusStyle.cpp" />
     <ClCompile Include="UI\DockTabSelectionAnimation.cpp" />
     <ClCompile Include="UI\RoundedViewSurface.cpp" />
@@ -837,7 +854,36 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ProcessDock\ProcessActivityHistory.h" />
+    <ClInclude Include="ProcessDock\ProcessEtwCaptureLifecycle.h" />
+    <ClInclude Include="MonitorDock\MonitorTableExport.h" />
+    <ClInclude Include="MonitorDock\MonitorCanonicalExport.h" />
+    <ClInclude Include="MonitorDock\MonitorNavigationSchema.h" />
+    <ClInclude Include="WindowDock\WindowImmutableTableSupport.h" />
+    <ClInclude Include="MonitorDock\EtwArchiveMetadata.h" />
+    <ClInclude Include="RegistryDock\OfflineHiveSession.h" />
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuTemporaryOverride.h" />
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuRegistrySnapshot.h" />
+    <ClInclude Include="PrivilegeDock\PrivilegeLegacyValueOperations.h" />
+    <ClInclude Include="PrivilegeDock\PrivilegeLegacyReadService.h" />
+    <ClInclude Include="RegistryDock\OfflineHiveWorker.h" />
+    <ClInclude Include="MonitorDock\MonitorEventFilterProjection.h" />
+    <ClInclude Include="UI\TableCompleteExport.h" />
+    <ClInclude Include="UI\CompleteExportCapture.h" />
+    <ClInclude Include="UI\CompleteExport.h" />
+    <ClInclude Include="MonitorDock\ProcessTraceEventMetadata.h" />
+    <ClInclude Include="WindowDock\WindowSnapshotSupport.h" />
+    <ClInclude Include="MonitorDock\WmiEventArchive.h" />
+    <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.h" />
+    <ClInclude Include="UI\BudgetedPlainTextTransfer.h" />
+    <ClInclude Include="UI\ModelTextSearchCursor.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.h" />
+    <ClInclude Include="UI\TableRowFilterSupport.h" />
+    <ClInclude Include="UI\TableRowFilterIdentityState.h" />
+    <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h" />
     <ClInclude Include="include\ads\ads_version.h" />
+    <ClInclude Include="UI\MemoryPageNavigationSchema.h" />
+    <ClInclude Include="MemoryDock\MemoryDock.ReadOnlyModels.h" />
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
     <ClInclude Include="PluginHost.h" />
@@ -849,6 +895,7 @@
     <ClInclude Include="FileDock\IrpFileSystemParser.h" />
     <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
     <ClInclude Include="FileDock\FileMappedProcessWindow.h" />
+    <ClInclude Include="FileDock\FilePropertyTableModel.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
@@ -875,6 +922,7 @@
     <ClInclude Include="KernelDock\KernelIoctlAuditTab.h" />
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
+    <ClInclude Include="RegistryDock\RegistryExternalActionSession.h" />
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeTab.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeWorker.h" />
@@ -892,6 +940,7 @@
     <ClInclude Include="KernelDock\KernelPlatformAuditTab.h" />
     <ClInclude Include="KernelDock\KernelIoctlDecoderTab.h" />
     <ClInclude Include="KernelDock\KernelDockIpcTab.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWorkerValue.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepWorker.h" />
     <ClInclude Include="KernelDock\KernelObjectTypeMatrixTab.h" />
@@ -900,6 +949,7 @@
     <ClInclude Include="KernelDock\KernelThreadAuditTab.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\file\file.h" />
+    <ClInclude Include="MinidumpDock\DumpCancellation.h" />
     <ClInclude Include="ksword\file\file_handle_tools.h" />
     <ClInclude Include="ksword\file\file_handle_query_worker.h" />
     <ClInclude Include="ksword\file\file_metadata_transaction.h" />
@@ -907,7 +957,9 @@
     <ClInclude Include="MemoryDock\MemoryDebugPage.h" />
     <ClInclude Include="MemoryDock\MemoryDebugProcessCatalog.h" />
     <ClInclude Include="MemoryDock\MemoryDebugExecutionPanel.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchContinuation.h" />
     <ClInclude Include="MemoryDock\MemoryDebugThreadSession.h" />
+    <ClInclude Include="MemoryDock\DdmaPhysicalWriteTransaction.h" />
     <ClInclude Include="ArkDriverClient\ArkHvmNoAttachClient.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkHvmNoAttachIoctl.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkMemoryResult.h" />
@@ -924,6 +976,7 @@
     <ClInclude Include="ksword\network\network_download_tools.h" />
     <ClInclude Include="ksword\network\network_format_tools.h" />
     <ClInclude Include="ksword\network\network_nids.h" />
+    <ClInclude Include="ksword\network\network_nids_state.h" />
     <ClInclude Include="ksword\network\network_process_etw_monitor.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\dll_hijack_detector.h" />
@@ -944,20 +997,26 @@
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\AsyncUiDispatcher.h" />
     <ClInclude Include="UI\AsyncOperation.h" />
+    <ClInclude Include="UI\AsyncCleanupRegistry.h" />
+    <ClInclude Include="UI\CoordinatedApplicationQuit.h" />
+    <ClInclude Include="UI\RetainedCleanupJob.h" />
     <ClInclude Include="UI\FlatTableModel.h" />
     <ClInclude Include="UI\DockTabInteraction.h" />
     <ClInclude Include="UI\FlowLayout.h" />
     <ClInclude Include="UI\AdaptivePageScroll.h" />
     <ClInclude Include="..\..\shared\evidence\HookPatchCompose.h" />
     <ClInclude Include="..\..\shared\evidence\MemoryAddressInput.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteLedger.h" />
     <ClInclude Include="UI\HvmEptLeafProbe.h" />
     <ClInclude Include="UI\HvmWriteAccessGate.h" />
     <ClInclude Include="UI\HvmHookPlan.h" />
     <ClInclude Include="UI\HvmControl.h" />
     <ClInclude Include="UI\HvmWatchPanel.h" />
     <ClInclude Include="UI\HvmWatchEventDialog.h" />
+    <ClInclude Include="UI\EmbeddedCellLayout.h" />
     <ClInclude Include="UI\EmbeddedRowDelegate.h" />
     <ClInclude Include="UI\CodeTextEdit.h" />
+    <ClInclude Include="UI\CodeTextSurfaceColors.h" />
     <ClInclude Include="UI\CodeEditorFileSession.h" />
     <ClInclude Include="UI\DetailLayoutHost.h" />
     <ClInclude Include="UI\DetailLayoutRegistry.h" />
@@ -965,8 +1024,12 @@
     <ClInclude Include="UI\TypedSyntaxDocument.h" />
     <ClInclude Include="UI\TablePresentation.h" />
     <ClInclude Include="UI\ToolbarMetrics.h" />
+    <ClInclude Include="UI\LazyPageContent.h" />
+    <ClInclude Include="KernelDock\KernelNavigationCatalog.h" />
     <ClInclude Include="UI\PageControlStyle.h" />
     <ClInclude Include="UI\PageTabMotion.h" />
+    <ClInclude Include="UI\PerfTrace.h" />
+    <ClInclude Include="UI\UiAnimationGate.h" />
     <ClInclude Include="UI\PageTabFocusStyle.h" />
     <ClInclude Include="UI\DockTabSelectionAnimation.h" />
     <ClInclude Include="UI\RoundedViewSurface.h" />
@@ -974,6 +1037,9 @@
     <ClInclude Include="UI\PrimaryPageStyle.h" />
     <ClInclude Include="UI\ParameterWorkspace.h" />
     <ClInclude Include="UI\MainSurfaceStyle.h" />
+    <ClInclude Include="UI\PageNavigationCatalog.h" />
+    <ClInclude Include="UI\PageNavigationTabCatalog.h" />
+    <ClInclude Include="UI\ScopedObjectDiscoveryCursor.h" />
     <ClInclude Include="UI\PageNavigationBridge.h" />
     <ClInclude Include="UI\McpLocalBridge.h" />
     <ClInclude Include="UI\McpHexCanvasAdapter.h" />
@@ -987,22 +1053,29 @@
     <ClInclude Include="SettingsDock\SettingsDock.Layout.h" />
     <ClInclude Include="UI\DetailNavigationGroups.h" />
     <ClInclude Include="UI\DetailDialogChrome.h" />
+    <ClInclude Include="UI\DetailCardProjectionValues.h" />
     <ClInclude Include="UI\DetailPresentation.h" />
     <ClInclude Include="UI\SmoothScrollSupport.h" />
     <ClInclude Include="UI\TableColumnAutoFit.h" />
+    <ClInclude Include="UI\FrozenPaneRowSync.h" />
     <ClInclude Include="UI\TableFreezeSupport.h" />
     <ClInclude Include="UI\TableHeaderSortingSupport.h" />
     <ClInclude Include="UI\IntegrityRiskPresentation.h" />
     <ClInclude Include="UI\TableInteractionSupport.h" />
     <ClInclude Include="UI\TableContextMenu.h" />
+    <ClInclude Include="UI\HvmRehearsalResource.h" />
     <ClInclude Include="UI\ThemeBinding.h" />
     <ClInclude Include="UI\FlatButtonTheme.h" />
     <ClInclude Include="UI\FloatingScrollbars.h" />
     <ClInclude Include="UI\ResultTableHost.h" />
+    <ClInclude Include="DriverDock\DriverDock.ServiceAction.h" />
     <ClInclude Include="UI\UiCommitCoordinator.h" />
+    <ClInclude Include="UI\TableSearchFilterSnapshot.h" />
     <ClInclude Include="UI\TableSearchSupport.h" />
     <ClInclude Include="UI\TextSearchReplaceSupport.h" />
     <ClInclude Include="UI\TableSnapshotCompare.h" />
+    <ClInclude Include="UI\ImmutableValueTable.h" />
+    <ClInclude Include="UI\ImmutableValueTableModel.h" />
     <ClInclude Include="UI\VisibleTableWidget.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
@@ -1046,6 +1119,7 @@
     <ClInclude Include="..\..\shared\evidence\PfnAccounting.h" />
     <ClInclude Include="..\..\shared\driver\KswordArkPfnIoctl.h" />
     <ClInclude Include="..\..\third_party\systeminformer_dyn\PfnNative.h" />
+    <ClInclude Include="NetworkDock\NetworkDock.NidsAnalysis.h" />
     <ClInclude Include="MemoryDock\SystemMemoryAuditPage.h" />
     <ClInclude Include="MemoryDock\MemoryAccessBackend.h" />
     <ClInclude Include="MemoryDock\WorkbenchIoPorts.h" />
@@ -1060,6 +1134,7 @@
     <ClInclude Include="MemoryDock\DmaProcessOpPage.h" />
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
     <ClInclude Include="MiscDock\ApplicationControlPage.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteDiagnostics.h" />
     <ClInclude Include="MiscDock\SoundSource\SoundSourceDetector.h" />
     <QtMoc Include="MiscDock\SoundSource\SoundSourcePage.h" />
     <ClInclude Include="MiscDock\RenderBenchmark\RenderBenchmarkPage.h" />
@@ -1121,11 +1196,16 @@
     <ClInclude Include="..\..\shared\ui\MetricChartBinding.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
+    <ClInclude Include="MonitorDock\ProcessTraceEventArchive.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
     <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h" />
+    <ClInclude Include="MonitorDock\TimelineRateModel.h" />
     <ClInclude Include="MonitorDock\EventTimelineModel.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
+    <ClInclude Include="NetworkDock\NetworkDock.NavigationData.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
+    <ClInclude Include="NetworkDock\NetworkValueTableModel.h" />
+    <ClInclude Include="NetworkDock\PacketMonitorTable.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
@@ -1144,6 +1224,7 @@
     <ClInclude Include="..\..\shared\window\DwmProcessIdentity.h" />
     <ClInclude Include="OtherDock\DwmZOrderControl.h" />
     <ClInclude Include="OtherDock\WindowInputClient.h" />
+    <ClInclude Include="RegistryDock\RegistryNavigationSchema.h" />
     <ClInclude Include="OtherDock\WindowInputControl.h" />
     <ClInclude Include="OtherDock\WindowControlInspectionInput.h" />
     <ClInclude Include="OtherDock\WindowControlInspectionOverlay.h" />
@@ -1159,6 +1240,7 @@
     <ClInclude Include="PrivilegeDock\PrivilegeTokenPages.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />
+    <ClInclude Include="KernelDock\KernelResultModel.h" />
     <ClInclude Include="KernelDock\KernelCleanImageBaseline.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskDeletedEntryForensics.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskFileSystemForensics.h" />
@@ -1174,6 +1256,7 @@
     <ClInclude Include="ProcessDock\ProcessAffinityUtils.h" />
     <ClInclude Include="ProcessDock\ProcessAffinityPersistence.h" />
     <ClInclude Include="ProcessDock\ProcessAffinityModel.h" />
+    <ClInclude Include="ProcessDock\ProcessActivitySeriesCache.h" />
     <ClInclude Include="ProcessDock\ThreadAffinityMenu.h" />
     <ClInclude Include="ProcessDock\ProcessCpuCapacityCell.h" />
     <ClInclude Include="ProcessDock\ProcessGpuTableView.h" />
@@ -1182,7 +1265,10 @@
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
+    <QtMoc Include="UI\AsyncLogTextView.h" />
     <QtMoc Include="UI\StructuredFieldView.h" />
+    <ClInclude Include="UI\ValueTableSelection.h" />
+    <ClInclude Include="UI\FieldTreeModel.h" />
     <ClInclude Include="UI\ComplexReportModel.h" />
     <ClInclude Include="UI\ComplexReportDelegate.h" />
     <ClInclude Include="UI\ComplexReportView.h" />
@@ -1267,6 +1353,7 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryTargetSession.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryValueDecode.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryIoPort.h" />
+    <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryReadSchedule.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryPageReader.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryIoByteStore.h" />
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryKernelMutation.h" />
@@ -1304,6 +1391,8 @@
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="ProcessDock\ProcessHotkeyEnumerator.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />
+    <ClInclude Include="MonitorDock\WinAPIEventArchive.h" />
+    <ClInclude Include="MonitorDock\WinAPISessionBackend.h" />
     <ClInclude Include="MonitorDock\WinAPIDock.h" />
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />
     <ClInclude Include="WindowDock\WindowDock.h" />
@@ -1328,6 +1417,7 @@
     <ClInclude Include="..\..\shared\evidence\ImageDiff.h" />
     <ClInclude Include="..\..\shared\evidence\MemoryRegionEvidence.h" />
     <ClInclude Include="..\..\shared\evidence\SyscallEvidence.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteOperationRunner.h" />
     <ClInclude Include="..\..\shared\evidence\SyscallCorrelation.h" />
     <ClInclude Include="..\..\shared\evidence\InjectionSurvey.h" />
     <ClInclude Include="..\..\shared\ProcessTerminateMethods.h" />
@@ -1391,6 +1481,14 @@
     <Error Condition="'$(QtAdvancedDockingRuntimeSource)'==''" Text="Qt Advanced Docking runtime is not configured for $(Configuration)|$(Platform)." />
     <Error Condition="!Exists('$(QtAdvancedDockingRuntimeSource)')" Text="Qt Advanced Docking runtime was not found: $(QtAdvancedDockingRuntimeSource)" />
     <Copy SourceFiles="$(QtAdvancedDockingRuntimeSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <PropertyGroup>
+      <QtAdvancedDockingLicenseDir>$(MSBuildProjectDirectory)\..\..\third_party\qt_advanced_docking_system\</QtAdvancedDockingLicenseDir>
+      <QtAdvancedDockingNoticeTargetDir>$(TargetDir)licenses\third_party\</QtAdvancedDockingNoticeTargetDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(QtAdvancedDockingNoticeTargetDir)" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)LICENSE.txt" DestinationFiles="$(QtAdvancedDockingNoticeTargetDir)qt-advanced-docking-system-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)NOTICE.md" DestinationFiles="$(QtAdvancedDockingNoticeTargetDir)qt-advanced-docking-system-NOTICE.md" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)qt-advanced-docking-system-5.1.1-ksword-source.zip" DestinationFolder="$(QtAdvancedDockingNoticeTargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyKswordLicenseAndCovenant" AfterTargets="Build">
     <PropertyGroup>

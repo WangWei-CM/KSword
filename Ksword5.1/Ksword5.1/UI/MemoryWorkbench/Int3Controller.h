@@ -191,6 +191,19 @@ namespace ks::ui
         // 弹框前快照的上下文。模态期间其它工作台修改共享上下文也不会改变提示的目标，
         // 执行后也不会覆盖其它工作台的新上下文。owner 或弹框被删除时返回 false。
         // parentWidget 仅用于定位弹框，可传空。
+        struct LeavePlan
+        {
+            Int3LeaveChoice choice = Int3LeaveChoice::KeepAndContinue;
+            ksword::memwb::PatchTarget target;
+            ksword::memwb::Scope scope = ksword::memwb::Scope::ProcessVirtual;
+            ksword::memwb::Channel channel = ksword::memwb::Channel::UserMode;
+            std::vector<std::uint64_t> ids;
+            bool allowed() const noexcept { return choice != Int3LeaveChoice::Cancel; }
+        };
+        // Prepare only records a decision. Apply rejects a changed ledger rather
+        // than restoring a patch added after the user approved this plan.
+        LeavePlan PrepareLeave(QWidget* parentWidget, Int3LeaveScenario scenario);
+        bool ApplyPreparedLeave(const LeavePlan& plan);
         bool RequestLeave(QWidget* parentWidget, Int3LeaveScenario scenario);
 
     signals:

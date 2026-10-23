@@ -6,11 +6,16 @@
 #include "../UI/MemoryWorkbench/WorkbenchTarget.h" // AcquireAnchorForPid：与工作台锚点同一取法读进程创建时间。
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QPersistentModelIndex>
+#include <QTableView>
+#include <QTreeView>
 #include <QImage>
 #include <QPixmap>
 #include <QRunnable>
 #include <QSaveFile>
 #include <QSet>
+#include <QTimer>
 #include <QThread> // QThread::idealThreadCount：CPU 占用率的分母要按逻辑核数归一化。
 #include <QVector>
 
@@ -39,19 +44,18 @@ namespace
     // - 输入：MemoryDock 进程/区域等普通表格和行号；
     // - 处理：按列顺序读取整行文本，隐藏列也保留，方便复制 PID/Session 上下文；
     // - 返回：TSV 文本，行无效时返回空字符串。
-    QString processRegionTableRowText(QTableWidget* table, const int rowIndex)
+    QString processRegionTableRowText(QTableView* table, const int rowIndex)
     {
-        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        if (table == nullptr || rowIndex < 0 || (!table->model() || rowIndex >= table->model()->rowCount()))
         {
             return QString();
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->model()->index(rowIndex, columnIndex).data(Qt::DisplayRole).toString());
         }
         return fields.join(QLatin1Char('\t'));
     }
@@ -60,7 +64,7 @@ namespace
     // - 输入：目标表格和行号；
     // - 处理：把整行 TSV 写入系统剪贴板；
     // - 返回：无，剪贴板不可用或行无效时直接返回。
-    void copyProcessRegionTableRow(QTableWidget* table, const int rowIndex)
+    void copyProcessRegionTableRow(QTableView* table, const int rowIndex)
     {
         if (table == nullptr || QApplication::clipboard() == nullptr)
         {
@@ -143,12 +147,12 @@ namespace
 
     // pathIconWaiterTable 作用：
     // - 输入：无；
-    // - 处理：记录每个在途路径的回写等待者，同路径的重复请求只追加等待者，
+    // - 处理：记录每个在途路径的回写等待者，同路径按所属视图覆盖旧回写订阅，
     //   不重复向 Shell 发起查询（多个 MemoryDock 实例共存时同样成立）；
     // - 返回：等待表引用，只允许 UI 线程访问。
-    QHash<QString, QVector<IconApplyCallback>>& pathIconWaiterTable()
+    QHash<QString, QHash<QObject*, IconApplyCallback>>& pathIconWaiterTable()
     {
-        static QHash<QString, QVector<IconApplyCallback>> waiterTableByPath;
+        static QHash<QString, QHash<QObject*, IconApplyCallback>> waiterTableByPath;
         return waiterTableByPath;
     }
 
@@ -210,7 +214,7 @@ namespace
     // - 输入：绝对路径与图标落地后的 UI 线程回写动作；
     // - 处理：缓存未命中时提交线程池任务做 Shell 查询，同路径并发请求合并成一个任务；
     // - 返回：无，回写动作只会在 UI 线程被调用一次。
-    void queuePathIconExtraction(const QString& absolutePath, IconApplyCallback applyIconOnUiThread)
+    void queuePathIconExtraction(const QString& absolutePath, QObject* owner, IconApplyCallback applyIconOnUiThread)
     {
         const QString normalizedPath = absolutePath.trimmed();
         if (normalizedPath.isEmpty() || pathIconCache().contains(normalizedPath))
@@ -221,12 +225,12 @@ namespace
         auto waiterIt = pathIconWaiterTable().find(normalizedPath);
         if (waiterIt != pathIconWaiterTable().end())
         {
-            waiterIt.value().push_back(std::move(applyIconOnUiThread));
+            waiterIt.value().insert(owner, std::move(applyIconOnUiThread));
             return;
         }
         pathIconWaiterTable().insert(
             normalizedPath,
-            QVector<IconApplyCallback>{ std::move(applyIconOnUiThread) });
+            QHash<QObject*, IconApplyCallback>{{owner, std::move(applyIconOnUiThread)}});
 
         QRunnable* const extractionTask = QRunnable::create([normalizedPath]() {
             QImage iconImage = extractShellIconImageFromPath(normalizedPath);
@@ -251,7 +255,7 @@ namespace
                     }
                     pathIconCache().insert(normalizedPath, resolvedIcon);
 
-                    const QVector<IconApplyCallback> waiterList =
+                    const QHash<QObject*, IconApplyCallback> waiterList =
                         pathIconWaiterTable().take(normalizedPath);
                     for (const IconApplyCallback& waiterCallback : waiterList)
                     {
@@ -264,56 +268,181 @@ namespace
         QThreadPool::globalInstance()->start(extractionTask);
     }
 
-    // applyIconToProcessTableRows 作用：
-    // - 输入：进程表、图标对应的映像路径与已构造好的图标；
-    // - 处理：进程表允许排序，行号与缓存下标不再等价，只能按路径逐行反查回写；
-    // - 返回：无。
-    void applyIconToProcessTableRows(
-        QTableWidget* const processTable,
-        const QString& imagePath,
-        const QIcon& resolvedIcon)
-    {
-        if (processTable == nullptr)
-        {
-            return;
+    // Stable persistent indexes avoid a full view scan for every cold icon.
+    // One controller/subscription per view+path, regardless of filter rebuilds.
+    class PathIconProjection final : public QObject {
+    public:
+        explicit PathIconProjection(QAbstractItemView* view) : QObject(view), view(view) {
+            timer = new QTimer(this); timer->setSingleShot(true);
+            connect(timer, &QTimer::timeout, this, [this] { flush(); });
+            view->installEventFilter(this);
         }
-
-        for (int rowIndex = 0; rowIndex < processTable->rowCount(); ++rowIndex)
-        {
-            QTableWidgetItem* const processNameItem = processTable->item(rowIndex, 0);
-            if (processNameItem != nullptr &&
-                processNameItem->data(kIconPathItemRole).toString() == imagePath)
-            {
-                processNameItem->setIcon(resolvedIcon);
+        ~PathIconProjection() override { unsubscribe(); }
+        void reset(int column) {
+            unsubscribe(); ++generation; timer->stop(); this->column = column;
+            rows.clear(); requests.clear(); pending.clear(); deliveredIcons.clear();
+        }
+        void add(const QModelIndex& index, const QString& path) {
+            if (!path.isEmpty() && index.isValid()) { const QPersistentModelIndex identity(index); auto& matches = rows[path]; if (!matches.contains(identity)) { matches.push_back(identity); } }
+        }
+        void watch(const QString& path) {
+            if (path.isEmpty() || !rows.contains(path)) { return; }
+            requests.insert(path); schedule();
+        }
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::Show) { schedule(); }
+            else if (event->type() == QEvent::Hide) { timer->stop(); }
+            return false;
+        }
+    private:
+        void unsubscribe() {
+            for (const auto& path : subscriptions) {
+                auto found = pathIconWaiterTable().find(path);
+                if (found != pathIconWaiterTable().end()) { found.value().remove(this); }
             }
+            subscriptions.clear();
         }
+        void schedule() {
+            if (view && view->isVisible() && (!requests.isEmpty() || !pending.isEmpty()) && !timer->isActive()) { timer->start(0); }
+        }
+        void flush() {
+            if (!view || !view->isVisible()) { return; }
+            const QPointer<PathIconProjection> self(this);
+            const auto revision = generation;
+            int cells = 0;
+            QElapsedTimer budget; budget.start();
+            for (int count = 0; !requests.isEmpty() && count < 16 && budget.elapsed() < 5; ++count) {
+                const auto path = *requests.constBegin(); requests.remove(path);
+                if (pathIconCache().contains(path)) { pending.insert(path, 0); continue; }
+                subscriptions.insert(path);
+                queuePathIconExtraction(path, this, [guard = QPointer<PathIconProjection>(this), revision](const QString& path, const QIcon&) {
+                    if (!guard || guard->generation != revision) { return; }
+                    guard->subscriptions.remove(path); guard->pending.insert(path, 0); guard->schedule();
+                });
+            }
+            const auto apply = [this, self, revision, &cells](const QModelIndex& index) {
+                if (!index.isValid()) { return true; }
+                const auto path = index.data(kIconPathItemRole).toString();
+                if (!pending.contains(path)) { return true; }
+                const auto cached = pathIconCache().constFind(path);
+                if (cached == pathIconCache().constEnd()) { return true; }
+                if (dynamic_cast<ks::memory_detail::CoreReadOnlyModel*>(view->model())
+                    ? deliveredIcons.value(QPersistentModelIndex(index), 0) != cached.value().cacheKey()
+                    : index.data(Qt::DecorationRole).value<QIcon>().cacheKey() != cached.value().cacheKey()) {
+                    if (dynamic_cast<ks::memory_detail::CoreReadOnlyModel*>(view->model())) { deliveredIcons.insert(QPersistentModelIndex(index), cached.value().cacheKey()); }
+                    ++cells;
+                    view->model()->setData(index, cached.value(), Qt::DecorationRole);
+                }
+                return self && self->generation == revision;
+            };
+            // Visible rows get their icons first; remaining exact path matches
+            // drain below under the same time/cell budget.
+            if (auto* table = qobject_cast<QTableView*>(view.data())) {
+                const int first = qMax(0, table->rowAt(0));
+                int last = table->rowAt(table->viewport()->height() - 1);
+                if (last < 0) { last = qMin(table->model()->rowCount() - 1, first + 128); }
+                for (int row = first; row <= last && cells < 256 && budget.elapsed() < 5; ++row) {
+                    if (!apply(table->model()->index(row, column))) { return; }
+                }
+            } else if (auto* tree = qobject_cast<QTreeView*>(view.data())) {
+                auto index = tree->indexAt(QPoint(1, 1));
+                if (!index.isValid()) { index = tree->model()->index(0, 0); }
+                for (int count = 0; index.isValid() && count < 128 && cells < 256 && budget.elapsed() < 5; ++count) {
+                    if (tree->visualRect(index).top() >= tree->viewport()->height()) { break; }
+                    if (!apply(index.siblingAtColumn(column))) { return; }
+                    index = tree->indexBelow(index);
+                }
+            }
+            for (int count = 0; !pending.isEmpty() && count < 256 && cells < 256 && budget.elapsed() < 5; ++count) {
+                auto current = pending.begin();
+                const auto found = rows.constFind(current.key());
+                if (found == rows.constEnd() || current.value() >= found.value().size()) { pending.erase(current); continue; }
+                const QPersistentModelIndex index = found.value()[current.value()++];
+                if (!apply(index)) { return; }
+            }
+            schedule();
+        }
+        QPointer<QAbstractItemView> view;
+        QTimer* timer = nullptr;
+        QHash<QString, QVector<QPersistentModelIndex>> rows;
+        QSet<QString> requests, subscriptions;
+        QHash<QString, qsizetype> pending;
+        QHash<QPersistentModelIndex, quint64> deliveredIcons;
+        quint64 generation = 0;
+        int column = 0;
+    };
+
+    PathIconProjection* pathIconProjection(QAbstractItemView* view)
+    {
+        constexpr const char* property = "ksword_path_icon_projection";
+        if (auto* current = static_cast<PathIconProjection*>(view->property(property).value<void*>())) { return current; }
+        auto* current = new PathIconProjection(view);
+        view->setProperty(property, QVariant::fromValue(static_cast<void*>(current)));
+        return current;
     }
 
-    // applyIconToModuleTreeRows 作用：
-    // - 输入：模块树、路径列下标、图标对应的模块路径与已构造好的图标；
-    // - 处理：按路径反查所有匹配节点并回写图标，不重建整棵树；
-    // - 返回：无。
-    void applyIconToModuleTreeRows(
-        QTreeWidget* const moduleTree,
-        const int pathColumnIndex,
-        const QString& modulePath,
-        const QIcon& resolvedIcon)
-    {
-        if (moduleTree == nullptr)
-        {
-            return;
+    class CoreProjectionObserver final : public QObject {
+    public:
+        CoreProjectionObserver(QAbstractItemView* view, std::function<void(bool)> request, bool icons)
+            : QObject(view), view(view), request(std::move(request)), icons(icons) {
+            timer = new QTimer(this); timer->setSingleShot(true);
+            connect(timer, &QTimer::timeout, this, [this] { demandVisibleIcons(); });
+            view->installEventFilter(this); view->viewport()->installEventFilter(this);
+            connect(view->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { schedule(); });
         }
-
-        for (int itemIndex = 0; itemIndex < moduleTree->topLevelItemCount(); ++itemIndex)
-        {
-            QTreeWidgetItem* const rowItem = moduleTree->topLevelItem(itemIndex);
-            if (rowItem != nullptr &&
-                rowItem->data(pathColumnIndex, kIconPathItemRole).toString() == modulePath)
-            {
-                rowItem->setIcon(pathColumnIndex, resolvedIcon);
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override {
+            const QPointer<CoreProjectionObserver> alive(this);
+            if (watched == view && event->type() == QEvent::Show) { request(false); }
+            if (!alive || !view) { return false; }
+            if (watched == view && event->type() == QEvent::LanguageChange) {
+                if (auto* model = dynamic_cast<ks::memory_detail::CoreReadOnlyModel*>(view->model())) { model->refreshHeaders(); }
+                if (!alive || !view) { return false; }
+                request(true);
+            }
+            if (!alive || !view) { return false; }
+            if (watched == view && (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange)) {
+                if (auto* model = dynamic_cast<ks::memory_detail::CoreReadOnlyModel*>(view->model())) {
+                    const auto top = view->indexAt(QPoint(0, 0));
+                    if (top.isValid()) { model->refreshColors(top.row(), qMin(model->rowCount() - 1, top.row() + 255)); }
+                }
+            }
+            if (!alive || !view) { return false; }
+            if (event->type() == QEvent::Paint || event->type() == QEvent::Show || event->type() == QEvent::Resize) { schedule(); }
+            return false;
+        }
+    private:
+        void schedule() { if (icons && view && view->isVisible() && !timer->isActive()) { timer->start(0); } }
+        void demandVisibleIcons() {
+            if (!icons || !view || !view->isVisible()) { return; }
+            const QPointer<CoreProjectionObserver> alive(this);
+            auto* model = dynamic_cast<ks::memory_detail::CoreReadOnlyModel*>(view->model());
+            auto* projection = pathIconProjection(view);
+            if (!model) { if (lastModel) { projection->reset(0); lastModel = nullptr; } return; }
+            auto top = view->indexAt(QPoint(0, 0));
+            const int first = top.isValid() ? top.row() : 0;
+            auto bottom = view->indexAt(QPoint(0, view->viewport()->height() - 1));
+            const int last = qMin(model->rowCount() - 1, bottom.isValid() ? bottom.row() : first + 255);
+            if (lastModel != model || revision != model->revision || first != previousFirst || last != previousLast) {
+                projection->reset(0); lastModel = model; revision = model->revision; previousFirst = first; previousLast = last;
+            }
+            for (int row = first; row <= last && row < first + 256; ++row) {
+                if (!alive || !view) { return; }
+                const auto index = model->index(row, 0);
+                const auto path = index.data(kIconPathItemRole).toString();
+                if (path.isEmpty() || pathIconCache().contains(path)) { continue; }
+                projection->add(index, path); projection->watch(path);
             }
         }
-    }
+        QPointer<QAbstractItemView> view;
+        std::function<void(bool)> request;
+        bool icons;
+        QTimer* timer;
+        QPointer<QAbstractItemModel> lastModel;
+        std::uint64_t revision = 0;
+        int previousFirst = -1, previousLast = -1;
+    };
 
     // selectProcessRowByPid 作用：
     // - 输入：进程表、进程下拉框与目标 PID；
@@ -321,28 +450,32 @@ namespace
     //   避免多触发一次 currentIndexChanged 引起的模块重复枚举）；
     // - 返回：进程表命中并选中时返回 true。
     bool selectProcessRowByPid(
-        QTableWidget* const processTable,
+        QTableView* const processTable,
         QComboBox* const processCombo,
         const std::uint32_t pid)
     {
+        const QPointer<QTableView> guardedTable(processTable);
+        const QPointer<QComboBox> guardedCombo(processCombo);
         bool rowSelected = false;
         if (processTable != nullptr)
         {
-            for (int rowIndex = 0; rowIndex < processTable->rowCount(); ++rowIndex)
+            for (int rowIndex = 0; rowIndex < processTable->model()->rowCount(); ++rowIndex)
             {
-                QTableWidgetItem* const pidItem = processTable->item(rowIndex, 1);
-                if (pidItem == nullptr || pidItem->text().toUInt() != pid)
+                const QPersistentModelIndex pidItem(processTable->model()->index(rowIndex, 1));
+                if (!pidItem.isValid() || pidItem.data(Qt::DisplayRole).toString().toUInt() != pid)
                 {
                     continue;
                 }
                 processTable->selectRow(rowIndex);
-                processTable->scrollToItem(pidItem, QAbstractItemView::PositionAtCenter);
+                if (!guardedTable || !pidItem.isValid()) { return false; }
+                processTable->scrollTo(pidItem, QAbstractItemView::PositionAtCenter);
+                if (!guardedTable || !pidItem.isValid()) { return false; }
                 rowSelected = true;
                 break;
             }
         }
 
-        if (processCombo != nullptr)
+        if (guardedCombo)
         {
             const int comboIndex =
                 processCombo->findData(QVariant::fromValue(static_cast<uint>(pid)), Qt::UserRole);
@@ -542,9 +675,10 @@ namespace
     // - 处理：从用户地址空间下限遍历到上限，IMAGE/MAPPED 区域附带解析映射文件路径，
     //   全程无 Qt 控件访问，可直接在线程池任务里执行；
     // - 返回：区域快照数组，地址空间不可读时返回空数组。
-    std::vector<RegionSnapshotRow> collectVirtualMemoryRegionRows(const HANDLE processHandle)
+    std::vector<RegionSnapshotRow> collectVirtualMemoryRegionRows(const HANDLE processHandle, const std::function<bool()>& cancelled = {}, std::uint32_t* error = nullptr)
     {
         std::vector<RegionSnapshotRow> regionRows;
+        if (error) { *error = ERROR_SUCCESS; }
         if (processHandle == nullptr)
         {
             return regionRows;
@@ -560,6 +694,7 @@ namespace
         std::uint64_t currentAddress = minAddress;
         while (currentAddress < maxAddress)
         {
+            if (cancelled && cancelled()) { break; }
             MEMORY_BASIC_INFORMATION mbi{};
             const SIZE_T querySize = ::VirtualQueryEx(
                 processHandle,
@@ -568,6 +703,7 @@ namespace
                 sizeof(mbi));
             if (querySize != sizeof(mbi))
             {
+                if (error) { *error = ::GetLastError(); if (*error == ERROR_SUCCESS) { *error = ERROR_INVALID_DATA; } }
                 break;
             }
 
@@ -582,6 +718,7 @@ namespace
             if (regionRow.state == MEM_COMMIT &&
                 (regionRow.type == MEM_IMAGE || regionRow.type == MEM_MAPPED))
             {
+                if (cancelled && cancelled()) { break; }
                 wchar_t mappedPath[MAX_PATH] = {};
                 const DWORD length = ::GetMappedFileNameW(
                     processHandle,
@@ -598,6 +735,7 @@ namespace
             regionRows.push_back(std::move(regionRow));
             if (mbi.RegionSize == 0)
             {
+                if (error) { *error = ERROR_INVALID_DATA; }
                 break;
             }
 
@@ -606,6 +744,7 @@ namespace
                 static_cast<std::uint64_t>(mbi.RegionSize);
             if (nextAddress <= currentAddress)
             {
+                if (error) { *error = ERROR_INVALID_DATA; }
                 break;
             }
             currentAddress = nextAddress;
@@ -707,583 +846,203 @@ void MemoryDock::flushProcessComboDeferredCommit()
     commitAction();
 }
 
+struct MemoryDock::PreparedProcessSnapshot {
+    ProcessSnapshotResult snapshot;
+    std::shared_ptr<std::vector<ProcessEntry>> entries = ks::memory_detail::ValueStorage<std::vector<ProcessEntry>>();
+    std::shared_ptr<QHash<std::uint32_t, ProcessCpuSample>> samples = ks::memory_detail::ValueStorage<QHash<std::uint32_t, ProcessCpuSample>>();
+    std::shared_ptr<QHash<std::uint32_t, int>> rowsByPid = ks::memory_detail::ValueStorage<QHash<std::uint32_t, int>>();
+    std::shared_ptr<const QHash<std::uint32_t, ProcessCpuSample>> previous;
+    int logicalCoreCount = 1;
+    std::uint64_t selectedCreation = 0;
+    bool failed = false;
+};
+
+void MemoryDock::prepareProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared)
+{
+    try {
+        const auto& snapshot = prepared->snapshot;
+        if (!snapshot.snapshotCreated || !snapshot.enumerationStarted) { return; }
+        QHash<QString, int> exactNames, foldedNames;
+        for (const auto& row : snapshot.rows) { ++exactNames[row.processName]; ++foldedNames[row.processName.toCaseFolded()]; }
+        prepared->entries->reserve(snapshot.rows.size()); prepared->samples->reserve(static_cast<int>(snapshot.rows.size())); prepared->rowsByPid->reserve(static_cast<int>(snapshot.rows.size()));
+        for (const auto& row : snapshot.rows) {
+            ProcessEntry entry;
+            entry.pid = row.pid; entry.creationTime100ns = row.creationTime100ns; entry.sessionId = row.sessionId;
+            entry.processName = row.processName; entry.imagePath = row.imagePath.trimmed(); entry.workingSetMB = row.workingSetMB;
+            entry.exactNameCount = exactNames.value(row.processName); entry.foldedNameCount = foldedNames.value(row.processName.toCaseFolded());
+            if (row.cpuTimeValid) {
+                prepared->samples->insert(row.pid, ProcessCpuSample{row.cpuTime100ns, snapshot.sampleTime100ns, row.creationTime100ns});
+                const auto previous = prepared->previous->constFind(row.pid);
+                if (previous != prepared->previous->constEnd() && row.creationTime100ns != 0 && previous->creationTime100ns == row.creationTime100ns
+                    && snapshot.sampleTime100ns > previous->sampleTime100ns && row.cpuTime100ns >= previous->cpuTime100ns) {
+                    const auto cpu = static_cast<double>(row.cpuTime100ns - previous->cpuTime100ns);
+                    const auto wall = static_cast<double>(snapshot.sampleTime100ns - previous->sampleTime100ns);
+                    entry.cpuPercent = std::clamp(cpu / (wall * (std::max)(1, prepared->logicalCoreCount)) * 100.0, 0.0, 100.0);
+                    entry.cpuPercentValid = true;
+                }
+            }
+            prepared->rowsByPid->insert(entry.pid, static_cast<int>(prepared->entries->size()));
+            prepared->entries->push_back(std::move(entry));
+        }
+    } catch (...) { prepared->failed = true; }
+}
+
 void MemoryDock::refreshProcessList(const bool keepSelection)
 {
-    // 输出刷新入口日志，记录是否尝试保留上次选择。
-    kLogEvent refreshProcessStartEvent;
-    info << refreshProcessStartEvent
-        << "[MemoryDock] refreshProcessList: 开始刷新进程列表, keepSelection="
-        << (keepSelection ? "true" : "false")
-        << eol;
-
-    // 兜底：弹层已收起但 Hide 回投丢失时，被推迟的旧提交在这里先落地，
-    // 否则在途标记会一直挂着，进程列表再也不会更新。
+    const QPointer<MemoryDock> owner(this);
     flushProcessComboDeferredCommit();
-
-    // 已有枚举在途时不再叠加第二次 Toolhelp 快照：进程详情页一次 Tab 点击会连调两次，
-    // 后到的请求合并成一个待办，等在途结果落地后再补一轮。
-    if (readBoolProperty(this, kProcessRefreshInFlightProperty))
-    {
+    if (!owner) { return; }
+    if (readBoolProperty(this, kProcessRefreshInFlightProperty)) {
         setProperty(kProcessRefreshPendingProperty, true);
-        setProperty(kProcessRefreshPendingKeepSelectionProperty, keepSelection);
-        return;
+        setProperty(kProcessRefreshPendingKeepSelectionProperty, keepSelection); return;
     }
-
-    // 刷新前记录当前选择 PID，刷新后尽量恢复体验。
-    std::uint32_t previousPid = 0;
-    if (keepSelection)
-    {
-        const int index = m_processCombo->currentIndex();
-        if (index >= 0)
-        {
-            previousPid = static_cast<std::uint32_t>(m_processCombo->itemData(index, Qt::UserRole).toUInt());
-        }
-    }
-
-    // m_processCache 不在这里清空：清空到回填之间会让下拉框/R0 读写页读到空缓存，
-    // 缓存与表格统一在回投后的提交阶段一次性替换。
+    const auto previousPid = keepSelection ? m_processCombo->currentData(Qt::UserRole).toUInt() : 0U;
+    const auto generation = bumpGenerationProperty(this, kProcessRefreshGenerationProperty);
     setProperty(kProcessRefreshInFlightProperty, true);
-    const quint64 requestGeneration = bumpGenerationProperty(this, kProcessRefreshGenerationProperty);
-    const QPointer<MemoryDock> guardedSelf(this);
-
-    QRunnable* const refreshProcessTask = QRunnable::create([guardedSelf, requestGeneration, previousPid]() {
-        // 后台线程只做纯数据采集：Toolhelp 快照、句柄查询、映像路径解析都不触碰 Qt 控件。
-        ProcessSnapshotResult snapshotResult = collectProcessSnapshotRows();
-
-        QCoreApplication* const appInstance = QCoreApplication::instance();
-        if (appInstance == nullptr)
-        {
-            return;
+    auto prepared = ks::memory_detail::ValueStorage<PreparedProcessSnapshot>();
+    prepared->selectedCreation = keepSelection ? m_processCombo->currentData(kProcessCreationTimeRole).toULongLong() : 0ULL;
+    prepared->previous = m_previousCpuSamples;
+    prepared->logicalCoreCount = (std::max)(1, QThread::idealThreadCount());
+    try { QThreadPool::globalInstance()->start([owner, prepared, generation, previousPid] {
+        try { prepared->snapshot = collectProcessSnapshotRows(); prepareProcessSnapshot(prepared); }
+        catch (...) { prepared->failed = true; }
+        if (auto* app = QCoreApplication::instance()) {
+            QMetaObject::invokeMethod(app, [owner, prepared, generation, previousPid] {
+                if (!owner || owner->property(kProcessRefreshGenerationProperty).toULongLong() != generation) { return; }
+                if (prepared->failed || !prepared->snapshot.snapshotCreated || !prepared->snapshot.enumerationStarted) {
+                    owner->setProperty(kProcessRefreshInFlightProperty, false); owner->setProperty(kProcessRefreshPendingProperty, false);
+                    if (!prepared->snapshot.snapshotCreated) { QMessageBox::warning(owner, "进程刷新", "CreateToolhelp32Snapshot 失败。"); }
+                    else if (owner->m_processCountLabel) { owner->m_processCountLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); }
+                    return;
+                }
+                const auto commit = [owner, prepared, generation, previousPid] { if (owner) { owner->commitProcessSnapshot(prepared, generation, previousPid); } };
+                if (owner->deferCommitWhileProcessComboPopupOpen(commit)) { return; }
+                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(owner, QStringLiteral("memory-process-list-snapshot-apply"), {owner->m_processTable}, commit)) { return; }
+                commit();
+            }, Qt::QueuedConnection);
         }
+    }); } catch (...) {
+        setProperty(kProcessRefreshInFlightProperty, false); setProperty(kProcessRefreshPendingProperty, false);
+        if (m_processCountLabel) { m_processCountLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); }
+    }
+}
 
-        QMetaObject::invokeMethod(
-            appInstance,
-            [guardedSelf, requestGeneration, previousPid, snapshotResult = std::move(snapshotResult)]() mutable {
-                if (guardedSelf == nullptr)
-                {
-                    return;
-                }
-                MemoryDock* const resultDock = guardedSelf.data();
+void MemoryDock::commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared, const std::uint64_t generation, const std::uint32_t previousPid)
+{
+    if (property(kProcessRefreshGenerationProperty).toULongLong() != generation) { return; }
+    const QPointer<MemoryDock> owner(this);
+    m_processCache = prepared->entries; m_previousCpuSamples = prepared->samples; m_processRowsByPid = prepared->rowsByPid;
+    updateProcessComboFromCache();
+    if (!owner) { return; }
+    if (previousPid != 0 && m_processRowsByPid->contains(previousPid)) {
+        const auto row = m_processRowsByPid->value(previousPid);
+        if (prepared->selectedCreation == 0 || (*m_processCache)[static_cast<std::size_t>(row)].creationTime100ns == prepared->selectedCreation) { m_processCombo->setCurrentIndex(row); }
+    }
+    if (!owner) { return; }
+    requestCoreProjection(CoreKind::Processes, false);
+    if (!owner) { return; }
+    setProperty(kProcessRefreshInFlightProperty, false);
+    if (property(kProcessRefreshPendingProperty).toBool()) {
+        const auto keep = property(kProcessRefreshPendingKeepSelectionProperty).toBool();
+        setProperty(kProcessRefreshPendingProperty, false); refreshProcessList(keep);
+    }
+}
 
-                // 代次过期说明期间又发起了新一轮枚举，旧快照直接丢弃。
-                if (resultDock->property(kProcessRefreshGenerationProperty).toULongLong() != requestGeneration)
-                {
-                    return;
-                }
-
-                if (!snapshotResult.snapshotCreated)
-                {
-                    kLogEvent snapshotFailEvent;
-                    err << snapshotFailEvent
-                        << "[MemoryDock] refreshProcessList: CreateToolhelp32Snapshot 失败, error="
-                        << snapshotResult.lastErrorCode
-                        << eol;
-                    resultDock->setProperty(kProcessRefreshInFlightProperty, false);
-                    resultDock->setProperty(kProcessRefreshPendingProperty, false);
-                    QMessageBox::warning(resultDock, "进程刷新", "CreateToolhelp32Snapshot 失败。");
-                    return;
-                }
-                if (!snapshotResult.enumerationStarted)
-                {
-                    kLogEvent processFirstFailEvent;
-                    err << processFirstFailEvent
-                        << "[MemoryDock] refreshProcessList: Process32FirstW 失败, error="
-                        << snapshotResult.lastErrorCode
-                        << eol;
-                    resultDock->setProperty(kProcessRefreshInFlightProperty, false);
-                    resultDock->setProperty(kProcessRefreshPendingProperty, false);
-                    return;
-                }
-
-                const auto snapshotRows =
-                    std::make_shared<std::vector<ProcessSnapshotRow>>(std::move(snapshotResult.rows));
-                const std::uint64_t snapshotSampleTime = snapshotResult.sampleTime100ns;
-                auto commitProcessSnapshot =
-                    [guardedSelf, requestGeneration, previousPid, snapshotRows, snapshotSampleTime]() {
-                    if (guardedSelf == nullptr)
-                    {
-                        return;
-                    }
-                    MemoryDock* const commitDock = guardedSelf.data();
-                    if (commitDock->property(kProcessRefreshGenerationProperty).toULongLong() != requestGeneration)
-                    {
-                        return;
-                    }
-
-                    // 逻辑核数：占用率的分母要乘上它，否则一个跑满单核的进程在
-                    // 16 核机器上会被算成 100%，而任务管理器给的是 6.25%，两边对不上。
-                    const int logicalCoreCount =
-                        (std::max)(1, QThread::idealThreadCount());
-
-                    // 缓存与表格一次性替换，避免中途被其它页读到半成品。
-                    commitDock->m_processCache.clear();
-                    commitDock->m_processCache.reserve(snapshotRows->size());
-                    QHash<std::uint32_t, ProcessCpuSample> freshCpuSamples;
-                    freshCpuSamples.reserve(static_cast<int>(snapshotRows->size()));
-                    for (const ProcessSnapshotRow& snapshotRow : *snapshotRows)
-                    {
-                        ProcessEntry entry{};
-                        entry.pid = snapshotRow.pid;
-                        entry.sessionId = snapshotRow.sessionId;
-                        entry.processName = snapshotRow.processName;
-                        entry.workingSetMB = snapshotRow.workingSetMB;
-
-                        if (snapshotRow.cpuTimeValid)
-                        {
-                            freshCpuSamples.insert(
-                                snapshotRow.pid,
-                                ProcessCpuSample{
-                                    snapshotRow.cpuTime100ns, snapshotSampleTime });
-
-                            const auto previous =
-                                commitDock->m_previousCpuSamples.constFind(snapshotRow.pid);
-                            if (previous != commitDock->m_previousCpuSamples.constEnd()
-                                && snapshotSampleTime > previous->sampleTime100ns
-                                && snapshotRow.cpuTime100ns >= previous->cpuTime100ns)
-                            {
-                                // PID 会被系统回收：同一个 PID 的新进程 CPU 时间
-                                // 从 0 重新开始，于是增量为负。上面那条 >= 判据把
-                                // 这种情况挡掉，宁可这一轮显示"-"也不报一个假数。
-                                const double cpuDelta = static_cast<double>(
-                                    snapshotRow.cpuTime100ns - previous->cpuTime100ns);
-                                const double wallDelta = static_cast<double>(
-                                    snapshotSampleTime - previous->sampleTime100ns);
-                                const double percent =
-                                    (cpuDelta / (wallDelta * logicalCoreCount)) * 100.0;
-                                // 采样窗口两端的取数不是同一瞬间完成的，极端情况下
-                                // 算出来可能略微越界，夹一下再显示。
-                                entry.cpuPercent = std::clamp(percent, 0.0, 100.0);
-                                entry.cpuPercentValid = true;
-                            }
-                        }
-                        commitDock->m_processCache.push_back(std::move(entry));
-                    }
-                    // 整表替换而不是逐条更新：已退出的进程必须随之消失，否则它的
-                    // 采样会一直留着，等 PID 被复用时和新进程的时间相减。
-                    commitDock->m_previousCpuSamples = std::move(freshCpuSamples);
-
-                    // 先重建进程表。
-                    QTableWidget* const processTable = commitDock->m_processTable;
-                    processTable->setSortingEnabled(false);
-                    processTable->setRowCount(static_cast<int>(snapshotRows->size()));
-                    for (int row = 0; row < static_cast<int>(commitDock->m_processCache.size()); ++row)
-                    {
-                        // 缓存与快照行一一对应（同一份采集结果按同一顺序转换），
-                        // 映像路径只保存在快照行里，仅用于图标解析。
-                        const ProcessEntry& entry = commitDock->m_processCache[static_cast<std::size_t>(row)];
-                        // 图标键统一用去空白后的路径，和后台提取任务、回写比对保持同一份文本。
-                        const QString imagePath =
-                            (*snapshotRows)[static_cast<std::size_t>(row)].imagePath.trimmed();
-
-                        // 进程名前附加图标：缓存命中直接用，未命中先给占位图，
-                        // Shell 查询在线程池完成后按路径回填对应单元格。
-                        QTableWidgetItem* const processNameItem = new QTableWidgetItem(entry.processName);
-                        processNameItem->setData(kIconPathItemRole, imagePath);
-                        processNameItem->setData(kProcessCreationTimeRole,
-                            QVariant::fromValue<qulonglong>((*snapshotRows)[static_cast<std::size_t>(row)].creationTime100ns));
-                        processNameItem->setIcon(lookupCachedPathIcon(imagePath));
-                        processTable->setItem(row, 0, processNameItem);
-
-                        // PID / 会话 / CPU / 工作集四列一律用 NumericSortTableItem，
-                        // 显示带单位的文本、排序按裸数值（理由见该类的注释）。
-                        const auto makeNumericItem =
-                            [](const QString& displayText, const double sortValue) {
-                                return new NumericSortTableItem(displayText, sortValue);
-                            };
-
-                        processTable->setItem(row, 1, makeNumericItem(
-                            QString::number(entry.pid), static_cast<double>(entry.pid)));
-                        processTable->setItem(row, 2, makeNumericItem(
-                            QString::number(entry.sessionId), static_cast<double>(entry.sessionId)));
-                        // CPU 取不到时显示 "-" 而不是 0.00%：首次刷新、刚启动的进程、
-                        // 权限不足取不到 CPU 时间，这三种都是"还不知道"，跟"空闲"
-                        // 是两回事，显示成 0% 等于报了一个我们没有的读数。
-                        processTable->setItem(row, 3, makeNumericItem(
-                            entry.cpuPercentValid
-                                ? (QString::number(entry.cpuPercent, 'f', 2) + "%")
-                                : QStringLiteral("-"),
-                            entry.cpuPercentValid ? entry.cpuPercent : -1.0));
-                        processTable->setItem(row, 4, makeNumericItem(
-                            QString("%1 MB").arg(entry.workingSetMB, 0, 'f', 1),
-                            entry.workingSetMB));
-                    }
-                    processTable->setSortingEnabled(true);
-
-                    // 刷新出来的新行默认全是可见的，必须立刻按当前关键字重新过滤
-                    // 一遍。少了这一步，过滤框里留着关键字、列表却在下一次刷新后
-                    // 悄悄变回全量——而用户并不会察觉自己看的已经不是过滤结果。
-                    commitDock->applyProcessTableFilter();
-
-                    // 未命中缓存的映像路径统一提交后台提取，回调只改对应单元格图标，不重建整表。
-                    QSet<QString> queuedIconPaths;
-                    for (const ProcessSnapshotRow& snapshotRow : *snapshotRows)
-                    {
-                        const QString imagePath = snapshotRow.imagePath.trimmed();
-                        if (imagePath.isEmpty() || queuedIconPaths.contains(imagePath))
-                        {
-                            continue;
-                        }
-                        queuedIconPaths.insert(imagePath);
-                        queuePathIconExtraction(
-                            imagePath,
-                            [guardedSelf](const QString& resolvedPath, const QIcon& resolvedIcon) {
-                                if (guardedSelf == nullptr)
-                                {
-                                    return;
-                                }
-                                applyIconToProcessTableRows(
-                                    guardedSelf->m_processTable,
-                                    resolvedPath,
-                                    resolvedIcon);
-                            });
-                    }
-
-                    // 再同步重建顶部下拉框。
-                    commitDock->updateProcessComboFromCache();
-
-                    // 尝试恢复之前选中 PID。
-                    if (previousPid != 0)
-                    {
-                        for (int comboIndex = 0; comboIndex < commitDock->m_processCombo->count(); ++comboIndex)
-                        {
-                            if (commitDock->m_processCombo->itemData(comboIndex, Qt::UserRole).toUInt() == previousPid)
-                            {
-                                commitDock->m_processCombo->setCurrentIndex(comboIndex);
-                                break;
-                            }
-                        }
-                    }
-
-                    // 跨页跳转（focusProcessForOperations）登记的目标行只能等列表回填后再定位。
-                    const std::uint32_t pendingFocusPid = static_cast<std::uint32_t>(
-                        commitDock->property(kProcessFocusPendingPidProperty).toUInt());
-                    if (pendingFocusPid != 0)
-                    {
-                        commitDock->setProperty(kProcessFocusPendingPidProperty, 0U);
-                        selectProcessRowByPid(
-                            commitDock->m_processTable,
-                            commitDock->m_processCombo,
-                            pendingFocusPid);
-                    }
-
-                    // 输出刷新结束日志，记录本轮进程总数与恢复 PID。
-                    kLogEvent refreshProcessFinishEvent;
-                    info << refreshProcessFinishEvent
-                        << "[MemoryDock] refreshProcessList: 刷新完成, processCount="
-                        << commitDock->m_processCache.size()
-                        << ", previousPid="
-                        << previousPid
-                        << eol;
-
-                    // 本轮结束后释放在途标记，并把合并下来的待办请求补一轮。
-                    commitDock->setProperty(kProcessRefreshInFlightProperty, false);
-                    if (commitDock->property(kProcessRefreshPendingProperty).toBool())
-                    {
-                        const bool pendingKeepSelection =
-                            commitDock->property(kProcessRefreshPendingKeepSelectionProperty).toBool();
-                        commitDock->setProperty(kProcessRefreshPendingProperty, false);
-                        commitDock->refreshProcessList(pendingKeepSelection);
-                    }
-                };
-
-                // 顶部进程下拉框展开时先缓存本次提交：正在展开的弹层被清空重填后
-                // 会继续抓着鼠标，用户会看到整个界面卡住。
-                if (resultDock->deferCommitWhileProcessComboPopupOpen(commitProcessSnapshot))
-                {
-                    return;
-                }
-
-                // 右键菜单打开时先缓存本次提交，避免把用户正在操作的行整表换掉。
-                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-                        resultDock,
-                        QStringLiteral("memory-process-list-snapshot-apply"),
-                        {resultDock->m_processTable},
-                        commitProcessSnapshot))
-                {
-                    return;
-                }
-                commitProcessSnapshot();
-            },
-            Qt::QueuedConnection);
-        });
-    refreshProcessTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(refreshProcessTask);
+std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> MemoryDock::prepareTamperModuleCandidates(const std::vector<ModuleEntry>& modules)
+{
+    using Page = ksword::memory_dock::TamperDetectionPage;
+    auto snapshot = ks::memory_detail::ValueStorage<Page::ModuleCandidateSnapshot>();
+    snapshot->entries.reserve(modules.size()); snapshot->rowsByKey.reserve(static_cast<int>(modules.size()));
+    for (const auto& module : modules) {
+        Page::ModuleCandidate candidate;
+        candidate.displayText = QString("%1  (%2 KB)").arg(module.moduleName).arg(module.sizeBytes / 1024ULL);
+        candidate.filePath = module.fullPath; candidate.baseAddress = module.baseAddress; candidate.sizeBytes = module.sizeBytes;
+        const auto key = Page::ModuleCandidateSnapshot::identity(candidate);
+        if (!snapshot->rowsByKey.contains(key)) { snapshot->rowsByKey.insert(key, static_cast<int>(snapshot->entries.size())); }
+        snapshot->entries.push_back(std::move(candidate));
+    }
+    return snapshot;
 }
 
 void MemoryDock::syncTamperDetectionTargets()
 {
-    if (m_tamperDetectionPage == nullptr)
-    {
-        return;
-    }
-    m_tamperDetectionPage->setAttachedProcess(m_attachedPid, m_attachedProcessName);
-
-    // 模块列表转成"可扫描目标"。只传基址和大小：篡改检测页不需要知道签名、
-    // 入口点之类的东西，多传一份就会多一处需要同步的状态。
-    std::vector<ksword::memory_dock::TamperDetectionPage::ModuleCandidate> candidates;
-    candidates.reserve(m_moduleCache.size());
-    for (const ModuleEntry& module : m_moduleCache)
-    {
-        ksword::memory_dock::TamperDetectionPage::ModuleCandidate candidate;
-        candidate.displayText = QString("%1  (%2 KB)")
-            .arg(module.moduleName)
-            .arg(module.sizeBytes / 1024ULL);
-        // 磁盘映像那条参考路径要按加载基址归一化文件字节，所以完整路径必须带过去。
-        candidate.filePath = module.fullPath;
-        candidate.baseAddress = module.baseAddress;
-        candidate.sizeBytes = module.sizeBytes;
-        candidates.push_back(std::move(candidate));
-    }
-    m_tamperDetectionPage->setModuleCandidates(candidates);
+    if (!m_tamperDetectionPage) { return; }
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<ksword::memory_dock::TamperDetectionPage> page(m_tamperDetectionPage);
+    page->setAttachedProcess(m_attachedPid, m_attachedProcessName);
+    if (!owner || !page) { return; }
+    page->setModuleCandidates(m_moduleCachePid == m_attachedPid ? m_tamperCandidateSnapshot : ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>());
 }
 
 void MemoryDock::applyProcessTableFilter()
 {
-    if (m_processTable == nullptr)
-    {
-        return;
-    }
-    const QString keyword = (m_processFilterEdit != nullptr)
-        ? m_processFilterEdit->text().trimmed()
-        : QString();
-
-    int shownRows = 0;
-    const int totalRows = m_processTable->rowCount();
-    for (int row = 0; row < totalRows; ++row)
-    {
-        bool matched = keyword.isEmpty();
-        if (!matched)
-        {
-            // 进程名与 PID 任一命中即算命中：用户手里可能只有其中一个。
-            const QTableWidgetItem* const nameItem = m_processTable->item(row, 0);
-            const QTableWidgetItem* const pidItem = m_processTable->item(row, 1);
-            matched =
-                (nameItem != nullptr && nameItem->text().contains(keyword, Qt::CaseInsensitive))
-                || (pidItem != nullptr && pidItem->text().contains(keyword, Qt::CaseInsensitive));
-        }
-        m_processTable->setRowHidden(row, !matched);
-        if (matched)
-        {
-            ++shownRows;
-        }
-    }
-
-    if (m_processCountLabel != nullptr)
-    {
-        m_processCountLabel->setText(keyword.isEmpty()
-            ? QString("共 %1 个进程").arg(totalRows)
-            : QString("显示 %1 / 共 %2").arg(shownRows).arg(totalRows));
-    }
+    requestCoreProjection(CoreKind::Processes, true);
 }
 
 void MemoryDock::updateProcessComboFromCache()
 {
-    // 下拉框重建入口日志：记录缓存规模。
-    kLogEvent comboUpdateEvent;
-    dbg << comboUpdateEvent
-        << "[MemoryDock] updateProcessComboFromCache: 重建下拉框, cacheSize="
-        << m_processCache.size()
-        << eol;
-
-    // 下拉框重建期间阻断信号，防止反复触发模块刷新。
+    if (!m_processComboModel || !m_processCombo) { return; }
+    const QPointer<MemoryDock> owner(this);
     QSignalBlocker blocker(m_processCombo);
-    m_processCombo->clear();
-
-    // 同名进程有几个：像 QQ 这种一开就是十个同名进程的程序，光看名字选不出
-    // 目标，选错之后的表现是"地址读不到"，而读取代码其实完全正常——排查会被
-    // 整个带偏到内存读取上去。所以同名时把工作集也显示出来：主进程和辅助进程
-    // 的内存量差一两个数量级，一眼就能分开。
-    QHash<QString, int> nameCount;
-    for (const ProcessEntry& entry : m_processCache)
-    {
-        nameCount[entry.processName] += 1;
-    }
-
-    for (const ProcessEntry& entry : m_processCache)
-    {
+    const auto source = m_processCache;
+    m_processComboModel->publish(static_cast<int>(source->size()), [source](const int row, const int role) -> QVariant {
+        const auto& entry = (*source)[static_cast<std::size_t>(row)];
+        if (role == Qt::UserRole) { return QVariant::fromValue(entry.pid); }
+        if (role == Qt::UserRole + 1) { return entry.processName; }
+        if (role == Qt::UserRole + 2) { return entry.foldedNameCount; }
+        if (role == kProcessCreationTimeRole) { return QVariant::fromValue<qulonglong>(entry.creationTime100ns); }
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole) { return {}; }
         QString text = QString("%1 [PID:%2]").arg(entry.processName).arg(entry.pid);
-        if (nameCount.value(entry.processName) > 1)
-        {
-            text += QString(" · %1 MB · 同名 %2 个")
-                .arg(entry.workingSetMB, 0, 'f', 0)
-                .arg(nameCount.value(entry.processName));
-        }
-        m_processCombo->addItem(text, QVariant::fromValue(static_cast<uint>(entry.pid)));
-        const int row = m_processCombo->count() - 1;
-        m_processCombo->setItemData(row, entry.processName, Qt::UserRole + 1);
-    }
-
-    // 当前附加 PID 还存在时，默认选中它。
-    bool selectedAttachedProcess = false;
-    if (m_attachedPid != 0)
-    {
-        for (int comboIndex = 0; comboIndex < m_processCombo->count(); ++comboIndex)
-        {
-            if (m_processCombo->itemData(comboIndex, Qt::UserRole).toUInt() == m_attachedPid)
-            {
-                m_processCombo->setCurrentIndex(comboIndex);
-                selectedAttachedProcess = true;
-                break;
-            }
-        }
-    }
-    if (!selectedAttachedProcess && m_processCombo->count() > 0)
-    {
-        m_processCombo->setCurrentIndex(0);
-    }
-
+        if (entry.exactNameCount > 1) { text += ks::i18n::sourceText(QStringLiteral(" · %1 MB · 同名 %2 个")).arg(entry.workingSetMB, 0, 'f', 0).arg(entry.exactNameCount); }
+        return text;
+    });
+    if (!owner) { blocker.dismiss(); return; }
+    m_processCombo->setCurrentIndex(m_processRowsByPid->contains(m_attachedPid) ? m_processRowsByPid->value(m_attachedPid) : source->empty() ? -1 : 0);
 }
 
-void MemoryDock::rebuildModuleTableFromCache()
-{
-    // 仅用缓存重绘模块表：该路径不会触发 Win32 枚举，适合输入过滤时高频调用。
-    const QString filterText = (m_moduleFilterEdit == nullptr) ? QString() : m_moduleFilterEdit->text().trimmed();
-    std::vector<const ModuleEntry*> filteredModules;
-    filteredModules.reserve(m_moduleCache.size());
-    for (const ModuleEntry& entry : m_moduleCache)
-    {
-        if (!filterText.isEmpty() &&
-            !entry.moduleName.contains(filterText, Qt::CaseInsensitive) &&
-            !entry.fullPath.contains(filterText, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        filteredModules.push_back(&entry);
-    }
+void MemoryDock::rebuildModuleTableFromCache() { requestCoreProjection(CoreKind::Modules, false); }
 
-    // 批量更新期间关闭绘制和信号，减少重排开销并避免多余回调。
-    m_moduleTable->setUpdatesEnabled(false);
-    const QSignalBlocker tableBlocker(m_moduleTable);
-    m_moduleTable->clear();
-
-    // 图标按路径缓存：未命中时只放占位图并记录来源路径，绝不在这里同步问 Shell。
-    // 模块动辄上百个，冷缓存时逐个 QFileIconProvider 查询会把首帧和过滤输入一起拖住。
-    const int modulePathColumnIndex = toModuleTreeColumnIndex(ModuleTreeColumn::Path);
-    for (const ModuleEntry* moduleEntryPtr : filteredModules)
-    {
-        const ModuleEntry& entry = *moduleEntryPtr;
-        QTreeWidgetItem* rowItem = new QTreeWidgetItem();
-        rowItem->setText(toModuleTreeColumnIndex(ModuleTreeColumn::Path), entry.fullPath);
-        rowItem->setText(toModuleTreeColumnIndex(ModuleTreeColumn::Size), formatSize(entry.sizeBytes));
-        rowItem->setText(toModuleTreeColumnIndex(ModuleTreeColumn::Signature), entry.signatureState);
-        rowItem->setText(
-            toModuleTreeColumnIndex(ModuleTreeColumn::EntryOffset),
-            QString("0x%1").arg(entry.entryPointOffset, 0, 16).toUpper());
-        rowItem->setText(toModuleTreeColumnIndex(ModuleTreeColumn::State), entry.runningState);
-        rowItem->setText(toModuleTreeColumnIndex(ModuleTreeColumn::ThreadId), entry.threadIdText);
-        // 图标键统一用去空白后的路径，和后台提取任务、回写比对保持同一份文本。
-        const QString moduleIconPath = entry.fullPath.trimmed();
-        rowItem->setIcon(modulePathColumnIndex, lookupCachedPathIcon(moduleIconPath));
-        rowItem->setData(modulePathColumnIndex, kIconPathItemRole, moduleIconPath);
-
-        // 保存基址与线程 ID，供双击跳转和右键动作反查。
-        rowItem->setData(
-            toModuleTreeColumnIndex(ModuleTreeColumn::Path),
-            Qt::UserRole,
-            QVariant::fromValue<qulonglong>(entry.baseAddress));
-        rowItem->setData(
-            toModuleTreeColumnIndex(ModuleTreeColumn::Path),
-            Qt::UserRole + 1,
-            QVariant::fromValue(entry.representativeThreadId));
-
-        // 签名列颜色策略：可信绿、未知灰、不可信红。
-        if (entry.signatureTrusted)
-        {
-            rowItem->setForeground(
-                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
-                KswordTheme::SuccessColor());
-        }
-        else if (entry.signatureState.compare("Pending", Qt::CaseInsensitive) == 0 ||
-            entry.signatureState.compare("Unknown", Qt::CaseInsensitive) == 0)
-        {
-            rowItem->setForeground(
-                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
-                KswordTheme::TextSecondaryColor());
-        }
-        else
-        {
-            rowItem->setForeground(
-                toModuleTreeColumnIndex(ModuleTreeColumn::Signature),
-                KswordTheme::ErrorColor());
-        }
-
-        m_moduleTable->addTopLevelItem(rowItem);
-    }
-
-    // 排序仍按路径列执行，和原先交互习惯保持一致。
-    m_moduleTable->sortItems(modulePathColumnIndex, Qt::AscendingOrder);
-    m_moduleTable->setUpdatesEnabled(true);
-
-    // 未命中缓存的模块路径统一提交线程池提取图标，回调只改对应节点，不重建整棵树。
-    const QPointer<MemoryDock> guardedSelf(this);
-    QSet<QString> queuedIconPaths;
-    for (const ModuleEntry* moduleEntryPtr : filteredModules)
-    {
-        const QString modulePath = moduleEntryPtr->fullPath.trimmed();
-        if (modulePath.isEmpty() || queuedIconPaths.contains(modulePath))
-        {
-            continue;
-        }
-        queuedIconPaths.insert(modulePath);
-        queuePathIconExtraction(
-            modulePath,
-            [guardedSelf, modulePathColumnIndex](const QString& resolvedPath, const QIcon& resolvedIcon) {
-                if (guardedSelf == nullptr)
-                {
-                    return;
-                }
-                applyIconToModuleTreeRows(
-                    guardedSelf->m_moduleTable,
-                    modulePathColumnIndex,
-                    resolvedPath,
-                    resolvedIcon);
-            });
-    }
-
-    // 重绘结束日志：用于确认过滤后可见数量。
-    kLogEvent rebuildModuleTableEvent;
-    dbg << rebuildModuleTableEvent
-        << "[MemoryDock] rebuildModuleTableFromCache: 完成, cacheCount="
-        << m_moduleCache.size()
-        << ", visibleCount="
-        << filteredModules.size()
-        << ", filterText="
-        << filterText.toStdString()
-        << eol;
-}
+struct MemoryDock::ModuleRefreshJob {
+    ModuleRefreshRequest request;
+    std::uint64_t ticket = 0, creation = 0, elapsedMs = 0;
+    std::size_t moduleCount = 0, threadCount = 0;
+    std::atomic_bool cancel{false}, done{false};
+    std::shared_ptr<std::atomic_bool> lifetime;
+    bool cancelled() const { return cancel.load() || (lifetime && lifetime->load()); }
+    QString diagnostic;
+    std::vector<ModuleEntry> modules;
+    std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> candidates;
+};
 
 bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
 {
-    // 模块刷新改为异步，避免签名校验和模块枚举阻塞主线程。
-    kLogEvent refreshModuleStartEvent;
-    info << refreshModuleStartEvent
-        << "[MemoryDock] refreshModuleListForPid: 请求刷新模块, pid="
-        << pid
-        << eol;
-
-    if (pid == 0)
-    {
-        // pid 为 0 表示当前无有效目标，直接清空缓存和表格。
-        m_moduleCache.clear();
-        m_moduleCachePid = 0U;
-        m_moduleCacheCreateTime = 0U;
+    // Explicit refresh/attach consumes any still-pending combo selection timer.
+    if (m_processComboChangeTimer && m_processComboChangeTimer->isActive()) { m_processComboChangeTimer->stop(); }
+    const bool includeSignatureCheck = m_moduleSignatureCheck && m_moduleSignatureCheck->isChecked();
+    std::uint64_t creation = 0;
+    for (const auto& entry : *m_processCache) { if (entry.pid == pid) { creation = entry.creationTime100ns; break; } }
+    const ModuleRefreshRequest request{pid, creation, includeSignatureCheck};
+    const auto sameRequest = [&request](const ModuleRefreshRequest& other) {
+        return request.pid == other.pid && request.creation == other.creation && request.signatures == other.signatures;
+    };
+    if (pid && m_moduleRefreshJob && !m_moduleRefreshJob->cancel.load()
+        && sameRequest(m_moduleRefreshJob->request) && !m_moduleRefreshPending) { return true; }
+    if (pid && m_moduleRefreshPending && sameRequest(*m_moduleRefreshPending)) { return true; }
+    m_moduleRefreshTicket.fetch_add(1);
+    if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
+    if (!pid) {
+        m_moduleRefreshPending.reset(); m_moduleRefreshInProgress.store(false);
+        m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear(); m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>(); m_moduleCachePid = 0; m_moduleCacheCreateTime = 0;
         rebuildModuleTableFromCache();
-        if (m_moduleStatusLabel != nullptr)
-        {
+        if (m_moduleRefreshButton) { m_moduleRefreshButton->setEnabled(true); }
+        if (m_moduleStatusLabel) {
             m_moduleStatusLabel->setText("● 未选择有效进程");
-            m_moduleStatusLabel->setStyleSheet(
-                QStringLiteral("color:%1; font-weight:700;")
-                    .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
+            m_moduleStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         }
         return false;
     }
-
-    // 每次请求生成一个递增 ticket；旧任务回调时会被丢弃。
-    const std::uint64_t refreshTicket = m_moduleRefreshTicket.fetch_add(1) + 1;
-    const bool includeSignatureCheck =
-        (m_moduleSignatureCheck != nullptr) && m_moduleSignatureCheck->isChecked();
+    m_moduleRefreshPending = request;
     m_moduleRefreshInProgress.store(true);
-
     // 刷新期间更新状态栏并临时禁用按钮，避免用户误以为点击无效而反复触发。
     if (m_moduleRefreshButton != nullptr)
     {
@@ -1299,107 +1058,87 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
             QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
     }
 
-    // 使用 QPointer 守护 this，避免窗口销毁后异步回调访问悬空对象。
-    // 枚举走全局线程池而不是裸 detach 线程：连续切换进程时并发被池上限挡住，
-    // 不会因为每次切换都新建一条线程把系统拖垮。
-    const QPointer<MemoryDock> selfGuard(this);
-    QRunnable* const refreshModuleTask = QRunnable::create(
-        [selfGuard, pid, includeSignatureCheck, refreshTicket]() {
-        if (selfGuard == nullptr)
-        {
-            return;
-        }
 
-        // 后台线程仅执行耗时枚举和数据转换，不直接操作任何 Qt 控件。
-        // 先读一次目标进程的创建时间（与工作台锚点同一取法，取不到为 0）：缓存落地后它与 pid 一起
-        // 记在 m_moduleCachePid / m_moduleCacheCreateTime，供模块表预览"未附加的进程"时核对进程实例。
-        const ks::ui::AnchorInfo creationAnchor = ks::ui::AcquireAnchorForPid(pid);
-        const std::uint64_t moduleCreateTime = creationAnchor.createTime100ns;
-        ks::ui::ReleaseAnchorHandle(creationAnchor.handle);
+    if (!m_moduleRefreshPoll) {
+        m_moduleRefreshPoll = new QTimer(this); m_moduleRefreshPoll->setInterval(25);
+        connect(m_moduleRefreshPoll, &QTimer::timeout, this, [this] { pollModuleRefresh(); });
+        connect(this, &QObject::destroyed, [lifetime = m_moduleRefreshLifetime] { lifetime->store(true); });
+    }
+    startPendingModuleRefresh();
+    m_moduleRefreshPoll->start();
+    return true;
+}
 
-        const auto refreshStartTime = std::chrono::steady_clock::now();
-        const ks::process::ProcessModuleSnapshot moduleSnapshot =
-            ks::process::EnumerateProcessModulesAndThreads(pid, includeSignatureCheck);
-
-        std::vector<ModuleEntry> moduleCache;
-        moduleCache.reserve(moduleSnapshot.modules.size());
-        for (const ks::process::ProcessModuleRecord& moduleRecord : moduleSnapshot.modules)
-        {
-            ModuleEntry entry{};
-            entry.fullPath = QString::fromStdString(moduleRecord.modulePath);
-            entry.moduleName = QFileInfo(entry.fullPath).fileName();
-            entry.baseAddress = moduleRecord.moduleBaseAddress;
-            entry.sizeBytes = moduleRecord.moduleSizeBytes;
-            entry.signatureState = QString::fromStdString(moduleRecord.signatureState);
-            entry.signatureTrusted = moduleRecord.signatureTrusted;
-            entry.entryPointOffset = moduleRecord.entryPointRva;
-            entry.runningState = QString::fromStdString(moduleRecord.runningState);
-            entry.threadIdText = QString::fromStdString(moduleRecord.threadIdText);
-            entry.representativeThreadId = moduleRecord.representativeThreadId;
-            moduleCache.push_back(std::move(entry));
-        }
-        std::sort(moduleCache.begin(), moduleCache.end(), [](const ModuleEntry& left, const ModuleEntry& right) {
-            return left.baseAddress < right.baseAddress;
-            });
-
-        const std::uint64_t elapsedMs = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - refreshStartTime).count());
-        const std::size_t moduleCount = moduleSnapshot.modules.size();
-        const std::size_t threadCount = moduleSnapshot.threads.size();
-        const QString diagnosticText = QString::fromStdString(moduleSnapshot.diagnosticText).trimmed();
-
-        // 结果回到主线程落地，确保 Qt 视图更新线程安全。
-        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard,
-            pid,
-            moduleCreateTime,
-            includeSignatureCheck,
-            refreshTicket,
-            elapsedMs,
-            moduleCount,
-            threadCount,
-            diagnosticText,
-            moduleCache = std::move(moduleCache)]() mutable {
-                if (selfGuard == nullptr)
-                {
-                    return;
-                }
-
-                // 如果 ticket 已过期，说明用户又发起了新刷新，旧结果直接丢弃。
-                if (refreshTicket < selfGuard->m_moduleRefreshTicket.load())
-                {
-                    kLogEvent staleModuleEvent;
-                    dbg << staleModuleEvent
-                        << "[MemoryDock] refreshModuleListForPid: 丢弃过期模块结果, ticket="
-                        << refreshTicket
-                        << ", latestTicket="
-                        << selfGuard->m_moduleRefreshTicket.load()
-                        << eol;
-                    return;
-                }
-
-                auto moduleCacheSnapshot =
-                    std::make_shared<std::vector<ModuleEntry>>(std::move(moduleCache));
-                auto commitModuleSnapshot = [
-                    selfGuard,
-                    pid,
-                    moduleCreateTime,
-                    includeSignatureCheck,
-                    refreshTicket,
-                    elapsedMs,
-                    moduleCount,
-                    threadCount,
-                    diagnosticText,
-                    moduleCacheSnapshot]() mutable
-                {
-                    if (selfGuard == nullptr ||
-                        refreshTicket < selfGuard->m_moduleRefreshTicket.load())
-                    {
-                        return;
+void MemoryDock::startPendingModuleRefresh()
+{
+    if (m_moduleRefreshJob || !m_moduleRefreshPending) { return; }
+    auto job = std::make_shared<ModuleRefreshJob>();
+    job->request = *m_moduleRefreshPending; m_moduleRefreshPending.reset();
+    job->ticket = m_moduleRefreshTicket.load(); m_moduleRefreshJob = job;
+    job->lifetime = m_moduleRefreshLifetime;
+    // Worker and teardown share only task state, with one lifecycle subscription per Dock.
+    try { QThreadPool::globalInstance()->start([job] {
+        try {
+            if (!job->cancelled()) {
+                const auto start = std::chrono::steady_clock::now();
+                const auto anchor = ks::ui::AcquireAnchorForPid(job->request.pid);
+                job->creation = anchor.createTime100ns;
+                ks::ui::ReleaseAnchorHandle(anchor.handle);
+                if (!job->cancelled() && (!job->request.creation || job->request.creation == job->creation)) {
+                    const auto cancelled = [job] { return job->cancelled(); };
+                    const auto snapshot = job->creation
+                        ? ks::process::EnumerateProcessModulesAndThreadsIfIdentityMatches(job->request.pid, job->creation, job->request.signatures, cancelled)
+                        : ks::process::EnumerateProcessModulesAndThreads(job->request.pid, job->request.signatures, cancelled);
+                    job->moduleCount = snapshot.modules.size(); job->threadCount = snapshot.threads.size();
+                    job->diagnostic = QString::fromStdString(snapshot.diagnosticText).trimmed();
+                    job->modules.reserve(snapshot.modules.size());
+                    for (const auto& record : snapshot.modules) {
+                        if (job->cancelled()) { break; }
+                        ModuleEntry entry{};
+                        entry.fullPath = QString::fromStdString(record.modulePath); entry.moduleName = QFileInfo(entry.fullPath).fileName();
+                        entry.baseAddress = record.moduleBaseAddress; entry.sizeBytes = record.moduleSizeBytes;
+                        entry.signatureState = QString::fromStdString(record.signatureState); entry.signatureTrusted = record.signatureTrusted;
+                        entry.entryPointOffset = record.entryPointRva; entry.runningState = QString::fromStdString(record.runningState);
+                        entry.threadIdText = QString::fromStdString(record.threadIdText); entry.representativeThreadId = record.representativeThreadId;
+                        job->modules.push_back(std::move(entry));
                     }
+                    if (!job->cancelled()) { std::sort(job->modules.begin(), job->modules.end(), [](const auto& a, const auto& b) { return a.baseAddress < b.baseAddress; }); job->candidates = prepareTamperModuleCandidates(job->modules); }
+                } else if (!job->cancelled()) {
+                    job->creation = job->request.creation;
+                    job->diagnostic = QString::number(ERROR_INVALID_PARAMETER);
+                }
+                job->elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        } catch (...) { job->diagnostic = QString::number(ERROR_GEN_FAILURE); }
+        job->done.store(true);
+    }); } catch (...) { job->diagnostic = QString::number(ERROR_GEN_FAILURE); job->done.store(true); }
+}
 
+void MemoryDock::pollModuleRefresh()
+{
+    if (!m_moduleRefreshJob || !m_moduleRefreshJob->done.load()) { return; }
+    auto job = std::move(m_moduleRefreshJob);
+    if (job->cancel.load() || job->ticket != m_moduleRefreshTicket.load()) {
+        startPendingModuleRefresh();
+        if (!m_moduleRefreshJob) { m_moduleRefreshPoll->stop(); }
+        return;
+    }
+    const QPointer<MemoryDock> selfGuard(this);
+    const auto refreshTicket = job->ticket;
+    const auto pid = job->request.pid;
+    const auto moduleCreateTime = job->creation;
+    const auto includeSignatureCheck = job->request.signatures;
+    const auto elapsedMs = job->elapsedMs;
+    const auto moduleCount = job->moduleCount, threadCount = job->threadCount;
+    const auto diagnosticText = job->diagnostic;
+    const auto candidates = job->candidates ? job->candidates : ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
+    const auto moduleCacheSnapshot = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(std::move(job->modules));
+    const auto commitModuleSnapshot = [selfGuard, refreshTicket, pid, moduleCreateTime, includeSignatureCheck,
+        elapsedMs, moduleCount, threadCount, diagnosticText, moduleCacheSnapshot, candidates] {
+        if (!selfGuard || refreshTicket != selfGuard->m_moduleRefreshTicket.load()) { return; }
                     // 缓存和树必须原子落地；菜单打开时不能先换缓存再保留旧节点。
-                    selfGuard->m_moduleCache = std::move(*moduleCacheSnapshot);
+                    selfGuard->m_moduleCache = moduleCacheSnapshot;
+                    selfGuard->m_tamperCandidateSnapshot = candidates;
                     selfGuard->m_moduleCachePid = pid;
                     selfGuard->m_moduleCacheCreateTime = moduleCreateTime;
                     selfGuard->rebuildModuleTableFromCache();
@@ -1417,12 +1156,14 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
                             .arg(elapsedMs)
                             .arg(moduleCount)
                             .arg(threadCount)
-                            .arg(selfGuard->m_moduleTable->topLevelItemCount());
+                            .arg(QStringLiteral("%4"));
                         if (!diagnosticText.isEmpty())
                         {
                             statusText += QStringLiteral(
                                 " | 存在诊断；详情已写入日志。");
                         }
+                        selfGuard->m_moduleCacheStatusTemplate = statusText;
+                        statusText = statusText.arg(selfGuard->m_moduleTable->topLevelItemCount());
                         selfGuard->m_moduleStatusLabel->setText(statusText);
                         selfGuard->m_moduleStatusLabel->setStyleSheet(
                             QStringLiteral("color:%1; font-weight:%2;")
@@ -1449,29 +1190,18 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
                         << ", diagnostic="
                         << diagnosticText.toStdString()
                         << eol;
-                };
-
-                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-                        selfGuard.data(),
-                        QStringLiteral("memory-process-modules-snapshot-apply"),
-                        {selfGuard->m_moduleTable},
-                        commitModuleSnapshot))
-                {
-                    return;
-                }
-                commitModuleSnapshot();
-            }, Qt::QueuedConnection);
-        });
-    refreshModuleTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(refreshModuleTask);
-
-    return true;
+    };
+    m_moduleRefreshPoll->stop();
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("memory-process-modules-snapshot-apply"),
+        {m_moduleTable}, commitModuleSnapshot)) { return; }
+    commitModuleSnapshot();
 }
 
-bool MemoryDock::attachToProcess(
+ks::ui::LeaveEntryStatus MemoryDock::attachToProcess(
     const std::uint32_t pid,
     const QString& processName,
-    const bool showMessage)
+    const bool showMessage,
+    ks::ui::LeaveCompletion completion)
 {
     // 附加入口日志：记录目标 PID 与是否弹窗反馈。
     kLogEvent attachStartEvent;
@@ -1484,11 +1214,38 @@ bool MemoryDock::attachToProcess(
         << (showMessage ? "true" : "false")
         << eol;
 
-    // 暂存补丁与 int3 的目标变更确认统一交给工作台离开守卫。
-    if (!workbenchAllowsProcessChange())
+    if (m_workbenchProcessChangePending) return ks::ui::LeaveEntryStatus::Busy;
+    const QPointer<MemoryDock> self(this);
+    const auto attachment = m_processAttachmentGeneration.load();
+    const auto anchor = std::shared_ptr<ks::ui::AnchorInfo>(new ks::ui::AnchorInfo(ks::ui::AcquireAnchorForPid(pid)),
+        [](ks::ui::AnchorInfo* value) { ks::ui::ReleaseAnchorHandle(value->handle); delete value; });
+    if (anchor->targetGone) return ks::ui::LeaveEntryStatus::Rejected;
+    const auto expectedCreateTime = anchor->identityWeak ? 0 : anchor->createTime100ns;
+    const auto leave = workbenchAllowsProcessChange(
+        [self, attachment, anchor, expectedCreateTime, pid, processName, showMessage, completion](bool allowed) mutable {
+            if (!self) return;
+            self->m_workbenchProcessChangePending = false;
+            const bool current = self->m_processAttachmentGeneration.load() == attachment;
+            const bool alive = !anchor->handle || ks::ui::QueryAnchorAlive(anchor->handle) != std::optional<bool>(false);
+            const bool attached = allowed && current && alive
+                && self->attachToProcessAfterLeave(pid, processName, showMessage, expectedCreateTime);
+            if (self && completion) completion(attached);
+        });
+    if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+    if (leave == ks::ui::LeaveEntryStatus::Pending)
     {
-        return false;
+        m_workbenchProcessChangePending = true;
+        return leave;
     }
+    if (leave != ks::ui::LeaveEntryStatus::Completed) return leave;
+    if (m_processAttachmentGeneration.load() != attachment) return ks::ui::LeaveEntryStatus::Rejected;
+    return attachToProcessAfterLeave(pid, processName, showMessage, expectedCreateTime)
+        ? ks::ui::LeaveEntryStatus::Completed : ks::ui::LeaveEntryStatus::Rejected;
+}
+
+bool MemoryDock::attachToProcessAfterLeave(const std::uint32_t pid, const QString& processName,
+    const bool showMessage, const std::uint64_t expectedCreateTime)
+{
     // 附加前先清理旧进程上下文，避免残留句柄。
     detachProcess();
 
@@ -1550,6 +1307,19 @@ bool MemoryDock::attachToProcess(
             << eol;
     }
 
+    if (expectedCreateTime != 0)
+    {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const bool queried = ::GetProcessTimes(processHandle, &created, &exited, &kernel, &user) != FALSE;
+        const std::uint64_t actual = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32U) | created.dwLowDateTime;
+        if (!queried || actual != expectedCreateTime)
+        {
+            ::CloseHandle(processHandle);
+            m_canReadWriteMemory = false;
+            updateStatusBarText();
+            return false;
+        }
+    }
     m_attachedProcessHandle = processHandle;
     m_attachedPid = pid;
     m_attachedProcessName = processName;
@@ -1590,7 +1360,7 @@ bool MemoryDock::attachToProcess(
     return true;
 }
 
-void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool showMessage)
+void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool showMessage, ks::ui::LeaveCompletion completion)
 {
     // 从进程 Dock 跳转：刷新进程列表，定位目标行并切换到“进程与模块/内存区域”操作上下文。
     if (pid == 0)
@@ -1601,7 +1371,7 @@ void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool s
     // 进程列表刷新已改为异步，附加不能再等表格重建完成。进程名优先取现有缓存，
     // 缓存未命中时只做一次映像路径查询（单个进程句柄，代价可忽略）。
     QString processName;
-    for (const ProcessEntry& entry : m_processCache)
+    for (const ProcessEntry& entry : *m_processCache)
     {
         if (entry.pid == pid)
         {
@@ -1626,18 +1396,25 @@ void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool s
     // 当前表里已经存在该进程时立即定位，不必等异步结果回来。
     (void)selectProcessRowByPid(m_processTable, m_processCombo, pid);
 
-    attachToProcess(pid, processName, showMessage);
-    if (m_tabWidget != nullptr && m_tabRegions != nullptr)
-    {
+    const QPointer<MemoryDock> self(this);
+    const auto status = attachToProcess(pid, processName, showMessage, [self, completion](bool allowed) mutable {
+        if (!self) return;
+        if (allowed && self->m_tabWidget && self->m_tabRegions) self->m_tabWidget->setCurrentWidget(self->m_tabRegions);
+        if (self && completion) completion(allowed);
+    });
+    if (self && status == ks::ui::LeaveEntryStatus::Completed && m_tabWidget && m_tabRegions)
         m_tabWidget->setCurrentWidget(m_tabRegions);
-    }
 }
 
 void MemoryDock::focusProcessForSearch(const std::uint32_t pid, const bool showMessage)
 {
     // 搜索页需要有效进程句柄和最新区域缓存，先复用标准附加流程，再切到搜索页。
-    focusProcessForOperations(pid, showMessage);
-    if (m_attachedPid == pid && m_tabWidget != nullptr && m_tabSearch != nullptr)
+    const QPointer<MemoryDock> self(this);
+    focusProcessForOperations(pid, showMessage, [self, pid](bool allowed) {
+        if (self && allowed && self->m_attachedPid == pid && self->m_tabWidget && self->m_tabSearch)
+            self->m_tabWidget->setCurrentWidget(self->m_tabSearch);
+    });
+    if (self && m_attachedPid == pid && m_tabWidget != nullptr && m_tabSearch != nullptr)
     {
         m_tabWidget->setCurrentWidget(m_tabSearch);
     }
@@ -1684,6 +1461,7 @@ void MemoryDock::applyProcessDetailTabVisibility()
 
 void MemoryDock::detachProcess()
 {
+    cancelCoreProjection(false);
     // 分离入口日志：记录旧 PID 便于追踪。
     kLogEvent detachStartEvent;
     info << detachStartEvent
@@ -1695,9 +1473,9 @@ void MemoryDock::detachProcess()
     // 需要在句柄关闭之前还原；视图未创建时是空操作）。
     workbenchOnAboutToDetach();
 
-    // 先取消并等待所有扫描协调线程退出，再关闭进程句柄，
-    // 防止后台 ReadProcessMemory 使用已关闭或已复用的 HANDLE。
-    cancelAndWaitForMemoryScanTasks();
+    // 先取消扫描并解绑 UI；后台任务保留各自复制的进程句柄，
+    // 直到物理任务结束再释放，不在界面线程等待。
+    cancelMemoryScanTasks();
 
     // 先使所有基于旧附加上下文的异步快照失效。PTE/证据任务持有的是复制句柄，
     // 可以安全完成系统调用，但其结果不得再写回新的附加进程。
@@ -1725,6 +1503,8 @@ void MemoryDock::detachProcess()
 
     // 同步抬高模块刷新 ticket，确保旧的异步模块回调不会覆盖“已分离”状态。
     m_moduleRefreshTicket.fetch_add(1);
+    m_moduleRefreshPending.reset();
+    if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
     m_moduleRefreshInProgress.store(false);
     if (m_moduleRefreshButton != nullptr)
     {
@@ -1742,15 +1522,15 @@ void MemoryDock::detachProcess()
     m_canReadWriteMemory = false;
 
     // 分离时清理依赖上下文的数据缓存。
-    m_moduleCache.clear();
+    m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>(); m_moduleCacheStatusTemplate.clear(); m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();
     m_moduleCachePid = 0U;
     m_moduleCacheCreateTime = 0U;
-    m_regionCache.clear();
-    m_searchResultCache.clear();
+    m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
+    m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>();
     m_searchResultVisibleCount = 0;
-    m_processPteTranslateCache.clear();
+    m_processPteTranslateCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>();
     m_processPteTranslateVisibleCount = 0;
-    m_processMemoryEvidenceCache.clear();
+    m_processMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>();
     m_processMemoryEvidenceVisibleCount = 0;
 
     // 清理表格展示，避免用户误操作旧数据。
@@ -1762,15 +1542,15 @@ void MemoryDock::detachProcess()
             QStringLiteral("color:%1; font-weight:600;")
                 .arg(KswordTheme::TextSecondaryColor().name(QColor::HexRgb)));
     }
-    m_regionTable->setRowCount(0);
-    m_searchResultTable->setRowCount(0);
+    if (m_regionTable) { m_regionTable->clearEntries(); }
+    if (m_searchResultTable) { m_searchResultTable->clearEntries(); }
     if (m_processPteTranslateTable != nullptr)
     {
-        m_processPteTranslateTable->setRowCount(0);
+        m_processPteTranslateTable->clearEntries();
     }
     if (m_processMemoryEvidenceTable != nullptr)
     {
-        m_processMemoryEvidenceTable->setRowCount(0);
+        m_processMemoryEvidenceTable->clearEntries();
     }
     if (m_processPteTranslateStatusLabel != nullptr)
     {
@@ -1881,29 +1661,28 @@ void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
     }
 
     const QModelIndex index = m_processTable->indexAt(localPosition);
-    if (!index.isValid())
-    {
-        return;
-    }
-
+    if (!index.isValid() || !coreProjectionIsCurrent(CoreKind::Processes)) { return; }
+    const QPointer<MemoryDock> menuOwner(this);
+    const auto menuSource = m_corePublished[2];
     const int row = index.row();
-    const QTableWidgetItem* pidItem = m_processTable->item(row, 1);
-    const QTableWidgetItem* nameItem = m_processTable->item(row, 0);
-    if (pidItem == nullptr || nameItem == nullptr)
+    const QModelIndex pidItem = index.siblingAtColumn(1), nameItem = index.siblingAtColumn(0);
+    if (!pidItem.isValid() || !nameItem.isValid())
     {
         return;
     }
 
     bool pidOk = false;
-    const std::uint32_t pid = pidItem->text().toUInt(&pidOk);
+    const std::uint32_t pid = pidItem.data(Qt::DisplayRole).toString().toUInt(&pidOk);
     if (!pidOk || pid == 0)
     {
         return;
     }
-    const QString processName = nameItem->text().trimmed();
-    m_processTable->setCurrentCell(row, index.column());
+    const QString processName = nameItem.data(Qt::DisplayRole).toString().trimmed();
+    m_processTable->setCurrentIndex(index);
+    if (!menuOwner || !coreProjectionIsCurrent(CoreKind::Processes)) { return; }
+    const QString copiedRow = processRegionTableRowText(m_processTable, row);
 
-    QMenu contextMenu(this);
+    QMenu contextMenu;
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* attachAction = contextMenu.addAction(
         QIcon(":/Icon/process_start.svg"),
@@ -1917,24 +1696,24 @@ void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
 
-    const auto creationTime100ns = nameItem->data(kProcessCreationTimeRole).toULongLong();
+    const auto creationTime100ns = nameItem.data(kProcessCreationTimeRole).toULongLong();
     if (creationTime100ns != 0)
         ks::ui::x64dbg_navigation::AddAction(&contextMenu, this,
             {pid, creationTime100ns, 0, ks::ui::x64dbg_navigation::View::Disassembly});
 
     QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));
-    if (selectedAction == nullptr)
+    if (!menuOwner || selectedAction == nullptr)
     {
         return;
     }
 
-    if (selectedAction == attachAction)
+    if (selectedAction == attachAction && coreProjectionIsCurrent(CoreKind::Processes) && m_corePublished[2] == menuSource)
     {
         attachToProcess(pid, processName, true);
         return;
     }
 
-    if (selectedAction == dumpAction)
+    if (selectedAction == dumpAction && coreProjectionIsCurrent(CoreKind::Processes) && m_corePublished[2] == menuSource)
     {
         requestDumpProcessMemoryByPid(pid, processName);
         return;
@@ -1942,7 +1721,7 @@ void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
 
     if (selectedAction == copyRowAction)
     {
-        copyProcessRegionTableRow(m_processTable, row);
+        QApplication::clipboard()->setText(copiedRow);
         kLogEvent copyProcessRowEvent;
         dbg << copyProcessRowEvent
             << "[MemoryDock] 进程表右键复制当前行, row="
@@ -2391,192 +2170,6 @@ bool MemoryDock::dumpProcessMemoryToFile(
     return true;
 }
 
-void MemoryDock::refreshMemoryRegionList(const bool forceRequery)
-{
-    // 区域刷新入口日志：记录是否强制重查。
-    kLogEvent regionRefreshStartEvent;
-    info << regionRefreshStartEvent
-        << "[MemoryDock] refreshMemoryRegionList: 开始刷新区域, forceRequery="
-        << (forceRequery ? "true" : "false")
-        << ", attachedPid="
-        << m_attachedPid
-        << eol;
-
-    // 附加流程打的“必须异步”标记只对本次调用有效，读到后立刻清掉。
-    const bool requestedByAttach = readBoolProperty(this, kRegionRefreshFromAttachProperty);
-    if (requestedByAttach)
-    {
-        setProperty(kRegionRefreshFromAttachProperty, false);
-    }
-
-    if (m_attachedProcessHandle == nullptr)
-    {
-        m_regionCache.clear();
-        m_regionTable->setRowCount(0);
-        return;
-    }
-
-    if (!forceRequery && !m_regionCache.empty())
-    {
-        // 缓存可用且未要求重查时只重新过滤，不再遍历地址空间。
-        applyRegionFilterAndRebuildTable();
-
-        // 区域刷新结束日志：记录缓存数量。
-        kLogEvent regionCachedFinishEvent;
-        info << regionCachedFinishEvent
-            << "[MemoryDock] refreshMemoryRegionList: 刷新完成, regionCount="
-            << m_regionCache.size()
-            << eol;
-        return;
-    }
-
-    // 已有枚举在途时只登记一次待补请求：区域遍历动辄数百毫秒，重复点击不该叠加任务。
-    if (readBoolProperty(this, kRegionRefreshInFlightProperty))
-    {
-        setProperty(kRegionRefreshPendingProperty, true);
-        return;
-    }
-
-    // asyncAllowed 说明：附加流程和“表里已经有数据”的重查一律异步。
-    // 只有“缓存为空且没有在途任务”时保持同步 —— 那条路径上的调用方（扫描页收集
-    // 扫描范围）在调用返回后立刻读 m_regionCache，异步会让它直接判定为无区域可扫。
-    const bool asyncAllowed = requestedByAttach || !m_regionCache.empty();
-    std::uint32_t duplicateError = ERROR_SUCCESS;
-    const std::shared_ptr<void> processHandleLease =
-        asyncAllowed ? duplicateAttachedProcessHandleForWorker(&duplicateError) : std::shared_ptr<void>();
-    if (processHandleLease)
-    {
-        setProperty(kRegionRefreshInFlightProperty, true);
-
-        // 附加上下文代次：分离或重新附加后旧快照不得再写回新目标。
-        const std::uint64_t attachmentGeneration = m_processAttachmentGeneration.load();
-        const QPointer<MemoryDock> guardedSelf(this);
-
-        QRunnable* const enumerateRegionTask =
-            QRunnable::create([guardedSelf, processHandleLease, attachmentGeneration]() {
-                // 工作线程只做 VirtualQueryEx / GetMappedFileNameW 遍历，产出纯值类型行。
-                std::vector<RegionSnapshotRow> regionRows =
-                    collectVirtualMemoryRegionRows(static_cast<HANDLE>(processHandleLease.get()));
-
-                QCoreApplication* const appInstance = QCoreApplication::instance();
-                if (appInstance == nullptr)
-                {
-                    return;
-                }
-
-                QMetaObject::invokeMethod(
-                    appInstance,
-                    [guardedSelf, attachmentGeneration, regionRows = std::move(regionRows)]() mutable {
-                        if (guardedSelf == nullptr)
-                        {
-                            return;
-                        }
-                        MemoryDock* const resultDock = guardedSelf.data();
-
-                        // 附加上下文已变化（分离/重新附加）时旧快照直接丢弃。注意这里不能
-                        // 顺手清在途标记：那组标记已经在 detachProcess 里复位并被新一轮
-                        // 任务重新占用，旧任务再清一次会让新任务失去去重保护。
-                        if (attachmentGeneration != resultDock->m_processAttachmentGeneration.load())
-                        {
-                            return;
-                        }
-
-                        if (regionRows.empty())
-                        {
-                            resultDock->setProperty(kRegionRefreshInFlightProperty, false);
-                            resultDock->setProperty(kRegionRefreshPendingProperty, false);
-                            reportRegionEnumerateFailure(
-                                resultDock,
-                                QStringLiteral("VirtualQueryEx 未返回有效区域。"));
-                            return;
-                        }
-
-                        const auto regionRowsSnapshot =
-                            std::make_shared<std::vector<RegionSnapshotRow>>(std::move(regionRows));
-                        auto commitRegionSnapshot = [guardedSelf, attachmentGeneration, regionRowsSnapshot]() {
-                            if (guardedSelf == nullptr)
-                            {
-                                return;
-                            }
-                            MemoryDock* const commitDock = guardedSelf.data();
-                            if (attachmentGeneration != commitDock->m_processAttachmentGeneration.load())
-                            {
-                                return;
-                            }
-
-                            // 缓存与表格一次性替换，避免过滤动作读到半成品缓存。
-                            commitDock->m_regionCache.clear();
-                            commitDock->m_regionCache.reserve(regionRowsSnapshot->size());
-                            for (const RegionSnapshotRow& regionRow : *regionRowsSnapshot)
-                            {
-                                RegionEntry entry{};
-                                entry.baseAddress = regionRow.baseAddress;
-                                entry.regionSize = regionRow.regionSize;
-                                entry.protect = regionRow.protect;
-                                entry.state = regionRow.state;
-                                entry.type = regionRow.type;
-                                entry.mappedFilePath = regionRow.mappedFilePath;
-                                commitDock->m_regionCache.push_back(std::move(entry));
-                            }
-                            commitDock->applyRegionFilterAndRebuildTable();
-
-                            // 区域刷新结束日志：记录缓存数量。
-                            kLogEvent regionRefreshFinishEvent;
-                            info << regionRefreshFinishEvent
-                                << "[MemoryDock] refreshMemoryRegionList: 刷新完成, regionCount="
-                                << commitDock->m_regionCache.size()
-                                << eol;
-
-                            // 在途标记留到提交阶段才释放：右键菜单打开时本次提交会被延后，
-                            // 期间必须继续挡住新任务，否则旧提交会覆盖更新的结果。
-                            commitDock->setProperty(kRegionRefreshInFlightProperty, false);
-
-                            // 合并下来的待补请求在本轮落地后再补一次，避免结果落后于用户操作。
-                            if (commitDock->property(kRegionRefreshPendingProperty).toBool())
-                            {
-                                commitDock->setProperty(kRegionRefreshPendingProperty, false);
-                                commitDock->refreshMemoryRegionList(true);
-                            }
-                        };
-
-                        // 右键菜单打开时先缓存本次提交，避免把用户正在操作的行整表换掉。
-                        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-                                resultDock,
-                                QStringLiteral("memory-region-list-snapshot-apply"),
-                                {resultDock->m_regionTable},
-                                commitRegionSnapshot))
-                        {
-                            return;
-                        }
-                        commitRegionSnapshot();
-                    },
-                    Qt::QueuedConnection);
-                });
-        enumerateRegionTask->setAutoDelete(true);
-        QThreadPool::globalInstance()->start(enumerateRegionTask);
-        return;
-    }
-
-    // 同步兜底：调用方需要立刻拿到区域缓存，或复制句柄失败（正常情况下不可达）。
-    QString errorText;
-    std::vector<RegionEntry> regionList;
-    if (!enumerateMemoryRegionsByVirtualQuery(m_attachedProcessHandle, regionList, &errorText))
-    {
-        reportRegionEnumerateFailure(this, errorText);
-        return;
-    }
-    m_regionCache = std::move(regionList);
-
-    applyRegionFilterAndRebuildTable();
-
-    // 区域刷新结束日志：记录缓存数量。
-    kLogEvent regionRefreshFinishEvent;
-    info << regionRefreshFinishEvent
-        << "[MemoryDock] refreshMemoryRegionList: 刷新完成, regionCount="
-        << m_regionCache.size()
-        << eol;
-}
-
 bool MemoryDock::enumerateMemoryRegionsByVirtualQuery(
     HANDLE processHandle,
     std::vector<RegionEntry>& regionsOut,
@@ -2628,108 +2221,464 @@ bool MemoryDock::enumerateMemoryRegionsByVirtualQuery(
     return true;
 }
 
-void MemoryDock::applyRegionFilterAndRebuildTable()
+void MemoryDock::applyRegionFilterAndRebuildTable() { if (m_regionTable) { requestCoreProjection(CoreKind::Regions, false); } }
+
+
+struct MemoryDock::CoreProjectionJob {
+    std::atomic_bool done{false}, cancel{false};
+    std::shared_ptr<std::atomic_bool> lifetime;
+    std::shared_ptr<CoreProjectionData> data;
+    bool failed = false;
+    bool cancelled() const { return cancel.load() || (lifetime && lifetime->load()); }
+};
+
+QString MemoryDock::coreRowKey(const CoreProjectionData& data, const std::size_t row)
 {
-    // 过滤入口日志：记录当前缓存规模与过滤开关状态。
-    kLogEvent regionFilterStartEvent;
-    dbg << regionFilterStartEvent
-        << "[MemoryDock] applyRegionFilterAndRebuildTable: 开始过滤, cacheSize="
-        << m_regionCache.size()
-        << ", committedOnly="
-        << (m_regionCommittedOnlyCheck->isChecked() ? "true" : "false")
-        << ", imageOnly="
-        << (m_regionImageOnlyCheck->isChecked() ? "true" : "false")
-        << ", readableOnly="
-        << (m_regionReadableOnlyCheck->isChecked() ? "true" : "false")
-        << eol;
-
-    // 关键字过滤：留空表示不筛，命中判据覆盖基址文本、保护属性与映射文件路径。
-    const QString filterKeyword = (m_regionFilterEdit != nullptr)
-        ? m_regionFilterEdit->text().trimmed()
-        : QString();
-
-    // 过滤条件组合：已提交 / IMAGE / 可读 / 关键字。
-    std::vector<const RegionEntry*> filteredRegions;
-    filteredRegions.reserve(m_regionCache.size());
-    for (const RegionEntry& entry : m_regionCache)
-    {
-        if (m_regionCommittedOnlyCheck->isChecked() && entry.state != MEM_COMMIT)
-        {
-            continue;
-        }
-        if (m_regionImageOnlyCheck->isChecked() && entry.type != MEM_IMAGE)
-        {
-            continue;
-        }
-        if (m_regionReadableOnlyCheck->isChecked() && !isReadableProtect(entry.protect))
-        {
-            continue;
-        }
-        if (!filterKeyword.isEmpty())
-        {
-            const bool keywordMatched =
-                formatAddress(entry.baseAddress).contains(filterKeyword, Qt::CaseInsensitive)
-                || protectToText(entry.protect).contains(filterKeyword, Qt::CaseInsensitive)
-                || entry.mappedFilePath.contains(filterKeyword, Qt::CaseInsensitive);
-            if (!keywordMatched)
-            {
-                continue;
-            }
-        }
-        filteredRegions.push_back(&entry);
+    if (data.kind == CoreKind::Processes) { const auto& entry = (*data.processes)[row]; return QString::number(entry.pid) + QLatin1Char(':') + QString::number(entry.creationTime100ns); }
+    if (row == SIZE_MAX) { return {}; }
+    const auto target = QString::number(data.pid) + QLatin1Char(':') + QString::number(data.target) + QLatin1Char(':');
+    if (data.extraSource) { return target + data.extraKey(row); }
+    if (data.kind == CoreKind::Modules) {
+        const auto& entry = (*data.modules)[row];
+        return target + QString::number(entry.baseAddress) + QLatin1Char(':') + QString::number(entry.fullPath.size()) + QLatin1Char(':') + entry.fullPath;
     }
-
-    m_regionTable->setSortingEnabled(false);
-    m_regionTable->setRowCount(static_cast<int>(filteredRegions.size()));
-    for (int row = 0; row < static_cast<int>(filteredRegions.size()); ++row)
-    {
-        const RegionEntry& entry = *filteredRegions[static_cast<std::size_t>(row)];
-        // 列 0 和列 1 附带 UserRole 原始值，便于右键动作时可靠反查。
-        //
-        // 这里原先还写了 setData(Qt::EditRole, 原始数值)：QTableWidgetItem::setData
-        // 内部把 EditRole 直接改写成 DisplayRole，于是 formatAddress()/formatSize()
-        // 生成的“0x00007FF6…/4.00 MB”当场被裸十进制数覆盖——一个内核分析工具的
-        // 内存区域表看不到十六进制地址。排序改由 NumericSortRole 承担，显示文本不再被动。
-        QTableWidgetItem* baseItem = new ks::ui::NumericTableItem(
-            formatAddress(entry.baseAddress),
-            static_cast<qulonglong>(entry.baseAddress));
-        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(entry.baseAddress)));
-        m_regionTable->setItem(row, 0, baseItem);
-
-        QTableWidgetItem* sizeItem = new ks::ui::NumericTableItem(
-            formatSize(entry.regionSize),
-            static_cast<qulonglong>(entry.regionSize));
-        sizeItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(entry.regionSize)));
-        m_regionTable->setItem(row, 1, sizeItem);
-
-        m_regionTable->setItem(row, 2, new QTableWidgetItem(protectToText(entry.protect)));
-        m_regionTable->setItem(row, 3, new QTableWidgetItem(stateToText(entry.state)));
-        m_regionTable->setItem(row, 4, new QTableWidgetItem(typeToText(entry.type)));
-        m_regionTable->setItem(row, 5, new QTableWidgetItem(entry.mappedFilePath));
-    }
-    m_regionTable->setSortingEnabled(true);
-
-    // 状态标签明确写出“显示了多少 / 一共多少”，避免用户把过滤结果误当成全部区域。
-    if (m_regionStatusLabel != nullptr)
-    {
-        if (m_attachedPid == 0U)
-        {
-            m_regionStatusLabel->setText("未附加进程。");
-        }
-        else
-        {
-            m_regionStatusLabel->setText(
-                QString("显示 %1 / 共 %2 个区域")
-                    .arg(filteredRegions.size())
-                    .arg(m_regionCache.size()));
-        }
-    }
-
-    // 过滤结束日志：记录最终展示条目数。
-    kLogEvent regionFilterFinishEvent;
-    info << regionFilterFinishEvent
-        << "[MemoryDock] applyRegionFilterAndRebuildTable: 完成, visibleCount="
-        << filteredRegions.size()
-        << eol;
+    const auto& entry = (*data.regions)[row];
+    return target + QString::number(entry.baseAddress) + QLatin1Char(':') + QString::number(entry.regionSize);
 }
 
+QVariant MemoryDock::coreCell(const CoreProjectionData& data, const std::size_t row, const int column, const int role)
+{
+    if (role == ks::memory_detail::CoreSourceIndexRole) { return QVariant::fromValue<qulonglong>(row); }
+    if (role == ks::memory_detail::CoreIdentityRole) { return coreRowKey(data, row); }
+    if (data.extraSource) { return data.extraCell(row, column, role); }
+    const bool numeric = role == ks::ui::NumericSortRole;
+    if (data.kind == CoreKind::Processes) {
+        const auto& entry = (*data.processes)[row];
+        if (column == 0) {
+            if (role == kIconPathItemRole) { return entry.imagePath; }
+            if (role == Qt::DecorationRole) { return lookupCachedPathIcon(entry.imagePath); }
+            if (role == kProcessCreationTimeRole) { return QVariant::fromValue<qulonglong>(entry.creationTime100ns); }
+        }
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return entry.processName;
+        case 1: return numeric ? QVariant::fromValue(entry.pid) : QVariant(QString::number(entry.pid));
+        case 2: return numeric ? QVariant::fromValue(entry.sessionId) : QVariant(QString::number(entry.sessionId));
+        case 3: return numeric ? QVariant(entry.cpuPercentValid ? entry.cpuPercent : -1.0) : QVariant(entry.cpuPercentValid ? QString::number(entry.cpuPercent, 'f', 2) + QLatin1Char('%') : QStringLiteral("-"));
+        case 4: return numeric ? QVariant(entry.workingSetMB) : QVariant(QStringLiteral("%1 MB").arg(entry.workingSetMB, 0, 'f', 1));
+        default: return {};
+        }
+    }
+    if (data.kind == CoreKind::Modules) {
+        const auto& entry = (*data.modules)[row];
+        if (column == 0) {
+            if (role == kIconPathItemRole) { return entry.fullPath.trimmed(); }
+            if (role == Qt::DecorationRole) { return lookupCachedPathIcon(entry.fullPath); }
+            if (role == Qt::UserRole) { return QVariant::fromValue<qulonglong>(entry.baseAddress); }
+            if (role == Qt::UserRole + 1) { return QVariant::fromValue(entry.representativeThreadId); }
+        }
+        if (column == 2 && role == Qt::ForegroundRole) {
+            return QBrush(entry.signatureTrusted ? KswordTheme::SuccessColor()
+                : entry.signatureState.compare(QStringLiteral("Pending"), Qt::CaseInsensitive) == 0 || entry.signatureState.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0
+                    ? KswordTheme::TextSecondaryColor() : KswordTheme::ErrorColor());
+        }
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return entry.fullPath;
+        case 1: return numeric ? QVariant::fromValue<qulonglong>(entry.sizeBytes) : QVariant(formatSize(entry.sizeBytes));
+        case 2: return data.language.sourceText(entry.signatureState);
+        case 3: return numeric ? QVariant::fromValue<qulonglong>(entry.entryPointOffset) : QVariant(QStringLiteral("0x%1").arg(entry.entryPointOffset, 0, 16).toUpper());
+        case 4: return data.language.sourceText(entry.runningState);
+        case 5: return entry.threadIdText;
+        default: return {};
+        }
+    }
+    const auto& entry = (*data.regions)[row];
+    if (role == Qt::UserRole) {
+        if (column == 0) { return QVariant::fromValue<qulonglong>(entry.baseAddress); }
+        if (column == 1) { return QVariant::fromValue<qulonglong>(entry.regionSize); }
+    }
+    if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+    switch (column) {
+    case 0: return numeric ? QVariant::fromValue<qulonglong>(entry.baseAddress) : QVariant(formatAddress(entry.baseAddress));
+    case 1: return numeric ? QVariant::fromValue<qulonglong>(entry.regionSize) : QVariant(formatSize(entry.regionSize));
+    case 2: return protectToText(entry.protect);
+    case 3: return stateToText(entry.state);
+    case 4: return typeToText(entry.type);
+    case 5: return entry.mappedFilePath;
+    default: return {};
+    }
+}
+
+bool MemoryDock::sameCoreRequest(const CoreProjectionData& left, const CoreProjectionData& right)
+{
+    return left.kind == right.kind && left.extraSource == right.extraSource && left.extraRisk == right.extraRisk && left.processes == right.processes && left.modules == right.modules && left.regions == right.regions
+        && left.filter == right.filter && left.pid == right.pid && left.target == right.target
+        && left.localeGeneration == right.localeGeneration && left.languageId == right.languageId
+        && left.committed == right.committed && left.image == right.image && left.readable == right.readable
+        && left.sortColumn == right.sortColumn && left.sortOrder == right.sortOrder;
+}
+
+std::shared_ptr<MemoryDock::CoreProjectionData> MemoryDock::captureCoreRequest(const CoreKind kind) const
+{
+    auto data = std::make_shared<CoreProjectionData>();
+    data->kind = kind; data->localeGeneration = m_coreLocaleGeneration;
+    data->language = ks::i18n::LanguageManager::instance().sourceTextSnapshot(); data->languageId = data->language.languageId();
+    const auto index = static_cast<std::size_t>(kind);
+    data->sortColumn = m_coreSortColumns[index]; data->sortOrder = m_coreSortOrders[index];
+    if (kind == CoreKind::Processes) {
+        data->processes = m_processCache; data->filter = m_processFilterEdit ? m_processFilterEdit->text().trimmed() : QString();
+        if (m_processTable) { data->selectedKey = m_processTable->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString(); data->selectedColumn = m_processTable->currentIndex().column(); }
+    } else if (kind == CoreKind::Modules) {
+        data->modules = m_moduleCache; data->filter = m_moduleFilterEdit ? m_moduleFilterEdit->text().trimmed() : QString();
+        data->pid = m_moduleCachePid; data->target = m_moduleCacheCreateTime; data->statusTemplate = m_moduleCacheStatusTemplate;
+        if (m_moduleTable) {
+            data->selectedKey = m_moduleTable->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString();
+            data->selectedColumn = m_moduleTable->currentIndex().column();
+        }
+    } else if (kind == CoreKind::Regions) {
+        data->regions = m_regionCache; data->filter = m_regionFilterEdit ? m_regionFilterEdit->text().trimmed() : QString();
+        data->pid = m_attachedPid; data->target = m_processAttachmentGeneration.load();
+        data->committed = m_regionCommittedOnlyCheck && m_regionCommittedOnlyCheck->isChecked();
+        data->image = m_regionImageOnlyCheck && m_regionImageOnlyCheck->isChecked();
+        data->readable = m_regionReadableOnlyCheck && m_regionReadableOnlyCheck->isChecked();
+        if (m_regionTable) {
+            data->selectedKey = m_regionTable->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString();
+            data->selectedColumn = m_regionTable->currentIndex().column();
+        }
+    }
+    if (static_cast<int>(kind) >= 3) {
+        data->pid = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence || kind == CoreKind::SearchResults ? m_attachedPid : 0;
+        data->target = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence || kind == CoreKind::SearchResults ? m_processAttachmentGeneration.load() : 0;
+        switch (kind) {
+        case CoreKind::KernelExecutable: captureKernelExecutableProjection(*data); break;
+        case CoreKind::KernelEvidence: captureKernelMemoryProjection(*data); break;
+        case CoreKind::PteEvidence: capturePteProjection(*data); break;
+        case CoreKind::ProcessEvidence: captureProcessEvidenceProjection(*data); break;
+        case CoreKind::SearchResults: captureSearchResultProjection(*data); break;
+        default: break;
+        }
+        if (auto* table = extraCoreTable(kind)) { data->selectedKey = table->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString(); data->selectedColumn = table->currentIndex().column(); }
+    }
+    return data;
+}
+
+void MemoryDock::buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& job)
+{
+    try {
+        auto& data = *job->data;
+        data.rows = ks::memory_detail::ValueStorage<std::vector<std::size_t>>();
+        const std::size_t count = data.extraSource ? data.extraCount : data.kind == CoreKind::Processes ? data.processes->size() : data.kind == CoreKind::Modules ? data.modules->size() : data.regions->size();
+        struct SortRow { std::size_t source; QVariant key; };
+        std::vector<SortRow> rows; rows.reserve(count);
+        auto selected = std::numeric_limits<std::size_t>::max();
+        for (std::size_t row = 0; row < count; ++row) {
+            if ((row & 63U) == 0 && job->cancelled()) { job->done.store(true); return; }
+            if (data.extraSource) { if (!data.extraMatches(row)) { continue; } }
+            else if (data.kind == CoreKind::Processes) {
+                const auto& entry = (*data.processes)[row];
+                if (!data.filter.isEmpty() && !entry.processName.contains(data.filter, Qt::CaseInsensitive) && !QString::number(entry.pid).contains(data.filter, Qt::CaseInsensitive)) { continue; }
+            } else if (data.kind == CoreKind::Modules) {
+                const auto& entry = (*data.modules)[row];
+                if (!data.filter.isEmpty() && !entry.moduleName.contains(data.filter, Qt::CaseInsensitive) && !entry.fullPath.contains(data.filter, Qt::CaseInsensitive)) { continue; }
+            } else {
+                const auto& entry = (*data.regions)[row];
+                if ((data.committed && entry.state != MEM_COMMIT) || (data.image && entry.type != MEM_IMAGE) || (data.readable && !isReadableProtect(entry.protect))) { continue; }
+                if (!data.filter.isEmpty() && !formatAddress(entry.baseAddress).contains(data.filter, Qt::CaseInsensitive)
+                    && !protectToText(entry.protect).contains(data.filter, Qt::CaseInsensitive) && !entry.mappedFilePath.contains(data.filter, Qt::CaseInsensitive)) { continue; }
+            }
+            if (!data.selectedKey.isEmpty() && coreRowKey(data, row) == data.selectedKey) { selected = row; }
+            rows.push_back({row, coreCell(data, row, data.sortColumn, ks::ui::NumericSortRole)});
+        }
+        std::stable_sort(rows.begin(), rows.end(), [&](const auto& left, const auto& right) {
+            int comparison = 0;
+            if (left.key.metaType().id() == QMetaType::QString) { comparison = QString::compare(left.key.toString(), right.key.toString(), Qt::CaseInsensitive); }
+            else if (left.key.metaType().id() == QMetaType::Double) { const auto a = left.key.toDouble(), b = right.key.toDouble(); comparison = a < b ? -1 : a > b ? 1 : 0; }
+            else { const auto a = left.key.toULongLong(), b = right.key.toULongLong(); comparison = a < b ? -1 : a > b ? 1 : 0; }
+            return comparison == 0 ? left.source < right.source : data.sortOrder == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
+        });
+        if (!job->cancelled()) {
+            data.rows->reserve(rows.size());
+            for (const auto& row : rows) {
+                if (row.source == selected) { data.selectedRow = static_cast<int>(data.rows->size()); }
+                data.rows->push_back(row.source);
+            }
+            if (data.extraSource && data.extraDiagnosticRow && data.rows->empty()) { data.rows->push_back(SIZE_MAX); }
+        }
+    } catch (...) { job->failed = true; }
+    job->done.store(true);
+}
+
+void MemoryDock::initializeCoreProjection(const CoreKind kind)
+{
+    const auto index = static_cast<std::size_t>(kind);
+    if (m_coreInitialized[index]) { return; }
+    m_coreInitialized[index] = true;
+    if (!m_coreProjectionPoll) {
+        m_coreProjectionPoll = new QTimer(this); m_coreProjectionPoll->setInterval(25);
+        connect(m_coreProjectionPoll, &QTimer::timeout, this, [this] { pollCoreProjection(); });
+        m_coreProjectionDebounce = new QTimer(this); m_coreProjectionDebounce->setSingleShot(true); m_coreProjectionDebounce->setInterval(120);
+        connect(m_coreProjectionDebounce, &QTimer::timeout, this, [this] { pollCoreProjection(); });
+        connect(this, &QObject::destroyed, [lifetime = m_coreProjectionLifetime] { lifetime->store(true); });
+    }
+    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : kind == CoreKind::Regions ? m_regionTable : extraCoreTable(kind);
+    auto* model = kind == CoreKind::Processes ? m_processTable->readOnlyModel : kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : kind == CoreKind::Regions ? m_regionTable->readOnlyModel : extraCoreTable(kind)->readOnlyModel;
+    model->requestSort = [guard = QPointer<MemoryDock>(this), kind, index](int column, Qt::SortOrder order) {
+        if (!guard || (guard->m_coreSortColumns[index] == column && guard->m_coreSortOrders[index] == order)) { return; }
+        guard->m_coreSortColumns[index] = column; guard->m_coreSortOrders[index] = order;
+        guard->requestCoreProjection(kind, true);
+    };
+    new CoreProjectionObserver(view, [guard = QPointer<MemoryDock>(this), kind](bool language) {
+        if (!guard) { return; }
+        if (language) { ++guard->m_coreLocaleGeneration; }
+        guard->requestCoreProjection(kind, false);
+    }, kind == CoreKind::Modules || kind == CoreKind::Processes);
+}
+
+void MemoryDock::requestCoreProjection(const CoreKind kind, const bool debounce)
+{
+    const auto index = static_cast<std::size_t>(kind);
+    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : kind == CoreKind::Regions ? m_regionTable : extraCoreTable(kind);
+    if (!view) { return; }
+    auto request = captureCoreRequest(kind);
+    if (m_corePublished[index] && sameCoreRequest(*request, *m_corePublished[index])) {
+        if (m_coreProjectionJob && m_coreProjectionJob->data->kind == kind && !sameCoreRequest(*request, *m_coreProjectionJob->data)) { m_coreProjectionJob->cancel.store(true); }
+        view->setEnabled(true); return;
+    }
+    if (m_coreFailed[index]) { if (sameCoreRequest(*request, *m_coreFailed[index])) { return; } m_coreFailed[index].reset(); }
+    if (m_coreReady[index] && !sameCoreRequest(*request, *m_coreReady[index])) { m_coreReady[index].reset(); }
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<QAbstractItemView> guardedView(view);
+    view->setEnabled(false);
+    if (!owner || !guardedView) { return; }
+    if (m_coreProjectionJob && m_coreProjectionJob->data->kind == kind && !sameCoreRequest(*request, *m_coreProjectionJob->data)) { m_coreProjectionJob->cancel.store(true); }
+    if (debounce) { m_coreProjectionDebounce->start(); return; }
+    if (!view->isVisible() || m_coreProjectionDebounce->isActive()) { return; }
+    if (m_coreReady[index]) {
+        if (sameCoreRequest(*request, *m_coreReady[index])) {
+            const auto ready = std::move(m_coreReady[index]); publishCoreProjection(ready); return;
+        }
+        m_coreReady[index].reset();
+    }
+    if (m_coreProjectionJob) { return; }
+    const auto job = std::make_shared<CoreProjectionJob>(); job->data = std::move(request); job->lifetime = m_coreProjectionLifetime;
+    m_coreProjectionJob = job; m_coreProjectionPoll->start();
+    try { QThreadPool::globalInstance()->start([job] { buildCoreProjection(job); }); }
+    catch (...) { job->failed = true; job->done.store(true); }
+}
+
+void MemoryDock::publishCoreProjection(const std::shared_ptr<CoreProjectionData>& data)
+{
+    const auto current = captureCoreRequest(data->kind);
+    if (!sameCoreRequest(*current, *data)) { return; }
+    const auto kind = static_cast<std::size_t>(data->kind);
+    const QPointer<MemoryDock> owner(this);
+    const QPointer<QAbstractItemView> view(data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : data->kind == CoreKind::Regions ? m_regionTable : extraCoreTable(data->kind));
+    if (!view || !view->isVisible()) { m_coreReady[kind] = data; return; }
+    const QPointer<ks::memory_detail::CoreReadOnlyModel> model(data->kind == CoreKind::Processes ? m_processTable->readOnlyModel : data->kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : data->kind == CoreKind::Regions ? m_regionTable->readOnlyModel : extraCoreTable(data->kind)->readOnlyModel);
+    const int scroll = view->verticalScrollBar()->value();
+    model->publish(data->rows, [data](std::size_t row, int column, int role) { return coreCell(*data, row, column, role); });
+    if (!owner || !view || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
+    m_corePublished[kind] = data;
+    view->setEnabled(true);
+    if (!owner || !view || !model || view->model() != model || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
+    if (data->selectedRow >= 0 || (data->extraSource && model->rowCount() > 0)) { view->setCurrentIndex(model->index(data->selectedRow >= 0 ? data->selectedRow : 0, qMax(0, data->selectedColumn))); }
+    if (!owner || !view || !model || view->model() != model || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
+    view->verticalScrollBar()->setValue(scroll);
+    if (!owner) { return; }
+    if (data->extraSource) {
+        const auto count = data->rows->size() == 1 && data->rows->front() == SIZE_MAX ? 0U : data->rows->size();
+        switch (data->kind) {
+        case CoreKind::KernelExecutable: m_kernelExecutableVisibleCount = count; if (!data->statusTemplate.isEmpty() && m_kernelExecutableStatusLabel) { m_kernelExecutableStatusLabel->setText(data->statusTemplate.arg(count)); } break;
+        case CoreKind::KernelEvidence: m_kernelMemoryEvidenceVisibleCount = count; if (!data->statusTemplate.isEmpty() && m_kernelMemoryEvidenceStatusLabel) { m_kernelMemoryEvidenceStatusLabel->setText(data->statusTemplate.arg(count)); } break;
+        case CoreKind::PteEvidence: m_processPteTranslateVisibleCount = count; break;
+        case CoreKind::ProcessEvidence: m_processMemoryEvidenceVisibleCount = count; break;
+        default: break;
+        }
+        if (!owner) { return; }
+    }
+    if (data->kind == CoreKind::Processes) {
+        const auto pending = static_cast<std::uint32_t>(property(kProcessFocusPendingPidProperty).toUInt());
+        if (pending != 0) { if (selectProcessRowByPid(m_processTable, m_processCombo, pending)) { setProperty(kProcessFocusPendingPidProperty, 0U); } }
+        if (!owner) { return; }
+        if (m_processCountLabel) { m_processCountLabel->setText(data->filter.isEmpty() ? QString("共 %1 个进程").arg(data->processes->size()) : QString("显示 %1 / 共 %2").arg(data->rows->size()).arg(data->processes->size())); }
+    } else if (data->kind == CoreKind::Modules && m_moduleStatusLabel) {
+        if (!data->statusTemplate.isEmpty()) { m_moduleStatusLabel->setText(data->statusTemplate.arg(data->rows->size())); }
+    } else if (data->kind == CoreKind::Regions && m_regionStatusLabel) {
+        QString status = m_attachedPid ? QStringLiteral("显示 %1 / 共 %2 个区域").arg(data->rows->size()).arg(data->regions->size()) : QStringLiteral("未附加进程。");
+        if (m_regionCachePartial) { status += QStringLiteral(" | ") + ks::i18n::packedSourceText(QStringLiteral("Region enumeration is partial (Win32: %1)")).arg(m_regionCacheError); }
+        m_regionStatusLabel->setText(status);
+    }
+}
+
+void MemoryDock::pollCoreProjection()
+{
+    const QPointer<MemoryDock> owner(this);
+    pollMemoryScanTask();
+    if (!owner) { return; }
+    pollFirstScanPreparation();
+    if (!owner) { return; }
+    pollRegionRefresh();
+    if (!owner) { return; }
+    if (m_coreProjectionJob && m_coreProjectionJob->done.load()) {
+        const auto job = std::move(m_coreProjectionJob);
+        const auto kind = static_cast<std::size_t>(job->data->kind);
+        if (!job->cancelled() && sameCoreRequest(*captureCoreRequest(job->data->kind), *job->data)) {
+            if (job->failed) {
+                m_coreFailed[kind] = job->data;
+                QAbstractItemView* view = job->data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : job->data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : job->data->kind == CoreKind::Regions ? m_regionTable : extraCoreTable(job->data->kind);
+                if (view) { view->setEnabled(true); }
+                if (!owner) { return; }
+                QLabel* label = job->data->kind == CoreKind::Processes ? m_processCountLabel : job->data->kind == CoreKind::Modules ? m_moduleStatusLabel : job->data->kind == CoreKind::Regions ? m_regionStatusLabel : job->data->kind == CoreKind::KernelExecutable ? m_kernelExecutableStatusLabel : job->data->kind == CoreKind::KernelEvidence ? m_kernelMemoryEvidenceStatusLabel : job->data->kind == CoreKind::PteEvidence ? m_processPteTranslateStatusLabel : job->data->kind == CoreKind::ProcessEvidence ? m_processMemoryEvidenceStatusLabel : job->data->kind == CoreKind::SearchResults ? m_scanStatusLabel : nullptr;
+                if (label) { label->setText(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); }
+            } else { m_coreReady[kind] = job->data; }
+        }
+    }
+    if (m_processTable && m_processTable->isVisible()) { requestCoreProjection(CoreKind::Processes, false); }
+    if (!owner) { return; }
+    if (m_moduleTable && m_moduleTable->isVisible()) { requestCoreProjection(CoreKind::Modules, false); }
+    if (!owner) { return; }
+    if (m_regionTable && m_regionTable->isVisible()) { requestCoreProjection(CoreKind::Regions, false); }
+    if (auto* table = extraCoreTable(CoreKind::KernelExecutable); table && table->isVisible()) { requestCoreProjection(CoreKind::KernelExecutable, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::KernelEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::KernelEvidence, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::PteEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::PteEvidence, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::ProcessEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::ProcessEvidence, false); }
+    if (!owner) { return; }
+    if (m_searchResultTable && m_searchResultTable->isVisible()) { requestCoreProjection(CoreKind::SearchResults, false); }
+    if (!owner) { return; }
+    if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation && !m_scanInProgress.load() && !m_scanCompletion) { m_coreProjectionPoll->stop(); }
+}
+
+bool MemoryDock::coreProjectionIsCurrent(const CoreKind kind) const
+{
+    const auto index = static_cast<std::size_t>(kind);
+    return m_corePublished[index] && sameCoreRequest(*captureCoreRequest(kind), *m_corePublished[index]);
+}
+
+struct MemoryDock::RegionRefreshJob {
+    std::atomic_bool done{false}, cancel{false};
+    std::shared_ptr<std::atomic_bool> lifetime;
+    std::shared_ptr<void> handle;
+    std::shared_ptr<const std::vector<RegionEntry>> rows;
+    std::uint64_t generation = 0;
+    std::uint32_t error = ERROR_SUCCESS;
+    bool partial = false;
+    bool cancelled() const { return cancel.load() || (lifetime && lifetime->load()); }
+};
+
+void MemoryDock::startPendingRegionRefresh()
+{
+    if (m_regionRefreshJob || !m_regionRefreshPendingJob) { return; }
+    const auto job = std::move(m_regionRefreshPendingJob); m_regionRefreshJob = job;
+    try { QThreadPool::globalInstance()->start([job] {
+        try {
+            const auto cancelled = [job] { return job->cancelled(); };
+            auto collected = collectVirtualMemoryRegionRows(static_cast<HANDLE>(job->handle.get()), cancelled, &job->error);
+            auto rows = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); rows->reserve(collected.size());
+            for (auto& row : collected) {
+                if (job->cancelled()) { break; }
+                RegionEntry entry; entry.baseAddress = row.baseAddress; entry.regionSize = row.regionSize;
+                entry.protect = row.protect; entry.state = row.state; entry.type = row.type; entry.mappedFilePath = std::move(row.mappedFilePath);
+                rows->push_back(std::move(entry));
+            }
+            job->partial = job->error != ERROR_SUCCESS; job->rows = std::move(rows);
+        } catch (...) { job->error = ERROR_NOT_ENOUGH_MEMORY; }
+        job->handle.reset(); job->done.store(true);
+    }); } catch (...) { job->error = ERROR_NOT_ENOUGH_MEMORY; job->handle.reset(); job->done.store(true); }
+}
+
+void MemoryDock::pollRegionRefresh()
+{
+    if (!m_regionRefreshJob || !m_regionRefreshJob->done.load()) { return; }
+    const auto job = std::move(m_regionRefreshJob);
+    if (!job->cancelled() && job->generation == m_processAttachmentGeneration.load()) {
+        const QPointer<MemoryDock> owner(this);
+        m_regionSearchSnapshot = job->rows; m_regionSearchGeneration = job->generation;
+        m_regionSearchError = job->error != ERROR_SUCCESS ? job->error : !job->rows || job->rows->empty() ? ERROR_INVALID_DATA : ERROR_SUCCESS;
+        const bool hadSearch = bool(m_firstScanPreparation);
+        if (hadSearch) { acceptFirstScanRegionSnapshot(m_regionSearchSnapshot, m_regionSearchError); }
+        if (!owner) { return; }
+        const auto commit = [owner, job, hadSearch] {
+            if (!owner || job->generation != owner->m_processAttachmentGeneration.load() || job->cancelled()) { return; }
+            if (!job->rows || job->rows->empty()) {
+                owner->setProperty(kRegionRefreshInFlightProperty, false);
+                const bool pending = owner->property(kRegionRefreshPendingProperty).toBool();
+                owner->setProperty(kRegionRefreshPendingProperty, false);
+                if (!hadSearch) { reportRegionEnumerateFailure(owner, QStringLiteral("VirtualQueryEx 未返回有效区域。")); }
+                if (owner && pending && job->generation == owner->m_processAttachmentGeneration.load()) { owner->refreshMemoryRegionList(true); }
+                return;
+            }
+            owner->m_regionCache = job->rows; owner->m_regionCachePartial = job->partial; owner->m_regionCacheError = job->error;
+            owner->applyRegionFilterAndRebuildTable();
+            if (!owner) { return; }
+            owner->setProperty(kRegionRefreshInFlightProperty, false);
+            if (owner->property(kRegionRefreshPendingProperty).toBool()) {
+                owner->setProperty(kRegionRefreshPendingProperty, false); owner->refreshMemoryRegionList(true);
+            }
+        };
+        if (!ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("memory-region-list-snapshot-apply"), {m_regionTable}, commit)) { commit(); }
+        if (!owner) { return; }
+    }
+    startPendingRegionRefresh();
+}
+
+void MemoryDock::requestFirstScanRegions()
+{
+    if (!m_regionCache->empty() && !m_regionCachePartial) { acceptFirstScanRegionSnapshot(m_regionCache, ERROR_SUCCESS); return; }
+    if (readBoolProperty(this, kRegionRefreshInFlightProperty) && m_regionSearchGeneration == m_processAttachmentGeneration.load()) { acceptFirstScanRegionSnapshot(m_regionSearchSnapshot, m_regionSearchError); return; }
+    if (readBoolProperty(this, kRegionRefreshInFlightProperty)) { return; }
+    refreshMemoryRegionList(true);
+}
+
+void MemoryDock::refreshMemoryRegionList(const bool forceRequery)
+{
+    if (m_attachedProcessHandle == nullptr) {
+        m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
+        applyRegionFilterAndRebuildTable(); return;
+    }
+    if (!forceRequery && !m_regionCache->empty()) { applyRegionFilterAndRebuildTable(); return; }
+    if (readBoolProperty(this, kRegionRefreshInFlightProperty)) { setProperty(kRegionRefreshPendingProperty, true); return; }
+    setProperty(kRegionRefreshFromAttachProperty, false);
+    std::uint32_t error = ERROR_SUCCESS;
+    const auto handle = duplicateAttachedProcessHandleForWorker(&error);
+    if (!handle) {
+        if (m_firstScanPreparation) { acceptFirstScanRegionSnapshot({}, error != ERROR_SUCCESS ? error : ERROR_INVALID_HANDLE); }
+        else { reportRegionEnumerateFailure(this, QStringLiteral("VirtualQueryEx 未返回有效区域。")); }
+        return;
+    }
+    m_regionSearchSnapshot.reset(); m_regionSearchGeneration = UINT64_MAX; m_regionSearchError = ERROR_SUCCESS;
+    auto job = std::make_shared<RegionRefreshJob>(); job->handle = handle; job->generation = m_processAttachmentGeneration.load(); job->lifetime = m_coreProjectionLifetime;
+    m_regionRefreshPendingJob = job;
+    if (m_regionRefreshJob) { m_regionRefreshJob->cancel.store(true); }
+    setProperty(kRegionRefreshInFlightProperty, true);
+    startPendingRegionRefresh(); m_coreProjectionPoll->start();
+}
+
+void MemoryDock::cancelCoreProjection(const bool closing)
+{
+    cancelFirstScanPreparation();
+    m_regionSearchSnapshot.reset(); m_regionSearchGeneration = UINT64_MAX;
+    if (closing) { m_coreProjectionLifetime->store(true); m_moduleRefreshLifetime->store(true); }
+    if (m_coreProjectionJob) { m_coreProjectionJob->cancel.store(true); }
+    if (m_regionRefreshJob) { m_regionRefreshJob->cancel.store(true); }
+    if (m_moduleRefreshJob) { m_moduleRefreshJob->cancel.store(true); }
+    m_regionRefreshPendingJob.reset();
+    for (auto& data : m_coreReady) { data.reset(); }
+    for (auto& data : m_corePublished) { data.reset(); }
+    for (auto& data : m_coreFailed) { data.reset(); }
+}
+
+MemoryTableView* MemoryDock::extraCoreTable(const CoreKind kind) const
+{
+    switch (kind) {
+    case CoreKind::KernelExecutable: return m_kernelExecutableTable;
+    case CoreKind::KernelEvidence: return m_kernelMemoryEvidenceTable;
+    case CoreKind::PteEvidence: return m_processPteTranslateTable;
+    case CoreKind::ProcessEvidence: return m_processMemoryEvidenceTable;
+    case CoreKind::SearchResults: return m_searchResultTable;
+    default: return nullptr;
+    }
+}

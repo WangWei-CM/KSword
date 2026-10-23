@@ -1,3 +1,4 @@
+namespace ks::monitor { class MonitorCanonicalExport; }
 #include "../UI/StructuredFieldView.h"
 #pragma once
 
@@ -60,6 +61,7 @@ private:
     void updateStatusLabel();
     void updateDetailPanel();
     void exportVisibleRows();
+    void updateExportAction();
     unsigned long selectedCategoryMask() const;
     void recordWorkerFailure(const std::string& message, bool unsupported);
 
@@ -76,6 +78,7 @@ private:
     QPushButton* m_pauseButton = nullptr;
     QPushButton* m_clearButton = nullptr;
     QPushButton* m_exportButton = nullptr;
+    ks::monitor::MonitorCanonicalExport* m_tableExport = nullptr;
     QComboBox* m_categoryFilterCombo = nullptr;
     QLineEdit* m_operationFilterEdit = nullptr;
     QLineEdit* m_pidFilterEdit = nullptr;

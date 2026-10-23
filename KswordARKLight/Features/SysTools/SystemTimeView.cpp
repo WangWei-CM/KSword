@@ -42,6 +42,7 @@ constexpr int kR0StatusTextId = 67415;
 
 constexpr UINT kMsgCollectCompleted = WM_APP + 715;
 constexpr UINT kMsgStatusCompleted = WM_APP + 716;
+constexpr UINT kMsgControlCompleted = WM_APP + 717;
 
 // kClockTimerId drives the header line only. The full report is not re-rendered
 // on the tick because it would fight the user's selection and the find bar in
@@ -61,6 +62,11 @@ int Width(const RECT& rc) {
 int Height(const RECT& rc) {
     return rc.bottom > rc.top ? static_cast<int>(rc.bottom - rc.top) : 0;
 }
+
+struct TimeControlResult final {
+    bool freshAvailable = false;
+    ksword::ark::SystemTimeControlResult result;
+};
 
 struct SystemTimeViewState final {
     HWND hwnd = nullptr;
@@ -83,6 +89,8 @@ struct SystemTimeViewState final {
     std::wstring statusText = L"系统时间报告与 R0 全局变速控制。";
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<SystemTimeInfoSnapshot>> collectTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ksword::ark::SystemTimeQueryResult>> statusTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<TimeControlResult>> controlTask;
+    std::uint64_t controlRevision = 0;
     bool supported = false;
     bool hypervAvailable = false;
     bool active = false;
@@ -96,20 +104,23 @@ bool Checked(HWND checkbox) {
 }
 
 void UpdateControlState(SystemTimeViewState& state) {
+    const bool busy = state.controlTask && state.controlTask->running();
     const bool backendHyperv = ::SendMessageW(state.backendCombo, CB_GETCURSEL, 0, 0) == 0;
     ::EnableWindow(state.applyButton,
-        state.supported && Checked(state.acknowledge) && (!backendHyperv || state.hypervAvailable));
-    ::EnableWindow(state.resetButton, state.supported);
-    ::EnableWindow(state.backendCombo, state.supported && !state.active);
-    ::EnableWindow(state.resolutionCombo, state.supported && !state.active);
+        !busy && state.supported && Checked(state.acknowledge) && (!backendHyperv || state.hypervAvailable));
+    ::EnableWindow(state.resetButton, !busy && state.supported);
+    ::EnableWindow(state.backendCombo, !busy && state.supported && !state.active);
+    ::EnableWindow(state.resolutionCombo, !busy && state.supported && !state.active);
 }
 
-void BeginQueryStatus(SystemTimeViewState& state) {
-    if (!state.statusTask || state.statusTask->running()) { return; }
+void BeginQueryStatus(SystemTimeViewState& state, const bool force = false) {
+    if (!state.statusTask || (!force && state.statusTask->running())) { return; }
+    const auto revision = state.controlRevision;
     state.statusTask->request(
         [] { return ksword::ark::DriverClient().querySystemTime(); },
-        [&state](std::uint64_t, std::optional<ksword::ark::SystemTimeQueryResult>&& query,
+        [&state, revision](std::uint64_t, std::optional<ksword::ark::SystemTimeQueryResult>&& query,
             std::exception_ptr error) {
+            if (revision != state.controlRevision) return;
             if (error || !query || !query->io.ok) {
                 state.supported = false;
                 ::SetWindowTextW(state.r0StatusText,
@@ -144,7 +155,7 @@ void BeginQueryStatus(SystemTimeViewState& state) {
 }
 
 void ControlSpeed(SystemTimeViewState& state, bool reset) {
-    if (!state.supported) { return; }
+    if (!state.supported || !state.controlTask || state.controlTask->running()) { return; }
     unsigned long factor = 1;
     if (!reset) {
         if (!Checked(state.acknowledge)) { return; }
@@ -177,27 +188,43 @@ void ControlSpeed(SystemTimeViewState& state, bool reset) {
         (::SendMessageW(state.speedCombo, CB_GETCURSEL, 0, 0) == 0
             ? KSWORD_ARK_SYSTEM_TIME_COMMAND_SPEED_UP
             : KSWORD_ARK_SYSTEM_TIME_COMMAND_SLOW_DOWN);
-    const ksword::ark::DriverClient client;
-    const auto fresh = client.querySystemTime();
-    if (!fresh.io.ok || !state.supported) {
-        state.statusText = L"控制前无法读取 R0 状态，未执行修改。";
-        ::InvalidateRect(state.hwnd, nullptr, TRUE);
-        return;
-    }
-    const auto result = client.controlSystemTime(command, factor, backend, resolution,
-        fresh.response.generation, !reset);
-    if (!result.io.ok || result.response.status != KSWORD_ARK_SYSTEM_TIME_STATUS_OK) {
-        state.statusText = L"R0 计时控制失败：Win32=" + std::to_wstring(result.io.win32Error) +
-            L"，状态=" + std::to_wstring(result.response.status) +
-            L"，NTSTATUS=" + std::to_wstring(static_cast<unsigned long>(result.response.lastStatus));
-    } else {
-        state.statusText = reset ? L"已请求恢复连续计数 1x；关闭页面不会自动恢复变速。"
-            : L"已应用全局变速；关闭页面不会自动恢复，请用“恢复 1x”。";
-        ::SendMessageW(state.acknowledge, BM_SETCHECK, BST_UNCHECKED, 0);
-    }
-    BeginQueryStatus(state);
+    ++state.controlRevision;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    state.controlTask->request(
+        [command, factor, backend, resolution, reset, lease] {
+            TimeControlResult outcome;
+            const ksword::ark::DriverClient client;
+            const auto fresh = client.querySystemTime();
+            outcome.freshAvailable = fresh.io.ok;
+            if (outcome.freshAvailable) {
+                outcome.result = client.controlSystemTime(command, factor, backend, resolution,
+                    fresh.response.generation, !reset);
+            }
+            return outcome;
+        },
+        [&state, reset](std::uint64_t, std::optional<TimeControlResult>&& outcome, std::exception_ptr error) {
+            if (error || !outcome) {
+                state.statusText = L"R0 计时状态查询失败。";
+            } else if (!outcome->freshAvailable) {
+                state.statusText = L"控制前无法读取 R0 状态，未执行修改。";
+            } else {
+                const auto& result = outcome->result;
+                if (!result.io.ok || result.response.status != KSWORD_ARK_SYSTEM_TIME_STATUS_OK) {
+                    state.statusText = L"R0 计时控制失败：Win32=" + std::to_wstring(result.io.win32Error) +
+                        L"，状态=" + std::to_wstring(result.response.status) +
+                        L"，NTSTATUS=" + std::to_wstring(static_cast<unsigned long>(result.response.lastStatus));
+                } else {
+                    state.statusText = reset ? L"已请求恢复连续计数 1x；关闭页面不会自动恢复变速。"
+                        : L"已应用全局变速；关闭页面不会自动恢复，请用“恢复 1x”。";
+                    ::SendMessageW(state.acknowledge, BM_SETCHECK, BST_UNCHECKED, 0);
+                }
+            }
+            BeginQueryStatus(state, true);
+            UpdateControlState(state);
+            ::InvalidateRect(state.hwnd, nullptr, TRUE);
+        });
     UpdateControlState(state);
-    ::InvalidateRect(state.hwnd, nullptr, TRUE);
 }
 
 bool CopyText(HWND owner, const std::wstring& text) {
@@ -396,6 +423,7 @@ LRESULT CALLBACK SystemTimeViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             state->collectTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<SystemTimeInfoSnapshot>>(hwnd, kMsgCollectCompleted);
             state->statusTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ksword::ark::SystemTimeQueryResult>>(hwnd, kMsgStatusCompleted);
+            state->controlTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<TimeControlResult>>(hwnd, kMsgControlCompleted);
             LayoutView(*state);
             UpdateClockLine(*state);
             ::SetTimer(hwnd, kClockTimerId, kClockIntervalMs, nullptr);
@@ -474,6 +502,10 @@ LRESULT CALLBACK SystemTimeViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             state->collectTask->consume(hwnd, wParam, lParam);
             return 0;
         }
+        if (state && msg == kMsgControlCompleted && state->controlTask) {
+            state->controlTask->consume(hwnd, wParam, lParam);
+            return 0;
+        }
         if (state && msg == kMsgStatusCompleted && state->statusTask) {
             state->statusTask->consume(hwnd, wParam, lParam);
             return 0;
@@ -484,6 +516,7 @@ LRESULT CALLBACK SystemTimeViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 state->collectTask->cancel();
             }
             if (state->statusTask) { state->statusTask->cancel(); }
+            if (state->controlTask) { state->controlTask->cancel(); }
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }

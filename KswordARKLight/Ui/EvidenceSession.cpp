@@ -140,19 +140,30 @@ std::uint64_t EvidenceSession::record(std::wstring source, std::wstring format, 
     }
     std::scoped_lock lock(mutex_);
     const std::uint64_t sequence = nextSequence_++;
-    items_.push_back({ sequence, CurrentFileTime100ns(), std::move(source), std::move(format), std::move(text) });
+    items_.push_back(std::make_shared<const EvidenceItem>(EvidenceItem{
+        sequence, CurrentFileTime100ns(), std::move(source), std::move(format), std::move(text) }));
     return sequence;
 }
 
-std::vector<EvidenceItem> EvidenceSession::snapshot() const {
+EvidenceSession::SharedSnapshot EvidenceSession::sharedSnapshot() const {
     std::scoped_lock lock(mutex_);
     return items_;
 }
 
+std::vector<EvidenceItem> EvidenceSession::snapshot() const {
+    const auto shared = sharedSnapshot();
+    std::vector<EvidenceItem> items;
+    items.reserve(shared.size());
+    for (const auto& item : shared) {
+        items.push_back(*item);
+    }
+    return items;
+}
+
 bool EvidenceSession::erase(const std::uint64_t sequence) {
     std::scoped_lock lock(mutex_);
-    const auto item = std::find_if(items_.begin(), items_.end(), [sequence](const EvidenceItem& candidate) {
-        return candidate.sequence == sequence;
+    const auto item = std::find_if(items_.begin(), items_.end(), [sequence](const std::shared_ptr<const EvidenceItem>& candidate) {
+        return candidate->sequence == sequence;
     });
     if (item == items_.end()) {
         return false;
@@ -172,19 +183,28 @@ std::size_t EvidenceSession::size() const {
 }
 
 EvidenceDiff EvidenceSession::latestDiff() const {
-    std::scoped_lock lock(mutex_);
-    if (items_.size() < 2U) {
-        return {};
+    std::shared_ptr<const EvidenceItem> before;
+    std::shared_ptr<const EvidenceItem> after;
+    {
+        std::scoped_lock lock(mutex_);
+        if (items_.size() < 2U) {
+            return {};
+        }
+        before = items_[items_.size() - 2U];
+        after = items_.back();
     }
-    return BuildEvidenceDiff(items_[items_.size() - 2U].text, items_.back().text);
+    return BuildEvidenceDiff(before->text, after->text);
 }
 
 std::wstring EvidenceSession::exportJson(const EvidenceRedaction redaction) const {
-    const std::vector<EvidenceItem> items = snapshot();
+    return exportJsonSnapshot(sharedSnapshot(), redaction);
+}
+
+std::wstring EvidenceSession::exportJsonSnapshot(const SharedSnapshot& items, const EvidenceRedaction redaction) {
     std::wostringstream output;
     output << L"{\r\n  \"schema\": \"ksword-arklight-evidence-v1\",\r\n  \"items\": [";
     for (std::size_t index = 0; index < items.size(); ++index) {
-        const EvidenceItem& item = items[index];
+        const EvidenceItem& item = *items[index];
         output << (index == 0 ? L"\r\n" : L",\r\n")
                << L"    {\"sequence\": " << item.sequence
                << L", \"timestamp100ns\": " << item.timestamp100ns
@@ -197,10 +217,14 @@ std::wstring EvidenceSession::exportJson(const EvidenceRedaction redaction) cons
 }
 
 std::wstring EvidenceSession::exportTsv(const EvidenceRedaction redaction) const {
-    const std::vector<EvidenceItem> items = snapshot();
+    return exportTsvSnapshot(sharedSnapshot(), redaction);
+}
+
+std::wstring EvidenceSession::exportTsvSnapshot(const SharedSnapshot& items, const EvidenceRedaction redaction) {
     std::wostringstream output;
     output << L"Sequence\tTimestamp100ns\tSource\tFormat\tText\r\n";
-    for (const EvidenceItem& item : items) {
+    for (const auto& sharedItem : items) {
+        const EvidenceItem& item = *sharedItem;
         output << item.sequence << L'\t' << item.timestamp100ns << L'\t'
                << TsvCell(item.source) << L'\t' << TsvCell(item.format) << L'\t'
                << TsvCell(RedactEvidenceText(item.text, redaction)) << L"\r\n";

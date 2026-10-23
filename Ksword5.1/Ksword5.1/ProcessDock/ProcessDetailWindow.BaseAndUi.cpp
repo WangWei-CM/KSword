@@ -146,6 +146,14 @@ namespace
         }
     }
 
+    constexpr char kEmbeddedViewContextPendingProperty[] = "ksword_embedded_context_pending";
+
+    bool isCurrentEmbeddedPage(QWidget* tab, QTabWidget* tabs)
+    {
+        return tab != nullptr && tabs != nullptr && tabs->currentWidget() == tab
+            && tab->isVisible() && !tab->window()->isMinimized();
+    }
+
     // attachEmbeddedDockToTabLayout 作用：
     // - 入参：内嵌页布局、占位标签成员引用、已构建完成的 Dock 控件；
     // - 处理：移除并延迟销毁占位标签，再把 Dock 按拉伸因子 1 挂进页面布局；
@@ -606,14 +614,27 @@ namespace
         }
     }
 
+    constexpr const char* DetailChartExposureProperty = "ksword_detail_chart_exposed";
+    bool detailChartPageExposed(const QWidget* page)
+    {
+        // Native spontaneous Hide need not clear QWidget::isVisible().
+        return page != nullptr && page->isVisible()
+            && page->property(DetailChartExposureProperty).toBool()
+            && !page->window()->isMinimized();
+    }
+
     class ProcessPerformanceHistoryChartWidget final : public QWidget
     {
     public:
+        using Sample = ProcessDetailWindow::PerformanceHistorySample;
+        using History = std::vector<Sample>;
+        using HistorySnapshot = std::shared_ptr<const History>;
+
         struct Series
         {
             QString label;
             QColor color;
-            std::vector<double> values;
+            double Sample::*valueMember = nullptr;
         };
 
         explicit ProcessPerformanceHistoryChartWidget(QWidget* parent = nullptr)
@@ -636,40 +657,93 @@ namespace
             });
         }
 
+        const HistorySnapshot& historySnapshot() const
+        {
+            return m_history;
+        }
+
+        // 比较规范样本本身，不能只用首尾时间判断：历史替换可修正中间样本。
+        static bool historyMatches(const HistorySnapshot& snapshot, const std::deque<Sample>& history)
+        {
+            if (!snapshot || snapshot->size() != history.size())
+            {
+                return false;
+            }
+            const auto sameValue = [](const double left, const double right) {
+                return left == right || (std::isnan(left) && std::isnan(right));
+            };
+            for (std::size_t index = 0; index < history.size(); ++index)
+            {
+                const Sample& left = (*snapshot)[index];
+                const Sample& right = history[index];
+                if (left.unixMilliseconds != right.unixMilliseconds
+                    || !sameValue(left.cpuPercent, right.cpuPercent)
+                    || !sameValue(left.cpuCorePercent, right.cpuCorePercent)
+                    || !sameValue(left.memoryMB, right.memoryMB)
+                    || !sameValue(left.diskMBps, right.diskMBps)
+                    || !sameValue(left.networkRxKBps, right.networkRxKBps)
+                    || !sameValue(left.networkTxKBps, right.networkTxKBps)
+                    || !sameValue(left.gpuPercent, right.gpuPercent))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         void setChartData(
-            std::vector<qint64> timestamps,
+            HistorySnapshot history,
             std::vector<Series> series,
             const QString& unitText,
             const double fixedMaximum,
             const QString& emptyText,
             const QString& timeHeader,
             const QString& copyLatestText,
-            const QString& copyHistoryText)
+            const QString& copyHistoryText,
+            const double axisStep = 0.0)
         {
-            m_previousPointCount = m_timestamps.size();
-            m_historyWindowShifted =
-                m_previousPointCount == timestamps.size()
-                && m_previousPointCount > 1U
-                && timestamps.front() > m_timestamps.front();
-            m_timestamps = std::move(timestamps);
-            m_previousLatestValueByLabel.clear();
-            for (const Series& oldSeries : m_series)
+            bool projectionChanged = m_history != history || m_series.size() != series.size()
+                || m_fixedMaximum != fixedMaximum || m_axisStep != axisStep;
+            for (std::size_t index = 0; !projectionChanged && index < series.size(); ++index)
             {
-                if (!oldSeries.values.empty())
+                projectionChanged = m_series[index].valueMember != series[index].valueMember;
+            }
+            if (projectionChanged)
+            {
+                m_previousPointCount = pointCount();
+                m_historyWindowShifted = m_history && history
+                    && m_previousPointCount == history->size()
+                    && m_previousPointCount > 1U
+                    && history->front().unixMilliseconds > m_history->front().unixMilliseconds;
+                m_previousLatestValues.clear();
+                for (const Series& oldSeries : m_series)
                 {
-                    m_previousLatestValueByLabel.insert(oldSeries.label, oldSeries.values.back());
+                    if (m_previousPointCount > 0U && oldSeries.valueMember != nullptr)
+                    {
+                        m_previousLatestValues.push_back(m_history->back().*oldSeries.valueMember);
+                    }
                 }
+                m_history = std::move(history);
             }
             m_series = std::move(series);
             m_unitText = unitText;
             m_fixedMaximum = fixedMaximum;
+            m_axisStep = axisStep;
             m_emptyText = emptyText;
             m_timeHeader = timeHeader;
             m_copyLatestText = copyLatestText;
             m_copyHistoryText = copyHistoryText;
+            if (!projectionChanged)
+            {
+                // 主题/语言只更新画笔与文案；不复制历史、不改横轴、不重启采样插值。
+                update();
+                return;
+            }
+            m_axisMaximum = chartMaximum();
+            m_linePathsValid = false;
             m_seriesAnimation->stop();
             // 隐藏和空图只保存完整历史，避免无可见帧时仍启动260ms动画计时器。
-            if (isVisible() && !m_timestamps.empty())
+            if (isVisible() && pointCount() > 0U)
             {
                 m_animationProgress = 0.0;
                 m_seriesAnimation->start();
@@ -707,14 +781,14 @@ namespace
             painter.setBrush(Qt::NoBrush);
             painter.drawRect(plotRect);
 
-            if (m_timestamps.empty() || m_series.empty())
+            if (pointCount() == 0U || m_series.empty())
             {
                 painter.setPen(textColor);
                 painter.drawText(plotRect, Qt::AlignCenter, m_emptyText);
                 return;
             }
 
-            const double axisMaximum = chartMaximum();
+            const double axisMaximum = m_axisMaximum;
             drawGrid(painter, plotRect, axisMaximum, borderColor, textColor);
             drawLines(painter, plotRect, axisMaximum);
             drawLegend(painter, textColor);
@@ -723,7 +797,7 @@ namespace
 
         void contextMenuEvent(QContextMenuEvent* eventPointer) override
         {
-            if (eventPointer == nullptr || m_timestamps.empty() || m_series.empty())
+            if (eventPointer == nullptr || pointCount() == 0U || m_series.empty())
             {
                 return;
             }
@@ -748,6 +822,11 @@ namespace
         }
 
     private:
+        std::size_t pointCount() const
+        {
+            return m_history ? m_history->size() : 0U;
+        }
+
         QRectF chartRect() const
         {
             return QRectF(rect()).adjusted(62.0, 24.0, -12.0, -29.0);
@@ -763,10 +842,18 @@ namespace
             double maximum = 0.0;
             for (const Series& series : m_series)
             {
-                for (const double value : series.values)
+                if (series.valueMember == nullptr || !m_history)
                 {
-                    maximum = std::max(maximum, std::max(0.0, value));
+                    continue;
                 }
+                for (const Sample& sample : *m_history)
+                {
+                    maximum = std::max(maximum, std::max(0.0, sample.*series.valueMember));
+                }
+            }
+            if (m_axisStep > 0.0)
+            {
+                return std::max(m_axisStep, std::ceil(maximum / m_axisStep) * m_axisStep);
             }
             if (maximum <= 0.0)
             {
@@ -839,30 +926,48 @@ namespace
             return startRatio + (targetRatio - startRatio) * m_animationProgress;
         }
 
-        void drawLines(QPainter& painter, const QRectF& plotRect, const double axisMaximum) const
+        // 路径只依赖数据、坐标与动画进度；普通expose/滚动/换色不再重复投影1800点。
+        void ensureLinePaths(const QRectF& plotRect, const double axisMaximum)
         {
-            const std::size_t pointCount = m_timestamps.size();
+            const qreal pixelRatio = devicePixelRatioF();
+            if (m_linePathsValid && m_cachedPlotRect == plotRect
+                && m_cachedAxisMaximum == axisMaximum && m_cachedPixelRatio == pixelRatio
+                && m_cachedAnimationProgress == m_animationProgress)
+            {
+                return;
+            }
+            m_cachedLinePaths.clear();
+            m_cachedLinePaths.reserve(m_series.size());
+            m_cachedPlotRect = plotRect;
+            m_cachedAxisMaximum = axisMaximum;
+            m_cachedPixelRatio = pixelRatio;
+            m_cachedAnimationProgress = m_animationProgress;
+            m_linePathsValid = true;
+            const std::size_t pointCount = this->pointCount();
             if (pointCount == 0U)
             {
                 return;
             }
 
-            for (const Series& series : m_series)
+            for (std::size_t seriesIndex = 0; seriesIndex < m_series.size(); ++seriesIndex)
             {
-                if (series.values.empty())
+                const Series& series = m_series[seriesIndex];
+                m_cachedLinePaths.emplace_back();
+                QPainterPath& linePath = m_cachedLinePaths.back();
+                if (series.valueMember == nullptr)
                 {
                     continue;
                 }
-                QPainterPath linePath;
-                const std::size_t seriesPointCount = std::min(pointCount, series.values.size());
+                const std::size_t seriesPointCount = pointCount;
                 for (std::size_t pointIndex = 0; pointIndex < seriesPointCount; ++pointIndex)
                 {
                     const double x = plotRect.left()
                         + plotRect.width() * animatedXRatio(pointIndex, seriesPointCount);
-                    double displayValue = series.values[pointIndex];
+                    double displayValue = (*m_history)[pointIndex].*series.valueMember;
                     if (pointIndex + 1U == seriesPointCount && m_animationProgress < 1.0)
                     {
-                        const double startValue = m_previousLatestValueByLabel.value(series.label, displayValue);
+                        const double startValue = seriesIndex < m_previousLatestValues.size()
+                            ? m_previousLatestValues[seriesIndex] : displayValue;
                         displayValue = startValue + (displayValue - startValue) * m_animationProgress;
                     }
                     const double valueRatio = std::min(
@@ -878,9 +983,17 @@ namespace
                         linePath.lineTo(x, y);
                     }
                 }
-                painter.setPen(QPen(series.color, 2.0));
+            }
+        }
+
+        void drawLines(QPainter& painter, const QRectF& plotRect, const double axisMaximum)
+        {
+            ensureLinePaths(plotRect, axisMaximum);
+            for (std::size_t seriesIndex = 0; seriesIndex < m_cachedLinePaths.size(); ++seriesIndex)
+            {
+                painter.setPen(QPen(m_series[seriesIndex].color, 2.0));
                 painter.setBrush(Qt::NoBrush);
-                painter.drawPath(linePath);
+                painter.drawPath(m_cachedLinePaths[seriesIndex]);
             }
         }
 
@@ -903,30 +1016,30 @@ namespace
 
         void drawTimeRange(QPainter& painter, const QRectF& plotRect, const QColor& textColor) const
         {
-            if (m_timestamps.empty())
+            if (pointCount() == 0U)
             {
                 return;
             }
             painter.setPen(textColor);
             const QRectF leftTextRect(plotRect.left(), plotRect.bottom() + 5.0, 120.0, 18.0);
             const QRectF rightTextRect(plotRect.right() - 120.0, plotRect.bottom() + 5.0, 120.0, 18.0);
-            painter.drawText(leftTextRect, Qt::AlignLeft | Qt::AlignVCenter, timeText(m_timestamps.front()));
-            painter.drawText(rightTextRect, Qt::AlignRight | Qt::AlignVCenter, timeText(m_timestamps.back()));
+            painter.drawText(leftTextRect, Qt::AlignLeft | Qt::AlignVCenter, timeText(m_history->front().unixMilliseconds));
+            painter.drawText(rightTextRect, Qt::AlignRight | Qt::AlignVCenter, timeText(m_history->back().unixMilliseconds));
         }
 
         QString latestValuesText() const
         {
-            if (m_timestamps.empty())
+            if (pointCount() == 0U)
             {
                 return QString();
             }
             QStringList lines;
-            lines << (m_timeHeader + QStringLiteral(": ") + timeText(m_timestamps.back()));
+            lines << (m_timeHeader + QStringLiteral(": ") + timeText(m_history->back().unixMilliseconds));
             for (const Series& series : m_series)
             {
-                if (!series.values.empty())
+                if (series.valueMember != nullptr)
                 {
-                    lines << (series.label + QStringLiteral(": ") + valueText(series.values.back()));
+                    lines << (series.label + QStringLiteral(": ") + valueText(m_history->back().*series.valueMember));
                 }
             }
             return lines.join(QLatin1Char('\n'));
@@ -943,20 +1056,20 @@ namespace
 
             QStringList lines;
             lines << headerFields.join(QLatin1Char('\t'));
-            for (std::size_t pointIndex = 0; pointIndex < m_timestamps.size(); ++pointIndex)
+            for (std::size_t pointIndex = 0; pointIndex < pointCount(); ++pointIndex)
             {
                 QStringList rowFields;
-                rowFields << timeText(m_timestamps[pointIndex]);
+                rowFields << timeText((*m_history)[pointIndex].unixMilliseconds);
                 for (const Series& series : m_series)
                 {
-                    rowFields << valueText(pointIndex < series.values.size() ? series.values[pointIndex] : 0.0);
+                    rowFields << valueText(series.valueMember != nullptr ? (*m_history)[pointIndex].*series.valueMember : 0.0);
                 }
                 lines << rowFields.join(QLatin1Char('\t'));
             }
             return lines.join(QLatin1Char('\n'));
         }
 
-        std::vector<qint64> m_timestamps;
+        HistorySnapshot m_history;
         std::vector<Series> m_series;
         QString m_unitText;
         QString m_emptyText;
@@ -964,7 +1077,15 @@ namespace
         QString m_copyLatestText;
         QString m_copyHistoryText;
         double m_fixedMaximum = 0.0;
-        QHash<QString, double> m_previousLatestValueByLabel;
+        double m_axisStep = 0.0;
+        double m_axisMaximum = 1.0;
+        std::vector<QPainterPath> m_cachedLinePaths;
+        QRectF m_cachedPlotRect;
+        double m_cachedAxisMaximum = 1.0;
+        double m_cachedAnimationProgress = 1.0;
+        qreal m_cachedPixelRatio = 0.0;
+        bool m_linePathsValid = false;
+        std::vector<double> m_previousLatestValues;
         std::size_t m_previousPointCount = 0U;
         bool m_historyWindowShifted = false;
         QVariantAnimation* m_seriesAnimation = nullptr;
@@ -1052,7 +1173,12 @@ namespace
 
         void paintEvent(QPaintEvent* eventPointer) override
         {
-            (void)eventPointer;
+            const QRegion exposedRegion = eventPointer != nullptr
+                ? eventPointer->region() : QRegion(rect());
+            if (exposedRegion.isEmpty())
+            {
+                return;
+            }
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -1067,48 +1193,68 @@ namespace
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
 
-            for (int index = 0; index < static_cast<int>(m_coreValues.size()); ++index)
+            // Derive candidate rows/columns from the dirty bounds, then respect disjoint regions.
+            // Include the antialias halo and integer rounding of fractional cell bounds.
+            const QRectF exposedBounds = QRectF(exposedRegion.boundingRect()).adjusted(-2.0, -2.0, 2.0, 2.0);
+            const int coreCount = static_cast<int>(m_coreValues.size());
+            const int rowCount = (coreCount + columnCount - 1) / columnCount;
+            const int firstRow = std::max(0, static_cast<int>(std::floor(exposedBounds.top() / (kCellHeight + kGridSpacing))));
+            const int lastRow = std::min(rowCount - 1, static_cast<int>(std::floor(exposedBounds.bottom() / (kCellHeight + kGridSpacing))));
+            const int firstColumn = std::max(0, static_cast<int>(std::floor(exposedBounds.left() / (cellWidth + kGridSpacing))));
+            const int lastColumn = std::min(columnCount - 1, static_cast<int>(std::floor(exposedBounds.right() / (cellWidth + kGridSpacing))));
+            for (int row = firstRow; row <= lastRow; ++row)
             {
-                const int row = index / columnCount;
-                const int column = index % columnCount;
-                const QRectF cellRect(
-                    column * (cellWidth + kGridSpacing),
-                    row * (kCellHeight + kGridSpacing),
-                    cellWidth,
-                    kCellHeight);
-                const ProcessDetailWindow::CpuCoreValue& core =
-                    m_coreValues[static_cast<std::size_t>(index)];
+                for (int column = firstColumn; column <= lastColumn; ++column)
+                {
+                    const int index = row * columnCount + column;
+                    if (index >= coreCount)
+                    {
+                        break;
+                    }
+                    const QRectF cellRect(
+                        column * (cellWidth + kGridSpacing),
+                        row * (kCellHeight + kGridSpacing),
+                        cellWidth,
+                        kCellHeight);
+                    // QPainter clips pixels automatically; skip path/text generation as well.
+                    if (!exposedRegion.intersects(cellRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                    {
+                        continue;
+                    }
+                    const ProcessDetailWindow::CpuCoreValue& core =
+                        m_coreValues[static_cast<std::size_t>(index)];
 
-                painter.setPen(QPen(borderColor, 1.0));
-                painter.setBrush(cardColor);
-                painter.drawRoundedRect(cellRect.adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0);
+                    painter.setPen(QPen(borderColor, 1.0));
+                    painter.setBrush(cardColor);
+                    painter.drawRoundedRect(cellRect.adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0);
 
-                const QRectF contentRect = cellRect.adjusted(8.0, 5.0, -8.0, -8.0);
-                QFont labelFont = painter.font();
-                labelFont.setWeight(QFont::DemiBold);
-                painter.setFont(labelFont);
-                painter.setPen(secondaryTextColor);
-                painter.drawText(contentRect, Qt::AlignLeft | Qt::AlignTop, coordinateText(core));
+                    const QRectF contentRect = cellRect.adjusted(8.0, 5.0, -8.0, -8.0);
+                    QFont labelFont = painter.font();
+                    labelFont.setWeight(QFont::DemiBold);
+                    painter.setFont(labelFont);
+                    painter.setPen(secondaryTextColor);
+                    painter.drawText(contentRect, Qt::AlignLeft | Qt::AlignTop, coordinateText(core));
 
-                QFont valueFont = painter.font();
-                valueFont.setWeight(QFont::Bold);
-                painter.setFont(valueFont);
-                painter.setPen(core.sampleReady ? primaryTextColor : secondaryTextColor);
-                painter.drawText(
-                    contentRect,
-                    Qt::AlignRight | Qt::AlignTop,
-                    core.sampleReady
-                        ? QString::number(core.percent, 'f', core.percent >= 10.0 ? 1 : 2)
-                            + QStringLiteral("%")
-                        : QStringLiteral("—"));
+                    QFont valueFont = painter.font();
+                    valueFont.setWeight(QFont::Bold);
+                    painter.setFont(valueFont);
+                    painter.setPen(core.sampleReady ? primaryTextColor : secondaryTextColor);
+                    painter.drawText(
+                        contentRect,
+                        Qt::AlignRight | Qt::AlignTop,
+                        core.sampleReady
+                            ? QString::number(core.percent, 'f', core.percent >= 10.0 ? 1 : 2)
+                                + QStringLiteral("%")
+                            : QStringLiteral("—"));
 
-                const QRectF plotRect = cellRect.adjusted(7.0, 27.0, -7.0, -7.0);
-                drawHistoryLine(
-                    painter,
-                    plotRect,
-                    m_historyByProcessorIndex[core.processorIndex],
-                    cpuColor,
-                    borderColor);
+                    const QRectF plotRect = cellRect.adjusted(7.0, 27.0, -7.0, -7.0);
+                    drawHistoryLine(
+                        painter,
+                        plotRect,
+                        m_historyByProcessorIndex[core.processorIndex],
+                        cpuColor,
+                        borderColor);
+                }
             }
 
             if (m_coreValues.empty())
@@ -1228,6 +1374,7 @@ namespace
             const bool multipleProcessorGroups)
         {
             m_threadValues = std::move(threadValues);
+            m_cardLayoutDirty = true;
             QSet<std::uint32_t> liveThreadIds;
             for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
             {
@@ -1324,7 +1471,13 @@ namespace
 
         void paintEvent(QPaintEvent* eventPointer) override
         {
-            (void)eventPointer;
+            const QRegion exposedRegion = eventPointer != nullptr
+                ? eventPointer->region() : QRegion(rect());
+            if (exposedRegion.isEmpty())
+            {
+                return;
+            }
+            ensureCardLayout(std::max(1, width()));
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -1333,29 +1486,26 @@ namespace
             const QColor borderColor = KswordTheme::BorderColor();
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
-            qreal cardTop = 0.0;
-            const QRect exposedRect = eventPointer != nullptr ? eventPointer->rect() : rect();
+            const QRectF exposedBounds = QRectF(exposedRegion.boundingRect()).adjusted(-2.0, -2.0, 2.0, 2.0);
+            const int firstCardIndex = std::max(0, static_cast<int>(std::upper_bound(
+                m_cardTops.cbegin(), m_cardTops.cend(), exposedBounds.top()) - m_cardTops.cbegin()) - 1);
 
-            for (int index = 0; index < static_cast<int>(m_threadValues.size()); ++index)
+            for (int index = firstCardIndex; index < static_cast<int>(m_threadValues.size()); ++index)
             {
                 const ProcessDetailWindow::ThreadCpuCoreValue& thread =
                     m_threadValues[static_cast<std::size_t>(index)];
                 const bool expanded = m_expandedThreadIds.contains(thread.threadId);
-                const qreal currentCardHeight = cardHeight(thread, width());
-                const QRectF cardRect(
-                    0.0,
-                    cardTop,
-                    static_cast<qreal>(width()),
-                    currentCardHeight);
-                cardTop += currentCardHeight + kGridSpacing;
-                // 滚动内容可能包含大量线程；视口外卡片保留数据，只跳过文字和折线路径生成。
-                if (cardRect.bottom() < exposedRect.top() - 1)
-                {
-                    continue;
-                }
-                if (cardRect.top() > exposedRect.bottom() + 1)
+                const qreal cardTop = m_cardTops[static_cast<std::size_t>(index)];
+                const qreal currentCardHeight = m_cardTops[static_cast<std::size_t>(index) + 1U]
+                    - cardTop - kGridSpacing;
+                const QRectF cardRect(0.0, cardTop, static_cast<qreal>(width()), currentCardHeight);
+                if (cardRect.top() > exposedBounds.bottom())
                 {
                     break;
+                }
+                if (!exposedRegion.intersects(cardRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                {
+                    continue;
                 }
 
                 painter.setPen(QPen(borderColor, 1.0));
@@ -1424,35 +1574,51 @@ namespace
                     (bodyWidth - kCoreGridSpacing * (columnCount - 1))
                         / static_cast<qreal>(columnCount));
                 const auto threadHistoryIt = m_historyByThreadId.find(thread.threadId);
-                for (int coreIndex = 0; coreIndex < static_cast<int>(thread.cores.size()); ++coreIndex)
+                const int coreCount = static_cast<int>(thread.cores.size());
+                const int rowCount = (coreCount + columnCount - 1) / columnCount;
+                const int firstRow = std::max(0, static_cast<int>(std::floor((exposedBounds.top() - bodyTop) / (kCoreChartHeight + kCoreGridSpacing))));
+                const int lastRow = std::min(rowCount - 1, static_cast<int>(std::floor((exposedBounds.bottom() - bodyTop) / (kCoreChartHeight + kCoreGridSpacing))));
+                const int firstColumn = std::max(0, static_cast<int>(std::floor((exposedBounds.left() - bodyLeft) / (coreCardWidth + kCoreGridSpacing))));
+                const int lastColumn = std::min(columnCount - 1, static_cast<int>(std::floor((exposedBounds.right() - bodyLeft) / (coreCardWidth + kCoreGridSpacing))));
+                for (int row = firstRow; row <= lastRow; ++row)
                 {
-                    const ProcessDetailWindow::CpuCoreValue& core =
-                        thread.cores[static_cast<std::size_t>(coreIndex)];
-                    const int row = coreIndex / columnCount;
-                    const int column = coreIndex % columnCount;
-                    const QRectF coreCardRect(
-                        bodyLeft + column * (coreCardWidth + kCoreGridSpacing),
-                        bodyTop + row * (kCoreChartHeight + kCoreGridSpacing),
-                        coreCardWidth,
-                        kCoreChartHeight);
-                    const std::deque<double>* history = nullptr;
-                    if (threadHistoryIt != m_historyByThreadId.end())
+                    for (int column = firstColumn; column <= lastColumn; ++column)
                     {
-                        const auto coreHistoryIt = threadHistoryIt->second.find(core.processorIndex);
-                        if (coreHistoryIt != threadHistoryIt->second.end())
+                        const int coreIndex = row * columnCount + column;
+                        if (coreIndex >= coreCount)
                         {
-                            history = &coreHistoryIt->second;
+                            break;
                         }
+                        const QRectF coreCardRect(
+                            bodyLeft + column * (coreCardWidth + kCoreGridSpacing),
+                            bodyTop + row * (kCoreChartHeight + kCoreGridSpacing),
+                            coreCardWidth,
+                            kCoreChartHeight);
+                        if (!exposedRegion.intersects(coreCardRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                        {
+                            continue;
+                        }
+                        const ProcessDetailWindow::CpuCoreValue& core =
+                            thread.cores[static_cast<std::size_t>(coreIndex)];
+                        const std::deque<double>* history = nullptr;
+                        if (threadHistoryIt != m_historyByThreadId.end())
+                        {
+                            const auto coreHistoryIt = threadHistoryIt->second.find(core.processorIndex);
+                            if (coreHistoryIt != threadHistoryIt->second.end())
+                            {
+                                history = &coreHistoryIt->second;
+                            }
+                        }
+                        drawCoreChart(
+                            painter,
+                            coreCardRect,
+                            core,
+                            history,
+                            cpuColor,
+                            borderColor,
+                            primaryTextColor,
+                            secondaryTextColor);
                     }
-                    drawCoreChart(
-                        painter,
-                        coreCardRect,
-                        core,
-                        history,
-                        cpuColor,
-                        borderColor,
-                        primaryTextColor,
-                        secondaryTextColor);
                 }
             }
 
@@ -1471,10 +1637,16 @@ namespace
                 return;
             }
 
-            qreal top = 0.0;
-            for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+            ensureCardLayout(std::max(1, width()));
+            const qreal clickY = eventPointer->position().y();
+            const int index = std::max(0, static_cast<int>(std::upper_bound(
+                m_cardTops.cbegin(), m_cardTops.cend(), clickY) - m_cardTops.cbegin()) - 1);
+            if (index < static_cast<int>(m_threadValues.size()))
             {
-                const qreal height = cardHeight(thread, width());
+                const ProcessDetailWindow::ThreadCpuCoreValue& thread =
+                    m_threadValues[static_cast<std::size_t>(index)];
+                const qreal top = m_cardTops[static_cast<std::size_t>(index)];
+                const qreal height = m_cardTops[static_cast<std::size_t>(index) + 1U] - top - kGridSpacing;
                 const QRectF cardRect(0.0, top, static_cast<qreal>(width()), height);
                 if (cardRect.contains(eventPointer->position()))
                 {
@@ -1486,13 +1658,13 @@ namespace
                     {
                         m_expandedThreadIds.insert(thread.threadId);
                     }
+                    m_cardLayoutDirty = true;
                     synchronizeHeight();
                     updateGeometry();
                     update();
                     eventPointer->accept();
                     return;
                 }
-                top += height + kGridSpacing;
             }
             QWidget::mousePressEvent(eventPointer);
         }
@@ -1515,6 +1687,7 @@ namespace
                         return left.threadId < right.threadId;
                     });
                 m_sortPending = false;
+                m_cardLayoutDirty = true;
             }
             synchronizeHeight();
         }
@@ -1561,19 +1734,44 @@ namespace
                     : 0);
         }
 
+        // One prefix layout serves painting, hit testing and the current-width height query.
+        // It contains positions only; all histories and stable thread identities stay in their existing maps.
+        void ensureCardLayout(const int availableWidth) const
+        {
+            if (!m_cardLayoutDirty && m_cardLayoutWidth == availableWidth)
+            {
+                return;
+            }
+            m_cardTops.resize(m_threadValues.size() + 1U);
+            qreal top = 0.0;
+            for (std::size_t index = 0; index < m_threadValues.size(); ++index)
+            {
+                m_cardTops[index] = top;
+                top += cardHeight(m_threadValues[index], availableWidth) + kGridSpacing;
+            }
+            m_cardTops.back() = top;
+            m_cardLayoutWidth = availableWidth;
+            m_cardLayoutDirty = false;
+        }
+
         int contentHeightForWidth(const int availableWidth) const
         {
             if (m_threadValues.empty())
             {
                 return kCollapsedCardHeight;
             }
-            int height = 0;
-            for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+            // sizeHint may ask about its 820px reference; do not evict the visible-width index for it.
+            if (availableWidth != std::max(1, width()))
             {
-                height += cardHeight(thread, availableWidth);
+                int height = (static_cast<int>(m_threadValues.size()) - 1) * kGridSpacing;
+                for (const ProcessDetailWindow::ThreadCpuCoreValue& thread : m_threadValues)
+                {
+                    height += cardHeight(thread, availableWidth);
+                }
+                return height;
             }
-            height += (static_cast<int>(m_threadValues.size()) - 1) * kGridSpacing;
-            return height;
+            ensureCardLayout(availableWidth);
+            return static_cast<int>(m_cardTops.back() - kGridSpacing);
         }
 
         QString coordinateText(const ProcessDetailWindow::CpuCoreValue& core) const
@@ -1682,6 +1880,9 @@ namespace
         std::vector<ProcessDetailWindow::ThreadCpuCoreValue> m_threadValues;
         std::unordered_map<std::uint32_t, CoreHistoryMap> m_historyByThreadId;
         QSet<std::uint32_t> m_expandedThreadIds;
+        mutable std::vector<qreal> m_cardTops;
+        mutable int m_cardLayoutWidth = -1;
+        mutable bool m_cardLayoutDirty = true;
         bool m_sortPending = false; // 隐藏期间多个样本只需在Show时提交最终排序。
         bool m_multipleProcessorGroups = false;
     };
@@ -1831,38 +2032,68 @@ void ProcessDetailWindow::rebuildActionAffinityCoreButtons()
 // closeEvent：只处理已创建的工作台，不为关闭而懒加载；确认时拒绝重入与全局退出中的重复关闭。
 void ProcessDetailWindow::closeEvent(QCloseEvent* event)
 {
-    // 全局退出已经统一询问所有工作台，模态循环里迟到的详情窗关闭请求不得再弹一轮确认。
-    if ((qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
-        || property("ksword_memory_detail_close_guard_active").toBool())
+    if (m_workbenchCloseApproved)
     {
-        if (event != nullptr)
+        m_workbenchCloseApproved = false;
+        setProperty("ksword_memory_detail_close_guard_active", false);
+        if (m_embeddedMemoryDock && !m_embeddedMemoryDock->workbenchQuitPreparationCurrent())
         {
-            event->ignore();
-        }
-        return;
-    }
-
-    if (m_embeddedMemoryDock != nullptr)
-    {
-        // self：确认框的嵌套事件循环可能销毁详情窗，返回后必须先探活再改属性或访问成员。
-        const QPointer<ProcessDetailWindow> self(this);
-        setProperty("ksword_memory_detail_close_guard_active", true);
-        const bool allowed = m_embeddedMemoryDock->confirmWorkbenchQuit();
-        if (!self)
-        {
-            if (event != nullptr)
-            {
-                event->ignore();
-            }
+            m_embeddedMemoryDock->cancelWorkbenchQuit();
+            if (event) event->ignore();
             return;
         }
-        setProperty("ksword_memory_detail_close_guard_active", false);
-        if (!allowed)
-        {
-            if (event != nullptr)
+        QWidget::closeEvent(event);
+        return;
+    }
+    if ((qApp && qApp->property("ksword_memory_quit_guard_active").toBool())
+        || property("ksword_memory_detail_close_guard_active").toBool())
+    {
+        if (event) event->ignore();
+        return;
+    }
+    if (m_embeddedMemoryDock)
+    {
+        const QPointer<ProcessDetailWindow> self(this);
+        const QPointer<MemoryDock> dock(m_embeddedMemoryDock);
+        const auto ticket = ++m_workbenchCloseTicket;
+        setProperty("ksword_memory_detail_close_guard_active", true);
+        m_workbenchClosePending = true;
+        const auto status = dock->confirmWorkbenchQuit([self, dock, ticket](bool allowed) {
+            if (!self || !self->m_workbenchClosePending || ticket != self->m_workbenchCloseTicket) return;
+            self->m_workbenchClosePending = false;
+            if (!allowed || !dock || self->m_embeddedMemoryDock != dock || !dock->workbenchQuitPreparationCurrent())
             {
-                event->ignore();
+                if (!self) return;
+                self->setProperty("ksword_memory_detail_close_guard_active", false);
+                if (dock) dock->cancelWorkbenchQuit();
+                return;
             }
+            if (!self) return;
+            self->m_workbenchCloseApproved = true;
+            QTimer::singleShot(0, self, [self, ticket]() {
+                if (self && ticket == self->m_workbenchCloseTicket && self->m_workbenchCloseApproved) self->close();
+            });
+        });
+        if (!self) { if (event) event->ignore(); return; }
+        if (status == ks::ui::LeaveEntryStatus::Pending)
+        {
+            QObject::connect(dock, &QObject::destroyed, self, [self, ticket, dockAddress = dock.data()]() {
+                if (self && ticket == self->m_workbenchCloseTicket)
+                {
+                    ++self->m_workbenchCloseTicket;
+                    self->m_workbenchClosePending = false;
+                    if (self->m_embeddedMemoryDock == dockAddress) self->m_embeddedMemoryDock = nullptr;
+                    self->setProperty("ksword_memory_detail_close_guard_active", false);
+                }
+            });
+            if (event) event->ignore();
+            return;
+        }
+        m_workbenchClosePending = false;
+        setProperty("ksword_memory_detail_close_guard_active", false);
+        if (status != ks::ui::LeaveEntryStatus::Completed)
+        {
+            if (event) event->ignore();
             return;
         }
     }
@@ -2032,11 +2263,25 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         m_detailOverviewRefreshing = false;
         ++m_detailOverviewRefreshTicket;
         m_detailOverviewResult = DetailOverviewRefreshResult{};
+        ++m_threadInspectRefreshTicket;
+        m_threadInspectRefreshing = false;
+        m_threadInspectRows.reset();
+        m_threadInspectPublishedRows.reset();
+        if (m_threadInspectTable) m_threadInspectTable->clearRows();
         m_threadInspectInitialRefreshStarted = false;
         m_moduleInitialRefreshStarted = false;
         m_tokenInitialRefreshStarted = false;
         m_tokenSwitchInitialRefreshStarted = false;
         m_sectionInfoInitialRefreshStarted = false;
+        m_hotkeyRows.reset();
+        m_keyboardHotkeyRows.reset();
+        m_keyboardHookRows.reset();
+        m_hotkeyRefreshing = false;
+        m_keyboardRefreshing = false;
+        m_keyboardRefreshPending = false;
+        if (m_hotkeyTable) m_hotkeyTable->clearRows();
+        if (m_keyboardHotkeyTable) m_keyboardHotkeyTable->clearRows();
+        if (m_keyboardHookTable) m_keyboardHookTable->clearRows();
         m_hotkeyInitialRefreshStarted = false;
         m_keyboardInitialRefreshStarted = false;
         m_pebInitialRefreshStarted = false;
@@ -2123,18 +2368,55 @@ void ProcessDetailWindow::setCpuCoreViewSample(CpuCoreViewSample sample)
     refreshCpuCoreView(true);
 }
 
-bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
+void ProcessDetailWindow::scheduleChartPresentationRestore()
 {
-    // Show 已设置可见标志；这里只提交已有数据，不枚举、不重建页面或修改根主题。
-    if (event != nullptr && event->type() == QEvent::Show)
+    if (m_chartPresentationRestoreQueued)
     {
-        if (watched == m_performanceTab && m_performanceChartsDirty)
+        return;
+    }
+    m_chartPresentationRestoreQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_chartPresentationRestoreQueued = false;
+        if (m_performanceChartsDirty && detailChartPageExposed(m_performanceTab))
         {
             refreshPerformanceHistoryCharts();
         }
-        else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+        if (m_cpuCorePresentationDirty && detailChartPageExposed(m_cpuCoreTab))
         {
             refreshCpuCoreView();
+        }
+    });
+}
+
+bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event != nullptr && event->type() == QEvent::Show
+        && (watched == m_embeddedHandleTab || watched == m_embeddedMemoryTab
+            || watched == m_embeddedNetworkTab || watched == m_embeddedWindowTab))
+    {
+        QTimer::singleShot(0, this, [this] { requestInitialRefreshForCurrentTab(); });
+    }
+    if (event != nullptr && (watched == m_performanceTab || watched == m_cpuCoreTab))
+    {
+        if (event->type() == QEvent::Hide)
+        {
+            watched->setProperty(DetailChartExposureProperty, false);
+            if (watched == m_performanceTab) m_performanceChartsDirty = true;
+            else m_cpuCorePresentationDirty = true;
+        }
+        else if (event->type() == QEvent::Show)
+        {
+            watched->setProperty(DetailChartExposureProperty, true);
+            // Populate an ordinary first Show before paint, then cover native restore ordering.
+            if (watched == m_performanceTab && m_performanceChartsDirty)
+            {
+                refreshPerformanceHistoryCharts();
+            }
+            else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+            {
+                refreshCpuCoreView();
+            }
+            scheduleChartPresentationRestore();
         }
     }
     return QWidget::eventFilter(watched, event);
@@ -2150,6 +2432,13 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         return;
     }
 
+    if (event->type() == QEvent::WindowStateChange)
+    {
+        // Also retry after state publication: a native Show can precede clearing Minimized.
+        scheduleChartPresentationRestore();
+        return;
+    }
+
     if (event->type() == QEvent::LanguageChange)
     {
         // 只有语言变化重建译文；普通样式事件不能重新读取图标、文件和对象详情。
@@ -2157,6 +2446,11 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         refreshPerformanceHistoryCharts();
         refreshCpuCoreView();
         return;
+    }
+
+    if (event->type() == QEvent::WindowStateChange && !isMinimized())
+    {
+        QTimer::singleShot(0, this, [this] { requestInitialRefreshForCurrentTab(); });
     }
 
     const bool isThemeEvent =
@@ -2187,10 +2481,12 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         updateThreadInspectStatusLabel(m_threadInspectStatusLabel->text(), m_threadInspectRefreshing);
     }
 
+    if (m_moduleTable != nullptr && m_moduleRecords) rebuildModuleTable();
+
     if (m_moduleStatusLabel != nullptr)
     {
         updateModuleStatusLabel(m_moduleStatusLabel->text(), m_moduleRefreshing);
-        if (!m_moduleRefreshing && m_moduleRecords.empty())
+        if (!m_moduleRefreshing && (!m_moduleRecords || m_moduleRecords->empty()))
         {
             m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusErrorColor(), 700));
         }
@@ -2464,6 +2760,11 @@ void ProcessDetailWindow::initializeUi()
     m_pebTab = new QWidget(m_tabWidget);
     m_kernelCallbackTab = new QWidget(m_tabWidget);
 
+    // QTabWidget 先显示新页，再发 currentChanged 触发惰性构造。
+    // 在轻量页壳上提前监听，才能记录首次 Show，避免图表和汇总读数一直被可见性守卫跳过。
+    m_performanceTab->installEventFilter(this);
+    m_cpuCoreTab->installEventFilter(this);
+
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
     m_performanceTab->setObjectName(QStringLiteral("ProcessDetailTab_Performance"));
     m_cpuCoreTab->setObjectName(QStringLiteral("ProcessDetailTab_CpuCore"));
@@ -2558,12 +2859,16 @@ void ProcessDetailWindow::initializeUi()
 
 void ProcessDetailWindow::ensureTabContentInitialized(QWidget* const tab)
 {
-    // 所有惰性详情页共用完成入口；早退也准备已存在的可见页，构造/隐藏阶段只持弱引用。
-    const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(tab);
     if (tab == nullptr || m_initializedTabs.contains(tab))
     {
+        if (tab != nullptr && tab->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(tab);
+        }
         return;
     }
+    // 首帧完成守卫只覆盖真正构造；已建页仍通过共享 dirty 快速入口准备。
+    const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(tab);
 
     // 先标记，防止初始化中发生 tab 事件时递归重复创建控件树。
     m_initializedTabs.insert(tab);
@@ -2810,7 +3115,7 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     {
         if (!m_hotkeyInitialRefreshStarted)
         {
-            requestAsyncHotkeyRefresh();
+            requestAsyncHotkeyRefresh(false);
         }
         return;
     }
@@ -2819,7 +3124,7 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
     {
         if (!m_keyboardInitialRefreshStarted)
         {
-            requestAsyncKeyboardRefresh();
+            requestAsyncKeyboardRefresh(false);
         }
         return;
     }
@@ -2862,6 +3167,7 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
 
 void ProcessDetailWindow::initializeEmbeddedHandleTab()
 {
+    m_embeddedHandleTab->installEventFilter(this);
     // 只创建轻量容器；HandleDock 自身包含多张表和异步枚举，首次切页时再构造。
     m_embeddedHandleLayout = new QVBoxLayout(m_embeddedHandleTab);
     m_embeddedHandleLayout->setContentsMargins(0, 0, 0, 0);
@@ -2878,51 +3184,52 @@ void ProcessDetailWindow::initializeEmbeddedHandleTab()
 
 void ProcessDetailWindow::ensureEmbeddedHandleView()
 {
-    // 作用：首次进入“句柄”页时懒加载内嵌 HandleDock，并锁定当前 PID。
-    // 入参：无，目标进程取自 m_baseRecord。
-    // 返回：无。与内存页一致按帧拆分：槽函数立即返回，控件树构造与 PID 聚焦分属两段事件循环。
-    if (m_embeddedHandleDock != nullptr || m_embeddedHandleLayout == nullptr)
-    {
-        return;
-    }
+    if (m_embeddedHandleLayout == nullptr || !isCurrentEmbeddedPage(m_embeddedHandleTab, m_tabWidget)) return;
+    if (m_embeddedHandleDock != nullptr && !m_embeddedHandleTab->property(kEmbeddedViewContextPendingProperty).toBool()) return;
+    if (!markEmbeddedViewBuildPending(m_embeddedHandleTab)) return;
 
-    if (!markEmbeddedViewBuildPending(m_embeddedHandleTab))
+    const QPointer<QWidget> page(m_embeddedHandleTab);
+    const std::uint32_t targetProcessId = m_baseRecord.pid;
+    const std::uint64_t creationTime = m_baseRecord.creationTime100ns;
+    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this, page, targetProcessId, creationTime]
     {
-        return;
-    }
-
-    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
-        // 挂载、范围裁剪与显式 Show 全部结束后才准备最终分支，不给默认页提前换肤。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedHandleTab);
-        if (m_embeddedHandleDock != nullptr || m_embeddedHandleLayout == nullptr)
+        if (!page || page != m_embeddedHandleTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+            || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
         {
-            clearEmbeddedViewBuildPending(m_embeddedHandleTab);
+            clearEmbeddedViewBuildPending(page);
             return;
         }
-
-        // 第一段：构造控件树并替换占位文本。
-        m_embeddedHandleDock = new HandleDock(m_embeddedHandleTab);
-        m_embeddedHandleDock->hide();
-        attachEmbeddedDockToTabLayout(
-            m_embeddedHandleLayout,
-            m_embeddedHandlePlaceholder,
-            m_embeddedHandleDock);
-        m_embeddedHandleDock->show();
-
-        // 第二段：按当前 PID 聚焦，句柄枚举本身已是异步实现。
-        const std::uint32_t targetProcessId = m_baseRecord.pid;
-        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, targetProcessId]() {
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
+        if (m_embeddedHandleDock == nullptr)
+        {
+            m_embeddedHandleDock = new HandleDock(page);
+            m_embeddedHandleDock->hide();
+            attachEmbeddedDockToTabLayout(m_embeddedHandleLayout, m_embeddedHandlePlaceholder, m_embeddedHandleDock);
+            page->setProperty(kEmbeddedViewContextPendingProperty, true);
+            m_embeddedHandleDock->show();
+        }
+        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, page, targetProcessId, creationTime]
+        {
+            if (!page || page != m_embeddedHandleTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+                || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
+            {
+                // A mounted page keeps its pending context for the next real Show.
+                clearEmbeddedViewBuildPending(page);
+                return;
+            }
             if (m_embeddedHandleDock != nullptr)
             {
                 m_embeddedHandleDock->focusProcessId(targetProcessId, false);
+                page->setProperty(kEmbeddedViewContextPendingProperty, false);
             }
-            clearEmbeddedViewBuildPending(m_embeddedHandleTab);
+            clearEmbeddedViewBuildPending(page);
         });
     });
 }
 
 void ProcessDetailWindow::initializeEmbeddedMemoryTab()
 {
+    m_embeddedMemoryTab->installEventFilter(this);
     m_embeddedMemoryLayout = new QVBoxLayout(m_embeddedMemoryTab);
     m_embeddedMemoryLayout->setContentsMargins(0, 0, 0, 0);
     m_embeddedMemoryLayout->setSpacing(0);
@@ -2937,60 +3244,53 @@ void ProcessDetailWindow::initializeEmbeddedMemoryTab()
 
 void ProcessDetailWindow::ensureEmbeddedMemoryView()
 {
-    // 作用：
-    // - 首次进入“内存”页时懒加载内嵌 MemoryDock，并把当前进程附加到该 Dock。
-    // - 这条链路是详情窗最重的一次同步开销：MemoryDock 构造函数内部同步枚举全系统进程，
-    //   focusProcessForOperations 会再枚举一次进程，随后 attachToProcess 还要遍历目标进程
-    //   的整个地址空间。三段叠在一次 Tab 点击里会让界面无响应数秒。
-    // - 因此改成分帧构建：槽函数立即返回让占位文本先绘制，控件树构造与进程附加各占一段
-    //   事件循环，段与段之间界面可以重绘并响应输入。
-    // 入参：无，目标进程取自 m_baseRecord。
-    // 返回：无。排队期间重复调用会被排队标记短路，不会构造出第二个 MemoryDock。
-    if (m_embeddedMemoryDock != nullptr || m_embeddedMemoryLayout == nullptr)
-    {
-        return;
-    }
+    if (m_embeddedMemoryLayout == nullptr || !isCurrentEmbeddedPage(m_embeddedMemoryTab, m_tabWidget)) return;
+    if (m_embeddedMemoryDock != nullptr && !m_embeddedMemoryTab->property(kEmbeddedViewContextPendingProperty).toBool()) return;
+    if (!markEmbeddedViewBuildPending(m_embeddedMemoryTab)) return;
 
-    if (!markEmbeddedViewBuildPending(m_embeddedMemoryTab))
+    const QPointer<QWidget> page(m_embeddedMemoryTab);
+    const std::uint32_t targetProcessId = m_baseRecord.pid;
+    const std::uint64_t creationTime = m_baseRecord.creationTime100ns;
+    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this, page, targetProcessId, creationTime]
     {
-        return;
-    }
-
-    // QTimer::singleShot 传入 this 作为上下文对象：窗口先于定时器销毁时回调不会执行，
-    // 与构造函数里首刷延迟的既有写法保持一致，无需额外的存活判断。
-    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
-        // 统一在本阶段退出时准备真实首屏；隐藏或已销毁宿主由共享弱引用守卫跳过。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedMemoryTab);
-        if (m_embeddedMemoryDock != nullptr || m_embeddedMemoryLayout == nullptr)
+        if (!page || page != m_embeddedMemoryTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+            || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
         {
-            clearEmbeddedViewBuildPending(m_embeddedMemoryTab);
+            clearEmbeddedViewBuildPending(page);
             return;
         }
-
-        // 第一段：只做控件树构造与页面挂载，不触发目标进程附加。
-        m_embeddedMemoryDock = new MemoryDock(m_embeddedMemoryTab);
-        m_embeddedMemoryDock->hide();
-        attachEmbeddedDockToTabLayout(
-            m_embeddedMemoryLayout,
-            m_embeddedMemoryPlaceholder,
-            m_embeddedMemoryDock);
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
+        if (m_embeddedMemoryDock == nullptr)
+        {
+            m_embeddedMemoryDock = new MemoryDock(page, MemoryDock::PageScope::ProcessDetail);
+            m_embeddedMemoryDock->hide();
+            attachEmbeddedDockToTabLayout(m_embeddedMemoryLayout, m_embeddedMemoryPlaceholder, m_embeddedMemoryDock);
         m_embeddedMemoryDock->setProcessDetailMemoryScope();
-        m_embeddedMemoryDock->show();
-
-        // 第二段：附加目标进程。pid 在构造这一段取定，保证与本次构建的目标一致。
-        const std::uint32_t targetProcessId = m_baseRecord.pid;
-        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, targetProcessId]() {
+            page->setProperty(kEmbeddedViewContextPendingProperty, true);
+            m_embeddedMemoryDock->show();
+        }
+        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, page, targetProcessId, creationTime]
+        {
+            if (!page || page != m_embeddedMemoryTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+                || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
+            {
+                // A mounted page keeps its pending context for the next real Show.
+                clearEmbeddedViewBuildPending(page);
+                return;
+            }
             if (m_embeddedMemoryDock != nullptr)
             {
                 m_embeddedMemoryDock->focusProcessForOperations(targetProcessId, false);
+                page->setProperty(kEmbeddedViewContextPendingProperty, false);
             }
-            clearEmbeddedViewBuildPending(m_embeddedMemoryTab);
+            clearEmbeddedViewBuildPending(page);
         });
     });
 }
 
 void ProcessDetailWindow::initializeEmbeddedNetworkTab()
 {
+    m_embeddedNetworkTab->installEventFilter(this);
     m_embeddedNetworkLayout = new QVBoxLayout(m_embeddedNetworkTab);
     m_embeddedNetworkLayout->setContentsMargins(0, 0, 0, 0);
     m_embeddedNetworkLayout->setSpacing(0);
@@ -3005,47 +3305,46 @@ void ProcessDetailWindow::initializeEmbeddedNetworkTab()
 
 void ProcessDetailWindow::ensureEmbeddedNetworkView()
 {
-    // 作用：首次进入“网络”页时懒加载内嵌 NetworkDock，并只保留当前进程的连接。
-    // 入参：无，目标进程取自 m_baseRecord。
-    // 返回：无。与内存页一致按帧拆分，避免控件树构造与连接过滤挤在一次 Tab 点击里。
-    if (m_embeddedNetworkDock != nullptr || m_embeddedNetworkLayout == nullptr)
-    {
-        return;
-    }
+    if (m_embeddedNetworkLayout == nullptr || !isCurrentEmbeddedPage(m_embeddedNetworkTab, m_tabWidget)) return;
+    if (m_embeddedNetworkDock != nullptr && !m_embeddedNetworkTab->property(kEmbeddedViewContextPendingProperty).toBool()) return;
+    if (!markEmbeddedViewBuildPending(m_embeddedNetworkTab)) return;
 
-    if (!markEmbeddedViewBuildPending(m_embeddedNetworkTab))
+    const QPointer<QWidget> page(m_embeddedNetworkTab);
+    const std::uint32_t targetProcessId = m_baseRecord.pid;
+    const std::uint64_t creationTime = m_baseRecord.creationTime100ns;
+    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this, page, targetProcessId, creationTime]
     {
-        return;
-    }
-
-    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
-        // 连接范围会切换内层 Tab，完成 Scope 与 Show 后再准备当前分支的首次颜色。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedNetworkTab);
-        if (m_embeddedNetworkDock != nullptr || m_embeddedNetworkLayout == nullptr)
+        if (!page || page != m_embeddedNetworkTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+            || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
         {
-            clearEmbeddedViewBuildPending(m_embeddedNetworkTab);
+            clearEmbeddedViewBuildPending(page);
             return;
         }
-
-        // 第一段：构造控件树、裁剪页面范围并替换占位文本。
-        m_embeddedNetworkDock = new NetworkDock(m_embeddedNetworkTab);
-        m_embeddedNetworkDock->hide();
-        attachEmbeddedDockToTabLayout(
-            m_embeddedNetworkLayout,
-            m_embeddedNetworkPlaceholder,
-            m_embeddedNetworkDock);
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
+        if (m_embeddedNetworkDock == nullptr)
+        {
+            m_embeddedNetworkDock = new NetworkDock(page, NetworkDock::ConstructScope::ProcessConnections);
+            m_embeddedNetworkDock->hide();
+            attachEmbeddedDockToTabLayout(m_embeddedNetworkLayout, m_embeddedNetworkPlaceholder, m_embeddedNetworkDock);
         m_embeddedNetworkDock->setProcessDetailConnectionScope();
-        m_embeddedNetworkDock->show();
-
-        // 第二段：按当前 PID 过滤连接，连接枚举本身已是异步实现。
-        const quint32 targetProcessId = static_cast<quint32>(m_baseRecord.pid);
-        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, targetProcessId]() {
+            page->setProperty(kEmbeddedViewContextPendingProperty, true);
+            m_embeddedNetworkDock->show();
+        }
+        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, page, targetProcessId, creationTime]
+        {
+            if (!page || page != m_embeddedNetworkTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+                || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
+            {
+                // A mounted page keeps its pending context for the next real Show.
+                clearEmbeddedViewBuildPending(page);
+                return;
+            }
             if (m_embeddedNetworkDock != nullptr)
             {
-                m_embeddedNetworkDock->focusConnectionsByPids(
-                    QVector<quint32>{ targetProcessId });
+                m_embeddedNetworkDock->focusConnectionsByPids(QVector<quint32>{ targetProcessId });
+                page->setProperty(kEmbeddedViewContextPendingProperty, false);
             }
-            clearEmbeddedViewBuildPending(m_embeddedNetworkTab);
+            clearEmbeddedViewBuildPending(page);
         });
     });
 }
@@ -3066,6 +3365,7 @@ void ProcessDetailWindow::initializeSoundSourceTab()
 
 void ProcessDetailWindow::initializeEmbeddedWindowTab()
 {
+    m_embeddedWindowTab->installEventFilter(this);
     m_embeddedWindowLayout = new QVBoxLayout(m_embeddedWindowTab);
     m_embeddedWindowLayout->setContentsMargins(0, 0, 0, 0);
     m_embeddedWindowLayout->setSpacing(0);
@@ -3080,47 +3380,46 @@ void ProcessDetailWindow::initializeEmbeddedWindowTab()
 
 void ProcessDetailWindow::ensureEmbeddedWindowView()
 {
-    // 作用：首次进入“窗口”页时懒加载内嵌 OtherDock，并只保留当前进程的窗口列表。
-    // 入参：无，目标进程取自 m_baseRecord。
-    // 返回：无。与内存页一致按帧拆分，避免控件树构造与窗口枚举挤在一次 Tab 点击里。
-    if (m_embeddedWindowDock != nullptr || m_embeddedWindowLayout == nullptr)
-    {
-        return;
-    }
+    if (m_embeddedWindowLayout == nullptr || !isCurrentEmbeddedPage(m_embeddedWindowTab, m_tabWidget)) return;
+    if (m_embeddedWindowDock != nullptr && !m_embeddedWindowTab->property(kEmbeddedViewContextPendingProperty).toBool()) return;
+    if (!markEmbeddedViewBuildPending(m_embeddedWindowTab)) return;
 
-    if (!markEmbeddedViewBuildPending(m_embeddedWindowTab))
+    const QPointer<QWidget> page(m_embeddedWindowTab);
+    const std::uint32_t targetProcessId = m_baseRecord.pid;
+    const std::uint64_t creationTime = m_baseRecord.creationTime100ns;
+    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this, page, targetProcessId, creationTime]
     {
-        return;
-    }
-
-    QTimer::singleShot(kEmbeddedViewBuildFirstStageDelayMs, this, [this]() {
-        // 范围裁剪和挂载保持原流程，阶段结束仅对真实可见宿主消费待应用主题。
-        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(m_embeddedWindowTab);
-        if (m_embeddedWindowDock != nullptr || m_embeddedWindowLayout == nullptr)
+        if (!page || page != m_embeddedWindowTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+            || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
         {
-            clearEmbeddedViewBuildPending(m_embeddedWindowTab);
+            clearEmbeddedViewBuildPending(page);
             return;
         }
-
-        // 第一段：构造控件树、裁剪页面范围并替换占位文本。
-        m_embeddedWindowDock = new OtherDock(m_embeddedWindowTab);
-        m_embeddedWindowDock->hide();
-        attachEmbeddedDockToTabLayout(
-            m_embeddedWindowLayout,
-            m_embeddedWindowPlaceholder,
-            m_embeddedWindowDock);
+        const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
+        if (m_embeddedWindowDock == nullptr)
+        {
+            m_embeddedWindowDock = new OtherDock(page, OtherDock::PageScope::WindowListOnly, QVector<quint32>{targetProcessId});
+            m_embeddedWindowDock->hide();
+            attachEmbeddedDockToTabLayout(m_embeddedWindowLayout, m_embeddedWindowPlaceholder, m_embeddedWindowDock);
         m_embeddedWindowDock->setWindowListOnlyScope();
-        m_embeddedWindowDock->show();
-
-        // 第二段：按当前 PID 过滤窗口列表。
-        const quint32 targetProcessId = static_cast<quint32>(m_baseRecord.pid);
-        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, targetProcessId]() {
+            page->setProperty(kEmbeddedViewContextPendingProperty, true);
+            m_embeddedWindowDock->show();
+        }
+        QTimer::singleShot(kEmbeddedViewBuildNextStageDelayMs, this, [this, page, targetProcessId, creationTime]
+        {
+            if (!page || page != m_embeddedWindowTab || !isCurrentEmbeddedPage(page, m_tabWidget)
+                || targetProcessId != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns)
+            {
+                // A mounted page keeps its pending context for the next real Show.
+                clearEmbeddedViewBuildPending(page);
+                return;
+            }
             if (m_embeddedWindowDock != nullptr)
             {
-                m_embeddedWindowDock->focusProcessIds(
-                    QVector<quint32>{ targetProcessId });
+                m_embeddedWindowDock->focusProcessIds(QVector<quint32>{ targetProcessId });
+                page->setProperty(kEmbeddedViewContextPendingProperty, false);
             }
-            clearEmbeddedViewBuildPending(m_embeddedWindowTab);
+            clearEmbeddedViewBuildPending(page);
         });
     });
 }
@@ -3777,7 +4076,6 @@ void ProcessDetailWindow::initializeDetailTab()
 
 void ProcessDetailWindow::initializePerformanceTab()
 {
-    m_performanceTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     const auto configureCopyableLabel = [&languageManager](QLabel* label) {
         if (label == nullptr)
@@ -3878,7 +4176,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 {
     m_performanceChartsDirty = true;
     // 数据入队和1800点裁剪仍在每次样本更新执行；只有不可见的图形转换延后。
-    if (m_performanceHistoryStatusLabel == nullptr || !m_performanceTab->isVisible())
+    if (m_performanceHistoryStatusLabel == nullptr || !detailChartPageExposed(m_performanceTab))
     {
         return;
     }
@@ -3887,57 +4185,42 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
     const auto text = [](const QString& key) {
         return ks::i18n::text(key, QString());
     };
-    std::vector<qint64> timestamps;
-    std::vector<double> cpuValues;
-    std::vector<double> cpuCoreValues;
-    std::vector<double> memoryValues;
-    std::vector<double> diskValues;
-    std::vector<double> networkRxValues;
-    std::vector<double> networkTxValues;
-    std::vector<double> gpuValues;
-    timestamps.reserve(m_performanceHistory.size());
-    cpuValues.reserve(m_performanceHistory.size());
-    cpuCoreValues.reserve(m_performanceHistory.size());
-    memoryValues.reserve(m_performanceHistory.size());
-    diskValues.reserve(m_performanceHistory.size());
-    networkRxValues.reserve(m_performanceHistory.size());
-    networkTxValues.reserve(m_performanceHistory.size());
-    gpuValues.reserve(m_performanceHistory.size());
-    for (const PerformanceHistorySample& sample : m_performanceHistory)
+    using Chart = ProcessPerformanceHistoryChartWidget;
+    const auto* primaryChart = static_cast<Chart*>(m_performanceCpuChart);
+    Chart::HistorySnapshot history = primaryChart != nullptr
+        ? primaryChart->historySnapshot() : Chart::HistorySnapshot{};
+    if (!Chart::historyMatches(history, m_performanceHistory))
     {
-        timestamps.push_back(sample.unixMilliseconds);
-        cpuValues.push_back(sample.cpuPercent);
-        cpuCoreValues.push_back(sample.cpuCorePercent);
-        memoryValues.push_back(sample.memoryMB);
-        diskValues.push_back(sample.diskMBps);
-        networkRxValues.push_back(sample.networkRxKBps);
-        networkTxValues.push_back(sample.networkTxKBps);
-        gpuValues.push_back(sample.gpuPercent);
+        // 六图共用一份完整不可变快照，不再分解成八向量和六份时间轴。
+        history = std::make_shared<const Chart::History>(
+            m_performanceHistory.cbegin(), m_performanceHistory.cend());
     }
 
     const QString timeHeader = text(QStringLiteral("process.detail.performance.header.time"));
     const QString emptyText = text(QStringLiteral("process.detail.performance.chart.empty"));
     const QString copyLatestText = text(QStringLiteral("process.detail.performance.action.copy_current"));
     const QString copyHistoryText = text(QStringLiteral("process.detail.performance.action.copy_history"));
-    const auto setChartData = [&timestamps, &emptyText, &timeHeader, &copyLatestText, &copyHistoryText](
+    const auto setChartData = [&history, &emptyText, &timeHeader, &copyLatestText, &copyHistoryText](
         QWidget* chartWidget,
         std::vector<ProcessPerformanceHistoryChartWidget::Series> series,
         const QString& unitText,
-        const double fixedMaximum) {
+        const double fixedMaximum,
+        const double axisStep = 0.0) {
         auto* chart = static_cast<ProcessPerformanceHistoryChartWidget*>(chartWidget);
         if (chart == nullptr)
         {
             return;
         }
         chart->setChartData(
-            timestamps,
+            history,
             std::move(series),
             unitText,
             fixedMaximum,
             emptyText,
             timeHeader,
             copyLatestText,
-            copyHistoryText);
+            copyHistoryText,
+            axisStep);
     };
 
     setChartData(
@@ -3945,28 +4228,24 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.cpu")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
-            std::move(cpuValues) } },
+            &Chart::Sample::cpuPercent } },
         QStringLiteral("%"),
         100.0);
-    const double cpuCoreMaximum = cpuCoreValues.empty()
-        ? 100.0
-        : std::max(
-            100.0,
-            std::ceil(*std::max_element(cpuCoreValues.cbegin(), cpuCoreValues.cend()) / 100.0) * 100.0);
     setChartData(
         m_performanceCpuCoreChart,
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.cpu_core")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
-            std::move(cpuCoreValues) } },
+            &Chart::Sample::cpuCorePercent } },
         QStringLiteral("%"),
-        cpuCoreMaximum);
+        0.0,
+        100.0);
     setChartData(
         m_performanceMemoryChart,
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.memory")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory),
-            std::move(memoryValues) } },
+            &Chart::Sample::memoryMB } },
         QStringLiteral("MB"),
         0.0);
     setChartData(
@@ -3974,7 +4253,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.disk")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
-            std::move(diskValues) } },
+            &Chart::Sample::diskMBps } },
         QStringLiteral("MB/s"),
         0.0);
     setChartData(
@@ -3983,11 +4262,11 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
             ProcessPerformanceHistoryChartWidget::Series{
                 text(QStringLiteral("process.detail.performance.series.network_rx")),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
-                std::move(networkRxValues) },
+                &Chart::Sample::networkRxKBps },
             ProcessPerformanceHistoryChartWidget::Series{
                 text(QStringLiteral("process.detail.performance.series.network_tx")),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write),
-                std::move(networkTxValues) }
+                &Chart::Sample::networkTxKBps }
         },
         QStringLiteral("KB/s"),
         0.0);
@@ -3996,18 +4275,18 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.gpu")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
-            std::move(gpuValues) } },
+            &Chart::Sample::gpuPercent } },
         QStringLiteral("%"),
         100.0);
 
     // 空历史同样已经提交到六个图表，避免身份切换/清空后残留上一对象的曲线。
-    if (timestamps.empty())
+    if (history->empty())
     {
         m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
         return;
     }
-    const QString beginTime = QDateTime::fromMSecsSinceEpoch(timestamps.front()).toString(QStringLiteral("HH:mm:ss"));
-    const QString endTime = QDateTime::fromMSecsSinceEpoch(timestamps.back()).toString(QStringLiteral("HH:mm:ss"));
+    const QString beginTime = QDateTime::fromMSecsSinceEpoch(history->front().unixMilliseconds).toString(QStringLiteral("HH:mm:ss"));
+    const QString endTime = QDateTime::fromMSecsSinceEpoch(history->back().unixMilliseconds).toString(QStringLiteral("HH:mm:ss"));
     m_performanceHistoryStatusLabel->setText(
         text(QStringLiteral("process.detail.performance.status.samples"))
             .arg(static_cast<qulonglong>(m_performanceHistory.size()))
@@ -4017,7 +4296,6 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 
 void ProcessDetailWindow::initializeCpuCoreTab()
 {
-    m_cpuCoreTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     QVBoxLayout* layout = nullptr;
     QWidget* const contentWidget = createScrollableTabContent(m_cpuCoreTab, layout, 12, 10);
@@ -4140,7 +4418,7 @@ void ProcessDetailWindow::refreshCpuCoreView(const bool appendHistory)
         static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
             sample.threads, multipleProcessorGroups);
     }
-    if (!m_cpuCoreTab->isVisible())
+    if (!detailChartPageExposed(m_cpuCoreTab))
     {
         return;
     }
@@ -4226,11 +4504,11 @@ void ProcessDetailWindow::initializeThreadTab()
     // 线程表格：
     // - 继续沿用原有列定义和刷新逻辑；
     // - 仅把显示位置从“详细信息页底部”迁移到独立标签。
-    m_threadInspectTable = new ks::ui::VisibleTableWidget(threadGroup);
+    QVector<ks::ui::ImmutableTableHeader> threadHeaders;
+    for (const auto& header : ThreadInspectHeaders) threadHeaders.push_back(ks::ui::ImmutableTableHeader(header));
+    m_threadInspectTable = new ks::ui::ImmutableValueTable(threadGroup, std::move(threadHeaders));
     // 当前进程的线程详情是辅助清单，保留复制导出而非整套对比栏。
     ks::ui::SetTableActionBarMode(m_threadInspectTable, ks::ui::TableActionBarMode::Compact);
-    m_threadInspectTable->setColumnCount(toThreadColumnIndex(ThreadRowColumn::Count));
-    m_threadInspectTable->setHorizontalHeaderLabels(ThreadInspectHeaders);
     m_threadInspectTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_threadInspectTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_threadInspectTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -4276,7 +4554,9 @@ void ProcessDetailWindow::initializeThreadTab()
     connect(openThreadStackButton, &QPushButton::clicked, this, [this]() {
         openSelectedThreadStackWindow();
         });
-    connect(m_threadInspectTable, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int) {
+    m_threadInspectTable->currentRowChanged = [this]() {
+        if (m_threadInspectRefreshing || m_threadInspectTable->isPreparing() || !m_threadInspectPublishedRows) return;
+        const int currentRow = m_threadInspectTable->currentRow();
         // 选中行详情：
         // - 输入：当前表格行；
         // - 处理：从缓存中取 ThreadInspectItem，展示固定 detail IOCTL 可读摘要；
@@ -4290,18 +4570,18 @@ void ProcessDetailWindow::initializeThreadTab()
             m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("请选择一条线程记录查看 runtime detail。")));
             return;
         }
-        const QTableWidgetItem* threadIdItem =
-            m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
-        const std::size_t cacheIndex = threadIdItem != nullptr
-            ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows.size());
-        if (cacheIndex >= m_threadInspectRows.size())
+        const QModelIndex threadIdItem =
+            m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+        const std::size_t cacheIndex = threadIdItem.isValid()
+            ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+            : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+        if (cacheIndex >= m_threadInspectPublishedRows->size())
         {
             m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("当前线程行缺少缓存详情，请刷新线程页。")));
             return;
         }
 
-        const ThreadInspectItem& rowItem = m_threadInspectRows[cacheIndex];
+        const ThreadInspectItem& rowItem = (*m_threadInspectPublishedRows)[cacheIndex];
         const auto threadDetailStatusName = [](const std::uint32_t statusValue) -> QString
         {
             switch (statusValue)
@@ -4358,11 +4638,9 @@ void ProcessDetailWindow::initializeThreadTab()
             : rowItem.r0RuntimeDetailText));
         document.note(QStringLiteral("\n点击“采样PDB字段”可对当前 TID 按需读取 thread_detail deep offset 小字段。"));
         m_threadRuntimeSampleOutput->setDocument(document);
-        });
-    connect(m_threadInspectTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
-        openSelectedThreadStackWindow();
-    });
-    connect(m_threadInspectTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        };
+    m_threadInspectTable->rowDoubleClicked = [this](int) { openSelectedThreadStackWindow(); };
+    connect(m_threadInspectTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition)
     {
         // 线程表右键菜单：
         // - 输入：用户在表格上的点击位置；
@@ -4376,7 +4654,7 @@ void ProcessDetailWindow::initializeThreadTab()
         const QModelIndex clickedIndex = m_threadInspectTable->indexAt(localPosition);
         if (clickedIndex.isValid())
         {
-            m_threadInspectTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            m_threadInspectTable->setCurrentIndex(clickedIndex);
         }
 
         QMenu menu(m_threadInspectTable);
@@ -4388,18 +4666,18 @@ void ProcessDetailWindow::initializeThreadTab()
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
         const int selectedThreadRow = m_threadInspectTable->currentRow();
-        const QTableWidgetItem* const selectedThreadIdItem =
+        const QModelIndex selectedThreadIdItem =
             selectedThreadRow >= 0
-                ? m_threadInspectTable->item(
+                ? m_threadInspectTable->model()->index(
                     selectedThreadRow,
                     toThreadColumnIndex(ThreadRowColumn::ThreadId))
-                : nullptr;
-        const std::size_t selectedThreadCacheIndex = selectedThreadIdItem != nullptr
-            ? static_cast<std::size_t>(selectedThreadIdItem->data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows.size());
+                : QModelIndex();
+        const std::size_t selectedThreadCacheIndex = selectedThreadIdItem.isValid()
+            ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
+            : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
         const ThreadInspectItem* const selectedThreadAffinityTarget =
-            selectedThreadCacheIndex < m_threadInspectRows.size()
-                ? &m_threadInspectRows[selectedThreadCacheIndex]
+            selectedThreadCacheIndex < m_threadInspectPublishedRows->size()
+                ? &(*m_threadInspectPublishedRows)[selectedThreadCacheIndex]
                 : nullptr;
         QMenu* const affinityMenu = ks::process::addThreadAffinitySubMenu(
             &menu,
@@ -4504,18 +4782,18 @@ void ProcessDetailWindow::initializeThreadTab()
         bool hasDriverThreadTarget = false;
         if (m_threadInspectTable->currentRow() >= 0 && m_baseRecord.pid == 4U)
         {
-            const QTableWidgetItem* selectedThreadIdItem = m_threadInspectTable->item(
+            const QModelIndex selectedThreadIdItem = m_threadInspectTable->model()->index(
                 m_threadInspectTable->currentRow(),
                 toThreadColumnIndex(ThreadRowColumn::ThreadId));
-            const std::size_t selectedCacheIndex = selectedThreadIdItem != nullptr
-                ? static_cast<std::size_t>(selectedThreadIdItem->data(Qt::UserRole).toULongLong())
-                : static_cast<std::size_t>(m_threadInspectRows.size());
+            const std::size_t selectedCacheIndex = selectedThreadIdItem.isValid()
+                ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
+                : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
             hasDriverThreadTarget =
-                selectedCacheIndex < m_threadInspectRows.size() &&
-                m_threadInspectRows[selectedCacheIndex].threadId != 0U &&
-                m_threadInspectRows[selectedCacheIndex].createTime100ns != 0ULL &&
-                (m_threadInspectRows[selectedCacheIndex].startAddress != 0ULL ||
-                 m_threadInspectRows[selectedCacheIndex].win32StartAddress != 0ULL);
+                selectedCacheIndex < m_threadInspectPublishedRows->size() &&
+                (*m_threadInspectPublishedRows)[selectedCacheIndex].threadId != 0U &&
+                (*m_threadInspectPublishedRows)[selectedCacheIndex].createTime100ns != 0ULL &&
+                ((*m_threadInspectPublishedRows)[selectedCacheIndex].startAddress != 0ULL ||
+                 (*m_threadInspectPublishedRows)[selectedCacheIndex].win32StartAddress != 0ULL);
         }
         suspendDriverThreadAction->setVisible(hasDriverThreadTarget);
         resumeDriverThreadAction->setVisible(hasDriverThreadTarget);
@@ -4619,8 +4897,8 @@ void ProcessDetailWindow::initializeThreadTab()
         rowFields.reserve(m_threadInspectTable->columnCount());
         for (int columnIndex = 0; columnIndex < m_threadInspectTable->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = m_threadInspectTable->item(rowIndex, columnIndex);
-            rowFields.push_back(item != nullptr ? item->text() : QString());
+            const QModelIndex item = m_threadInspectTable->model()->index(rowIndex, columnIndex);
+            rowFields.push_back(item.isValid() ? item.data().toString() : QString());
         }
         QApplication::clipboard()->setText(rowFields.join('\t'));
     });
@@ -5261,16 +5539,15 @@ void ProcessDetailWindow::initializeModuleTab()
     m_moduleLayout->addLayout(m_moduleTopBarLayout);
 
     // 模块列表表格。
-    m_moduleTable = new QTreeWidget(m_moduleTab);
-    m_moduleTable->setColumnCount(static_cast<int>(ModuleColumn::Count));
-    m_moduleTable->setHeaderLabels(ModuleHeaders);
-    m_moduleTable->setRootIsDecorated(false);
-    m_moduleTable->setItemsExpandable(false);
+    QVector<ks::ui::ImmutableTableHeader> moduleHeaders;
+    for (const auto& header : ModuleHeaders) moduleHeaders.push_back(ks::ui::ImmutableTableHeader(header));
+    m_moduleTable = new ks::ui::ImmutableValueTable(m_moduleTab, std::move(moduleHeaders));
+    ks::ui::SetTableActionBarMode(m_moduleTable, ks::ui::TableActionBarMode::Compact);
     m_moduleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_moduleTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_moduleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_moduleTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_moduleTable->setSortingEnabled(true);
+    m_moduleTable->sortByColumn(toModuleColumnIndex(ModuleColumn::Path), Qt::AscendingOrder);
     m_moduleTable->setAlternatingRowColors(true);
     m_moduleLayout->addWidget(m_moduleTable, 1);
 
@@ -6548,7 +6825,7 @@ void ProcessDetailWindow::initializeConnections()
     });
 
     // 模块表右键菜单。
-    connect(m_moduleTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_moduleTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showModuleContextMenu(localPosition);
     });
 }

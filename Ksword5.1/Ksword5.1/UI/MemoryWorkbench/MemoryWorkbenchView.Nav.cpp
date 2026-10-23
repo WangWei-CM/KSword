@@ -124,7 +124,7 @@ namespace ks::ui
     NavStatus MemoryWorkbenchView::openAt(const NavRequest& request)
     {
         const QPointer<MemoryWorkbenchView> self(this);
-        if (target_ == nullptr)
+        if (target_ == nullptr || leaveSequencePending_)
         {
             applyNavOutcome(request, NavStatus::Unavailable);
             return NavStatus::Unavailable;
@@ -178,20 +178,32 @@ namespace ks::ui
             identity.scope.has_value() || identity.pinPid.has_value() || identity.channel.has_value();
         if (identityRequested)
         {
-            const bool accepted = target_->requestIdentity(identity, LeaveReason::ScopeChange);
+            const auto accepted = target_->requestIdentity(identity, LeaveReason::ScopeChange,
+                [self, request, previousAddressBeforeIdentity, identityChangeCountBefore](bool allowed) {
+                    if (!self) return;
+                    if (allowed) self->finishOpenAt(request, previousAddressBeforeIdentity,
+                        self->identityChangeCount_ != identityChangeCountBefore);
+                    else self->applyNavOutcome(request, self->target_->lastIdentityFailure());
+                });
             if (!self)
             {
                 return NavStatus::LeaveRefused;
             }
-            if (!accepted)
+            if (accepted == LeaveEntryStatus::Pending) return NavStatus::Pending;
+            if (accepted != LeaveEntryStatus::Completed)
             {
                 const auto failure = target_->lastIdentityFailure();
                 applyNavOutcome(request, failure);
                 return failure;
             }
         }
-        const bool identityActuallyChanged = (identityChangeCount_ != identityChangeCountBefore);
+        return finishOpenAt(request, previousAddressBeforeIdentity, identityChangeCount_ != identityChangeCountBefore);
+    }
 
+    NavStatus MemoryWorkbenchView::finishOpenAt(const NavRequest& request,
+        std::uint64_t previousAddressBeforeIdentity, bool identityActuallyChanged)
+    {
+        const QPointer<MemoryWorkbenchView> self(this);
         const auto& session = target_->session();
         if (!self)
         {
@@ -275,7 +287,7 @@ namespace ks::ui
     void MemoryWorkbenchView::applyNavOutcome(const NavRequest& request, NavStatus status)
     {
         Q_UNUSED(request);
-        if (status == NavStatus::Ok)
+        if (status == NavStatus::Ok || status == NavStatus::Pending)
         {
             return;
         }

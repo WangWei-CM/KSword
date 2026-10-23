@@ -1,9 +1,11 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 
 #include <memory>
 #include "../UI/VisibleTableWidget.h"
@@ -21,10 +23,12 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QTimer>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -114,7 +118,7 @@ namespace
     // - 输入：SSDT 表指针与可视行号；
     // - 处理：按当前表格列顺序读取可见文本，空单元格使用占位符，字段间使用 Tab；
     // - 返回：适合复制到剪贴板/表格软件的 TSV 文本；输入无效时返回空字符串。
-    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    QString tableRowAsTsv(const KernelResultTable* tableWidget, const int rowIndex)
     {
         if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
         {
@@ -195,7 +199,13 @@ void KernelDock::initializeSsdtTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_ssdtPage);
     m_ssdtLayout->addWidget(splitter, 1);
 
-    m_ssdtTable = new ks::ui::VisibleTableWidget(splitter);
+    m_ssdtTable = new KernelResultTable(splitter);
+    m_ssdtTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_ssdtRefreshRunning.store(false);
+        m_refreshSsdtButton->setEnabled(true);
+        if (owner) m_ssdtStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 服务槽值及模块归属需要保留完整性现场比较。
     ks::ui::SetTableActionBarMode(m_ssdtTable, ks::ui::TableActionBarMode::Full);
     m_ssdtTable->setColumnCount(static_cast<int>(SsdtColumn::Count));
@@ -216,6 +226,7 @@ void KernelDock::initializeSsdtTab()
     m_ssdtTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ssdtTable->verticalHeader()->setVisible(false);
     m_ssdtTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_ssdtTable->horizontalHeader()->setResizeContentsPrecision(100);
     m_ssdtTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_ssdtTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(SsdtColumn::ServiceName), QHeaderView::Stretch);
     m_ssdtTable->setColumnWidth(static_cast<int>(SsdtColumn::Index), 90);
@@ -240,10 +251,13 @@ void KernelDock::initializeSsdtTab()
     connect(m_restoreSsdtButton, &QPushButton::clicked, this, [this]() {
         restoreSelectedSsdtBaseline();
     });
-    connect(m_ssdtFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildSsdtTable(filterText.trimmed());
-    });
-    connect(m_ssdtTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    auto* ssdtFilterTimer = new QTimer(m_ssdtFilterEdit);
+    ssdtFilterTimer->setSingleShot(true);
+    ssdtFilterTimer->setInterval(120);
+    connect(m_ssdtFilterEdit, &QLineEdit::textChanged, ssdtFilterTimer,
+        [ssdtFilterTimer]() { ssdtFilterTimer->start(); });
+    connect(ssdtFilterTimer, &QTimer::timeout, this, [this]() { rebuildSsdtTable(); });
+    connect(m_ssdtTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showSsdtDetailByCurrentRow();
         const KernelSsdtEntry* entry = currentSsdtEntry();
         m_restoreSsdtButton->setEnabled(
@@ -251,9 +265,10 @@ void KernelDock::initializeSsdtTab()
             && entry->cleanBaselineAvailable
             && entry->cleanBaselineDiffers
             && entry->tableEntryAddress != 0U
-            && !m_ssdtRefreshRunning.load());
+            && !m_ssdtRefreshRunning.load()
+            && (!m_kernelActionOperations[2] || !m_kernelActionOperations[2]->isBusy()));
     });
-    connect(m_ssdtTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_ssdtTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         if (m_ssdtTable == nullptr)
         {
             return;
@@ -274,7 +289,7 @@ void KernelDock::initializeSsdtTab()
             kernelText("kernel.ssdt.menu.copy_row", QStringLiteral("复制当前行")));
         // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-        copyRowAction->setEnabled(currentRow >= 0);
+        copyRowAction->setEnabled(currentRow >= 0 && !ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow));
 
         /*
          * 监视这一项**槽位本身**的写入，不是它指向的服务例程。
@@ -342,7 +357,8 @@ void KernelDock::initializeSsdtTab()
             ks::ui::openHvmWatch(this, request);
             return;
         }
-        if (selectedAction != copyRowAction || currentRow < 0)
+        if (selectedAction != copyRowAction || currentRow < 0
+            || ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow))
         {
             return;
         }
@@ -386,11 +402,10 @@ void KernelDock::refreshSsdtAsync()
                 return;
             }
 
-            guardThis->m_ssdtRefreshRunning.store(false);
-            guardThis->m_refreshSsdtButton->setEnabled(true);
-
             if (!success)
             {
+                guardThis->m_ssdtRefreshRunning.store(false);
+                guardThis->m_refreshSsdtButton->setEnabled(true);
                 guardThis->m_ssdtStatusLabel->setText(kernelText("kernel.ssdt.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -398,32 +413,38 @@ void KernelDock::refreshSsdtAsync()
             }
 
             guardThis->m_ssdtRows = std::move(resultRows);
-            guardThis->rebuildSsdtTable(guardThis->m_ssdtFilterEdit->text().trimmed());
+            guardThis->rebuildSsdtTable(true, [=]() {
+                if (!guardThis) return;
+                guardThis->m_ssdtRefreshRunning.store(false);
+                guardThis->m_refreshSsdtButton->setEnabled(true);
 
-            std::size_t unresolvedCount = 0U;
-            for (const KernelSsdtEntry& entry : guardThis->m_ssdtRows)
-            {
-                if (!entry.indexResolved)
+
+                std::size_t unresolvedCount = 0U;
+                for (const KernelSsdtEntry& entry : guardThis->m_ssdtRows)
                 {
-                    ++unresolvedCount;
+                    if (!entry.indexResolved)
+                    {
+                        ++unresolvedCount;
+                    }
                 }
-            }
 
-            guardThis->m_ssdtStatusLabel->setText(
-                kernelText("kernel.ssdt.status.summary", QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项"))
-                .arg(guardThis->m_ssdtRows.size())
-                .arg(unresolvedCount));
-            guardThis->m_ssdtStatusLabel->setStyleSheet(
-                statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+                guardThis->m_ssdtStatusLabel->setText(
+                    kernelText("kernel.ssdt.status.summary", QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项"))
+                    .arg(guardThis->m_ssdtRows.size())
+                    .arg(unresolvedCount));
+                guardThis->m_ssdtStatusLabel->setStyleSheet(
+                    statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
-            if (guardThis->m_ssdtTable->rowCount() > 0)
-            {
-                guardThis->m_ssdtTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.ssdt.empty", QStringLiteral("当前环境未返回可见 SSDT 条目。"))));
-            }
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_ssdtTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_ssdtTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.ssdt.empty", QStringLiteral("当前环境未返回可见 SSDT 条目。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -443,72 +464,67 @@ void KernelDock::refreshSsdtAsync()
     }).detach();
 }
 
-void KernelDock::rebuildSsdtTable(const QString& filterKeyword)
+void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_ssdtTable == nullptr)
     {
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
 
-    m_ssdtTable->setSortingEnabled(false);
-    m_ssdtTable->setRowCount(0);
-
-    for (std::size_t sourceIndex = 0; sourceIndex < m_ssdtRows.size(); ++sourceIndex)
+    const auto searchFields = [](const KernelSsdtEntry& entry) {
+        return QStringList{entry.indexResolved ? QString::number(entry.serviceIndex) : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>")), entry.serviceNameText, formatAddressHex(entry.zwRoutineAddress), formatAddressHex(entry.serviceRoutineAddress), formatAddressHex(entry.tableEntryAddress), entry.moduleNameText};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged && m_ssdtTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        const KernelSsdtEntry& entry = m_ssdtRows[sourceIndex];
-        const QString indexText = entry.indexResolved
-            ? QString::number(entry.serviceIndex)
-            : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
-        const QString zwAddressText = formatAddressHex(entry.zwRoutineAddress);
-        const QString serviceAddressText = formatAddressHex(entry.serviceRoutineAddress);
-        const QString slotAddressText =
-            formatAddressHex(entry.tableEntryAddress);
-
-        const bool matched = filterKeyword.isEmpty()
-            || indexText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.serviceNameText.contains(filterKeyword, Qt::CaseInsensitive)
-            || zwAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || serviceAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || slotAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.moduleNameText.contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        const int rowIndex = m_ssdtTable->rowCount();
-        m_ssdtTable->insertRow(rowIndex);
-
-        auto* indexItem = new QTableWidgetItem(indexText);
-        indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        auto* serviceNameItem = new QTableWidgetItem(safeText(entry.serviceNameText));
-        auto* zwAddressItem = new QTableWidgetItem(zwAddressText);
-        auto* serviceAddressItem = new QTableWidgetItem(serviceAddressText);
-        auto* slotAddressItem = new QTableWidgetItem(slotAddressText);
-        auto* moduleItem = new QTableWidgetItem(safeText(entry.moduleNameText));
-
-        indexItem->setFlags(indexItem->flags() & ~Qt::ItemIsEditable);
-        serviceNameItem->setFlags(serviceNameItem->flags() & ~Qt::ItemIsEditable);
-        zwAddressItem->setFlags(zwAddressItem->flags() & ~Qt::ItemIsEditable);
-        serviceAddressItem->setFlags(serviceAddressItem->flags() & ~Qt::ItemIsEditable);
-        slotAddressItem->setFlags(slotAddressItem->flags() & ~Qt::ItemIsEditable);
-        moduleItem->setFlags(moduleItem->flags() & ~Qt::ItemIsEditable);
-
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
+        applyKernelResultFilterAsync(m_ssdtTable, m_ssdtFilterEdit);
+        return;
     }
 
-    m_ssdtTable->setSortingEnabled(true);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
+    publishKernelResultRows(m_ssdtTable, m_ssdtRows.size(),
+        [rows = m_ssdtRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelSsdtEntry& entry = rows[sourceIndex];
+            const QString indexText = entry.indexResolved
+                ? QString::number(entry.serviceIndex)
+                : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
+            const QString zwAddressText = formatAddressHex(entry.zwRoutineAddress);
+            const QString serviceAddressText = formatAddressHex(entry.serviceRoutineAddress);
+            const QString slotAddressText =
+                formatAddressHex(entry.tableEntryAddress);
+
+            const int rowIndex = static_cast<int>(sourceIndex);
+
+            auto* indexItem = new QTableWidgetItem(indexText);
+            indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            indexItem->setData(KernelSearchFieldsRole, searchFields(entry));
+            auto* serviceNameItem = new QTableWidgetItem(safeText(entry.serviceNameText));
+            auto* zwAddressItem = new QTableWidgetItem(zwAddressText);
+            auto* serviceAddressItem = new QTableWidgetItem(serviceAddressText);
+            auto* slotAddressItem = new QTableWidgetItem(slotAddressText);
+            auto* moduleItem = new QTableWidgetItem(safeText(entry.moduleNameText));
+
+            indexItem->setFlags(indexItem->flags() & ~Qt::ItemIsEditable);
+            serviceNameItem->setFlags(serviceNameItem->flags() & ~Qt::ItemIsEditable);
+            zwAddressItem->setFlags(zwAddressItem->flags() & ~Qt::ItemIsEditable);
+            serviceAddressItem->setFlags(serviceAddressItem->flags() & ~Qt::ItemIsEditable);
+            slotAddressItem->setFlags(slotAddressItem->flags() & ~Qt::ItemIsEditable);
+            moduleItem->setFlags(moduleItem->flags() & ~Qt::ItemIsEditable);
+
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
+        }, []() {}, std::move(onReady), sourceChanged, m_ssdtFilterEdit);
 }
 
 void KernelDock::restoreSelectedSsdtBaseline()
 {
+    if (m_ssdtRefreshRunning.load()
+        || (m_kernelActionOperations[2] && m_kernelActionOperations[2]->isBusy())) return;
     const KernelSsdtEntry* selected = currentSsdtEntry();
     if (selected == nullptr
         || !selected->cleanBaselineAvailable
@@ -531,18 +547,24 @@ void KernelDock::restoreSelectedSsdtBaseline()
     }
 
     const KernelSsdtEntry snapshot = *selected;
-    const ksword::ark::DriverClient client;
-    const ksword::ark::KernelInlinePatchResult preflight =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            0UL);
-    if (!preflight.io.ok
-        || preflight.status
-            != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+    auto& slot = m_kernelActionOperations[2];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot]()
+        {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_ssdtRefreshRunning.load();
+            m_refreshSsdtButton->setEnabled(!busy && !scanning);
+            const KernelSsdtEntry* entry = currentSsdtEntry();
+            m_restoreSsdtButton->setEnabled(!busy && !scanning && entry != nullptr
+                && entry->cleanBaselineAvailable && entry->cleanBaselineDiffers
+                && entry->tableEntryAddress != 0U);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation = slot;
+    using Result = ksword::ark::KernelInlinePatchResult;
+    const auto reportPreflightFailure = [this](const Result& preflight)
     {
         QMessageBox::critical(
             this,
@@ -559,95 +581,140 @@ void KernelDock::restoreSelectedSsdtBaseline()
                     8,
                     16,
                     QChar('0')));
-        return;
-    }
-
-    const QMessageBox::StandardButton warning =
-        QMessageBox::warning(
-            this,
-            kernelText(
-                "kernel.ssdt.restore.warning.title",
-                QStringLiteral("高风险内核表项恢复")),
-            kernelText(
-                "kernel.ssdt.restore.warning.body",
-                QStringLiteral(
-                    "即将把 SSDT[%1] 槽位从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
-                    "R0 会在写入前再次逐字节比较当前值；任何并发变化都会使操作失败。"
-                    "错误恢复可能立即导致系统崩溃。\n\n映像：%4"))
-                .arg(snapshot.serviceIndex)
-                .arg(static_cast<qulonglong>(snapshot.currentTableValue),
-                    0,
-                    16)
-                .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
-                    0,
-                    16)
-                .arg(snapshot.cleanBaselinePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-    if (warning != QMessageBox::Yes)
+    };
+    const auto presentApplied = [this, expectedSize = snapshot.tableEntrySize](const Result& applied)
     {
-        return;
-    }
+        const QPointer<KernelDock> guard(this);
+        if (!applied.io.ok
+            || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
+            || applied.bytesPatched != expectedSize)
+        {
+            QMessageBox::critical(
+                this,
+                kernelText(
+                    "kernel.ssdt.restore.title",
+                    QStringLiteral("SSDT 槽位恢复")),
+                kernelText(
+                    "kernel.ssdt.restore.failed",
+                    QStringLiteral(
+                        "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
+                    .arg(applied.io.win32Error)
+                    .arg(applied.status)
+                    .arg(static_cast<unsigned long>(applied.lastStatus),
+                        8,
+                        16,
+                        QChar('0'))
+                    .arg(applied.bytesPatched));
+            if (guard) refreshSsdtAsync();
+            return;
+        }
 
-    // 最终确认改为直接点击：不再要求输入确认短语，默认聚焦“否”避免误触。
-    const auto confirmation = QMessageBox::warning(
-        this,
-        kernelText(
-            "kernel.ssdt.restore.confirm.title",
-            QStringLiteral("最终确认")),
-        kernelText(
-            "kernel.ssdt.restore.confirm.final",
-            QStringLiteral("确认按基线恢复该 SSDT 表项？该操作会改写内核数据。")),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmation != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    m_restoreSsdtButton->setEnabled(false);
-    const ksword::ark::KernelInlinePatchResult applied =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    if (!applied.io.ok
-        || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
-        || applied.bytesPatched != snapshot.tableEntrySize)
-    {
-        QMessageBox::critical(
+        QMessageBox::information(
             this,
             kernelText(
                 "kernel.ssdt.restore.title",
                 QStringLiteral("SSDT 槽位恢复")),
             kernelText(
-                "kernel.ssdt.restore.failed",
+                "kernel.ssdt.restore.success",
                 QStringLiteral(
-                    "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
-                .arg(applied.io.win32Error)
-                .arg(applied.status)
-                .arg(static_cast<unsigned long>(applied.lastStatus),
-                    8,
-                    16,
-                    QChar('0'))
-                .arg(applied.bytesPatched));
-        refreshSsdtAsync();
-        return;
-    }
+                    "槽位已按验证基线恢复，并已触发重新扫描。")));
+        if (guard) refreshSsdtAsync();
+    };
+    operation->submit<KernelSsdtEntry, Result>(snapshot,
+        [](const KernelSsdtEntry& value, const ks::ui::AsyncOperationToken&)
+        {
+            return ksword::ark::DriverClient().patchInlineHook(
+                value.tableEntryAddress, KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
+                value.tableEntrySize, value.currentTableBytes, value.cleanTableBytes, 0UL);
+        },
+        [this, snapshot, operation, reportPreflightFailure, presentApplied](
+            const Result& preflight, const std::uint64_t ticket)
+        {
+            if (!preflight.io.ok || preflight.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+            {
+                reportPreflightFailure(preflight);
+                return true;
+            }
+            const QPointer<KernelDock> guard(this);
+            const QMessageBox::StandardButton warning =
+                QMessageBox::warning(
+                    this,
+                    kernelText(
+                        "kernel.ssdt.restore.warning.title",
+                        QStringLiteral("高风险内核表项恢复")),
+                    kernelText(
+                        "kernel.ssdt.restore.warning.body",
+                        QStringLiteral(
+                            "即将把 SSDT[%1] 槽位从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
+                            "R0 会在写入前再次逐字节比较当前值；任何并发变化都会使操作失败。"
+                            "错误恢复可能立即导致系统崩溃。\n\n映像：%4"))
+                        .arg(snapshot.serviceIndex)
+                        .arg(static_cast<qulonglong>(snapshot.currentTableValue),
+                            0,
+                            16)
+                        .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
+                            0,
+                            16)
+                        .arg(snapshot.cleanBaselinePath),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+            if (!guard || warning != QMessageBox::Yes)
+            {
+                return true;
+            }
 
-    QMessageBox::information(
-        this,
-        kernelText(
-            "kernel.ssdt.restore.title",
-            QStringLiteral("SSDT 槽位恢复")),
-        kernelText(
-            "kernel.ssdt.restore.success",
-            QStringLiteral(
-                "槽位已按验证基线恢复，并已触发重新扫描。")));
-    refreshSsdtAsync();
+            // 最终确认改为直接点击：不再要求输入确认短语，默认聚焦“否”避免误触。
+            const auto confirmation = QMessageBox::warning(
+                this,
+                kernelText(
+                    "kernel.ssdt.restore.confirm.title",
+                    QStringLiteral("最终确认")),
+                kernelText(
+                    "kernel.ssdt.restore.confirm.final",
+                    QStringLiteral("确认按基线恢复该 SSDT 表项？该操作会改写内核数据。")),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (!guard || confirmation != QMessageBox::Yes)
+            {
+                return true;
+            }
+
+            // Keep the preflight gate occupied through both modal confirmations.
+            // Defer the handoff until AsyncOperation has marked this receipt deferred.
+            QTimer::singleShot(0, this, [this, snapshot, operation, ticket, presentApplied]()
+            {
+                if (!operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!operation) return;
+                const auto accepted = operation->submitTransaction<KernelSsdtEntry, Result>(snapshot,
+                    [](const KernelSsdtEntry& value)
+                    {
+                        return ksword::ark::DriverClient().patchInlineHook(
+                            value.tableEntryAddress, KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
+                            value.tableEntrySize, value.currentTableBytes, value.cleanTableBytes,
+                            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
+                    },
+                    [presentApplied](const Result& applied, std::uint64_t)
+                    {
+                        presentApplied(applied);
+                        return true;
+                    },
+                    [presentApplied](std::exception_ptr)
+                    {
+                        Result failed{};
+                        failed.io.win32Error = ERROR_UNHANDLED_EXCEPTION;
+                        presentApplied(failed);
+                    });
+                if (accepted != 0 && m_restoreSsdtButton) m_restoreSsdtButton->setEnabled(false);
+            });
+            return false;
+        },
+        [reportPreflightFailure](std::exception_ptr)
+        {
+            Result failed{};
+            failed.io.win32Error = ERROR_UNHANDLED_EXCEPTION;
+            reportPreflightFailure(failed);
+        });
 }
 
 bool KernelDock::currentSsdtSourceIndex(std::size_t& sourceIndexOut) const
@@ -660,7 +727,7 @@ bool KernelDock::currentSsdtSourceIndex(std::size_t& sourceIndexOut) const
     }
 
     const int currentRow = m_ssdtTable->currentRow();
-    if (currentRow < 0)
+    if (currentRow < 0 || ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow))
     {
         return false;
     }

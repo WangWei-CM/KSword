@@ -327,15 +327,16 @@ namespace ks::minidump
                 ParseThreadList(view, location, true, architecture, faultingThreadId,
                     modules, result, &scanInputs, &memory);
             }
+            const ThreadIdIndex threadIndex = BuildThreadIdIndex(result.threads);
             if (FindStream(view, header.StreamDirectoryRva, header.NumberOfStreams,
                     ThreadInfoListStream, &location))
             {
-                ParseThreadInfoList(view, location, result);
+                ParseThreadInfoList(view, location, result, threadIndex);
             }
             if (FindStream(view, header.StreamDirectoryRva, header.NumberOfStreams,
                     static_cast<std::uint32_t>(24) /* ThreadNamesStream */, &location))
             {
-                ParseThreadNames(view, location, result);
+                ParseThreadNames(view, location, result, threadIndex);
             }
             // 线程栈全部登记完毕，此时才能定型内存索引。
             memory.finalize(view);
@@ -346,6 +347,7 @@ namespace ks::minidump
             // 起始地址的模块归属要等 ThreadInfoList 合入之后才能算。
             for (ThreadEntry& thread : result.threads)
             {
+                CheckDumpCancellation();
                 if (thread.startAddress != 0)
                 {
                     thread.startSymbolText = modules.symbolText(thread.startAddress);
@@ -432,8 +434,11 @@ namespace ks::minidump
         }
     }
 
-    DumpParseResult ParseDumpFile(const QString& filePath)
+    DumpParseResult ParseDumpFile(
+        const QString& filePath, const DumpCancellationToken& cancellation)
     {
+        const ScopedDumpCancellation cancellationScope(cancellation);
+        CheckDumpCancellation();
         // result：唯一返回值；先记录文件路径与大小，后续逐步填充。
         DumpParseResult result{};
         result.filePath = filePath;
@@ -466,6 +471,10 @@ namespace ks::minidump
             result.errorText = QStringLiteral("文件映射失败（文件过大或系统资源不足）。");
             return result;
         }
+        // Unmap exactly once even when a cooperative checkpoint or allocation throws.
+        const auto unmap = [&dumpFile](uchar* address) { dumpFile.unmap(address); };
+        const std::unique_ptr<uchar, decltype(unmap)> mapping(mapped, unmap);
+        CheckDumpCancellation();
         DumpFileView view{};
         view.data = mapped;
         view.size = result.fileSize;
@@ -493,7 +502,7 @@ namespace ks::minidump
                 "无法识别的文件签名 %1：既不是 MDMP 用户态转储，也不是 PAGEDUMP/PAGEDU64 内核转储。")
                 .arg(detail::Hex(signature));
         }
-        dumpFile.unmap(mapped);
+        CheckDumpCancellation();
         return result;
     }
 }

@@ -10,11 +10,13 @@
 
 #include "../Framework.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QVector>
 #include <QStringList>
 
+#include <functional>
 #include <atomic>      // std::atomic_bool：搜索线程运行状态控制。
 #include <deque>       // std::deque：搜索结果 FIFO 队列，避免头部消费搬移。
 #include <memory>      // std::unique_ptr：后台线程对象托管。
@@ -36,6 +38,7 @@ class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
+namespace ks::ui { class AsyncOperation; }
 class RegistryOptimizationPage;
 class RegistryValueEditorWidget;
 class QComboBox;
@@ -46,6 +49,7 @@ struct RegistryDocument;
 struct RegistryAccessContext;
 struct RegistryKeyListing;
 struct RegistryApplyResult;
+struct RegistryValueState;
 
 // ============================================================
 // RegistryDock
@@ -59,6 +63,9 @@ class RegistryDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const RegistryDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：初始化 UI、根键节点与信号槽；
     // - 参数 parent：Qt 父控件。
@@ -74,6 +81,8 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // SearchOptions：
     // - 作用：封装搜索时的匹配范围选项。
     struct SearchOptions
@@ -106,6 +115,17 @@ private:
         QString result;
     };
 
+    struct PendingApplyResult
+    {
+        QVector<PendingValueChange> applied;
+        QVector<PendingValueChange> recoverable;
+        QVector<PendingValueChange> remaining;
+    };
+    static PendingApplyResult applyPendingValueBatch(const QVector<PendingValueChange>& changes,
+        const std::shared_ptr<std::atomic_bool>& closed);
+    ks::ui::AsyncOperation& applyOperation();
+    void finishApplyWithoutReceipt();
+
     // PendingSearchRow：
     // - 作用：后台搜索线程产生的待刷入 UI 行数据。
     struct PendingSearchRow
@@ -137,6 +157,7 @@ private:
     void applyPendingChanges();
     void restoreLastChanges();
     void filterCurrentValues();
+    void filterValueRows(int firstRow, int endRow, bool replaceFilter = false);
     void appendValueRows(const std::shared_ptr<const RegistryKeyListing>& listing,
         int offset, quint64 generation, const QString& selectedName);
     void showNavigationMenu();
@@ -156,10 +177,15 @@ private:
     void updateStatusBar(const QString& messageText);
     void selectTreeItemByPath(const QString& registryPath);
     void ensureTreeItemLoaded(QTreeWidgetItem* item);
+    void reconcileSubKeyLoads();
 
     // ===================== 右键菜单与编辑 =====================
     void showTreeContextMenu(const QPoint& localPos);
     void showValueContextMenu(const QPoint& localPos);
+    ks::ui::AsyncOperation& legacyMutationOperation();
+    void finishLegacyMutation();
+    void readLegacyValue(const QString& path, const QString& name, const RegistryAccessContext& context,
+        std::function<void(const RegistryValueState&, const QString&, bool)> continuation);
     void createSubKey();
     void createValue();
     void renameSelectedObject();
@@ -202,28 +228,24 @@ private:
     void importRegFileAsync();
 
     // ===================== 搜索能力 =====================
+    struct SearchSession {
+        enum class State { Running, Complete, Stopped, Failed };
+        std::mutex mutex;
+        std::deque<PendingSearchRow> rows;
+        std::atomic_bool stopping{false};
+        std::atomic_size_t scanned{0}, hits{0}, skipped{0}, dropped{0};
+        std::atomic<State> state{State::Running};
+        quint64 generation = 0;
+        int progressPid = 0;
+        bool uiFinalized = false; // GUI-only terminal claim; workers never access this member.
+    };
     void startSearchAsync();
-    void stopSearch(bool waitForThread);
+    void stopSearch(bool invalidateResults);
     void flushPendingSearchRows();
-    void enqueuePendingSearchRow(PendingSearchRow&& row);
-    void searchRegistryRecursive(
-        HKEY rootKey,
-        const QString& subPath,
-        const QString& keyword,
-        const SearchOptions& options,
-        std::size_t* scannedKeyCount,
-        std::size_t* hitCount);
-    // searchRegistryRecursiveByR0：
-    // - 作用：R0 在线时用驱动枚举完成后台搜索，避免搜索路径绕回 Win32。
-    void searchRegistryRecursiveByR0(
-        const QString& kernelKeyPath,
-        const QString& displayKeyPath,
-        const QString& keyword,
-        const SearchOptions& options,
-        std::size_t* scannedKeyCount,
-        std::size_t* hitCount);
-    void searchRegistryPath(const QString& path, bool useR0, const QString& keyword,
-        const SearchOptions& options, std::size_t* scanned, std::size_t* hits);
+    static void enqueuePendingSearchRow(const std::shared_ptr<SearchSession>& session, PendingSearchRow&& row);
+    static void searchRegistryPath(const QString& path, bool useR0, const QString& keyword,
+        const SearchOptions& options, const std::shared_ptr<SearchSession>& session,
+        const std::function<bool()>& shouldStop, std::size_t* scanned, std::size_t* hits);
 
     // ===================== WinAPI 工具 =====================
     static bool parseRegistryPath(const QString& pathText, HKEY* rootKeyOut, QString* subPathOut);
@@ -278,11 +300,12 @@ private:
 
     // ===================== 搜索线程状态 =====================
     std::atomic_bool m_searchRunning{ false };   // 搜索线程是否运行中。
-    std::atomic_bool m_searchStopFlag{ false };  // 搜索线程停止标志。
-    std::unique_ptr<std::thread> m_searchThread; // 搜索线程对象。
+    std::unique_ptr<ks::ui::AsyncOperation> m_searchOperation;
+    std::shared_ptr<SearchSession> m_searchSession;
+    struct SubKeyLoadRecovery;
+    std::shared_ptr<SubKeyLoadRecovery> m_subKeyLoadRecovery;
+    QTimer* m_subKeyRecoveryTimer = nullptr;
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_uiDispatcher; // 晚到的导入/导出与搜索消息受页面关闭门禁保护。
-    std::mutex m_pendingMutex;                   // 待刷入搜索结果队列锁。
-    std::deque<PendingSearchRow> m_pendingRows;  // 有界待刷入搜索结果 FIFO 队列。
     QTimer* m_searchFlushTimer = nullptr;        // UI 节流刷新定时器。
 
     // ===================== 进度与统计 =====================
@@ -292,6 +315,7 @@ private:
     std::atomic_size_t m_searchSkipped{0};
     std::atomic_size_t m_searchDropped{0};
     bool m_lastSearchStopped = false;
+    bool m_lastSearchFailed = false;
     quint64 m_searchGeneration = 0;
     int m_activeLocationIndex = 0;
 
@@ -325,9 +349,17 @@ private:
     int m_editorViewBits = 0;
     bool m_editorUseR0 = false;
     quint64 m_editorGeneration = 0;
+    std::shared_ptr<const RegistryKeyListing> m_deferredValueListing;
+    int m_deferredValueOffset = 0;
+    quint64 m_deferredValueGeneration = 0;
+    QString m_deferredValueSelection;
     quint64 m_valueLoadGeneration = 0;
     int m_viewBits = 0;
     bool m_applyingChanges = false;
+    std::unique_ptr<ks::ui::AsyncOperation> m_legacyMutationOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_applyOperation;
+    bool m_applyReceipt = false;
+    bool m_legacyMutationReceipt = false;
     std::shared_ptr<std::atomic_bool> m_operationsClosed = std::make_shared<std::atomic_bool>(false);
     QVector<PendingValueChange> m_pendingChanges;
     QVector<PendingValueChange> m_lastChanges;

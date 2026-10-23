@@ -5,12 +5,27 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 using namespace service_dock_detail;
 
 namespace
 {
+    class ServiceNameItem final : public QTableWidgetItem
+    {
+    public:
+        explicit ServiceNameItem(const QString& text) : QTableWidgetItem(text)
+        { setFlags(flags() & ~Qt::ItemIsEditable); setToolTip(text); }
+        bool operator<(const QTableWidgetItem& other) const override
+        {
+            if (tableWidget() && tableWidget()->property("service_preset_sort").toBool())
+                return data(Qt::UserRole + 93).toInt() < other.data(Qt::UserRole + 93).toInt();
+            return QTableWidgetItem::operator<(other);
+        }
+    };
+
     // createServiceTable 作用：创建服务主列表控件并配置列结构。
     QTableWidget* createServiceTable(QWidget* parentWidget)
     {
@@ -285,25 +300,26 @@ void ServiceDock::initializeConnections()
             applySelectedStartType();
         });
 
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&)
-        {
-            rebuildServiceTable();
-        });
+    m_filterDebounceTimer = new QTimer(this);
+    m_filterDebounceTimer->setSingleShot(true);
+    m_filterDebounceTimer->setInterval(120);
+    connect(m_filterDebounceTimer, &QTimer::timeout, this, &ServiceDock::applyServiceTableFilter);
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { m_filterDebounceTimer->start(); });
     connect(m_sortCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](const int)
         {
             rebuildServiceTable();
         });
     connect(m_runningOnlyButton, &QToolButton::toggled, this, [this](const bool)
         {
-            rebuildServiceTable();
+            applyServiceTableFilter();
         });
     connect(m_autoStartOnlyButton, &QToolButton::toggled, this, [this](const bool)
         {
-            rebuildServiceTable();
+            applyServiceTableFilter();
         });
     connect(m_riskOnlyButton, &QToolButton::toggled, this, [this](const bool)
         {
-            rebuildServiceTable();
+            applyServiceTableFilter();
         });
 
     connect(m_serviceTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& localPos)
@@ -324,13 +340,20 @@ void ServiceDock::initializeConnections()
 
 }
 
-void ServiceDock::rebuildServiceTable()
+void ServiceDock::rebuildServiceTable(const bool preserveDetailEdits)
 {
     if (m_serviceTable == nullptr)
     {
         return;
     }
 
+    if (!isVisible()) { m_serviceRowsDirty = true; return; }
+    const QPointer<ServiceDock> guarded(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("service-table-rebuild"), {m_serviceTable},
+        [guarded, preserveDetailEdits]() { if (guarded) guarded->rebuildServiceTable(preserveDetailEdits); })) return;
+    m_serviceRowsDirty = false;
+    if (m_filterDebounceTimer) m_filterDebounceTimer->stop();
+    const QSignalBlocker selectionBlocker(m_serviceTable);
     // 先记录旧选择，重建后按服务短名恢复选择，避免刷新导致用户焦点丢失。
     const QString previousSelectedServiceName = selectedServiceName();
 
@@ -339,10 +362,6 @@ void ServiceDock::rebuildServiceTable()
     for (int index = 0; index < static_cast<int>(m_serviceList.size()); ++index)
     {
         const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(index)];
-        if (!entryMatchesCurrentFilter(entry))
-        {
-            continue;
-        }
         visibleIndexList.push_back(index);
     }
 
@@ -356,33 +375,58 @@ void ServiceDock::rebuildServiceTable()
             return serviceLessThan(leftEntry, rightEntry);
         });
 
-    m_serviceTable->setRowCount(static_cast<int>(visibleIndexList.size()));
-    for (int rowIndex = 0; rowIndex < static_cast<int>(visibleIndexList.size()); ++rowIndex)
+    const QIcon runningIcon = createBlueIcon(":/Icon/process_start.svg");
+    const QIcon stoppedIcon = createBlueIcon(":/Icon/process_pause.svg");
+    QSet<QString> wantedNames;
+    for (const auto& entry : m_serviceList) wantedNames.insert(entry.serviceNameText.toCaseFolded());
+    for (int row = m_serviceTable->rowCount() - 1; row >= 0; --row)
     {
-        const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(visibleIndexList[static_cast<std::size_t>(rowIndex)])];
+        const auto* item = m_serviceTable->item(row, toServiceColumn(ServiceColumn::Name));
+        if (!item || !wantedNames.contains(item->data(kServiceNameRole).toString().toCaseFolded()))
+            m_serviceTable->removeRow(row);
+    }
+    QHash<QString, int> rowByName;
+    for (int row = 0; row < m_serviceTable->rowCount(); ++row)
+        rowByName.insert(m_serviceTable->item(row, toServiceColumn(ServiceColumn::Name))->data(kServiceNameRole).toString().toCaseFolded(), row);
+    for (int rank = 0; rank < static_cast<int>(visibleIndexList.size()); ++rank)
+    {
+        const int sourceIndex = visibleIndexList[static_cast<std::size_t>(rank)];
+        const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(sourceIndex)];
+        const QString key = entry.serviceNameText.toCaseFolded();
+        int rowIndex = rowByName.value(key, -1);
+        if (rowIndex < 0)
+        {
+            rowIndex = m_serviceTable->rowCount();
+            m_serviceTable->insertRow(rowIndex);
+            rowByName.insert(key, rowIndex);
+        }
 
-        QTableWidgetItem* nameItem = createReadOnlyItem(entry.serviceNameText);
+        const auto assignCell = [this, rowIndex](const ServiceColumn column, const QString& text) {
+            auto* cell = m_serviceTable->item(rowIndex, toServiceColumn(column));
+            if (!cell)
+            {
+                cell = column == ServiceColumn::Name ? static_cast<QTableWidgetItem*>(new ServiceNameItem(text)) : createReadOnlyItem(text);
+                m_serviceTable->setItem(rowIndex, toServiceColumn(column), cell);
+            }
+            else if (cell->text() != text) { cell->setText(text); cell->setToolTip(text); }
+            return cell;
+        };
+        auto* nameItem = assignCell(ServiceColumn::Name, entry.serviceNameText);
         nameItem->setData(kServiceNameRole, entry.serviceNameText);
-        nameItem->setIcon(entry.currentState == SERVICE_RUNNING
-            ? createBlueIcon(":/Icon/process_start.svg")
-            : createBlueIcon(":/Icon/process_pause.svg"));
-
-        QTableWidgetItem* displayNameItem = createReadOnlyItem(entry.displayNameText);
-        QTableWidgetItem* stateItem = createReadOnlyItem(entry.stateText);
-        QTableWidgetItem* startTypeItem = createReadOnlyItem(entry.startTypeText);
-        QTableWidgetItem* pidItem = createReadOnlyItem(entry.processId == 0
-            ? QStringLiteral("-")
-            : QString::number(entry.processId));
-        QTableWidgetItem* accountItem = createReadOnlyItem(entry.accountText);
-        QTableWidgetItem* riskItem = createReadOnlyItem(entry.riskSummaryText);
-
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::Name), nameItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::DisplayName), displayNameItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::State), stateItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::StartType), startTypeItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::Pid), pidItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::Account), accountItem);
-        m_serviceTable->setItem(rowIndex, toServiceColumn(ServiceColumn::Risk), riskItem);
+        nameItem->setData(Qt::UserRole + 91, sourceIndex);
+        nameItem->setData(Qt::UserRole + 93, rank);
+        const bool running = entry.currentState == SERVICE_RUNNING;
+        if (nameItem->data(Qt::UserRole + 92).isNull() || nameItem->data(Qt::UserRole + 92).toBool() != running)
+        {
+            nameItem->setIcon(running ? runningIcon : stoppedIcon);
+            nameItem->setData(Qt::UserRole + 92, running);
+        }
+        assignCell(ServiceColumn::DisplayName, entry.displayNameText);
+        assignCell(ServiceColumn::State, entry.stateText);
+        assignCell(ServiceColumn::StartType, entry.startTypeText);
+        assignCell(ServiceColumn::Pid, entry.processId == 0 ? QStringLiteral("-") : QString::number(entry.processId));
+        assignCell(ServiceColumn::Account, entry.accountText);
+        assignCell(ServiceColumn::Risk, entry.riskSummaryText);
 
         // 基础高亮策略：
         // - 运行中：绿色弱高亮；
@@ -407,18 +451,17 @@ void ServiceDock::rebuildServiceTable()
             rowColor = KswordTheme::WithAlpha(KswordTheme::ErrorColor(), 68);
         }
 
-        if (rowColor.isValid())
+        const QBrush background = rowColor.isValid() ? QBrush(rowColor) : QBrush();
+        for (int columnIndex = 0; columnIndex < toServiceColumn(ServiceColumn::Count); ++columnIndex)
         {
-            for (int columnIndex = 0; columnIndex < toServiceColumn(ServiceColumn::Count); ++columnIndex)
-            {
-                QTableWidgetItem* rowItem = m_serviceTable->item(rowIndex, columnIndex);
-                if (rowItem != nullptr)
-                {
-                    rowItem->setBackground(rowColor);
-                }
-            }
+            auto* rowItem = m_serviceTable->item(rowIndex, columnIndex);
+            if (rowItem && rowItem->background() != background) rowItem->setBackground(background);
         }
     }
+
+    m_serviceTable->setProperty("service_preset_sort", true);
+    m_serviceTable->sortItems(toServiceColumn(ServiceColumn::Name), Qt::AscendingOrder);
+    m_serviceTable->setProperty("service_preset_sort", false);
 
     // 重建后恢复选择：
     // - 优先恢复旧服务；
@@ -448,9 +491,44 @@ void ServiceDock::rebuildServiceTable()
         m_serviceTable->selectRow(0);
     }
 
+    applyServiceTableFilter();
+    if (!preserveDetailEdits) syncToolbarStateWithSelection(false);
+    if (!preserveDetailEdits || previousSelectedServiceName.compare(selectedServiceName(), Qt::CaseInsensitive) != 0) updateDetailViewsFromSelection();
+}
+
+void ServiceDock::applyServiceTableFilter()
+{
+    if (!m_serviceTable) return;
+    if (!isVisible()) { m_serviceRowsDirty = true; return; }
+    const QPointer<ServiceDock> guarded(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("service-table-filter"), {m_serviceTable},
+        [guarded]() { if (guarded) guarded->applyServiceTableFilter(); })) return;
+    const QString previous = selectedServiceName();
+    QSignalBlocker blocked(m_serviceTable);
+    m_visibleServiceCount = 0;
+    QSet<QPersistentModelIndex> excludedRows;
+    for (int row = 0; row < m_serviceTable->rowCount(); ++row)
+    {
+        auto* item = m_serviceTable->item(row, toServiceColumn(ServiceColumn::Name));
+        const int index = item ? item->data(Qt::UserRole + 91).toInt() : -1;
+        const bool visible = index >= 0 && index < static_cast<int>(m_serviceList.size()) &&
+            entryMatchesCurrentFilter(m_serviceList[static_cast<std::size_t>(index)]);
+        if (!visible) excludedRows.insert(QPersistentModelIndex(m_serviceTable->model()->index(row, 0)));
+        else ++m_visibleServiceCount;
+    }
+    ks::ui::ApplyTableRowFilter(m_serviceTable, excludedRows);
+    int firstVisible = -1;
+    for (int row = 0; row < m_serviceTable->rowCount(); ++row)
+        if (!ks::ui::IsTableRowExcludedByFilter(m_serviceTable, row)) { firstVisible = row; break; }
+    if (m_serviceTable->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_serviceTable, m_serviceTable->currentRow()))
+    {
+        if (firstVisible >= 0) m_serviceTable->selectRow(firstVisible);
+        else { m_serviceTable->clearSelection(); m_serviceTable->setCurrentCell(-1, -1); }
+    }
     updateSummaryText();
-    syncToolbarStateWithSelection();
-    updateDetailViewsFromSelection();
+    const bool sameSelection = !previous.isEmpty() && previous.compare(selectedServiceName(), Qt::CaseInsensitive) == 0;
+    syncToolbarStateWithSelection(sameSelection);
+    if (!sameSelection) updateDetailViewsFromSelection();
 }
 
 bool ServiceDock::entryMatchesCurrentFilter(const ServiceEntry& entry) const
@@ -580,7 +658,7 @@ void ServiceDock::updateSummaryText()
         }
     }
 
-    const int visibleCount = (m_serviceTable == nullptr) ? 0 : m_serviceTable->rowCount();
+    const int visibleCount = m_visibleServiceCount;
     m_summaryLabel->setText(
         QStringLiteral("状态：总计 %1，运行中 %2，自动启动 %3，风险 %4，幽灵 %5，SCM 异常 %6，当前可见 %7")
         .arg(m_serviceList.size())
@@ -614,7 +692,7 @@ QString ServiceDock::selectedServiceName() const
     return nameItem->data(kServiceNameRole).toString().trimmed();
 }
 
-void ServiceDock::syncToolbarStateWithSelection()
+void ServiceDock::syncToolbarStateWithSelection(const bool preserveEdits)
 {
     const int selectedIndex = findServiceIndexByName(selectedServiceName());
     const bool hasSelection = selectedIndex >= 0 && selectedIndex < static_cast<int>(m_serviceList.size());
@@ -722,13 +800,14 @@ void ServiceDock::syncToolbarStateWithSelection()
             ? QStringLiteral("继续当前服务")
             : QStringLiteral("仅在服务已暂停时可继续"));
     }
-    m_applyStartTypeButton->setEnabled(scmRecordPresent && !pendingState);
+    m_applyStartTypeButton->setEnabled(scmRecordPresent && !pendingState && !m_configPendingReceipt);
     m_startTypeCombo->setEnabled(scmRecordPresent && !pendingState);
     if (m_generalStartButton != nullptr) { m_generalStartButton->setEnabled(m_startButton->isEnabled()); }
     if (m_generalStopButton != nullptr) { m_generalStopButton->setEnabled(m_stopButton->isEnabled()); }
     if (m_generalPauseButton != nullptr) { m_generalPauseButton->setEnabled(m_pauseButton->isEnabled()); }
     if (m_generalContinueButton != nullptr) { m_generalContinueButton->setEnabled(m_continueButton->isEnabled()); }
 
+    if (preserveEdits) return;
     if (!m_detailUiSyncInProgress && m_generalStartTypeCombo != nullptr)
     {
         const QSignalBlocker blocker(m_generalStartTypeCombo);
@@ -754,15 +833,7 @@ int ServiceDock::findServiceIndexByName(const QString& serviceNameText) const
         return -1;
     }
 
-    for (int index = 0; index < static_cast<int>(m_serviceList.size()); ++index)
-    {
-        const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(index)];
-        if (QString::compare(entry.serviceNameText, serviceNameText, Qt::CaseInsensitive) == 0)
-        {
-            return index;
-        }
-    }
-    return -1;
+    return m_serviceIndexByName.value(serviceNameText.toCaseFolded(), -1);
 }
 
 void ServiceDock::onServiceSelectionChanged()
@@ -771,7 +842,7 @@ void ServiceDock::onServiceSelectionChanged()
     syncToolbarStateWithSelection();
 }
 
-ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry) const
+ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry, const int visibleCount, const std::function<bool()>& shouldStop)
 {
     ks::ui::FieldDocument document;
     document.section(QStringLiteral("独立来源"));
@@ -785,10 +856,12 @@ ks::ui::FieldDocument ServiceDock::buildAuditTabText(const ServiceEntry& entry) 
         section.children = content.nodes;
         document.nodes.append(std::move(section));
     };
-    appendSection(QStringLiteral("触发器"), buildTriggerDetailText(entry));
-    appendSection(QStringLiteral("安全"), buildSecurityDetailText(entry));
+    if (shouldStop()) return {};
+    appendSection(QStringLiteral("触发器"), buildTriggerDetailText(entry, shouldStop));
+    if (shouldStop()) return {};
+    appendSection(QStringLiteral("安全"), buildSecurityDetailText(entry, shouldStop));
     appendSection(QStringLiteral("风险"), buildRiskDetailText(entry));
-    appendSection(QStringLiteral("导出"), buildExportDetailText(entry));
+    appendSection(QStringLiteral("导出"), buildExportDetailText(entry, visibleCount));
     return document;
 }
 

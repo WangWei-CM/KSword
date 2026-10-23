@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "./HandleFilterConfig.h"
 #include "HandleObjectTypeWorker.h"
 #include "../UI/AsyncOperation.h"
@@ -64,6 +65,9 @@ class HandleDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const HandleDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：
     // - 创建句柄页面全部控件与多 Tab 结构；
     // - 初始化筛选条件、右键菜单、异步刷新入口。
@@ -93,6 +97,8 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // HandleTableColumn 作用：
     // - 统一定义句柄列表列索引，杜绝魔法数字。
     enum class HandleTableColumn : int
@@ -206,7 +212,7 @@ private:
     // - 包含句柄行、类型列表与状态文案。
     struct HandleRefreshResult
     {
-        std::vector<HandleRow> rows;               // rows：过滤后的句柄行结果。
+        QVector<HandleRow> rows;                   // Immutable-by-sharing value snapshot; built only on worker.
         std::vector<QString> availableTypeList;    // availableTypeList：本轮可选类型列表。
         std::unordered_map<std::uint16_t, std::string> updatedTypeNameCacheByIndex; // updatedTypeNameCacheByIndex：更新后的类型缓存。
         std::size_t totalHandleCount = 0;          // totalHandleCount：系统总句柄数（枚举层）。
@@ -260,12 +266,33 @@ private:
         QString ruleId;
         QString ruleName;
         bool enabled = true;
-        std::vector<std::size_t> rowIndices;
+        QVector<std::size_t> rowIndices;
         std::size_t loadedCount = 0;
         QTreeWidgetItem* summaryItem = nullptr;
     };
 
 private:
+    struct HandleFilterRequest
+    {
+        QVector<HandleRow> rows;
+        QVector<ks::handle::HandleFilterRule> rules;
+        std::unordered_map<std::uint16_t, std::string> typeNames;
+        quint64 revision = 0;
+        bool rebuild = true;
+    };
+    struct HandleFilterResult
+    {
+        QVector<HandleRow> rows;
+        std::vector<HandleRuleMatchState> states;
+        std::vector<QString> availableTypes;
+        std::size_t totalMatches = 0;
+        quint64 revision = 0;
+        bool rebuild = true;
+    };
+    static HandleFilterResult prepareHandleFilter(const HandleFilterRequest& request,
+        const ks::ui::AsyncOperationToken& token);
+    bool applyHandleFilterResult(const HandleFilterResult& result, std::uint64_t ticket);
+    void ensureHandleFilterProjection();
     // initializeUi 作用：
     // - 创建页面布局与多 Tab 容器；
     // - 构建 Handle Table / Object Header / Object Type 三个页签。
@@ -386,11 +413,12 @@ private:
     HandleRuleMatchState* findRuleMatchState(const QString& ruleId);
     const HandleRuleMatchState* findRuleMatchState(const QString& ruleId) const;
     const ks::handle::HandleFilterRule* findActiveRule(const QString& ruleId) const;
-    bool handleRowMatchesRule(
+    static bool handleRowMatchesRule(
         const HandleRow& row,
-        const ks::handle::HandleFilterRule& rule) const;
+        const ks::handle::HandleFilterRule& rule);
     void updateHandleSummaryStatus();
     void sortLoadedRuleRows(int column, Qt::SortOrder order);
+    bool handleTreeRowLessThan(QTreeWidgetItem* left, QTreeWidgetItem* right, int column, Qt::SortOrder order) const;
 
     void loadFilterConfiguration();
     void saveFilterConfiguration() const;
@@ -402,7 +430,9 @@ private:
         const QVector<ks::handle::HandleFilterRule>& existingRules);
     void importFilterConfiguration();
     void exportFilterConfiguration() const;
-    void exportRuleResults(const QString& ruleId = QString()) const;
+    void exportRuleResults(const QString& ruleId = QString());
+    void reconcileExportReceipt();
+    void settleExportReceipt(const QString& message, bool success = false);
     void returnToSavedFilters();
     QString buildRuleConditionSummary(const ks::handle::HandleFilterRule& rule) const;
 
@@ -522,7 +552,7 @@ private:
     // - 返回可修改指针供动作函数使用。
     // 调用方法：右键动作执行前调用。
     // 传入/传出：无，返回 HandleRow*（无选中时返回 nullptr）。
-    HandleRow* selectedHandleRow();
+    const HandleRow* selectedHandleRow();
 
     // copyCurrentHandleCell 作用：
     // - 复制当前句柄单元格文本到剪贴板；
@@ -712,6 +742,13 @@ private:
     bool m_objectTypeRefreshInProgress = false;  // m_objectTypeRefreshInProgress：对象类型刷新互斥标记。
     bool m_objectTypeRefreshPending = false;     // m_objectTypeRefreshPending：对象类型刷新待执行请求标记。
     bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
+    std::unique_ptr<ks::ui::AsyncOperation> m_handleFilterOperation;
+    quint64 m_handleFilterRevision = 0;
+    bool m_handleFilterPreparationPending = false;
+    bool m_handleFilterProjectionDirty = false;
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
+    QString m_exportReceiptPath;
     std::unique_ptr<ks::ui::AsyncOperation> m_handleDetailOperation; // 详情请求合并与一次收尾控制器。
     bool m_handleRenderDeferredUntilTypeMap = false; // m_handleRenderDeferredUntilTypeMap：句柄枚举已完成但表格渲染正等待对象类型映射。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。
@@ -722,7 +759,7 @@ private:
     int m_objectTypeRefreshProgressPid = 0;      // m_objectTypeRefreshProgressPid：对象类型刷新 kPro 任务 PID。
     int m_handleDetailRefreshProgressPid = 0;    // m_handleDetailRefreshProgressPid：句柄详情刷新 kPro 任务 PID。
 
-    std::vector<HandleRow> m_allRows;            // m_allRows：完整句柄快照缓存。
+    QVector<HandleRow> m_allRows;            // m_allRows：完整句柄快照缓存。
     std::vector<HandleRow> m_rows;               // 兼容旧的整表渲染路径；规则树使用 m_allRows 索引。
     ks::handle::HandleFilterDocument m_filterDocument;
     ks::handle::HandleFilterRule m_temporaryFilterRule;

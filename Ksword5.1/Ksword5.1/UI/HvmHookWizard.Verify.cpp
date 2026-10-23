@@ -873,6 +873,7 @@ namespace ks::ui
             this,
             [this, residentBody, pollTimer](const bool expanded) {
                 residentBody->setVisible(expanded);
+                if (expanded) presentResidentEvidence();
                 if (!expanded)
                 {
                     // 收起来就必须停：折叠着的分组在背后打 IOCTL 是最难查的
@@ -903,6 +904,8 @@ namespace ks::ui
             }
             return;
         }
+        std::shared_ptr<HvmRehearsalResource::Reservation> rehearsalAccess;
+        if (!retainRehearsalAccess(rehearsalAccess)) return;
         m_verifyStaticInFlight = true;
         const quint64 sequence = ++m_verifyStaticSequence;
         const quint64 pageBase = m_plan.pageBasePhysical;
@@ -915,7 +918,7 @@ namespace ks::ui
         }
 
         QPointer<HvmHookWizard> safeThis(this);
-        std::thread([safeThis, sequence, pageBase]() {
+        std::thread([safeThis, sequence, pageBase, rehearsalAccess]() {
             const VerifyStaticSnapshot snapshot =
                 collectVerifyStaticSnapshot(pageBase);
             if (safeThis == nullptr)
@@ -1308,13 +1311,23 @@ namespace ks::ui
             // 这一轮读不到它并不代表它没发生过——保留上一轮的结论，
             // 否则一条真实的读数会在下一秒被自己抹掉。
             HvmCheckRow sticky = m_verifyResidentRows.at(eventIndex);
-            sticky.conclusion = sticky.conclusion + QStringLiteral(" ")
-                + ks::i18n::sourceText(QStringLiteral("（本行来自本次观察中较早的一次轮询：事件环是消费型的，游标推进之后旧事件读不回来。）"));
+            const QString suffix = ks::i18n::sourceText(QStringLiteral("（本行来自本次观察中较早的一次轮询：事件环是消费型的，游标推进之后旧事件读不回来。）"));
+            if (!sticky.conclusion.endsWith(suffix)) sticky.conclusion += QStringLiteral(" ") + suffix;
             rows[eventIndex] = sticky;
         }
         m_verifyResidentRows = rows;
-        fillCheckTable(m_verifyResidentTable, m_verifyResidentRows);
+        m_residentSnapshot = snapshot;
+        m_residentProjectionDirty = true;
+        presentResidentEvidence();
+    }
 
+    void HvmHookWizard::presentResidentEvidence()
+    {
+        if (!m_residentProjectionDirty || !isVisible() || isMinimized()
+            || m_currentStep != Step::Verify || !m_verifyResidentGroup->isChecked()) return;
+        m_residentProjectionDirty = false;
+        const auto& snapshot = m_residentSnapshot;
+        fillCheckTable(m_verifyResidentTable, m_verifyResidentRows);
         if (m_verifyStatusLabel != nullptr)
         {
             const ksword::hvm::HvmState& state = snapshot.state;
@@ -1333,7 +1346,7 @@ namespace ks::ui
                 text += QStringLiteral(" ");
                 text += ks::i18n::sourceText(QStringLiteral("如果刚才还在常驻，那么发生过 fail-closed 退虚拟化。按代码最可能的三种成因：上一次翻转还没恢复就又来一次（hvm_ept_view.c:832-838）、取到的访问方向与视图不符（:843-858）、或者这条视图在切换后端里不可表示（hvm_ept_switch.c:519-526）。本向导不会自动重装——重装会把现场盖掉。"));
             }
-            m_verifyStatusLabel->setText(text);
+            if (m_verifyStatusLabel->text() != text) m_verifyStatusLabel->setText(text);
             ApplyStatusRole(m_verifyStatusLabel, role);
         }
     }
@@ -1474,59 +1487,60 @@ namespace ks::ui
         {
             return;
         }
-        // 先清空再重建：直接改行数会把上一批留下的单元格控件（第 4 列的按钮）
-        // 挂在新的一行上，那样按钮会执行上一批的修复动作。
-        table->setRowCount(0);
+        bool geometryChanged = table->rowCount() != rows.size();
         table->setRowCount(rows.size());
-
-        // 第 4 列的按钮要回调到对话框本体。fillCheckTable 是静态的，
-        // 所以从表格自己所在的窗口取回实例——这时控件树已经建完。
-        HvmHookWizard* const wizard =
-            qobject_cast<HvmHookWizard*>(table->window());
-
+        HvmHookWizard* const wizard = qobject_cast<HvmHookWizard*>(table->window());
         for (int row = 0; row < rows.size(); ++row)
         {
-            const HvmCheckRow& data = rows.at(row);
-
-            QTableWidgetItem* const criterionItem =
-                new QTableWidgetItem(data.criterion);
-            criterionItem->setToolTip(data.criterion);
-            table->setItem(row, 0, criterionItem);
-
-            // 第 2 列只写读到了什么，第 3 列才是结论 —— 三张表共用这套列语义。
-            QTableWidgetItem* const readingItem =
-                new QTableWidgetItem(data.reading);
-            readingItem->setToolTip(data.reading);
-            table->setItem(row, 1, readingItem);
-
-            // 结论列用 QLabel 承载，才能吃到全局样式块里的语义状态色：
-            // QTableWidgetItem 不是控件，ApplyStatusRole 对它无效。
-            QLabel* const verdictLabel = new QLabel(
-                describeCheckVerdict(data.verdict),
-                table);
-            verdictLabel->setToolTip(data.conclusion);
-            verdictLabel->setWordWrap(true);
-            verdictLabel->setMargin(4);
-            ApplyStatusRole(verdictLabel, checkVerdictStatusRole(data.verdict));
-            table->setCellWidget(row, 2, verdictLabel);
-
-            if (data.remedy != HvmCheckRemedy::None && wizard != nullptr)
+            const auto& data = rows.at(row);
+            const bool sameIdentity = table->item(row, 0)
+                && table->item(row, 0)->data(Qt::UserRole).toInt() == data.criterionId;
+            if (!sameIdentity)
             {
-                QPushButton* const remedyButton = new QPushButton(
-                    data.remedyLabel,
-                    table);
-                remedyButton->setToolTip(data.conclusion);
-                const HvmCheckRemedy remedy = data.remedy;
-                connect(
-                    remedyButton,
-                    &QPushButton::clicked,
-                    wizard,
-                    [wizard, remedy]() {
-                        wizard->runPreflightRemedy(remedy);
-                    });
-                table->setCellWidget(row, 3, remedyButton);
+                table->setCellWidget(row, 2, nullptr);
+                table->setCellWidget(row, 3, nullptr);
+                geometryChanged = true;
             }
+            const auto updateItem = [&](int column, const QString& value) {
+                auto* item = table->item(row, column);
+                if (!item) { item = new QTableWidgetItem; table->setItem(row, column, item); }
+                if (item->text() != value) { item->setText(value); geometryChanged = true; }
+                if (item->toolTip() != value) item->setToolTip(value);
+                return item;
+            };
+            updateItem(0, data.criterion)->setData(Qt::UserRole, data.criterionId);
+            updateItem(1, data.reading);
+            auto* verdictLabel = qobject_cast<QLabel*>(table->cellWidget(row, 2));
+            if (!verdictLabel)
+            {
+                verdictLabel = new QLabel(table);
+                verdictLabel->setWordWrap(true);
+                verdictLabel->setMargin(4);
+                table->setCellWidget(row, 2, verdictLabel);
+                geometryChanged = true;
+            }
+            const QString verdict = describeCheckVerdict(data.verdict);
+            if (verdictLabel->text() != verdict) { verdictLabel->setText(verdict); geometryChanged = true; }
+            if (verdictLabel->toolTip() != data.conclusion) verdictLabel->setToolTip(data.conclusion);
+            ApplyStatusRole(verdictLabel, checkVerdictStatusRole(data.verdict));
+            auto* remedyButton = qobject_cast<QPushButton*>(table->cellWidget(row, 3));
+            if (data.remedy == HvmCheckRemedy::None || !wizard)
+            {
+                if (remedyButton) { table->setCellWidget(row, 3, nullptr); geometryChanged = true; }
+                continue;
+            }
+            if (!remedyButton || remedyButton->property("ksword_hvm_remedy").toInt() != static_cast<int>(data.remedy))
+            {
+                remedyButton = new QPushButton(table);
+                remedyButton->setProperty("ksword_hvm_remedy", static_cast<int>(data.remedy));
+                const auto remedy = data.remedy;
+                connect(remedyButton, &QPushButton::clicked, wizard, [wizard, remedy]() { wizard->runPreflightRemedy(remedy); });
+                table->setCellWidget(row, 3, remedyButton);
+                geometryChanged = true;
+            }
+            if (remedyButton->text() != data.remedyLabel) { remedyButton->setText(data.remedyLabel); geometryChanged = true; }
+            if (remedyButton->toolTip() != data.conclusion) remedyButton->setToolTip(data.conclusion);
         }
-        table->resizeRowsToContents();
+        if (geometryChanged) table->resizeRowsToContents();
     }
 }

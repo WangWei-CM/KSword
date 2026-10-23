@@ -5,6 +5,8 @@
 #include <QWidget>
 
 class QPaintEvent;
+class QHideEvent;
+class QShowEvent;
 class QVariantAnimation;
 
 class PerformanceNavCard final : public QWidget
@@ -23,6 +25,8 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* paintEventPointer) override;
+    void hideEvent(QHideEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     void startLatestSampleAnimation(double previousSample);

@@ -22,5 +22,7 @@ namespace ks::minidump
     // - recognized=true 且 success=false：格式已识别但文件损坏/截断，errorText 给出原因；
     // - success=true：核心信息可展示，非致命问题记录在 diagnostics。
     // 本函数只读目标文件，可安全用于任意来源的样本；内部所有偏移访问均有边界检查。
-    DumpParseResult ParseDumpFile(const QString& filePath);
+    // Cancellation throws DumpWorkCancelled; partial results are never published.
+    DumpParseResult ParseDumpFile(
+        const QString& filePath, const DumpCancellationToken& cancellation = {});
 }

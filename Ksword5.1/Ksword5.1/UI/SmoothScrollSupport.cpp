@@ -1,5 +1,7 @@
 #include "SmoothScrollSupport.h"
 
+#include "./PerfTrace.h"
+
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
 #include <QApplication>
@@ -14,8 +16,11 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPointingDevice>
+#include <QPaintEvent>
 #include <QScreen>
+#include <QScrollArea>
 #include <QScrollBar>
+#include <QTableWidget>
 #include <QScopedValueRollback>
 #include <QSignalBlocker>
 #include <QTabBar>
@@ -43,7 +48,35 @@ namespace
     constexpr int kWheelAnimationDurationMs = 180;
     constexpr int kPixelAnimationDurationMs = 100;
     constexpr int kTabWheelStepPixels = 48;
+#if KSWORD_PERF_TRACE_ENABLED
+    constexpr qint64 kViewportProbeMinimumNs = 2000000;
+#endif
     thread_local const QEvent* g_tabScrollFrame = nullptr;
+
+#if KSWORD_PERF_TRACE_ENABLED
+    QString scrollAreaPerfLabel(const QAbstractScrollArea* area)
+    {
+        if (area == nullptr)
+        {
+            return QString();
+        }
+        QString label = QString::fromUtf8(area->metaObject()->className());
+        if (!area->objectName().isEmpty())
+        {
+            label += QLatin1Char('/') + area->objectName();
+        }
+        for (const QWidget* parent = area->parentWidget(); parent != nullptr;
+            parent = parent->parentWidget())
+        {
+            if (!parent->windowTitle().isEmpty())
+            {
+                label += QStringLiteral(" [") + parent->windowTitle() + QLatin1Char(']');
+                break;
+            }
+        }
+        return label;
+    }
+#endif
 
     // 滚动条仍使用原生整数像素值；独立时钟避免 QWidget 动画驱动约 60Hz 的默认节拍。
     // GPU 视口由呈现回调驱动；普通视口每次 tick 读取所属屏幕。
@@ -80,8 +113,23 @@ namespace
 
         bool running() const { return m_running; }
         int target() const { return m_target; }
-        void stop()
+        void stop(const char* outcome = "canceled")
         {
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope context(m_perfContext);
+            disconnect(m_perfFrameConnection);
+            // 采集：动画结束或被新滚动打断时，记录总时长与驱动帧数。
+            if (m_running && m_perfActive)
+            {
+                // 只是动画墙钟生命周期；包含正常帧等待，不能减去同步 work 推导阻塞。
+                ks::ui::RecordPerfSpanNs("perf_scroll_animation_elapsed",
+                    (m_bar.isNull() ? QString() : m_bar->objectName()) +
+                        QLatin1Char('/') + QString::fromLatin1(outcome),
+                    m_clock.isValid() ? m_clock.nsecsElapsed() : 0, m_perfFrames);
+            }
+            m_perfActive = false;
+            m_perfFrames = 0;
+#endif
             m_running = false;
             m_timer.stop();
             disconnect(m_frameConnection);
@@ -91,7 +139,7 @@ namespace
 
         void start(int targetValue, int durationMs)
         {
-            stop();
+            stop("replaced");
             if (m_bar.isNull())
             {
                 return;
@@ -105,6 +153,12 @@ namespace
             }
             m_clock.start();
             m_running = true;
+#if KSWORD_PERF_TRACE_ENABLED
+            // 采集：本段动画开始累计帧数，由 advance 推进。
+            m_perfActive = true;
+            m_perfFrames = 0;
+            m_perfContext = ks::ui::CapturePerfTraceContext();
+#endif
             for (QWidget* parent = m_bar->parentWidget(); parent; parent = parent->parentWidget())
             {
                 if (auto* area = qobject_cast<QAbstractScrollArea*>(parent))
@@ -115,6 +169,19 @@ namespace
             }
             if (m_frameSource)
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                const auto frameContext = m_perfContext;
+                const auto frameTarget = m_bar->objectName();
+                m_perfFrameConnection = connect(m_frameSource, &QOpenGLWidget::frameSwapped,
+                    this, [frameContext, frameTarget]()
+                    {
+                        // The signal boundary, not the queued animation callback.
+                        // A GL swap is not proof that a physical display showed it.
+                        const ks::ui::PerfTraceContextScope context(frameContext);
+                        try { ks::ui::RecordPerfMark("perf_scroll_gpu_frame_swapped", frameTarget); }
+                        catch (...) {}
+                    }, Qt::DirectConnection);
+#endif
                 const quint64 generation = m_generation;
                 m_frameConnection = connect(m_frameSource, &QOpenGLWidget::frameSwapped,
                     this, [this, generation]()
@@ -154,6 +221,15 @@ namespace
 
         void advance()
         {
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope context(m_perfContext);
+            // 同步驱动区间单独记录，包含最后一帧；不测异步 paint/合成/呈现。
+            ks::ui::PerfScope framePerf("perf_scroll_driver_sync_work",
+                m_bar.isNull() ? QString() : m_bar->objectName());
+            framePerf.setItemCount(0);
+            if (m_perfActive)
+                ++m_perfFrames; // 推进尝试次数，不是呈现帧数或 FPS。
+#endif
             if (!m_running || m_bar.isNull() || !m_bar->isEnabled() || !m_bar->window()->isVisible())
             {
                 stop();
@@ -168,7 +244,7 @@ namespace
             // 先停止计时，再发最后一帧信号，允许业务连接在信号内开始新滚动。
             if (progress >= 1.0)
             {
-                stop();
+                stop("completed");
             }
             else if (const int interval = m_frameSource ? watchdogInterval() : frameInterval();
                 m_timer.interval() != interval)
@@ -176,12 +252,19 @@ namespace
                 m_timer.setInterval(interval);
             }
             const QScopedValueRollback<bool> writingGuard(m_writing, true);
+#if KSWORD_PERF_TRACE_ENABLED
+            const int previousValue = m_bar->value();
+#endif
             m_bar->setValue(std::clamp(value, m_bar->minimum(), m_bar->maximum()));
             if (m_running && m_frameSource)
             {
                 // 整数像素缓动尾段可能连续两帧 value 相同，也必须维持下一次呈现回调。
                 m_frameSource->update();
             }
+#if KSWORD_PERF_TRACE_ENABLED
+            // count 为本次驱动是否实际改变整数滚动值；仍不等同物理呈现。
+            framePerf.setItemCount(!m_bar.isNull() && m_bar->value() != previousValue ? 1 : 0);
+#endif
         }
 
         QPointer<QScrollBar> m_bar;
@@ -196,6 +279,12 @@ namespace
         int m_durationMs = kWheelAnimationDurationMs;
         bool m_writing = false;
         bool m_running = false;
+#if KSWORD_PERF_TRACE_ENABLED
+        bool m_perfActive = false;      // 采集：本段动画是否正在累计帧数。
+        int m_perfFrames = 0;           // 采集：本段动画已推进的帧数。
+        ks::ui::PerfTraceContext m_perfContext;
+        QMetaObject::Connection m_perfFrameConnection;
+#endif
     };
 
     // 保留原 QTabBar 和连接，借助 Qt 的像素滚动路径移动标签，避免切页触发懒加载。
@@ -420,6 +509,9 @@ namespace
             if (eventObject->type() == QEvent::Show ||
                 eventObject->type() == QEvent::Polish)
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                ks::ui::ObservePerfScrollArea(scrollAreaForEventObject(watchedObject));
+#endif
                 if (auto* tabBar = qobject_cast<QTabBar*>(watchedObject))
                     configureTabBar(tabBar);
                 if (QAbstractScrollArea* scrollArea =
@@ -429,6 +521,17 @@ namespace
                         enabled() && !isSmoothScrollDisabled(scrollArea));
                 }
             }
+
+#if KSWORD_PERF_TRACE_ENABLED
+            // 全局过滤器位于 QWidget::event() 前；只量入口至 queued 回调的墙钟延迟。
+            // 此区间可与其它探针重叠，包含其它 UI 工作，不能当作 Paint/Layout 耗时或求和。
+            // 只采集 QTableWidget/QScrollArea 及其 viewport，避免把整棵控件树变成日志热点。
+            if (eventObject->type() == QEvent::Paint ||
+                eventObject->type() == QEvent::LayoutRequest)
+            {
+                scheduleViewportProbe(watchedObject, eventObject->type());
+            }
+#endif
 
             const bool tabStructureEvent = eventObject->type() == QEvent::Resize ||
                 eventObject->type() == QEvent::Hide || eventObject->type() == QEvent::StyleChange ||
@@ -472,12 +575,25 @@ namespace
             }
 
             QAbstractScrollArea* scrollArea = scrollAreaForEventObject(watchedObject, true);
+#if KSWORD_PERF_TRACE_ENABLED
+            // Also observe native scrolling when animations/custom smoothing are
+            // disabled. Registration never consumes or forwards the wheel event.
+            ks::ui::ObservePerfScrollArea(scrollArea);
+#endif
             if (scrollArea == nullptr ||
                 scrollArea->property(kFrozenPaneAuxiliaryProperty).toBool() ||
                 isSmoothScrollDisabled(qobject_cast<QWidget*>(watchedObject)))
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
+
+#if KSWORD_PERF_TRACE_ENABLED
+            // 采集：滚轮在全局过滤器内的同步处理耗时；逐帧动画由动画记录单独统计。
+            ks::ui::PerfScope wheelPerf("perf_scroll_wheel",
+                scrollAreaPerfLabel(scrollArea));
+            // 滚轮本身通常很快；标记它作为后续重绘停顿的最近用户操作。
+            ks::ui::RecordPerfMark("perf_scroll_wheel", scrollAreaPerfLabel(scrollArea));
+#endif
 
             auto* wheelEvent = static_cast<QWheelEvent*>(eventObject);
             if (wheelEvent->modifiers().testFlag(Qt::ControlModifier) ||
@@ -619,6 +735,97 @@ namespace
             }
             return nullptr;
         }
+
+#if KSWORD_PERF_TRACE_ENABLED
+        void scheduleViewportProbe(QObject* watchedObject, QEvent::Type eventType)
+        {
+            QWidget* watchedWidget = qobject_cast<QWidget*>(watchedObject);
+            if (watchedWidget == nullptr)
+            {
+                return;
+            }
+
+            QAbstractScrollArea* area = nullptr;
+            if (auto* directArea = qobject_cast<QAbstractScrollArea*>(watchedWidget))
+            {
+                area = directArea;
+            }
+            else
+            {
+                for (QWidget* parent = watchedWidget->parentWidget(); parent != nullptr;
+                    parent = parent->parentWidget())
+                {
+                    auto* candidate = qobject_cast<QAbstractScrollArea*>(parent);
+                    if (candidate != nullptr &&
+                        (candidate->viewport() == watchedWidget ||
+                         (qobject_cast<QScrollArea*>(candidate) != nullptr &&
+                          qobject_cast<QScrollArea*>(candidate)->widget() == watchedWidget)))
+                    {
+                        area = candidate;
+                        break;
+                    }
+                }
+            }
+            if (area == nullptr ||
+                (qobject_cast<QTableWidget*>(area) == nullptr &&
+                 qobject_cast<QScrollArea*>(area) == nullptr))
+            {
+                return;
+            }
+            const auto* scrollArea = qobject_cast<QScrollArea*>(area);
+            if (watchedWidget != area && watchedWidget != area->viewport() &&
+                (scrollArea == nullptr || scrollArea->widget() != watchedWidget))
+            {
+                return;
+            }
+
+            // 探针状态只属于采集器，不写 QWidget 动态属性：属性事件会被视觉观察器当作失效。
+            const quint8 pendingBit = eventType == QEvent::Paint ? 1 : 2;
+            auto pending = m_viewportProbePending.find(area);
+            if (pending == m_viewportProbePending.end())
+            {
+                pending = m_viewportProbePending.insert(area, 0);
+                connect(area, &QObject::destroyed, this, [this, area]()
+                {
+                    m_viewportProbePending.remove(area);
+                });
+            }
+            if ((*pending & pendingBit) != 0)
+            {
+                return;
+            }
+            *pending |= pendingBit;
+            const char* operationToken = eventType == QEvent::Paint
+                ? "perf_scroll_paint_queue_latency" : "perf_scroll_layout_queue_latency";
+            const QString targetLabel = scrollAreaPerfLabel(area) +
+                (watchedWidget == area->viewport() ? QStringLiteral("/viewport") :
+                    QStringLiteral("/content"));
+            const qint64 startNs = ks::ui::PerfTraceNowNs();
+            const auto traceContext = ks::ui::CapturePerfTraceContext();
+            QPointer<QAbstractScrollArea> guard(area);
+            QTimer::singleShot(0, this, [this, guard, pendingBit, targetLabel, operationToken, startNs, traceContext]()
+            {
+                const ks::ui::PerfTraceContextScope context(traceContext);
+                if (guard == nullptr)
+                {
+                    return;
+                }
+                auto pending = m_viewportProbePending.find(guard.data());
+                if (pending == m_viewportProbePending.end())
+                {
+                    return;
+                }
+                *pending &= ~pendingBit;
+                const qint64 elapsedNs = std::max<qint64>(
+                    0, ks::ui::PerfTraceNowNs() - startNs);
+                if (elapsedNs >= kViewportProbeMinimumNs)
+                {
+                    ks::ui::RecordPerfSpanNs(operationToken, targetLabel, elapsedNs);
+                }
+            });
+        }
+
+#endif
 
         TabStripAnimator* tabAnimator(QTabBar* bar)
         {
@@ -844,6 +1051,9 @@ namespace
             }
         }
 
+#if KSWORD_PERF_TRACE_ENABLED
+        QHash<QAbstractScrollArea*, quint8> m_viewportProbePending;
+#endif
         QHash<QScrollBar*, ScrollBarAnimator*> m_animations;
         QHash<QTabBar*, TabStripAnimator*> m_tabAnimators;
     };

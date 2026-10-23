@@ -17,8 +17,12 @@
 // ============================================================
 
 #include "WorkbenchWriteController.h"
+#include "WorkbenchWorkerValue.h"
+#include "../AsyncOperation.h"
 
 #include <QTimer>
+
+#include <algorithm>
 
 namespace ks::ui
 {
@@ -27,7 +31,7 @@ namespace ks::ui
     // 等待窗口移动），再挂一个 2 秒单次计时器兜底。
     // ------------------------------------------------------------
     WorkbenchWriteController::PendingStageTicket WorkbenchWriteController::beginPendingStage(
-        std::uint64_t address, const QByteArray& bytes)
+        std::uint64_t address, const QByteArray& bytes, StageCompletion completion)
     {
         if (bytes.isEmpty())
         {
@@ -41,6 +45,24 @@ namespace ks::ui
             return 0;
         }
 
+        return beginPendingOverlayValue(address, bytes, std::move(completion), false, false, 0, {});
+    }
+
+    WorkbenchWriteController::PendingStageTicket WorkbenchWriteController::beginPendingDiscard(
+        std::uint64_t address, std::uint64_t length, bool all, DiscardCompletion completion)
+    {
+        if (isCommitting() || finishing_ || !overlay_ || !target_) return 0;
+        if (!all && (!length || !ksword::memwb::MemoryDiffOverlay::RangeRepresentable(address, length)))
+            return 0;
+        return beginPendingOverlayValue(address, {}, {}, true, all, length, std::move(completion));
+    }
+
+    WorkbenchWriteController::PendingStageTicket WorkbenchWriteController::beginPendingOverlayValue(
+        std::uint64_t address, const QByteArray& bytes, StageCompletion completion,
+        bool discard, bool all, std::uint64_t length, DiscardCompletion discardCompletion)
+    {
+        // Capture and projection use exactly the same authority/revision guards
+        // as Stage. Discard mutates only a worker-owned overlay value too.
         // 绑定发起时的目标轴；capture 的同步通知可能销毁控制器或目标，先用弱引用守卫。
         const QPointer<WorkbenchWriteController> self(this);
         const QPointer<WorkbenchTarget> target(target_);
@@ -58,11 +80,14 @@ namespace ks::ui
         const PendingStageTicket ticket = ++pendingStageCounter_;
 
         PendingStageEntry entry;
+        entry.ticket = ticket;
         entry.address = address;
+        entry.completion = std::move(completion);
         entry.target = target;
         entry.sourceRevision = captured.rev.source;
-        const auto* data = reinterpret_cast<const std::uint8_t*>(bytes.constData());
-        entry.bytes.assign(data, data + bytes.size());
+        entry.bytes = bytes; // Implicitly shared, detached/converted on worker.
+        entry.discard = discard; entry.discardAll = all; entry.discardLength = length;
+        entry.discardCompletion = std::move(discardCompletion);
         // 计时器 parent=this：本对象销毁时 Qt 会级联删除它，不需要在析构函数里
         // 逐个手动 delete；下面的 lambda 定义在成员函数体内，因此对 this 的私有
         // 成员/信号拥有和本函数一样的访问权限，即使它在之后的事件循环里才被调用。
@@ -89,6 +114,13 @@ namespace ks::ui
         }
         if (attempt.resolved)
         {
+            if (discard)
+            {
+                const auto found = pendingStages_.find(ticket);
+                if (found != pendingStages_.end()) found->second.discardCompletion = {};
+                FinalizePendingStage(ticket, false, attempt.reason);
+                return 0; // Rejected before an actual value worker was accepted.
+            }
             FinalizePendingStage(ticket, attempt.ok, attempt.reason);
         }
         return ticket;
@@ -176,37 +208,183 @@ namespace ks::ui
             attempt.reason = QStringLiteral("no overlay");
             return attempt;
         }
-        const ksword::memwb::StageStatus status = overlay_->Stage(entry.address, entry.bytes);
-        switch (status)
+        if (stageJob_)
         {
-        case ksword::memwb::StageStatus::Ok:
-            // 复用正常"一次编辑手势完成"的全部后续处理（内容代次 +1、立即模式下
-            // 走 Commit、发 pendingPatchesChanged），不重新发明这条逻辑。
-            onEditCompleted();
-            attempt.resolved = true;
-            attempt.ok = true;
-            return attempt;
-        case ksword::memwb::StageStatus::OutOfWindow:
-        case ksword::memwb::StageStatus::UnreadBytes:
-            // 窗口还没覆盖到这个地址：可恢复的失败，保持票据挂起，等下一次
-            // notifyWindowMayCover 或超时。
-            return attempt;
-        case ksword::memwb::StageStatus::Empty:
-        case ksword::memwb::StageStatus::AddressOverflow:
-        case ksword::memwb::StageStatus::TooLarge:
-        default:
-            // 这三种拒绝原因与"窗口位置"无关，重试不会让结果变好：立即判定为
-            // 不可恢复的失败。Empty/AddressOverflow 理论上在 beginPendingStage 的
-            // 入口校验时已经挡掉，这里仍要处理是为了不对未来枚举新增值假装成功。
-            attempt.resolved = true;
-            attempt.ok = false;
-            attempt.reason = QStringLiteral("stage rejected (%1)").arg(static_cast<int>(status));
-            return attempt;
+            if (stageTicket_ == entry.ticket) return attempt;
+            return {true, false, QStringLiteral("cancelled")};
         }
+        if (isCommitting() || finishing_)
+            return {true, false, QStringLiteral("cancelled")};
+        // Only perform constant-time bounds checks here. Per-byte validity,
+        // payload conversion, merge/split work and all map allocation run on
+        // the value copy. A not-yet-loaded window still keeps the 2s ticket.
+        const auto length = static_cast<std::uint64_t>(entry.bytes.size());
+        if (!entry.discard && (!overlay_->HasBaseline() || entry.address < overlay_->BaseAddress()
+            || entry.address - overlay_->BaseAddress() > overlay_->BaselineSize()
+            || length > overlay_->BaselineSize() - (entry.address - overlay_->BaseAddress())))
+            return attempt;
+        auto job = MakeWorkerValue<StageValueJob>(*overlay_, entry.address, entry.bytes);
+        job->contentRevision = current.rev.content;
+        job->discard = entry.discard; job->discardAll = entry.discardAll;
+        job->discardLength = entry.discardLength;
+        if (entry.timer) job->waitingBudgetMs = (std::max)(1, entry.timer->remainingTime());
+        stageJob_ = job;
+        stageTicket_ = entry.ticket;
+        terminalPoll_->start();
+        if (entry.timer) entry.timer->stop(); // Timeout covers missing baseline, not accepted CPU work.
+        const auto readOnly = canvasReadOnlyHook_;
+        const auto suspend = commitSuspendHook_;
+        if (readOnly) readOnly(true);
+        if (!self) return attempt;
+        if (suspend) suspend(true);
+        if (!self) return attempt;
+        try
+        {
+            const auto ticket = stageAsync_->submit<std::shared_ptr<StageValueJob>, std::shared_ptr<StageValueJob>>(job,
+                [](const std::shared_ptr<StageValueJob>& value, const AsyncOperationToken& token)
+                {
+                    try
+                    {
+                        if (!token.isCanceled())
+                        {
+                            if (value->discard)
+                            {
+                                if (value->discardAll)
+                                {
+                                    value->discardedBytes = value->prepared.PendingByteCount();
+                                    value->prepared.DiscardAll();
+                                }
+                                else value->discardedBytes = value->prepared.Discard(value->address, value->discardLength);
+                                value->status = ksword::memwb::StageStatus::Ok;
+                            }
+                            else
+                            {
+                                const auto* first = reinterpret_cast<const std::uint8_t*>(value->bytes.constData());
+                                const std::vector<std::uint8_t> payload(first, first + value->bytes.size());
+                                value->status = value->prepared.Stage(value->address, payload);
+                            }
+                        }
+                        else value->failed = true;
+                    }
+                    catch (...) { value->failed = true; }
+                    value->completed.store(true, std::memory_order_release);
+                    return value;
+                },
+                [self, ticket = entry.ticket](const std::shared_ptr<StageValueJob>& result, std::uint64_t)
+                { if (self) self->consumeStage(ticket, result); return true; },
+                [self, ticket = entry.ticket](std::exception_ptr)
+                {
+                    if (!self) return;
+                    self->stageJob_.reset(); self->stageTicket_ = 0;
+                    self->releaseStageHooks();
+                    if (self) self->FinalizePendingStage(ticket, false, QStringLiteral("cancelled"));
+                });
+            if (!ticket)
+            {
+                stageJob_.reset(); stageTicket_ = 0;
+                releaseStageHooks();
+                if (self) return {true, false, QStringLiteral("cancelled")};
+            }
+        }
+        catch (...)
+        {
+            if (!self) return attempt;
+            stageJob_.reset(); stageTicket_ = 0;
+            releaseStageHooks();
+            if (self) return {true, false, QStringLiteral("cancelled")};
+        }
+        return attempt;
+    }
+
+    void WorkbenchWriteController::releaseStageHooks()
+    {
+        const QPointer<WorkbenchWriteController> self(this);
+        const auto readOnly = canvasReadOnlyHook_;
+        const auto suspend = commitSuspendHook_;
+        if (readOnly) readOnly(false);
+        if (self && suspend) suspend(false);
+    }
+
+    void WorkbenchWriteController::consumeStage(PendingStageTicket ticket,
+        const std::shared_ptr<StageValueJob>& job)
+    {
+        if (stageJob_ != job || stageTicket_ != ticket) return;
+        // The apply callback still owns its real AsyncOperation lane. Poll only
+        // after it has released that lane before exposing completion/reentry.
+        if (stageAsync_ && stageAsync_->isInFlight())
+        {
+            QTimer::singleShot(1, this, [this, ticket, job] { consumeStage(ticket, job); });
+            return;
+        }
+        const QPointer<WorkbenchWriteController> self(this);
+        const auto found = pendingStages_.find(ticket);
+        const auto target = found == pendingStages_.end() ? QPointer<WorkbenchTarget>{} : found->second.target;
+        const auto source = found == pendingStages_.end() ? 0 : found->second.sourceRevision;
+        const auto current = target ? target->capture() : TargetCapture{};
+        if (!self) return;
+        bool valid = !job->failed && target && target_ == target && current.rev.source == source && current.rev.content == job->contentRevision && overlay_
+            && overlay_->SameRevision(job->original) && pendingStages_.find(ticket) != pendingStages_.end();
+        bool staged = valid && job->status == ksword::memwb::StageStatus::Ok
+            && overlay_->TryAdoptPrepared(job->original, job->prepared);
+        if (staged) job->projected = overlay_->CaptureRevision();
+        if (!staged && overlay_)
+        {
+            // Finished rejected/canceled values need no strong reference to the
+            // current state when the feeder resumes. Removing that reference
+            // cannot destroy the visible state; unrelated prepared states stay
+            // worker-owned for their normal background disposal.
+            if (job->original.SameRevision(*overlay_)) job->original = ksword::memwb::MemoryDiffOverlay{};
+            if (job->prepared.SameRevision(*overlay_)) job->prepared = ksword::memwb::MemoryDiffOverlay{};
+        }
+        // Keep busy admission through external unlock hooks. They may notify,
+        // close or replace a target, but cannot start a new stage/write.
+        releaseStageHooks();
+        if (!self) return;
+        const auto afterHooks = target ? target->capture() : TargetCapture{};
+        if (!self) return;
+        valid = valid && target && target_ == target && afterHooks.rev.source == source && afterHooks.rev.content == job->contentRevision;
+        if (staged) valid = valid && overlay_ && job->projected && overlay_->MatchesRevision(*job->projected);
+        staged &= valid;
+        stageJob_.reset(); stageTicket_ = 0;
+        if (!operation_) terminalPoll_->stop();
+        // Resume after the AsyncOperation apply stack has released its busy
+        // state; no synchronous callback can cause a false Busy rejection.
+        if (staged)
+        {
+            if (job->discard)
+            {
+                finishing_ = true;
+                const auto clear = [self](WorkbenchWriteController*) { if (self) self->finishing_ = false; };
+                std::unique_ptr<WorkbenchWriteController, decltype(clear)> guard(this, clear);
+                if (job->discardedBytes && target_) target_->noteContentChanged();
+                if (self) emitPending();
+            }
+            else onEditCompleted();
+            if (!self) return;
+            const auto afterEdit = target ? target->capture() : TargetCapture{};
+            if (!self) return;
+            const bool changed = !job->discard || job->discardedBytes != 0;
+            const bool stillProjected = target && target_ == target && afterEdit.rev.source == source
+                && afterEdit.rev.content == job->contentRevision + (changed ? 1U : 0U)
+                && overlay_ && job->projected && overlay_->MatchesRevision(*job->projected);
+            FinalizePendingStage(ticket, stillProjected, stillProjected ? QString() : QStringLiteral("cancelled"),
+                stillProjected ? job->discardedBytes : 0);
+            return;
+        }
+        if (valid && (job->status == ksword::memwb::StageStatus::OutOfWindow
+            || job->status == ksword::memwb::StageStatus::UnreadBytes))
+        {
+            const auto it = pendingStages_.find(ticket);
+            if (it != pendingStages_.end() && it->second.timer) it->second.timer->start(job->waitingBudgetMs);
+            return;
+        }
+        FinalizePendingStage(ticket, false, valid
+            ? QStringLiteral("stage rejected (%1)").arg(static_cast<int>(job->status))
+            : QStringLiteral("cancelled"));
     }
 
     void WorkbenchWriteController::FinalizePendingStage(
-        PendingStageTicket ticket, bool ok, const QString& reason)
+        PendingStageTicket ticket, bool ok, const QString& reason, std::uint64_t discarded)
     {
         auto it = pendingStages_.find(ticket);
         if (it == pendingStages_.end())
@@ -225,7 +403,15 @@ namespace ks::ui
             it->second.timer->deleteLater();
         }
         // 先把 it 失效化前需要的数据都用完，再 erase（erase 之后 it 不可再用）。
+        const auto completion = std::move(it->second.completion);
+        const auto discardCompletion = std::move(it->second.discardCompletion);
+        const bool discard = it->second.discard;
         pendingStages_.erase(it);
+        const QPointer<WorkbenchWriteController> self(this);
+        if (completion) completion(ok, reason);
+        if (!self) return;
+        if (discardCompletion) discardCompletion(ok, discarded);
+        if (!self || discard) return;
         // 发出结果信号：成功提交 / 超时 / 显式取消三种情形都从这里统一发出
         // （头文件信号注释列出的三种结果）。信号是 moc 生成的公开成员函数，这里
         // 直接调用等价于 emit。

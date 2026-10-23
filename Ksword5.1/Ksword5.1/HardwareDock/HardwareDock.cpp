@@ -5,9 +5,11 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../UI/FloatingScrollbars.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "DiskMonitorPage.h"
 #include "MemoryCompositionHistoryWidget.h"
@@ -53,6 +55,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QHash>
+#include <QHideEvent>
 #include <QHeaderView>
 #include <QIcon>
 #include <QKeyEvent>
@@ -76,6 +79,8 @@
 #include <QResizeEvent>
 #include <QRunnable>
 #include <QScrollArea>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QScreen>
 #include <QSpacerItem>
 #include <QScrollBar>
@@ -88,6 +93,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -96,6 +102,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -321,7 +328,7 @@ namespace
 
     // applyDeviceAuditTableFilter 作用：
     // - 输入：设备审计表和搜索框文本；
-    // - 处理：仅通过 setRowHidden 本地过滤，避免重复 R0 查询；
+    // - 处理：提交业务过滤身份层，保留共享 search/freeze 隐藏位，避免重复 R0 查询；
     // - 返回：无，空表格指针直接忽略。
     void applyDeviceAuditTableFilter(QTableWidget* table, const QString& filterText)
     {
@@ -331,12 +338,13 @@ namespace
         }
 
         const QString normalizedFilterText = filterText.trimmed();
+        QSet<QPersistentModelIndex> excluded;
         for (int rowIndex = 0; rowIndex < table->rowCount(); ++rowIndex)
         {
-            table->setRowHidden(
-                rowIndex,
-                !rowMatchesDeviceAuditFilter(table, rowIndex, normalizedFilterText));
+            if (!rowMatchesDeviceAuditFilter(table, rowIndex, normalizedFilterText))
+                excluded.insert(QPersistentModelIndex(table->model()->index(rowIndex, 0)));
         }
+        ks::ui::ApplyTableRowFilter(table, excluded);
     }
 
     // buildDeviceAuditSearchStyle 作用：
@@ -612,6 +620,8 @@ namespace
     QTableWidget* createDeviceAuditTable(QWidget* parentWidget)
     {
         QTableWidget* table = new ks::ui::VisibleTableWidget(parentWidget);
+        ks::ui::SetTableRowFilterBusinessOwnership(
+            table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
         const QStringList headers = hardwareDeviceAuditTableHeaders();
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
@@ -1204,13 +1214,26 @@ namespace
         return rows;
     }
 
+    class DeviceAuditItem final : public QTableWidgetItem
+    {
+    public:
+        explicit DeviceAuditItem(const QString& text) : QTableWidgetItem(text) {}
+        bool operator<(const QTableWidgetItem& other) const override
+        {
+            if (tableWidget() != nullptr
+                && tableWidget()->property("kswordDeviceAuditCanonicalSort").toBool())
+                return data(Qt::UserRole + 28).toInt() < other.data(Qt::UserRole + 28).toInt();
+            return QTableWidgetItem::operator<(other);
+        }
+    };
+
     // makeDeviceAuditItem 作用：
     // - 输入：单元格文本；
     // - 处理：创建只读 QTableWidgetItem；
     // - 返回：由表格接管生命周期的 item 指针。
     QTableWidgetItem* makeDeviceAuditItem(const QString& text)
     {
-        QTableWidgetItem* item = new QTableWidgetItem(text);
+        QTableWidgetItem* item = new DeviceAuditItem(text);
         item->setFlags(item->flags() & ~Qt::ItemIsEditable);
         item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         return item;
@@ -1227,22 +1250,145 @@ namespace
             return;
         }
 
+        const QSignalBlocker blocker(table);
+        const QSignalBlocker selectionBlocker(table->selectionModel());
         const bool wasSortingEnabled = table->isSortingEnabled();
+        const int sortColumn = table->horizontalHeader()->sortIndicatorSection();
+        const Qt::SortOrder sortOrder = table->horizontalHeader()->sortIndicatorOrder();
         table->setSortingEnabled(false);
-        table->setRowCount(rows.size());
-        for (int rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
-        {
-            const QStringList& row = rows.at(rowIndex);
-            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        constexpr int identityRole = Qt::UserRole + 27;
+        const auto identityForRow = [](const QStringList& row) {
+            QString key;
+            // 对象地址、链路身份和类型组成稳定身份；不把可变风险/状态文字当身份。
+            for (const int column : {0, 1, 2, 6, 7, 12, 13, 14, 15, 16})
             {
-                const QString cellText = columnIndex < row.size() ? row.at(columnIndex) : QString();
-                table->setItem(rowIndex, columnIndex, makeDeviceAuditItem(cellText));
+                const QString part = row.value(column);
+                key += QString::number(part.size()) + QLatin1Char(':') + part;
+            }
+            return key;
+        };
+        QStringList desiredKeys;
+        QHash<QString, int> duplicateCounts;
+        for (const auto& row : rows)
+        {
+            const QString base = identityForRow(row);
+            desiredKeys.append(base + QLatin1Char('#') + QString::number(duplicateCounts[base]++));
+        }
+        QStringList existingKeys;
+        duplicateCounts.clear();
+        QSet<QString> selectedKeys;
+        QString currentKey;
+        const int currentColumn = table->currentColumn();
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            QString key = first != nullptr ? first->data(identityRole).toString() : QString();
+            if (key.isEmpty())
+            {
+                QStringList values;
+                for (int column = 0; column < table->columnCount(); ++column)
+                {
+                    auto* item = table->item(row, column);
+                    values.append(item != nullptr ? item->text() : QString());
+                }
+                const QString base = identityForRow(values);
+                key = base + QLatin1Char('#') + QString::number(duplicateCounts[base]++);
+            }
+            if (first != nullptr && first->data(identityRole).toString() != key)
+                first->setData(identityRole, key);
+            existingKeys.append(key);
+            if (first != nullptr && first->isSelected()) selectedKeys.insert(key);
+            if (row == table->currentRow()) currentKey = key;
+        }
+        // Existing rows keep their slots until Qt emits removal/layout notifications. Taking
+        // cells out and reinstalling them would transfer persistent indexes to another object.
+        table->clearSelection();
+        table->selectionModel()->clearCurrentIndex();
+        const QSet<QString> wanted(desiredKeys.cbegin(), desiredKeys.cend());
+        for (int last = table->rowCount() - 1; last >= 0;)
+        {
+            if (wanted.contains(existingKeys.at(last)))
+            {
+                --last;
+                continue;
+            }
+            int first = last;
+            while (first > 0 && !wanted.contains(existingKeys.at(first - 1))) --first;
+            // One Qt removal for each contiguous obsolete range preserves surviving
+            // persistent identities without notifying every observer once per row.
+            table->model()->removeRows(first, last - first + 1);
+            last = first - 1;
+        }
+        QHash<QString, int> rowByKey;
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            // Install the migration identity before matching; first population has no old rows.
+            if (first != nullptr) rowByKey.insert(first->data(identityRole).toString(), row);
+        }
+        int requiredRowCount = table->rowCount();
+        for (const QString& key : desiredKeys)
+        {
+            if (!rowByKey.contains(key)) rowByKey.insert(key, requiredRowCount++);
+        }
+        // QTableWidget appends this tail through one insertRows notification. USB
+        // snapshots can otherwise synchronously notify layout/filter observers 1024 times.
+        if (requiredRowCount != table->rowCount()) table->setRowCount(requiredRowCount);
+        // Structural notifications above remain live so persistent row identities follow
+        // inserts/removals. Cell replacement is one atomic data update: otherwise each
+        // of up to 1024 x 28 cells synchronously invalidates header/sort/filter observers.
+        {
+            const QSignalBlocker cellNotifications(table->model());
+            for (int rank = 0; rank < rows.size(); ++rank)
+            {
+                const QString& key = desiredKeys.at(rank);
+                const int rowIndex = rowByKey.value(key);
+                const QStringList& row = rows.at(rank);
+                for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+                {
+                    auto* item = table->item(rowIndex, columnIndex);
+                    const QString cellText = row.value(columnIndex);
+                    if (item == nullptr)
+                    {
+                        item = makeDeviceAuditItem(cellText);
+                        table->setItem(rowIndex, columnIndex, item);
+                    }
+                    else if (item->text() != cellText) item->setText(cellText);
+                    if (columnIndex == 0)
+                    {
+                        if (item->data(identityRole).toString() != key) item->setData(identityRole, key);
+                        if (item->data(Qt::UserRole + 28).toInt() != rank
+                            || !item->data(Qt::UserRole + 28).isValid())
+                            item->setData(Qt::UserRole + 28, rank);
+                    }
+                }
             }
         }
-        table->setSortingEnabled(wasSortingEnabled);
-        applyDeviceAuditTableFilter(
-            table,
-            table->property("kswordDeviceAuditFilter").toString());
+        if (table->rowCount() > 0 && table->columnCount() > 0)
+            emit table->model()->dataChanged(table->model()->index(0, 0),
+                table->model()->index(table->rowCount() - 1, table->columnCount() - 1));
+        if (wasSortingEnabled) table->setSortingEnabled(true);
+        else
+        {
+            // sortItems performs a layout move with persistent-index remapping. The temporary
+            // comparator restores source order when there is no active user sort.
+            table->setProperty("kswordDeviceAuditCanonicalSort", true);
+            table->sortItems(0, Qt::AscendingOrder);
+            table->setProperty("kswordDeviceAuditCanonicalSort", false);
+            const QSignalBlocker headerBlocker(table->horizontalHeader());
+            table->horizontalHeader()->setSortIndicator(sortColumn, sortOrder);
+        }
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            const QString key = first->data(identityRole).toString();
+            if (!currentKey.isEmpty() && key == currentKey && currentColumn >= 0)
+                table->setCurrentItem(table->item(row, currentColumn), QItemSelectionModel::NoUpdate);
+            if (selectedKeys.contains(key))
+                for (int column = 0; column < table->columnCount(); ++column)
+                    table->item(row, column)->setSelected(true);
+        }
+        applyDeviceAuditTableFilter(table, table->property("kswordDeviceAuditFilter").toString());
     }
 
     // createHardwareDeferredPlaceholder 作用：
@@ -3230,10 +3376,6 @@ namespace
         PDH_STATUS openQueryStatus = ERROR_SUCCESS;  // openQueryStatus：PdhOpenQueryW 返回值，供失败日志使用。
     };
 
-    // hardwareDockCpuCounterInitializing 作用：
-    // - 标记当前是否已有一轮后台 PDH 初始化在执行；
-    // - 防止初始化未完成期间每秒刷新重复投递任务。
-    std::atomic_bool hardwareDockCpuCounterInitializing{ false };
 
     // createHardwareDockCpuCounters 作用：
     // - 入参 coreCount：逻辑核心数量，决定注册多少个 \Processor(n) 计数器；
@@ -3299,17 +3441,7 @@ namespace
         return counterBundle;
     }
 
-    // closeHardwareDockCpuCounters 作用：
-    // - 入参 counterBundle：待释放的句柄集合；
-    // - 处理：关闭 PDH 查询，供控件已销毁或句柄已由更早一轮接管时丢弃结果；
-    // - 返回：无返回值。
-    void closeHardwareDockCpuCounters(const HardwareDockCpuCounterBundle& counterBundle)
-    {
-        if (counterBundle.cpuQueryHandle != nullptr)
-        {
-            ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.cpuQueryHandle));
-        }
-    }
+
 }
 
 namespace
@@ -3432,69 +3564,96 @@ namespace
         };
         using WidgetStyleLookup = std::function<WidgetStyle(const QWidget*)>;
         using LayoutStyleLookup = std::function<LayoutStyle(const QLayout*)>;
+        using Revision = std::array<quint64, 3>; // sample, structure, theme
+        using RevisionLookup = std::function<Revision()>;
 
         UtilizationFollowMirror(QWidget* source, QWidget* parent,
-            WidgetStyleLookup widgetStyle, LayoutStyleLookup layoutStyle)
+            WidgetStyleLookup widgetStyle, LayoutStyleLookup layoutStyle,
+            RevisionLookup revisionLookup)
             : QWidget(parent), m_source(source), m_widgetStyle(std::move(widgetStyle)),
-              m_layoutStyle(std::move(layoutStyle))
+              m_layoutStyle(std::move(layoutStyle)), m_revisionLookup(std::move(revisionLookup))
         {
             setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
             auto* const layout = new QVBoxLayout(this);
             layout->setContentsMargins(0, 0, 0, 0);
             layout->setSpacing(0);
-            rebuild();
         }
 
         void synchronize()
         {
             QWidget* const source = m_source.data();
-            if (source == nullptr) return;
-            int sourceChartCount = dynamic_cast<QChartView*>(source) != nullptr ? 1 : 0;
-            for (QWidget* const child : source->findChildren<QWidget*>())
-                if (dynamic_cast<QChartView*>(child) != nullptr) ++sourceChartCount;
-            if (m_sidebarSource == nullptr && sourceChartCount != m_charts.size())
-            {
-                rebuild();
-            }
+            if (source == nullptr || !m_mapped) return;
+            const Revision revision = m_revisionLookup();
+            // Geometry/Z-order follows independently; only changed canonical data is projected.
+            const bool rebuildNeeded = !m_built || revision[1] != m_presented[1]
+                || revision[2] != m_presented[2];
+            if (rebuildNeeded) rebuild();
+            const bool copyData = m_dirty || rebuildNeeded || revision[0] != m_presented[0];
             for (const auto& [from, to] : m_labels)
             {
                 if (from != nullptr && to != nullptr && to->text() != from->text())
                     to->setText(from->text());
             }
-            for (const auto& [from, to] : m_memories)
+            if (copyData)
             {
-                if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
+                for (const auto& [from, to] : m_memories)
+                    if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
             }
             for (const ChartCopy& chart : m_charts)
             {
                 if (chart.from == nullptr || chart.to == nullptr) continue;
-                for (const auto& [from, to] : chart.lines)
+                if (copyData)
                 {
-                    if (from != nullptr && to != nullptr)
+                    for (const auto& [from, to] : chart.lines)
                     {
+                        if (from == nullptr || to == nullptr) continue;
                         ks::ui::MetricChartBinding::MirrorSeries(from, to);
-                        to->setPen(from->pen());
+                        if (to->pen() != from->pen()) to->setPen(from->pen());
+                    }
+                    for (const auto& [from, to] : chart.barSets)
+                    {
+                        if (from == nullptr || to == nullptr) continue;
+                        const QVector<qreal> values = from->values();
+                        const QVector<qreal> oldValues = to->values();
+                        for (int index = 0; index < values.size(); ++index)
+                        {
+                            if (index >= to->count()) to->append(values[index]);
+                            else if (oldValues[index] != values[index]) to->replace(index, values[index]);
+                        }
                     }
                 }
+                // Axis tweens can progress between samples; keep their live range without replacing history.
                 for (const auto& [from, to] : chart.axes)
                 {
-                    if (from != nullptr && to != nullptr) to->setRange(from->min(), from->max());
+                    if (from != nullptr && to != nullptr
+                        && (to->min() != from->min() || to->max() != from->max()))
+                        to->setRange(from->min(), from->max());
                 }
-                for (const auto& [from, to] : chart.barSets)
-                {
-                    if (from == nullptr || to == nullptr) continue;
-                    const QVector<qreal> values = from->values();
-                    for (int index = 0; index < values.size(); ++index)
-                    {
-                        if (index < to->count()) to->replace(index, values[index]);
-                        else to->append(values[index]);
-                    }
-                }
-                chart.to->chart()->setTitle(chart.from->chart()->title());
-                chart.to->chart()->setTitleBrush(QBrush(KswordTheme::TextPrimaryColor()));
-                chart.to->chart()->legend()->setLabelColor(KswordTheme::TextSecondaryColor());
+                if (chart.to->chart()->title() != chart.from->chart()->title())
+                    chart.to->chart()->setTitle(chart.from->chart()->title());
             }
-            synchronizeSidebar();
+            synchronizeSidebar(copyData);
+            m_presented = revision;
+            m_dirty = false;
+        }
+
+    protected:
+        void showEvent(QShowEvent* event) override
+        {
+            m_mapped = true;
+            m_dirty = true;
+            synchronize(); // prepare the current canonical snapshot before first paint
+            QWidget::showEvent(event);
+        }
+
+        void hideEvent(QHideEvent* event) override
+        {
+            m_mapped = false;
+            m_dirty = true;
+            // Only the mirror's bounded animations stop; source sampling/history is untouched.
+            for (QVariantAnimation* const animation : findChildren<QVariantAnimation*>())
+                animation->stop();
+            QWidget::hideEvent(event);
         }
 
     private:
@@ -3759,11 +3918,13 @@ namespace
             return to;
         }
 
-        void synchronizeSidebar()
+        void synchronizeSidebar(const bool copyData)
         {
             QListWidget* const source = m_sidebarSource.data();
             QListWidget* const copy = m_sidebarCopy.data();
             if (source == nullptr || copy == nullptr) return;
+            const bool selectionChanged = copy->currentRow() != source->currentRow();
+            if (!copyData && !selectionChanged) return;
             while (copy->count() < source->count())
             {
                 auto* const item = new QListWidgetItem();
@@ -3779,7 +3940,11 @@ namespace
                     source->itemWidget(source->item(row)));
                 auto* const to = dynamic_cast<PerformanceNavCard*>(
                     copy->itemWidget(copy->item(row)));
-                if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
+                if (from != nullptr && to != nullptr)
+                {
+                    if (copyData) to->copyDisplayFrom(*from);
+                    else to->setSelectedState(row == source->currentRow());
+                }
             }
             if (copy->currentRow() != source->currentRow()) copy->setCurrentRow(source->currentRow());
         }
@@ -3800,12 +3965,17 @@ namespace
             m_sidebarSource = nullptr;
             m_sidebarCopy = nullptr;
             layout->addWidget(cloneWidget(source, this));
-            synchronizeSidebar();
+            m_built = true;
         }
 
         QPointer<QWidget> m_source;
         WidgetStyleLookup m_widgetStyle;
         LayoutStyleLookup m_layoutStyle;
+        RevisionLookup m_revisionLookup;
+        Revision m_presented{};
+        bool m_built = false;
+        bool m_mapped = false;
+        bool m_dirty = true;
         std::vector<std::pair<QPointer<QLabel>, QPointer<QLabel>>> m_labels;
         std::vector<std::pair<QPointer<MemoryCompositionHistoryWidget>,
             QPointer<MemoryCompositionHistoryWidget>>> m_memories;
@@ -3819,6 +3989,27 @@ namespace
     HWND utilizationFollowHookTarget = nullptr;
     HWND utilizationFollowFloatHandle = nullptr;
     std::function<void(DWORD)> utilizationFollowCallback;
+    quint64 utilizationFollowCallbackGeneration = 0;
+    bool utilizationFollowCallbackQueued = false;
+    bool utilizationFollowDestroyPending = false;
+
+    void queueUtilizationFollowCallback(const DWORD event)
+    {
+        if (!utilizationFollowCallback) return;
+        utilizationFollowDestroyPending |= event == EVENT_OBJECT_DESTROY;
+        if (utilizationFollowCallbackQueued) return;
+        utilizationFollowCallbackQueued = true;
+        const quint64 generation = utilizationFollowCallbackGeneration;
+        QTimer::singleShot(0, qApp, [generation]() {
+            if (generation != utilizationFollowCallbackGeneration) return;
+            utilizationFollowCallbackQueued = false;
+            const DWORD event = utilizationFollowDestroyPending
+                ? EVENT_OBJECT_DESTROY : EVENT_OBJECT_LOCATIONCHANGE;
+            utilizationFollowDestroyPending = false;
+            const auto callback = utilizationFollowCallback;
+            if (callback) callback(event);
+        });
+    }
 
     void utilizationRaiseFloatWithTarget()
     {
@@ -3855,8 +4046,7 @@ namespace
         {
             if (event == EVENT_OBJECT_REORDER || event == EVENT_OBJECT_SHOW)
                 utilizationRaiseFloatWithTarget();
-            const auto callback = utilizationFollowCallback;
-            QTimer::singleShot(0, qApp, [callback, event]() { callback(event); });
+            queueUtilizationFollowCallback(event);
         }
     }
 
@@ -3867,8 +4057,7 @@ namespace
         {
             if (foreground == utilizationFollowHookTarget)
                 utilizationRaiseFloatWithTarget();
-            const auto callback = utilizationFollowCallback;
-            QTimer::singleShot(0, qApp, [callback]() { callback(EVENT_SYSTEM_FOREGROUND); });
+            queueUtilizationFollowCallback(EVENT_SYSTEM_FOREGROUND);
         }
     }
 
@@ -3899,6 +4088,542 @@ namespace
     {
         return (::GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
     }
+}
+
+// The sampling service owns its PDH lifetime and network deltas on one persistent thread.
+// It deliberately has no QWidget/model/chart references. Hidden views do not stop collection.
+struct HardwareDock::SamplingReceipt final
+{
+    std::mutex mutex;
+    bool finished = false; // Physical completion is independent of Qt callback delivery.
+    std::shared_ptr<PerformanceSample> sample;
+};
+
+struct HardwareDock::SamplingState final : QObject
+{
+    const int coreCount = static_cast<int>(std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)));
+    std::vector<bool> m_metricCoreValid;
+    QString m_primaryNetworkAdapterName;
+    std::uint64_t m_primaryNetworkLinkBitsPerSecond = 0;
+    struct NetworkBaseline
+    {
+        bool lastOperational = false;
+        bool hasPreviousSample = false;
+        std::uint64_t lastRxBytes = 0;
+        std::uint64_t lastTxBytes = 0;
+        std::uint64_t linkBitsPerSecond = 0;
+        qint64 lastSampleMs = 0;
+    };
+    std::unordered_map<std::uint64_t, NetworkBaseline> networkBaselines;
+    void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。
+    std::vector<void*> m_coreCounterHandles;  // m_coreCounterHandles：每核利用率计数器句柄。
+    void* m_cpuPerformanceCounterHandle = nullptr; // m_cpuPerformanceCounterHandle：CPU 总体性能百分比计数器。
+    void* m_cpuFrequencyCounterHandle = nullptr; // m_cpuFrequencyCounterHandle：CPU 基准频率计数器。
+    void* m_diskPerfQueryHandle = nullptr;    // m_diskPerfQueryHandle：磁盘速率查询句柄。
+    void* m_diskReadCounterHandle = nullptr;  // m_diskReadCounterHandle：磁盘读速率计数器句柄。
+    void* m_diskWriteCounterHandle = nullptr; // m_diskWriteCounterHandle：磁盘写速率计数器句柄。
+
+    void retireCpuQuery()
+    {
+        if (m_cpuPerfQueryHandle != nullptr) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
+        m_cpuPerfQueryHandle = nullptr;
+        m_coreCounterHandles.clear();
+        m_cpuPerformanceCounterHandle = nullptr;
+        m_cpuFrequencyCounterHandle = nullptr;
+    }
+    void retireDiskQuery()
+    {
+        if (m_diskPerfQueryHandle != nullptr) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
+        m_diskPerfQueryHandle = nullptr;
+        m_diskReadCounterHandle = nullptr;
+        m_diskWriteCounterHandle = nullptr;
+    }
+    ~SamplingState() override
+    {
+        retireCpuQuery();
+        retireDiskQuery();
+    }
+    bool samplePerCoreUsage(std::vector<double>*, double*);
+    bool sampleCpuEffectiveSpeed(double*) const;
+    bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>*);
+    bool sampleMemoryUsage(double*);
+    bool sampleDiskRates(std::vector<DiskRateSample>*);
+    bool sampleNetworkRates(std::vector<NetworkRateSample>*);
+    bool sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot*) const;
+    PerformanceSample collect()
+    {
+        PerformanceSample sample;
+        sample.cpuValid = samplePerCoreUsage(&sample.coreUsage, &sample.totalCpuUsage);
+        sample.coreValid = m_metricCoreValid;
+        sampleCpuEffectiveSpeed(&sample.cpuSpeedGhz);
+        sampleCpuPowerInfo(&sample.powerInfo);
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        sample.memoryValid = ::GlobalMemoryStatusEx(&memory) == TRUE;
+        if (sample.memoryValid)
+        {
+            sample.memoryUsagePercent = static_cast<double>(memory.dwMemoryLoad);
+            sample.totalPhysicalBytes = memory.ullTotalPhys;
+            sample.availablePhysicalBytes = memory.ullAvailPhys;
+        }
+        ULONGLONG installedKb = 0;
+        ::GetPhysicallyInstalledSystemMemory(&installedKb);
+        sample.installedMemoryKb = installedKb;
+        sample.systemPerformanceValid = sampleSystemPerformanceSnapshot(&sample.systemPerformance);
+        sample.diskValid = sampleDiskRates(&sample.diskSamples);
+        sample.networkValid = sampleNetworkRates(&sample.networkSamples);
+        sample.primaryNetworkAdapterName = m_primaryNetworkAdapterName;
+        sample.primaryNetworkLinkBitsPerSecond = m_primaryNetworkLinkBitsPerSecond;
+        sample.sampleTimeMs = QDateTime::currentMSecsSinceEpoch();
+        return sample;
+    }
+};
+
+bool HardwareDock::SamplingState::samplePerCoreUsage(
+    std::vector<double>* coreUsageOut,
+    double* totalUsageOut)
+{
+    if (coreUsageOut == nullptr || totalUsageOut == nullptr)
+    {
+        return false;
+    }
+    coreUsageOut->clear();
+    m_metricCoreValid.clear();
+    *totalUsageOut = 0.0; // 查询早退也不能保留上一帧的有效性或总值。
+    if (m_cpuPerfQueryHandle == nullptr)
+    {
+        const auto counters = createHardwareDockCpuCounters(coreCount);
+        m_cpuPerfQueryHandle = counters.cpuQueryHandle;
+        m_coreCounterHandles = counters.coreCounterHandles;
+        m_cpuPerformanceCounterHandle = counters.cpuPerformanceCounterHandle;
+        m_cpuFrequencyCounterHandle = counters.cpuFrequencyCounterHandle;
+    }
+    coreUsageOut->assign(static_cast<std::size_t>(coreCount), 0.0);
+    m_metricCoreValid.assign(static_cast<std::size_t>(coreCount), false);
+    if (m_cpuPerfQueryHandle == nullptr)
+    {
+        return false;
+    }
+
+    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle);
+    const PDH_STATUS collectStatus = ::PdhCollectQueryData(queryHandle);
+    if (collectStatus != ERROR_SUCCESS)
+    {
+        retireCpuQuery();
+        return false;
+    }
+
+    double usageSum = 0.0;
+    int validCount = 0;
+
+    for (std::size_t coreIndex = 0; coreIndex < m_coreCounterHandles.size(); ++coreIndex)
+    {
+        void* counterHandleVoid = m_coreCounterHandles[coreIndex];
+        if (counterHandleVoid == nullptr)
+        {
+            continue;
+        }
+
+        PDH_FMT_COUNTERVALUE formattedValue{};
+        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
+            PDH_FMT_DOUBLE,
+            nullptr,
+            &formattedValue);
+        if (readStatus != ERROR_SUCCESS
+            || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
+                && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
+            || !std::isfinite(formattedValue.doubleValue))
+        {
+            continue;
+        }
+
+        const double usageValue = std::clamp(formattedValue.doubleValue, 0.0, 100.0);
+        (*coreUsageOut)[coreIndex] = usageValue;
+        m_metricCoreValid[coreIndex] = true; // 部分失败核的0占位不能成为有效历史样本。
+        usageSum += usageValue;
+        ++validCount;
+    }
+
+    *totalUsageOut = validCount > 0 ? (usageSum / static_cast<double>(validCount)) : 0.0;
+    return validCount > 0;
+}
+
+bool HardwareDock::SamplingState::sampleCpuEffectiveSpeed(double* speedGhzOut) const
+{
+    if (speedGhzOut == nullptr
+        || m_cpuPerformanceCounterHandle == nullptr
+        || m_cpuFrequencyCounterHandle == nullptr)
+    {
+        return false;
+    }
+
+    const auto readCounterValue =
+        [](void* counterHandle, double* valueOut)
+        {
+            if (counterHandle == nullptr || valueOut == nullptr)
+            {
+                return false;
+            }
+            PDH_FMT_COUNTERVALUE formattedValue{};
+            const PDH_STATUS status = ::PdhGetFormattedCounterValue(
+                reinterpret_cast<PDH_HCOUNTER>(counterHandle),
+                PDH_FMT_DOUBLE,
+                nullptr,
+                &formattedValue);
+            if (status != ERROR_SUCCESS
+                || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
+                    && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
+                || !std::isfinite(formattedValue.doubleValue))
+            {
+                return false;
+            }
+            *valueOut = formattedValue.doubleValue;
+            return true;
+        };
+
+    double performancePercent = 0.0;
+    double baseFrequencyMhz = 0.0;
+    if (!readCounterValue(m_cpuPerformanceCounterHandle, &performancePercent)
+        || !readCounterValue(m_cpuFrequencyCounterHandle, &baseFrequencyMhz))
+    {
+        return false;
+    }
+
+    const double effectiveFrequencyMhz = baseFrequencyMhz * performancePercent / 100.0;
+    if (!std::isfinite(effectiveFrequencyMhz)
+        || effectiveFrequencyMhz <= 0.0
+        || effectiveFrequencyMhz > 20000.0)
+    {
+        return false;
+    }
+
+    *speedGhzOut = effectiveFrequencyMhz / 1000.0;
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut)
+{
+    if (powerInfoOut == nullptr)
+    {
+        return false;
+    }
+
+    const ULONG logicalProcessorCount = std::max<ULONG>(
+        1,
+        static_cast<ULONG>(coreCount));
+    // KsProcessorPowerInformation 用途：
+    // - 与 CallNtPowerInformation(ProcessorInformation) 输出结构保持二进制兼容；
+    // - 避免不同 SDK 版本缺少 PROCESSOR_POWER_INFORMATION 定义导致编译失败。
+    struct KsProcessorPowerInformation
+    {
+        ULONG Number;            // Number：逻辑处理器编号。
+        ULONG MaxMhz;            // MaxMhz：最大频率。
+        ULONG CurrentMhz;        // CurrentMhz：当前频率。
+        ULONG MhzLimit;          // MhzLimit：限频上限。
+        ULONG MaxIdleState;      // MaxIdleState：最大空闲状态。
+        ULONG CurrentIdleState;  // CurrentIdleState：当前空闲状态。
+    };
+    std::vector<KsProcessorPowerInformation> nativeInfoList(logicalProcessorCount);
+
+    const NTSTATUS ntStatus = ::CallNtPowerInformation(
+        ProcessorInformation,
+        nullptr,
+        0,
+        nativeInfoList.data(),
+        static_cast<ULONG>(nativeInfoList.size() * sizeof(KsProcessorPowerInformation)));
+    if (ntStatus != 0)
+    {
+        return false;
+    }
+
+    powerInfoOut->clear();
+    powerInfoOut->reserve(nativeInfoList.size());
+    for (const KsProcessorPowerInformation& nativeInfo : nativeInfoList)
+    {
+        CpuPowerSnapshot snapshot;
+        snapshot.coreIndex = nativeInfo.Number;
+        snapshot.currentMhz = nativeInfo.CurrentMhz;
+        snapshot.maxMhz = nativeInfo.MaxMhz;
+        snapshot.limitMhz = nativeInfo.MhzLimit;
+        powerInfoOut->push_back(snapshot);
+    }
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleMemoryUsage(double* memoryUsagePercentOut)
+{
+    if (memoryUsagePercentOut == nullptr)
+    {
+        return false;
+    }
+
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
+    {
+        *memoryUsagePercentOut = 0.0;
+        return false;
+    }
+
+    *memoryUsagePercentOut = static_cast<double>(memoryStatus.dwMemoryLoad);
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleDiskRates(std::vector<DiskRateSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    if (m_diskPerfQueryHandle == nullptr)
+    {
+        PDH_HQUERY queryHandle = nullptr;
+        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
+        {
+            return false;
+        }
+
+        PDH_HCOUNTER readCounterHandle = nullptr;
+        PDH_HCOUNTER writeCounterHandle = nullptr;
+        const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(*)\\Disk Read Bytes/sec",
+            0,
+            &readCounterHandle);
+        const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(*)\\Disk Write Bytes/sec",
+            0,
+            &writeCounterHandle);
+        if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
+        {
+            ::PdhCloseQuery(queryHandle);
+            return false;
+        }
+
+        m_diskPerfQueryHandle = queryHandle;
+        m_diskReadCounterHandle = readCounterHandle;
+        m_diskWriteCounterHandle = writeCounterHandle;
+        ::PdhCollectQueryData(queryHandle);
+    }
+
+    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
+    if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
+    {
+        retireDiskQuery();
+        return false;
+    }
+
+    DWORD readBufferSize = 0;
+    DWORD readItemCount = 0;
+    PDH_STATUS readQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        &readBufferSize,
+        &readItemCount,
+        nullptr);
+    if (readQueryStatus != PDH_MORE_DATA || readBufferSize == 0 || readItemCount == 0)
+    {
+        sampleListOut->clear();
+        return true;
+    }
+
+    std::vector<unsigned char> readBuffer(readBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* readItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(readBuffer.data());
+    readQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        &readBufferSize,
+        &readItemCount,
+        readItemPointer);
+    if (readQueryStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    DWORD writeBufferSize = 0;
+    DWORD writeItemCount = 0;
+    PDH_STATUS writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        nullptr);
+    if (writeQueryStatus != PDH_MORE_DATA || writeBufferSize == 0 || writeItemCount == 0)
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> writeBuffer(writeBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* writeItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(writeBuffer.data());
+    writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        writeItemPointer);
+    if (writeQueryStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    // PhysicalDisk arrays share instance identity; avoid pairing every read with every write.
+    QHash<QString, double> writeRates;
+    writeRates.reserve(static_cast<int>(writeItemCount));
+    for (DWORD writeIndex = 0; writeIndex < writeItemCount; ++writeIndex)
+    {
+        const auto& item = writeItemPointer[writeIndex];
+        if (item.FmtValue.CStatus == ERROR_SUCCESS)
+        {
+            const QString key = QString::fromWCharArray(item.szName != nullptr ? item.szName : L"").trimmed().toCaseFolded();
+            if (!writeRates.contains(key))
+            {
+                writeRates.insert(key, std::max(0.0, item.FmtValue.doubleValue));
+            }
+        }
+    }
+    sampleListOut->clear();
+    sampleListOut->reserve(readItemCount);
+    for (DWORD readIndex = 0; readIndex < readItemCount; ++readIndex)
+    {
+        const PDH_FMT_COUNTERVALUE_ITEM_W& readItem = readItemPointer[readIndex];
+        const QString instanceNameText = QString::fromWCharArray(
+            readItem.szName != nullptr ? readItem.szName : L"").trimmed();
+        if (instanceNameText.isEmpty() || instanceNameText == QStringLiteral("_Total"))
+        {
+            continue;
+        }
+        if (readItem.FmtValue.CStatus != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        DiskRateSample sample;
+        sample.instanceNameText = instanceNameText;
+        sample.displayNameText = simplifyDiskInstanceName(instanceNameText);
+        sample.readBytesPerSec = std::max(0.0, readItem.FmtValue.doubleValue);
+        sample.writeBytesPerSec = writeRates.value(instanceNameText.toCaseFolded(), 0.0);
+        sampleListOut->push_back(sample);
+    }
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    MIB_IF_TABLE2* tablePointer = nullptr;
+    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
+    {
+        return false;
+    }
+
+    sampleListOut->clear();
+    sampleListOut->reserve(tablePointer->NumEntries);
+    const qint64 nowMs = static_cast<qint64>(::GetTickCount64());
+    std::unordered_set<std::uint64_t> observedKeys;
+    std::uint64_t primaryTrafficBytes = 0;
+    QString primaryAdapterName;
+    std::uint64_t primaryLinkBitsPerSecond = 0;
+    std::unordered_set<std::uint64_t> ipInterfaceKeys;
+    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
+    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
+    {
+        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
+        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
+        {
+            continue;
+        }
+
+        NetworkRateSample sample;
+        sample.interfaceKey = interfaceLuidToKey(static_cast<std::uint64_t>(rowValue.InterfaceLuid.Value));
+        sample.displayNameText = QString::fromWCharArray(rowValue.Alias).trimmed();
+        if (sample.displayNameText.isEmpty())
+        {
+            sample.displayNameText = QString::fromWCharArray(rowValue.Description).trimmed();
+        }
+        sample.linkBitsPerSecond = std::max<std::uint64_t>(
+            static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
+            static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
+        sample.physical = rowValue.InterfaceAndOperStatusFlags.HardwareInterface != 0;
+        sample.operational = rowValue.OperStatus == IfOperStatusUp;
+        sample.totalRxBytes = static_cast<std::uint64_t>(rowValue.InOctets);
+        sample.totalTxBytes = static_cast<std::uint64_t>(rowValue.OutOctets);
+
+        observedKeys.insert(sample.interfaceKey);
+        NetworkBaseline& device = networkBaselines[sample.interfaceKey];
+            const qint64 elapsedMs = nowMs - device.lastSampleMs;
+            if (sample.operational && device.lastOperational
+                && device.hasPreviousSample && elapsedMs > 0)
+            {
+                const std::uint64_t deltaRx = sample.totalRxBytes >= device.lastRxBytes
+                    ? (sample.totalRxBytes - device.lastRxBytes)
+                    : 0;
+                const std::uint64_t deltaTx = sample.totalTxBytes >= device.lastTxBytes
+                    ? (sample.totalTxBytes - device.lastTxBytes)
+                    : 0;
+                sample.rxBytesPerSec = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
+                sample.txBytesPerSec = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
+            }
+            device.lastRxBytes = sample.totalRxBytes;
+            device.lastTxBytes = sample.totalTxBytes;
+            device.lastSampleMs = nowMs;
+            device.linkBitsPerSecond = sample.linkBitsPerSecond;
+            device.lastOperational = sample.operational;
+            device.hasPreviousSample = true;
+        const std::uint64_t trafficBytes = sample.totalRxBytes + sample.totalTxBytes;
+        if (sample.operational && trafficBytes >= primaryTrafficBytes)
+        {
+            primaryTrafficBytes = trafficBytes;
+            primaryAdapterName = sample.displayNameText;
+            primaryLinkBitsPerSecond = sample.linkBitsPerSecond;
+        }
+        sampleListOut->push_back(sample);
+    }
+    ::FreeMibTable(tablePointer);
+    // A removed interface must establish a fresh baseline if its LUID later returns.
+    for (auto it = networkBaselines.begin(); it != networkBaselines.end();)
+    {
+        if (observedKeys.find(it->first) == observedKeys.end()) it = networkBaselines.erase(it);
+        else ++it;
+    }
+    m_primaryNetworkAdapterName = primaryAdapterName;
+    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const
+{
+    if (snapshotOut == nullptr)
+    {
+        return false;
+    }
+
+    PERFORMANCE_INFORMATION perfInfo{};
+    perfInfo.cb = sizeof(perfInfo);
+    if (::GetPerformanceInfo(&perfInfo, sizeof(perfInfo)) == FALSE)
+    {
+        return false;
+    }
+
+    // pageSizeBytes 用途：把页数指标统一转换为字节单位。
+    const std::uint64_t pageSizeBytes = static_cast<std::uint64_t>(perfInfo.PageSize);
+    snapshotOut->processCount = static_cast<std::uint32_t>(perfInfo.ProcessCount);
+    snapshotOut->threadCount = static_cast<std::uint32_t>(perfInfo.ThreadCount);
+    snapshotOut->handleCount = static_cast<std::uint32_t>(perfInfo.HandleCount);
+    snapshotOut->commitTotalBytes = static_cast<std::uint64_t>(perfInfo.CommitTotal) * pageSizeBytes;
+    snapshotOut->commitLimitBytes = static_cast<std::uint64_t>(perfInfo.CommitLimit) * pageSizeBytes;
+    snapshotOut->cachedBytes = static_cast<std::uint64_t>(perfInfo.SystemCache) * pageSizeBytes;
+    snapshotOut->pagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelPaged) * pageSizeBytes;
+    snapshotOut->nonPagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelNonpaged) * pageSizeBytes;
+    return true;
 }
 
 HardwareDock::HardwareDock(QWidget* parent)
@@ -3943,6 +4668,7 @@ HardwareDock::HardwareDock(QWidget* parent)
 
 HardwareDock::~HardwareDock()
 {
+    if (m_samplingDispatcher) m_samplingDispatcher->close();
     clearUtilizationFollowHooks();
     delete m_utilizationPickDialog.data();
     m_utilizationPickDialog = nullptr;
@@ -3962,21 +4688,12 @@ HardwareDock::~HardwareDock()
         m_refreshTimer->stop();
     }
 
-    if (m_cpuPerfQueryHandle != nullptr)
+    if (m_samplingThread != nullptr)
     {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
-        m_cpuPerfQueryHandle = nullptr;
-        m_coreCounterHandles.clear();
-        m_cpuPerformanceCounterHandle = nullptr;
-        m_cpuFrequencyCounterHandle = nullptr;
-    }
-
-    if (m_diskPerfQueryHandle != nullptr)
-    {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
-        m_diskPerfQueryHandle = nullptr;
-        m_diskReadCounterHandle = nullptr;
-        m_diskWriteCounterHandle = nullptr;
+        // Finish the single accepted collection before the worker destroys its PDH queries.
+        m_samplingThread->quit();
+        m_samplingThread->wait();
+        m_samplingState = nullptr;
     }
 
     if (m_gpuPerfQueryHandle != nullptr)
@@ -3998,6 +4715,8 @@ void HardwareDock::resizeEvent(QResizeEvent* resizeEventPointer)
 bool HardwareDock::eventFilter(QObject* watchedObject, QEvent* eventObject)
 {
     QWidget* const eventWidget = qobject_cast<QWidget*>(watchedObject);
+    if (eventWidget == this && eventObject != nullptr && eventObject->type() == QEvent::LanguageChange)
+        QTimer::singleShot(0, this, [this]() { refreshArchivedNavigationTexts(); });
     // 全局 palette 传播尚在遍历子树时只排队，主题完成后统一刷新性能图和浮窗快照。
     if (eventObject != nullptr
         && (eventObject->type() == QEvent::ApplicationPaletteChange
@@ -4290,7 +5009,7 @@ bool HardwareDock::eventFilter(QObject* watchedObject, QEvent* eventObject)
     if (eventObject != nullptr && eventObject->type() == QEvent::MouseButtonDblClick
         && (m_utilizationFloatingMode == UtilizationFloatingMode::None
             || m_utilizationFollowTarget != nullptr)
-        && m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_utilizationPage
+        && m_sideTabWidget != nullptr && currentHardwarePage() == m_utilizationPage
         && eventWidget != nullptr)
     {
         const auto* mouseEvent = static_cast<QMouseEvent*>(eventObject);
@@ -4354,14 +5073,9 @@ void HardwareDock::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
 
-    // R0 证据页构造后会立即发起驱动查询；欢迎页只复用本 Dock 的用户态
-    // 性能采样，因此必须把该页延迟到用户真正打开硬件 Dock 后再创建。
-    if (m_r0EvidencePage == nullptr && m_sideTabWidget != nullptr)
-    {
-        initializeR0EvidenceTab();
-    }
-
     startPerformanceSampling(SamplingScope::HardwareDetails);
+    ensureCurrentHardwarePageInitialized();
+    refreshStaticHardwareTexts(false);
 
     // splitter 在 Dock 首次显示前可能还没有最终宽度，因此分两轮尝试应用
     // 300px 默认左栏；成功后不再覆盖用户后续拖动结果。
@@ -4415,10 +5129,6 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
         }
 
         HardwareDock* dockPointer = safeThis.data();
-        if (dockPointer->m_coreChartEntries.empty())
-        {
-            dockPointer->initializeCoreCharts();
-        }
         dockPointer->initializePerformanceCounters();
         dockPointer->refreshCpuTopologyStaticInfo();
         dockPointer->refreshSystemVolumeInfo();
@@ -4436,6 +5146,357 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
             dockPointer->m_refreshTimer->start();
         }
     });
+}
+
+const std::vector<HardwareDock::HardwarePageDefinition>& HardwareDock::hardwarePageDefinitions()
+{
+    static const std::vector<HardwarePageDefinition> definitions = {
+        {{"hardware.tab.utilization", "", "hardware.tab.utilization", "性能监控", true}, "hardware.tooltip.utilization", "实时查看处理器、内存、磁盘、网络和显卡使用情况", &HardwareDock::initializeUtilizationTab},
+        {{"hardware.tab.overview", "", "hardware.tab.overview", "硬件概览", false}, "hardware.tooltip.overview", "查看处理器、内存、显卡和系统硬件摘要", &HardwareDock::initializeOverviewTab},
+        {{"hardware.tab.cpu", "", "hardware.tab.cpu", "处理器", false}, "hardware.tooltip.cpu", "查看处理器型号、核心利用率、频率、温度和电压", &HardwareDock::initializeCpuTab},
+        {{"hardware.tab.power", "", "hardware.tab.power", "电源", false}, "hardware.tooltip.power", "管理 Windows 电源方案与受控 CPU 功耗、Turbo 和 HWP 设置", &HardwareDock::initializePowerTab},
+        {{"hardware.tab.gpu", "", "hardware.tab.gpu", "显卡", false}, "hardware.tooltip.gpu", "查看显卡型号、显存与驱动信息", &HardwareDock::initializeGpuTab},
+        {{"hardware.tab.memory", "", "hardware.tab.memory", "内存", false}, "hardware.tooltip.memory", "查看内存容量、模组与使用情况", &HardwareDock::initializeMemoryTab},
+        {{"hardware.tab.disk_activity", "", "hardware.tab.disk_activity", "磁盘活动", false}, "hardware.tooltip.disk_activity", "查看文件访问与进程磁盘读写活动", &HardwareDock::initializeDiskMonitorTab},
+        {{"hardware.tab.device_manager", "", "hardware.tab.device_manager", "设备管理", false}, "hardware.tooltip.device_manager", "搜索、查看和管理 Windows 设备", &HardwareDock::initializeDeviceManagerTab},
+        {{"hardware.tab.other_devices", "", "hardware.tab.other_devices", "其他设备", false}, "hardware.tooltip.other_devices", "查看处理器、内存和显卡之外的硬件清单", &HardwareDock::initializeOtherDevicesTab},
+        {{"hardware.tab.hwid", "", "hardware.tab.hwid", "硬件标识设置", false}, "hardware.tooltip.hwid", "查看和调整支持的磁盘与网络硬件标识", &HardwareDock::initializeHwidDispatchTab},
+        {{"hardware.tab.device_stack", "", "hardware.tab.device_stack", "设备驱动链", false}, "hardware.tooltip.device_stack", "检查设备节点、驱动对象与附加驱动关系", &HardwareDock::initializeDeviceStackTab},
+        {{"hardware.tab.keyboard_mouse", "", "hardware.tab.keyboard_mouse", "键盘与鼠标", false}, "hardware.tooltip.keyboard_mouse", "检查键盘、鼠标与其他输入设备状态", &HardwareDock::initializeKeyboardMouseHidTab},
+        {{"hardware.tab.i8042_audit", "", "hardware.tab.i8042_audit", "i8042prt 审计", false}, "hardware.tooltip.i8042_audit", "精确验证 i8042prt 映像描述符、键鼠端点归属与设备栈关系", &HardwareDock::initializeI8042AuditTab},
+        {{"hardware.tab.usb", "", "hardware.tab.usb", "USB 设备", false}, "hardware.tooltip.usb", "检查 USB 控制器、集线器、端口与设备关系", &HardwareDock::initializeUsbTopologyTab},
+        {{"hardware.tab.system_bus", "", "hardware.tab.system_bus", "系统总线", false}, "hardware.tooltip.system_bus", "查看即插即用、电源管理与 PCI 总线设备状态", &HardwareDock::initializePnpAcpiPciTab},
+        {{"hardware.tab.r0_evidence", "", "hardware.tab.r0_evidence", "底层硬件检查", false}, "hardware.tooltip.r0_evidence", "查看处理器寄存器与系统表的底层只读检查结果", &HardwareDock::initializeR0EvidenceTab},
+    };
+    return definitions;
+}
+
+namespace
+{
+    const bool hardwareNavigationCatalogRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<HardwareDock>(QStringLiteral("hardware"));
+    const ks::ui::PageNavigationTabDefinition cpuUtilizationNavigation = {
+        "hardware.utilization.cpu", "hardware.tab.utilization", "hardware.utilization.card.cpu", "CPU", true};
+    const ks::ui::PageNavigationTabDefinition memoryUtilizationNavigation = {
+        "hardware.utilization.memory", "hardware.tab.utilization", "hardware.utilization.card.memory", "内存", false};
+    QString diskNavigationId(const QString& instance)
+    {
+        return QStringLiteral("hardware.utilization.disk:") + QString::fromLatin1(instance.toCaseFolded().toUtf8().toHex());
+    }
+    QString networkNavigationId(const std::uint64_t luid)
+    {
+        return QStringLiteral("hardware.utilization.network:") + QString::number(static_cast<qulonglong>(luid), 16);
+    }
+    QString gpuNavigationId(const std::uint64_t luid)
+    {
+        return QStringLiteral("hardware.utilization.gpu:") + QString::number(static_cast<qulonglong>(luid), 16);
+    }
+}
+
+QString HardwareDock::utilizationNavigationId(const UtilizationNavEntry& entry) const
+{
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    switch (entry.kind)
+    {
+    case UtilizationDeviceKind::Cpu: return QString::fromLatin1(cpuUtilizationNavigation.id);
+    case UtilizationDeviceKind::Memory: return QString::fromLatin1(memoryUtilizationNavigation.id);
+    case UtilizationDeviceKind::Disk:
+        return entry.deviceIndex >= 0 && index < m_diskUtilDevices.size() ? diskNavigationId(m_diskUtilDevices[index].instanceNameText) : QString();
+    case UtilizationDeviceKind::Network:
+        return entry.deviceIndex >= 0 && index < m_networkUtilDevices.size() ? networkNavigationId(m_networkUtilDevices[index].interfaceKey) : QString();
+    case UtilizationDeviceKind::VirtualNetwork: return QStringLiteral("hardware.utilization.virtual_network");
+    case UtilizationDeviceKind::Gpu:
+        return entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size() ? gpuNavigationId(m_gpuUtilDevices[index].adapterKey) : QString();
+    }
+    return {};
+}
+
+QString HardwareDock::diskUtilizationDisplayName(const DiskRateSample& sample, const int ordinal)
+{
+    return sample.displayNameText.isEmpty() ? ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.card.disk.prefix"), QStringLiteral("磁盘"))
+        + QStringLiteral(" %1").arg(ordinal) : sample.displayNameText;
+}
+
+QString HardwareDock::networkUtilizationDisplayName(const NetworkRateSample& sample, const int ordinal)
+{
+    return sample.displayNameText.isEmpty() ? ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.card.network.prefix"), QStringLiteral("以太网"))
+        + QStringLiteral(" %1").arg(ordinal) : sample.displayNameText;
+}
+
+QString HardwareDock::gpuUtilizationDisplayName(const int ordinal)
+{
+    return ks::i18n::contextText(QStringLiteral("hardware.utilization.card.gpu.prefix"), QStringLiteral("GPU"))
+        + QStringLiteral(" %1").arg(ordinal);
+}
+
+ks::ui::PageNavigationCatalog HardwareDock::navigationCatalog(const HardwareDock* existing)
+{
+    ks::ui::PageNavigationCatalog result;
+    for (const auto& definition : hardwarePageDefinitions())
+        result.push_back(ks::ui::PageNavigationTabDescriptor(definition.navigation));
+    if (existing != nullptr) result = existing->m_hardwareNavigationTabs.describe(std::move(result));
+    result.push_back(ks::ui::PageNavigationTabDescriptor(cpuUtilizationNavigation));
+    result.push_back(ks::ui::PageNavigationTabDescriptor(memoryUtilizationNavigation));
+    if (existing == nullptr) return result;
+    QSet<QString> emitted;
+    for (const auto& descriptor : result) emitted.insert(descriptor.id);
+    const auto appendDevice = [&](const QString& id, const QString& title, const QStringList& searchTexts)
+    {
+        if (id.isEmpty() || title.isEmpty()) return;
+        if (emitted.contains(id))
+        {
+            for (auto& descriptor : result)
+                if (descriptor.id == id)
+                    for (const auto& text : searchTexts)
+                        if (!descriptor.searchTexts.contains(text)) descriptor.searchTexts.push_back(text);
+            return;
+        }
+        emitted.insert(id);
+        result.push_back({id, QStringLiteral("hardware.tab.utilization"), title, searchTexts, true, true, false});
+    };
+    // Read only cached provider values/registered identities. Catalog collection never enumerates hardware.
+    for (const auto& device : existing->m_diskUtilDevices)
+        appendDevice(diskNavigationId(device.instanceNameText), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {device.instanceNameText});
+    for (std::size_t index = 0; index < existing->m_lastPerformanceSample.diskSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastPerformanceSample.diskSamples[index];
+        appendDevice(diskNavigationId(sample.instanceNameText), diskUtilizationDisplayName(sample, static_cast<int>(index)), {sample.instanceNameText});
+    }
+    bool virtualNetwork = existing->m_virtualNetworkPage != nullptr;
+    for (const auto& device : existing->m_networkUtilDevices)
+    {
+        if (device.physical) appendDevice(networkNavigationId(device.interfaceKey), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {});
+        else virtualNetwork = true;
+    }
+    for (std::size_t index = 0; index < existing->m_lastPerformanceSample.networkSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastPerformanceSample.networkSamples[index];
+        if (sample.physical) appendDevice(networkNavigationId(sample.interfaceKey), networkUtilizationDisplayName(sample, static_cast<int>(index)), {});
+        else virtualNetwork = true;
+    }
+    if (virtualNetwork) appendDevice(QStringLiteral("hardware.utilization.virtual_network"),
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.card.virtual_network"), QStringLiteral("虚拟网络")), {});
+    for (const auto& device : existing->m_gpuUtilDevices)
+        appendDevice(gpuNavigationId(device.adapterKey), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {});
+    for (std::size_t index = 0; index < existing->m_lastGpuSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastGpuSamples[index];
+        appendDevice(gpuNavigationId(sample.adapterKey), gpuUtilizationDisplayName(static_cast<int>(index)), {sample.displayNameText});
+    }
+    const int selectedRow = existing->m_utilizationSidebarList != nullptr ? existing->m_utilizationSidebarList->currentRow() : -1;
+    for (auto& descriptor : result)
+    {
+        if (descriptor.parentId != QStringLiteral("hardware.tab.utilization")) continue;
+        descriptor.current = false;
+        for (int row = 0; row < static_cast<int>(existing->m_utilizationNavEntries.size()); ++row)
+        {
+            if (descriptor.id != existing->utilizationNavigationId(existing->m_utilizationNavEntries[static_cast<std::size_t>(row)])) continue;
+            if (auto* item = existing->m_utilizationSidebarList->item(row))
+            {
+                descriptor.visible = !item->isHidden();
+                descriptor.enabled = item->flags().testFlag(Qt::ItemIsEnabled);
+                descriptor.current = selectedRow == row;
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+QWidget* HardwareDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto catalog = navigationCatalog(this);
+    const auto resolved = ks::ui::ResolvePageNavigationCatalog(catalog, QString());
+    if (!resolved) return nullptr;
+    const auto requested = std::find_if(resolved->cbegin(), resolved->cend(), [&id](const auto& entry) { return entry.page.id == id; });
+    if (requested == resolved->cend() || !requested->page.visible || !requested->page.enabled) return nullptr;
+    const QPointer<HardwareDock> self(this);
+    const QString topId = requested->page.parentId.isEmpty() ? id : QStringLiteral("hardware.tab.utilization");
+    if (m_hardwareNavigationTabs.activate(topId, catalog) == nullptr || !self) return nullptr;
+    ensureCurrentHardwarePageInitialized();
+    if (!self) return nullptr;
+    const auto stillNavigable = [this, &id]()
+    {
+        const auto current = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QString());
+        if (!current) return false;
+        const auto found = std::find_if(current->cbegin(), current->cend(), [&id](const auto& entry) { return entry.page.id == id; });
+        return found != current->cend() && found->page.visible && found->page.enabled && found->page.current;
+    };
+    if (requested->page.parentId.isEmpty()) return stillNavigable() ? m_sideTabWidget->currentWidget() : nullptr;
+    // A cached descriptor can precede its nav view. Resolve only the accepted identity;
+    // no provider query, default-row substitution or unrelated device construction.
+    for (std::size_t index = 0; index < m_lastPerformanceSample.diskSamples.size(); ++index)
+    {
+        const auto& sample = m_lastPerformanceSample.diskSamples[index];
+        if (diskNavigationId(sample.instanceNameText) == id && findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText) < 0)
+        {
+            const int device = ensureDiskUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateDiskUtilizationDevice(m_diskUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (std::size_t index = 0; index < m_lastPerformanceSample.networkSamples.size(); ++index)
+    {
+        const auto& sample = m_lastPerformanceSample.networkSamples[index];
+        if (id == QStringLiteral("hardware.utilization.virtual_network") && !sample.physical) ensureVirtualNetworkPage();
+        if (networkNavigationId(sample.interfaceKey) == id && sample.physical && findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey) < 0)
+        {
+            const int device = ensureNetworkUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateNetworkUtilizationDevice(m_networkUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (std::size_t index = 0; index < m_lastGpuSamples.size(); ++index)
+    {
+        const auto& sample = m_lastGpuSamples[index];
+        if (gpuNavigationId(sample.adapterKey) == id && findGpuUtilizationDeviceIndexByKey(sample.adapterKey) < 0)
+        {
+            const int device = ensureGpuUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateGpuUtilizationDevice(m_gpuUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (int row = 0; row < static_cast<int>(m_utilizationNavEntries.size()); ++row)
+    {
+        if (utilizationNavigationId(m_utilizationNavEntries[static_cast<std::size_t>(row)]) != id) continue;
+        m_utilizationSidebarList->setCurrentRow(row);
+        if (!self) return nullptr;
+        if (currentHardwarePage() != m_utilizationPage || m_utilizationSidebarList->currentRow() != row
+            || row >= static_cast<int>(m_utilizationNavEntries.size())
+            || utilizationNavigationId(m_utilizationNavEntries[static_cast<std::size_t>(row)]) != id) return nullptr;
+        const QPointer<QWidget> page = m_utilizationNavEntries[static_cast<std::size_t>(row)].detailPage;
+        if (!page || m_utilizationDetailStack == nullptr || m_utilizationDetailStack->currentWidget() != page) return nullptr;
+        ks::ui::PrepareWidgetThemeBindingsForShow(page);
+        if (!self || !page || currentHardwarePage() != m_utilizationPage
+            || m_utilizationSidebarList->currentRow() != row || m_utilizationDetailStack->currentWidget() != page
+            || !stillNavigable()) return nullptr;
+        return page.data();
+    }
+    return nullptr; // Device disappeared after the cached descriptor; never choose a different identity.
+}
+
+void HardwareDock::registerLazyHardwarePage(const HardwarePageDefinition& definition)
+{
+    const auto descriptor = ks::ui::PageNavigationTabDescriptor(definition.navigation);
+    const QString title = QString::fromUtf8(definition.navigation.sourceTitle);
+    const QString titleKey = QString::fromLatin1(definition.navigation.languageKey);
+    const QString tipKey = QString::fromLatin1(definition.tooltipKey);
+    const QString tip = QString::fromUtf8(definition.tooltip);
+    // Stable page identities keep Taskbar/global-search routes valid across first creation.
+    auto* host = new QWidget(m_sideTabWidget);
+    host->setProperty("ksword_page_frame_host", true);
+    configureCompressibleWidget(host, QSizePolicy::Expanding, QSizePolicy::Expanding);
+    host->setAutoFillBackground(false); // No descendant QWidget skin on the lazy shell.
+    auto* layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_hardwareNavigationTabs.add(definition.navigation, m_sideTabWidget, host);
+    const int index = m_sideTabWidget->indexOf(host);
+    ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, host, titleKey, title);
+    m_sideTabWidget->setTabToolTip(index, tip);
+    ks::i18n::LanguageManager::instance().bindTabToolTip(m_sideTabWidget, host, tipKey, tip);
+    m_lazyHardwarePages.push_back({host, nullptr, definition.initialize, QString::fromUtf8(definition.navigation.sourceTitle), titleKey, tip, tipKey});
+}
+
+int HardwareDock::addHardwarePageTab(QWidget* content, const QString& title)
+{
+    if (m_buildingHardwareHost == nullptr)
+    {
+        if (content == m_utilizationPage)
+        {
+            m_hardwareNavigationTabs.add(hardwarePageDefinitions().front().navigation, m_sideTabWidget, content);
+            return m_sideTabWidget->indexOf(content);
+        }
+        return m_sideTabWidget->addTab(content, title);
+    }
+    for (auto& page : m_lazyHardwarePages)
+    {
+        if (page.host == m_buildingHardwareHost)
+        {
+            page.content = content;
+            page.host->layout()->addWidget(content);
+            return m_sideTabWidget->indexOf(page.host);
+        }
+    }
+    return -1;
+}
+
+QWidget* HardwareDock::currentHardwarePage() const
+{
+    if (m_sideTabWidget == nullptr) return nullptr;
+    QWidget* const host = m_sideTabWidget->currentWidget();
+    for (const auto& page : m_lazyHardwarePages)
+        if (page.host == host) return page.content != nullptr ? page.content : page.host;
+    return host;
+}
+
+void HardwareDock::ensureCurrentHardwarePageInitialized()
+{
+    if (!m_hardwareDetailsSamplingEnabled || !isVisible() || m_sideTabWidget == nullptr
+        || m_hardwarePageInitializing) return;
+    QWidget* const currentHost = m_sideTabWidget->currentWidget();
+    if (currentHost == m_utilizationPage)
+    {
+        if (!m_utilizationDetailsInitialized)
+        {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(m_utilizationPage);
+            m_utilizationDetailsInitialized = true;
+            initializeUtilizationCpuSubTab();
+            initializeUtilizationMemorySubTab();
+            initializeCoreCharts();
+            restoreUtilizationHistory();
+        }
+        else ks::ui::PrepareWidgetThemeBindingsForShow(m_utilizationPage);
+        return;
+    }
+    for (auto& page : m_lazyHardwarePages)
+    {
+        if (page.host != currentHost) continue;
+        if (page.content == nullptr)
+        {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(page.host);
+            m_hardwarePageInitializing = true;
+            m_buildingHardwareHost = page.host;
+            (this->*page.initialize)();
+            // Original factories bind their content; restore the stable host's translated chrome.
+            ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, page.host, page.titleKey, page.title);
+            ks::i18n::LanguageManager::instance().bindTabToolTip(m_sideTabWidget, page.host, page.tipKey, page.tip);
+            m_buildingHardwareHost = nullptr;
+            m_hardwarePageInitializing = false;
+            if (page.content == m_cpuPage)
+            {
+                updateCpuDetailTable(m_lastPerformanceSample.coreUsage, m_lastPerformanceSample.powerInfo);
+            }
+            refreshStaticHardwareTexts(false);
+        }
+        else
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(page.host);
+        }
+        // Existing specialized factories keep their original single-instance lifecycle.
+        if (page.content == m_diskMonitorHostPage) ensureDiskMonitorTabInitialized();
+        if (page.content == m_otherDevicesHostPage) ensureOtherDevicesTabInitialized();
+        return;
+    }
+}
+
+void HardwareDock::restoreUtilizationHistory()
+{
+    if (m_presentationHistory.empty()) return;
+    materializeArchivedDeviceNavigation();
+    m_restoringUtilizationHistory = true;
+    // Re-project the same retained frames; do not collect, emit, increment identity or archive again.
+    for (const auto& frame : m_presentationHistory)
+    {
+        m_sampleCounter = frame.sampleId;
+        m_lastGpuSamples = frame.gpuSamples;
+        m_lastGpuValid = frame.gpuValid;
+        applyPerformanceSample(frame.sample);
+    }
+    m_restoringUtilizationHistory = false;
+    retireInactiveDeviceViews();
 }
 
 void HardwareDock::initializeUi()
@@ -4466,20 +5527,9 @@ void HardwareDock::initializeUi()
     // 页签顺序：性能与硬件信息 -> 设备管理 -> 底层诊断。
     // 先注册“性能监控”，让硬件 Dock 初次打开时直接显示实时数据。
     initializeUtilizationTab();
-    initializeOverviewTab();
-    initializeCpuTab();
-    initializePowerTab();
-    initializeGpuTab();
-    initializeMemoryTab();
-    initializeDiskMonitorTab();
-    initializeDeviceManagerTab();
-    initializeOtherDevicesTab();
-    initializeHwidDispatchTab();
-    initializeDeviceStackTab();
-    initializeKeyboardMouseHidTab();
-    initializeI8042AuditTab();
-    initializeUsbTopologyTab();
-    initializePnpAcpiPciTab();
+    const auto& definitions = hardwarePageDefinitions();
+    for (std::size_t index = 1; index < definitions.size(); ++index)
+        registerLazyHardwarePage(definitions[index]);
 
     if (m_sideTabWidget != nullptr)
     {
@@ -4490,12 +5540,14 @@ void HardwareDock::initializeUi()
             [this](const int tabIndexValue)
             {
                 Q_UNUSED(tabIndexValue);
-                if (m_sideTabWidget == nullptr || m_utilizationPage == nullptr)
+                ensureCurrentHardwarePageInitialized();
+                if (m_sideTabWidget == nullptr)
                 {
                     return;
                 }
 
-                QWidget* currentTabWidget = m_sideTabWidget->currentWidget();
+                QWidget* currentTabWidget = currentHardwarePage();
+                refreshStaticHardwareTexts(false);
                 if (currentTabWidget == m_diskMonitorHostPage)
                 {
                     // 硬盘监控会启动 ETW 与进程 IO 扫描，必须等用户真正进入该子页再创建。
@@ -4524,7 +5576,7 @@ void HardwareDock::initializeUi()
                     return;
                 }
 
-                if (m_sideTabWidget->currentWidget() != m_utilizationPage)
+                if (currentHardwarePage() != m_utilizationPage)
                 {
                     return;
                 }
@@ -4552,7 +5604,7 @@ void HardwareDock::initializeOverviewTab()
     m_overviewEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_overviewLayout->addWidget(m_overviewEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_overviewPage, QStringLiteral("硬件概览"));
+    const int tabIndex = addHardwarePageTab(m_overviewPage, QStringLiteral("硬件概览"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_overviewPage, QStringLiteral("hardware.tab.overview"), QStringLiteral("硬件概览"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"));
@@ -4597,7 +5649,7 @@ void HardwareDock::initializeUtilizationTab()
         QStringLiteral(
             "QListWidget{border:none;background:transparent;}"
             "QListWidget::item{border:none;padding:0px;margin:0px;}"
-            "QListWidget::item:selected{background:transparent;}"));
+            "QListWidget::item:selected{background:palette(highlight);color:palette(highlighted-text);border-radius:5px;}"));
     appendTransparentBackgroundStyle(m_utilizationSidebarList);
     m_utilizationBodySplitter->addWidget(m_utilizationSidebarList);
 
@@ -4638,11 +5690,11 @@ void HardwareDock::initializeUtilizationTab()
     // splitter 可用宽度把左侧校准到 300px，之后完全保留用户拖动结果。
     m_utilizationBodySplitter->setSizes({ 300, 360 });
 
-    initializeUtilizationCpuSubTab();
-    initializeUtilizationMemorySubTab();
-    initializeUtilizationDiskSubTab();
-    initializeUtilizationNetworkSubTab();
-    initializeUtilizationGpuSubTab();
+    // Keep the actual CPU/memory navigation identities without constructing detailed views.
+    m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
+    m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
     initializeUtilizationSidebarCards();
 
     connect(
@@ -4657,7 +5709,7 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList->setCurrentRow(0);
     syncUtilizationSidebarSelection(0);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_utilizationPage, QStringLiteral("性能监控"));
+    const int tabIndex = addHardwarePageTab(m_utilizationPage, QStringLiteral("性能监控"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_utilizationPage, QStringLiteral("hardware.tab.utilization"), QStringLiteral("性能监控"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("实时查看处理器、内存、磁盘、网络和显卡使用情况"));
@@ -4697,20 +5749,9 @@ void HardwareDock::initializeUtilizationSidebarCards()
     }
 }
 
-PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
-    QWidget* detailPage,
-    const QString& titleText,
-    const QColor& accentColor,
-    const UtilizationDeviceKind kind,
-    const int deviceIndex)
+PerformanceNavCard* HardwareDock::makeUtilizationSidebarCard(QListWidgetItem* itemPointer,
+    const QString& titleText, const QColor& accentColor)
 {
-    if (m_utilizationSidebarList == nullptr)
-    {
-        return nullptr;
-    }
-
-    // itemPointer 用途：承载 PerformanceNavCard 的 QListWidget 行。
-    QListWidgetItem* itemPointer = new QListWidgetItem();
     // cardPointer 用途：实际绘制任务管理器风格缩略卡片。
     PerformanceNavCard* cardPointer = new PerformanceNavCard(m_utilizationSidebarList);
     if (m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar)
@@ -4730,9 +5771,27 @@ PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
     // 只把高度交给 QListWidget 管理；宽度始终由 viewport/分割器决定，不能把
     // 卡片推荐宽度写进 item，否则拖动 splitter 时 QListView 会反向拉回 splitter。
     itemPointer->setSizeHint(QSize(0, cardPointer->sizeHint().height()));
-    m_utilizationSidebarList->addItem(itemPointer);
     m_utilizationSidebarList->setItemWidget(itemPointer, cardPointer);
 
+    return cardPointer;
+}
+
+PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
+    QWidget* detailPage,
+    const QString& titleText,
+    const QColor& accentColor,
+    const UtilizationDeviceKind kind,
+    const int deviceIndex)
+{
+    if (m_utilizationSidebarList == nullptr)
+    {
+        return nullptr;
+    }
+
+    // itemPointer 用途：承载 PerformanceNavCard 的 QListWidget 行。
+    QListWidgetItem* itemPointer = new QListWidgetItem();
+    m_utilizationSidebarList->addItem(itemPointer);
+    PerformanceNavCard* cardPointer = makeUtilizationSidebarCard(itemPointer, titleText, accentColor);
     // navEntry 用途：记录 QListWidget 行号与 QStackedWidget 页面之间的稳定映射。
     UtilizationNavEntry navEntry;
     navEntry.navCard = cardPointer;
@@ -4765,6 +5824,7 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
     int targetPageIndex = std::clamp(boundedRowIndex, 0, pageCount - 1);
     if (boundedRowIndex >= 0 && boundedRowIndex < entryCount)
     {
+        openArchivedDevice(m_utilizationNavEntries[static_cast<std::size_t>(boundedRowIndex)]);
         QWidget* targetPageWidget = m_utilizationNavEntries[static_cast<std::size_t>(boundedRowIndex)].detailPage;
         if (targetPageWidget != nullptr)
         {
@@ -4791,6 +5851,7 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
     }
 
     // 选项切换后立即重算大图高度，避免首帧出现滚动条。
+    retireInactiveDeviceViews();
     scheduleUtilizationLayoutRefresh();
 }
 
@@ -5166,7 +6227,10 @@ void HardwareDock::attachUtilizationWindow(void* targetWindow, const bool restor
         m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar
             ? static_cast<QWidget*>(m_utilizationBodySplitter)
             : static_cast<QWidget*>(m_utilizationDetailStack),
-        originalWidgetStyle, originalLayoutStyle);
+        originalWidgetStyle, originalLayoutStyle, [this]() {
+            return UtilizationFollowMirror::Revision{ static_cast<quint64>(m_sampleCounter),
+                m_utilizationMirrorStructureRevision, m_utilizationMirrorThemeRevision };
+        });
     mirror->setFont(m_utilizationBorrowedFont);
     m_utilizationFollowMirror = mirror;
     if (m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar)
@@ -5230,6 +6294,9 @@ void HardwareDock::clearUtilizationFollowHooks()
     utilizationFollowHookTarget = nullptr;
     utilizationFollowFloatHandle = nullptr;
     utilizationFollowCallback = {};
+    ++utilizationFollowCallbackGeneration;
+    utilizationFollowCallbackQueued = false;
+    utilizationFollowDestroyPending = false;
     if (m_utilizationFollowTimer != nullptr) m_utilizationFollowTimer->stop();
 }
 
@@ -6237,8 +7304,9 @@ void HardwareDock::adjustUtilizationChartHeights()
     applyMaxHeightIfChanged(m_memoryUtilSecondaryDetailLabel, std::max(1, m_memoryUtilSecondaryDetailLabel != nullptr ? m_memoryUtilSecondaryDetailLabel->sizeHint().height() : 1));
     applyMaxHeightIfChanged(m_diskUtilDetailLabel, std::max(1, m_diskUtilDetailLabel != nullptr ? m_diskUtilDetailLabel->sizeHint().height() : 1));
     applyMaxHeightIfChanged(m_networkUtilDetailLabel, std::max(1, m_networkUtilDetailLabel != nullptr ? m_networkUtilDetailLabel->sizeHint().height() : 1));
-    for (DiskUtilizationDevice& device : m_diskUtilDevices)
+    for (const int deviceIndex : m_presentedDiskDevices)
     {
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
         adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120,
             m_utilizationFloatingMode == UtilizationFloatingMode::Detail && m_utilizationFloatingPage == device.pageWidget);
         if (device.detailLabel != nullptr)
@@ -6246,8 +7314,9 @@ void HardwareDock::adjustUtilizationChartHeights()
             applyMaxHeightIfChanged(device.detailLabel, std::max(1, device.detailLabel->sizeHint().height()));
         }
     }
-    for (NetworkUtilizationDevice& device : m_networkUtilDevices)
+    for (const int deviceIndex : m_presentedNetworkDevices)
     {
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
         if (device.physical)
         {
             adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120,
@@ -6333,8 +7402,9 @@ void HardwareDock::adjustUtilizationChartHeights()
             applyMaxHeightIfChanged(m_gpuUtilDetailLabel, std::max(1, m_gpuUtilDetailLabel->sizeHint().height()));
         }
     }
-    for (GpuUtilizationDevice& device : m_gpuUtilDevices)
+    for (const int deviceIndex : m_presentedGpuDevices)
     {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
         if (device.pageWidget == nullptr)
         {
             continue;
@@ -6404,7 +7474,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 
 void HardwareDock::initializeUtilizationCpuSubTab()
 {
-    m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    if (m_utilizationCpuSubPage == nullptr) m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
     configureCompressibleWidget(m_utilizationCpuSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationCpuSubPage);
     QVBoxLayout* cpuSubLayout = new QVBoxLayout(m_utilizationCpuSubPage);
@@ -6510,12 +7580,12 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     detailLayout->addWidget(m_cpuUtilTertiaryDetailLabel, 3);
     cpuSubLayout->addLayout(detailLayout, 0);
 
-    m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
+    if (m_utilizationDetailStack->indexOf(m_utilizationCpuSubPage) < 0) m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
 }
 
 void HardwareDock::initializeUtilizationMemorySubTab()
 {
-    m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    if (m_utilizationMemorySubPage == nullptr) m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
     configureCompressibleWidget(m_utilizationMemorySubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationMemorySubPage);
     QVBoxLayout* memorySubLayout = new QVBoxLayout(m_utilizationMemorySubPage);
@@ -6580,7 +7650,7 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     detailLayout->addWidget(m_memoryUtilSecondaryDetailLabel, 1);
     memorySubLayout->addLayout(detailLayout, 0);
 
-    m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
+    if (m_utilizationDetailStack->indexOf(m_utilizationMemorySubPage) < 0) m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
 }
 
 void HardwareDock::initializeUtilizationDiskSubTab()
@@ -6668,6 +7738,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     }
 
     m_diskUtilChartView = createPlotBackgroundChartView(diskChart, m_utilizationDiskSubPage);
+    prepareNewUtilizationChartTheme(m_diskUtilChartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     diskSubLayout->addWidget(m_diskUtilChartView, 1);
 
     m_diskUtilDetailLabel = new QLabel(
@@ -6769,6 +7840,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     }
 
     m_networkUtilChartView = createPlotBackgroundChartView(networkChart, m_utilizationNetworkSubPage);
+    prepareNewUtilizationChartTheme(m_networkUtilChartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     networkSubLayout->addWidget(m_networkUtilChartView, 1);
 
     m_networkUtilDetailLabel = new QLabel(
@@ -6887,6 +7959,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             }
 
             QChartView* chartView = createPlotBackgroundChartView(chartPointer, cellWidget);
+            prepareNewUtilizationEngineChartTheme(chartView, engineKeyText);
             cellLayout->addWidget(chartView, 1);
             m_gpuEngineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
 
@@ -6980,6 +8053,9 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             if (chartViewOut != nullptr)
             {
                 *chartViewOut = createPlotBackgroundChartView(chartPointer, m_utilizationGpuSubPage);
+                const auto role = chartViewOut == &m_gpuDedicatedMemoryChartView
+                    ? KswordTheme::PerformanceRole::DedicatedMemory : KswordTheme::PerformanceRole::SharedMemory;
+                prepareNewUtilizationChartTheme(*chartViewOut, role, role);
             }
         };
 
@@ -7058,7 +8134,7 @@ void HardwareDock::initializeCpuTab()
     installHardwareAuditCopyMenu(m_cpuDetailTable);
     m_cpuLayout->addWidget(m_cpuDetailTable, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("处理器"));
+    const int tabIndex = addHardwarePageTab(m_cpuPage, QStringLiteral("处理器"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_cpuPage, QStringLiteral("hardware.tab.cpu"), QStringLiteral("处理器"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"));
@@ -7070,7 +8146,7 @@ void HardwareDock::initializePowerTab()
 {
     // 电源页拥有独立的 Windows 电源方案与受控 R0 CPU 调节逻辑。
     m_powerPage = new HardwarePowerPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_powerPage,
         QStringLiteral("电源"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7095,7 +8171,7 @@ void HardwareDock::initializeR0EvidenceTab()
     // - 处理：把 CPU/MSR/IDT/GDT 只读证据作为硬件 Dock 的独立顶部页签；
     // - 返回：无，页面由 Qt 父子树托管。
     m_r0EvidencePage = new HardwareR0EvidencePage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_r0EvidencePage,
         QStringLiteral("底层硬件检查"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7118,7 +8194,7 @@ void HardwareDock::initializeGpuTab()
     m_gpuEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_gpuLayout->addWidget(m_gpuEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_gpuPage, QStringLiteral("显卡"));
+    const int tabIndex = addHardwarePageTab(m_gpuPage, QStringLiteral("显卡"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_gpuPage, QStringLiteral("hardware.tab.gpu"), QStringLiteral("显卡"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看显卡型号、显存与驱动信息"));
@@ -7137,7 +8213,7 @@ void HardwareDock::initializeMemoryTab()
     m_memoryEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_memoryLayout->addWidget(m_memoryEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
+    const int tabIndex = addHardwarePageTab(m_memoryPage, QStringLiteral("内存"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_memoryPage, QStringLiteral("hardware.tab.memory"), QStringLiteral("内存"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看内存容量、模组与使用情况"));
@@ -7158,7 +8234,7 @@ void HardwareDock::initializeDiskMonitorTab()
             QStringLiteral("硬盘监控待加载"),
             QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
         1);
-    const int tabIndex = m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
+    const int tabIndex = addHardwarePageTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_diskMonitorHostPage, QStringLiteral("hardware.tab.disk_activity"), QStringLiteral("磁盘活动"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看文件访问与进程磁盘读写活动"));
@@ -7173,7 +8249,7 @@ void HardwareDock::initializeDeviceManagerTab()
     // - 处理：直接创建页面，页面自身控制后台刷新和搜索；
     // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
     m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+    const int tabIndex = addHardwarePageTab(m_deviceManagerPage, QStringLiteral("设备管理"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_deviceManagerPage, QStringLiteral("hardware.tab.device_manager"), QStringLiteral("设备管理"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("搜索、查看和管理 Windows 设备"));
@@ -7188,7 +8264,7 @@ void HardwareDock::initializeHwidDispatchTab()
     // - 处理：新增 EASY-HWID-SPOOFER Dispatch-only 集成页；
     // - 返回：无返回值，页面由 Qt 父子树释放。
     m_hwidDispatchPage = new HardwareHwidDispatchPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
+    const int tabIndex = addHardwarePageTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_hwidDispatchPage, QStringLiteral("hardware.tab.hwid"), QStringLiteral("硬件标识设置"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看和调整支持的磁盘与网络硬件标识"));
@@ -7209,7 +8285,7 @@ void HardwareDock::initializeOtherDevicesTab()
             QStringLiteral("其他设备待加载"),
             QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
         1);
-    const int tabIndex = m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+    const int tabIndex = addHardwarePageTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_otherDevicesHostPage, QStringLiteral("hardware.tab.other_devices"), QStringLiteral("其他设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存和显卡之外的硬件清单"));
@@ -7225,7 +8301,7 @@ void HardwareDock::initializeDeviceStackTab()
         QStringLiteral("对比系统设备记录与内核设备栈，帮助发现异常关联；本页为只读。"),
         &m_deviceStackEditor,
         &m_deviceStackTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
+    const int tabIndex = addHardwarePageTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_deviceStackPage, QStringLiteral("hardware.tab.device_stack"), QStringLiteral("设备驱动链"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查设备节点、驱动对象与附加驱动关系"));
@@ -7241,7 +8317,7 @@ void HardwareDock::initializeKeyboardMouseHidTab()
         QStringLiteral("只读审计：键盘、鼠标、HID 与输入设备状态，默认不做消息截获与输入抓取。"),
         &m_keyboardMouseHidEditor,
         &m_keyboardMouseHidTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
+    const int tabIndex = addHardwarePageTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_keyboardMouseHidPage, QStringLiteral("hardware.tab.keyboard_mouse"), QStringLiteral("键盘与鼠标"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查键盘、鼠标与其他输入设备状态"));
@@ -7252,7 +8328,7 @@ void HardwareDock::initializeKeyboardMouseHidTab()
 void HardwareDock::initializeI8042AuditTab()
 {
     m_i8042AuditPage = new HardwareI8042AuditPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_i8042AuditPage,
         QStringLiteral("i8042prt 审计"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7278,7 +8354,7 @@ void HardwareDock::initializeUsbTopologyTab()
         QStringLiteral("只读审计：USB 拓扑、控制器、Hub、端口与设备树关系。"),
         &m_usbTopologyEditor,
         &m_usbTopologyTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
+    const int tabIndex = addHardwarePageTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_usbTopologyPage, QStringLiteral("hardware.tab.usb"), QStringLiteral("USB 设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"));
@@ -7293,7 +8369,7 @@ void HardwareDock::initializePnpAcpiPciTab()
         QStringLiteral("即插即用与系统总线"),
         QStringLiteral("只读审计：PnP、ACPI、PCI、DevNode 状态与 cross-view 风险标记。"),
         &m_pnpAcpiPciEditor);
-    const int tabIndex = m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
+    const int tabIndex = addHardwarePageTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_pnpAcpiPciPage, QStringLiteral("hardware.tab.system_bus"), QStringLiteral("系统总线"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"));
@@ -7303,12 +8379,16 @@ void HardwareDock::initializePnpAcpiPciTab()
 
 void HardwareDock::ensureDiskMonitorTabInitialized()
 {
-    // 完成真实页面挂载后同步准备可见绑定；已初始化页重显也走同一个出口。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_diskMonitorHostPage);
     if (m_diskMonitorPage != nullptr || m_diskMonitorHostPage == nullptr)
     {
+        if (m_diskMonitorHostPage != nullptr && m_diskMonitorHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_diskMonitorHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_diskMonitorHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_diskMonitorHostPage->layout());
     if (hostLayout == nullptr)
@@ -7336,12 +8416,16 @@ void HardwareDock::ensureDiskMonitorTabInitialized()
 
 void HardwareDock::ensureOtherDevicesTabInitialized()
 {
-    // 完成真实页面挂载后同步准备可见绑定；不提前构造隐藏设备页。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_otherDevicesHostPage);
     if (m_otherDevicesPage != nullptr || m_otherDevicesHostPage == nullptr)
     {
+        if (m_otherDevicesHostPage != nullptr && m_otherDevicesHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_otherDevicesHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_otherDevicesHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_otherDevicesHostPage->layout());
     if (hostLayout == nullptr)
@@ -7387,6 +8471,11 @@ void HardwareDock::initializeCoreCharts()
 
     const DWORD logicalProcessorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
     const int coreCount = static_cast<int>(logicalProcessorCount);
+    while (m_coreHistory.size() < static_cast<std::size_t>(coreCount))
+    {
+        m_coreHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+        m_coreBaselineHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+    }
     const CpuCoreGridShape gridShape = chooseCpuCoreGridShape(coreCount);
     m_cpuCoreGridColumnCount = gridShape.columnCount;
     m_cpuCoreGridRowCount = gridShape.rowCount;
@@ -7421,10 +8510,11 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.lineSeries->setColor(
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu));
         chartEntry.baselineSeries = new QLineSeries(chartEntry.containerWidget);
-        for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
+        const auto index = static_cast<std::size_t>(coreIndex);
+        if (index < m_coreHistory.size())
         {
-            chartEntry.lineSeries->append(indexValue, 0.0);
-            chartEntry.baselineSeries->append(indexValue, 0.0);
+            ks::ui::MetricChartBinding::ForSeries(chartEntry.lineSeries, m_historyLength)->setHistory(m_coreHistory[index]);
+            ks::ui::MetricChartBinding::ForSeries(chartEntry.baselineSeries, m_historyLength)->setHistory(m_coreBaselineHistory[index]);
         }
 
         QChart* chart = new QChart();
@@ -7467,6 +8557,7 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.areaSeries->attachAxis(chartEntry.axisY);
 
         chartEntry.chartView = createPlotBackgroundChartView(chart, chartEntry.containerWidget);
+        prepareNewUtilizationChartTheme(chartEntry.chartView, KswordTheme::PerformanceRole::Cpu, KswordTheme::PerformanceRole::Cpu);
         containerLayout->addWidget(chartEntry.chartView, 1);
 
         const int rowIndex = coreIndex / gridShape.columnCount;
@@ -7501,141 +8592,595 @@ void HardwareDock::scheduleUtilizationLayoutRefresh()
     });
 }
 
-int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
+PerformanceNavCard* HardwareDock::restoreDeviceNavigation(DeviceSeriesArchive& archive, QWidget* page,
+    const QString& title, const QColor& accent, const UtilizationDeviceKind kind, const int deviceIndex)
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_diskUtilDevices.size()); ++indexValue)
+    if (archive.offlineButton) archive.offlineButton->deleteLater();
+    archive.offlineButton = nullptr;
+    if (archive.navRow < 0)
     {
-        const DiskUtilizationDevice& device = m_diskUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (QString::compare(device.instanceNameText, instanceNameText, Qt::CaseInsensitive) == 0)
-        {
-            return indexValue;
-        }
+        archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        return addUtilizationSidebarCard(page, title, accent, kind, deviceIndex);
     }
-    return -1;
+    auto* item = m_utilizationSidebarList->item(archive.navRow);
+    if (item == nullptr) return nullptr;
+    auto& entry = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)];
+    entry.detailPage = page;
+    if (entry.navCard != nullptr) return entry.navCard;
+    item->setText(QString());
+    item->setToolTip(QString());
+    entry.navCard = makeUtilizationSidebarCard(item, archive.active ? title : archivedDeviceTitle(title), accent);
+    return entry.navCard;
 }
 
-int HardwareDock::ensureDiskUtilizationDevice(
-    const DiskRateSample& sample,
-    const int ordinalIndex)
+void HardwareDock::archiveDeviceNavigation(DeviceSeriesArchive& archive, const QString& title,
+    const UtilizationDeviceKind kind, const int deviceIndex)
 {
-    const int existingIndex = findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText);
-    if (existingIndex >= 0)
+    if (m_utilizationSidebarList == nullptr) return;
+    const QString offlineTitle = archivedDeviceTitle(title);
+    if (archive.navRow < 0)
     {
-        return existingIndex;
+        archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        m_utilizationSidebarList->addItem(new QListWidgetItem());
+        UtilizationNavEntry entry;
+        entry.kind = kind;
+        entry.deviceIndex = deviceIndex;
+        m_utilizationNavEntries.push_back(entry);
     }
+    auto* item = m_utilizationSidebarList->item(archive.navRow);
+    if (item == nullptr) return;
+    auto& entry = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)];
+    const QPointer<PerformanceNavCard> card = entry.navCard;
+    entry.navCard = nullptr;
+    entry.detailPage = nullptr;
+    if (card) m_utilizationSidebarList->removeItemWidget(item);
+    if (card) card->deleteLater();
+    item->setText(offlineTitle);
+    item->setToolTip(offlineTitle);
+    item->setSizeHint(QSize(-1, -1)); // Restore native compact row height, keeping keyboard selection.
+}
 
-    // device 用途：为新发现的物理磁盘实例保留 UI 控件和历史采样。
-    DiskUtilizationDevice device;
-    device.instanceNameText = sample.instanceNameText;
-    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
-    device.displayNameText = useDefaultDisplayName
-        ? QStringLiteral("磁盘 %1").arg(ordinalIndex)
-        : sample.displayNameText;
-    if (useDefaultDisplayName)
+void HardwareDock::materializeArchivedDeviceNavigation()
+{
+    if (!m_utilizationDetailsInitialized) return;
+    bool virtualLayoutChanged = false;
+    for (int index = 0; index < static_cast<int>(m_diskUtilDevices.size()); ++index)
     {
-        device.displayNameText = ks::i18n::contextText(
-            QStringLiteral("hardware.utilization.card.disk.prefix"),
-            QStringLiteral("磁盘")) + device.displayNameText.mid(QStringLiteral("磁盘").size());
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Disk, index);
     }
-    createDiskUtilizationDevicePage(&device);
-    m_diskUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_diskUtilDevices.size()) - 1;
-    m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
-        UtilizationDeviceKind::Disk,
-        deviceIndex);
-    if (m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
+    for (int index = 0; index < static_cast<int>(m_networkUtilDevices.size()); ++index)
     {
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.pageWidget == nullptr && device.physical && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Network, index);
+        else if (!device.archive.active && !device.physical && !device.archive.offlineButton)
+        {
+            retireNetworkDeviceView(index);
+            virtualLayoutChanged = true;
+        }
+    }
+    for (int index = 0; index < static_cast<int>(m_gpuUtilDevices.size()); ++index)
+    {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Gpu, index);
+    }
+    if (virtualLayoutChanged) relayoutVirtualNetworkTiles();
+}
+
+void HardwareDock::openArchivedDevice(const UtilizationNavEntry& entry)
+{
+    m_openingArchivedDevice = true;
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    switch (entry.kind)
+    {
+    case UtilizationDeviceKind::Disk:
+        if (entry.deviceIndex >= 0 && index < m_diskUtilDevices.size())
+            ensureDiskUtilizationDevice(m_diskUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    case UtilizationDeviceKind::Network:
+        if (entry.deviceIndex >= 0 && index < m_networkUtilDevices.size())
+            ensureNetworkUtilizationDevice(m_networkUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    case UtilizationDeviceKind::Gpu:
+        if (entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size())
+            ensureGpuUtilizationDevice(m_gpuUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    default: break;
+    }
+    m_openingArchivedDevice = false;
+}
+
+QString HardwareDock::archivedDeviceTitle(const QString& title)
+{
+    return ks::i18n::contextText(QStringLiteral("hardware.utilization.device.offline_title"),
+        QStringLiteral("%1（离线，保留历史）")).arg(title);
+}
+
+void HardwareDock::restoreArchivedNavSamples(const DeviceSeriesArchive& archive, PerformanceNavCard* card,
+    const QString& primaryRole, const QString& secondaryRole, double* upperBound)
+{
+    if (card == nullptr) return;
+    const auto primary = archive.histories.value(primaryRole);
+    const auto secondary = archive.histories.value(secondaryRole);
+    double peak = 0.0;
+    for (const auto& history : {primary, secondary})
+        if (history) for (const auto& sample : history->samples())
+            if (sample.valid) peak = std::max(peak, sample.value);
+    const double scale = upperBound != nullptr ? std::max(1.0, peak * 1.08) : 100.0;
+    if (upperBound != nullptr) *upperBound = scale;
+    const auto values = [scale](const std::shared_ptr<ks::ui::MetricHistory>& history)
+    {
+        QVector<double> result;
+        if (history) for (const auto& sample : history->samples())
+            result.push_back(sample.valid ? std::clamp(sample.value / scale * 100.0, 0.0, 100.0) : 0.0);
+        return result;
+    };
+    card->setSampleSeries(values(primary), values(secondary));
+}
+
+void HardwareDock::projectArchivedDevice(const UtilizationNavEntry& entry)
+{
+    const int savedId = m_sampleCounter;
+    const qint64 savedTime = m_metricSampleTimeMs;
+    const bool savedDisk = m_metricDiskValid, savedNetwork = m_metricNetworkValid, savedGpu = m_metricGpuValid;
+    m_projectingDeviceArchive = true;
+    const auto project = [this](const DeviceSeriesArchive& archive)
+    {
+        m_sampleCounter = archive.lastSampleId;
+        m_metricSampleTimeMs = archive.lastSampleTimeMs;
+    };
+    const auto markProjected = [](DeviceSeriesArchive& archive)
+    {
+        if (!archive.histories.isEmpty() && !archive.histories.cbegin().value()->samples().empty())
+            archive.lastProjectedHistoryId = archive.histories.cbegin().value()->samples().back().id;
+    };
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    if (entry.kind == UtilizationDeviceKind::Disk && entry.deviceIndex >= 0 && index < m_diskUtilDevices.size())
+    {
+        auto& device = m_diskUtilDevices[index]; project(device.archive);
+        m_metricDiskValid = device.archive.available;
+        updateDiskUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("read"), QStringLiteral("write"), &device.navAutoScaleBytesPerSec);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    else if (entry.kind == UtilizationDeviceKind::Network && entry.deviceIndex >= 0 && index < m_networkUtilDevices.size())
+    {
+        auto& device = m_networkUtilDevices[index]; project(device.archive);
+        m_metricNetworkValid = device.archive.available;
+        updateNetworkUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("rx"), QStringLiteral("tx"), &device.navAutoScaleBytesPerSec);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    else if (entry.kind == UtilizationDeviceKind::Gpu && entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size())
+    {
+        auto& device = m_gpuUtilDevices[index]; project(device.archive);
+        m_metricGpuValid = device.archive.available;
+        updateGpuUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("overall"), QString(), nullptr);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    m_projectingDeviceArchive = false;
+    m_sampleCounter = savedId; m_metricSampleTimeMs = savedTime;
+    m_metricDiskValid = savedDisk; m_metricNetworkValid = savedNetwork; m_metricGpuValid = savedGpu;
+}
+
+void HardwareDock::refreshArchivedNavigationTexts()
+{
+    const auto refresh = [this](const DeviceSeriesArchive& archive, const QString& title)
+    {
+        if (archive.active) return;
+        const QString text = archivedDeviceTitle(title);
+        if (archive.navRow >= 0 && m_utilizationSidebarList != nullptr)
+        {
+            auto* item = m_utilizationSidebarList->item(archive.navRow);
+            if (item != nullptr && m_utilizationSidebarList->itemWidget(item) == nullptr)
+            { item->setText(text); item->setToolTip(text); }
+            if (archive.navRow < static_cast<int>(m_utilizationNavEntries.size()))
+                if (auto* card = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)].navCard) card->setTitleText(text);
+        }
+        if (archive.offlineButton) { archive.offlineButton->setText(text); archive.offlineButton->setToolTip(text); }
+    };
+    for (const auto& device : m_diskUtilDevices) refresh(device.archive, device.displayNameText);
+    for (const auto& device : m_networkUtilDevices) refresh(device.archive, device.displayNameText);
+    for (const auto& device : m_gpuUtilDevices) refresh(device.archive, device.displayNameText);
+}
+
+void HardwareDock::retireInactiveDeviceViews()
+{
+    bool virtualLayoutChanged = false;
+    const int selected = m_utilizationSidebarList != nullptr ? m_utilizationSidebarList->currentRow() : -1;
+    const auto protectedView = [this, selected](const DeviceSeriesArchive& archive, QWidget* page)
+    {
+        return archive.active || (archive.navRow >= 0 && archive.navRow == selected)
+            || (page != nullptr && m_utilizationDetailStack != nullptr && page == m_utilizationDetailStack->currentWidget())
+            || (page != nullptr && page == m_utilizationFloatingPage.data());
+    };
+    const auto needsMissingProjection = [](const DeviceSeriesArchive& archive)
+    {
+        return !archive.available && !archive.histories.isEmpty()
+            && !archive.histories.cbegin().value()->samples().empty()
+            && archive.lastProjectedHistoryId != archive.histories.cbegin().value()->samples().back().id;
+    };
+    for (const int index : QSet<int>(m_presentedDiskDevices))
+    {
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+        if (!protectedView(device.archive, device.pageWidget)) retireDiskDeviceView(index);
+        else
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Disk, index});
+        }
+    }
+    for (const int index : QSet<int>(m_presentedNetworkDevices))
+    {
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+        if (protectedView(device.archive, device.pageWidget))
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Network, index});
+            continue;
+        }
+        if (!device.physical && device.archive.explicitlyViewed
+            && m_utilizationDetailStack != nullptr && m_utilizationDetailStack->currentWidget() == m_virtualNetworkPage
+            && device.pageWidget != nullptr && m_virtualNetworkScrollArea != nullptr)
+        {
+            const auto* viewport = m_virtualNetworkScrollArea->viewport();
+            const QRect rect(device.pageWidget->mapTo(viewport, QPoint()), device.pageWidget->size());
+            if (rect.intersects(viewport->rect())) continue; // Only a visible explicitly opened archive tile stays materialized.
+        }
+        retireNetworkDeviceView(index);
+        virtualLayoutChanged = virtualLayoutChanged || !device.physical;
+    }
+    for (const int index : QSet<int>(m_presentedGpuDevices))
+    {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+        if (!protectedView(device.archive, device.pageWidget)) retireGpuDeviceView(index);
+        else
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Gpu, index});
+        }
+    }
+    if (virtualLayoutChanged) relayoutVirtualNetworkTiles();
+}
+
+void HardwareDock::retireDiskDeviceView(const int index)
+{
+    auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Disk, index);
+    m_presentedDiskDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.summaryLabel = nullptr;
+    device.chartView = nullptr;
+    device.readLineSeries = nullptr;
+    device.readBaselineSeries = nullptr;
+    device.readAreaSeries = nullptr;
+    device.writeLineSeries = nullptr;
+    device.writeBaselineSeries = nullptr;
+    device.writeAreaSeries = nullptr;
+    device.axisX = nullptr;
+    device.axisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+}
+
+void HardwareDock::retireNetworkDeviceView(const int index)
+{
+    auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    if (device.physical)
+        archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Network, index);
+    m_presentedNetworkDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    if (page && m_virtualNetworkGrid != nullptr) m_virtualNetworkGrid->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.summaryLabel = nullptr;
+    device.chartView = nullptr;
+    device.rxLineSeries = nullptr;
+    device.rxBaselineSeries = nullptr;
+    device.rxAreaSeries = nullptr;
+    device.txLineSeries = nullptr;
+    device.txBaselineSeries = nullptr;
+    device.txAreaSeries = nullptr;
+    device.axisX = nullptr;
+    device.axisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+    if (!device.physical && !device.archive.offlineButton)
+    {
+        ensureVirtualNetworkPage();
+        if (m_virtualNetworkGridHost != nullptr)
+        {
+            auto* button = new QPushButton(archivedDeviceTitle(device.displayNameText), m_virtualNetworkGridHost);
+            button->setToolTip(button->text());
+            button->setMinimumWidth(0);
+            button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+            device.archive.offlineButton = button;
+            connect(button, &QPushButton::clicked, this, [this, index]()
+            {
+                auto& archived = m_networkUtilDevices[static_cast<std::size_t>(index)];
+                archived.archive.explicitlyViewed = true;
+                m_openingArchivedDevice = true;
+                ensureNetworkUtilizationDevice(archived.lastSample, index);
+                m_openingArchivedDevice = false;
+                relayoutVirtualNetworkTiles();
+            });
+        }
+    }
+}
+
+void HardwareDock::retireGpuDeviceView(const int index)
+{
+    auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Gpu, index);
+    m_presentedGpuDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.adapterTitleLabel = nullptr;
+    device.summaryLabel = nullptr;
+    device.engineHostWidget = nullptr;
+    device.engineGridLayout = nullptr;
+    device.dedicatedMemoryChartView = nullptr;
+    device.dedicatedMemoryLineSeries = nullptr;
+    device.dedicatedMemoryBaselineSeries = nullptr;
+    device.dedicatedMemoryAreaSeries = nullptr;
+    device.dedicatedMemoryAxisX = nullptr;
+    device.dedicatedMemoryAxisY = nullptr;
+    device.sharedMemoryChartView = nullptr;
+    device.sharedMemoryLineSeries = nullptr;
+    device.sharedMemoryBaselineSeries = nullptr;
+    device.sharedMemoryAreaSeries = nullptr;
+    device.sharedMemoryAxisX = nullptr;
+    device.sharedMemoryAxisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    device.engineCharts.clear();
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+}
+
+void HardwareDock::appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
+    const double value, const bool valid, const int sampleId, const qint64 sampleTimeMs, const int capacity)
+{
+    auto& history = archive.histories[role];
+    if (!history) history = std::make_shared<ks::ui::MetricHistory>(static_cast<std::size_t>(std::max(1, capacity)));
+    history->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, value, valid});
+    auto& baseline = archive.histories[role + QStringLiteral(".baseline")];
+    if (!baseline) baseline = std::make_shared<ks::ui::MetricHistory>(static_cast<std::size_t>(std::max(1, capacity)));
+    baseline->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, 0.0, valid});
+}
+
+void HardwareDock::appendDeviceGap(DeviceSeriesArchive& archive, const int sampleId, const qint64 sampleTimeMs)
+{
+    archive.available = false;
+    for (auto& history : archive.histories)
+        history->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, 0.0, false});
+}
+
+void HardwareDock::attachDeviceHistory(DeviceSeriesArchive& archive, const QString& role,
+    QLineSeries* line, QLineSeries* baseline)
+{
+    const auto history = archive.histories.value(role);
+    const auto zero = archive.histories.value(role + QStringLiteral(".baseline"));
+    if (line != nullptr && history) ks::ui::MetricChartBinding::ForSeries(line, m_historyLength)->setHistory(history);
+    if (baseline != nullptr && zero) ks::ui::MetricChartBinding::ForSeries(baseline, m_historyLength)->setHistory(zero);
+}
+
+void HardwareDock::recordDeviceSamples(const std::vector<DiskRateSample>& disks,
+    const std::vector<NetworkRateSample>& networks, const std::vector<GpuUsageSample>& gpus)
+{
+    m_recordingDeviceHistory = true;
+    if (m_metricDiskValid)
+    {
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < disks.size(); ++ordinal)
+        {
+            const auto& sample = disks[ordinal];
+            const int index = ensureDiskUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("read"), sample.readBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("write"), sample.writeBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeDiskDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_diskUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeDiskDevices = std::move(observed);
+    }
+    else
+    {
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeDiskDevices)
+            appendDeviceGap(m_diskUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    if (m_metricNetworkValid)
+    {
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < networks.size(); ++ordinal)
+        {
+            const auto& sample = networks[ordinal];
+            const int index = ensureNetworkUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("rx"), sample.rxBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("tx"), sample.txBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeNetworkDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_networkUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeNetworkDevices = std::move(observed);
+    }
+    else
+    {
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeNetworkDevices)
+            appendDeviceGap(m_networkUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    if (m_metricGpuValid)
+    {
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < gpus.size(); ++ordinal)
+        {
+            const auto& sample = gpus[ordinal];
+            const int index = ensureGpuUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("3d"), sample.usage3DPercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("copy"), sample.usageCopyPercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("video_encode"), sample.usageVideoEncodePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("video_decode"), sample.usageVideoDecodePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("dedicated"), sample.dedicatedUsedGiB, sample.dedicatedUsageAvailable, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("shared"), sample.sharedUsedGiB, sample.sharedUsageAvailable, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("overall"), sample.overallUsagePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeGpuDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_gpuUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeGpuDevices = std::move(observed);
+    }
+    else
+    {
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeGpuDevices)
+            appendDeviceGap(m_gpuUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    m_recordingDeviceHistory = false;
+}
+
+int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
+{
+    return m_diskDeviceIndex.value(instanceNameText.toCaseFolded(), -1);
+}
+
+int HardwareDock::ensureDiskUtilizationDevice(const DiskRateSample& sample, const int ordinalIndex)
+{
+    int deviceIndex = findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText);
+    if (deviceIndex < 0)
+    {
+        DiskUtilizationDevice device;
+        device.instanceNameText = sample.instanceNameText;
+        device.displayNameText = diskUtilizationDisplayName(sample, ordinalIndex);
+        m_diskUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_diskUtilDevices.size()) - 1;
+        m_diskDeviceIndex.insert(sample.instanceNameText.toCaseFolded(), deviceIndex);
+    }
+    auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
+    {
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
+        createDiskUtilizationDevicePage(&device);
+        device.displayNameText = sourceTitle;
+        m_presentedDiskDevices.insert(deviceIndex);
+        device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
+            UtilizationDeviceKind::Disk, deviceIndex);
+        if (device.navCard != nullptr) device.navCard->setSeriesColors(
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Disk;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
+        scheduleUtilizationLayoutRefresh();
     }
-    scheduleUtilizationLayoutRefresh();
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
 int HardwareDock::findNetworkUtilizationDeviceIndexByKey(const std::uint64_t interfaceKey) const
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_networkUtilDevices.size()); ++indexValue)
-    {
-        const NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (device.interfaceKey == interfaceKey)
-        {
-            return indexValue;
-        }
-    }
-    return -1;
+    return m_networkDeviceIndex.value(static_cast<quint64>(interfaceKey), -1);
 }
 
-int HardwareDock::ensureNetworkUtilizationDevice(
-    const NetworkRateSample& sample,
-    const int ordinalIndex)
+int HardwareDock::ensureNetworkUtilizationDevice(const NetworkRateSample& sample, const int ordinalIndex)
 {
-    const int existingIndex = findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey);
-    if (existingIndex >= 0)
+    int deviceIndex = findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey);
+    if (deviceIndex < 0)
     {
-        return existingIndex;
+        NetworkUtilizationDevice device;
+        device.interfaceKey = sample.interfaceKey;
+        device.displayNameText = networkUtilizationDisplayName(sample, ordinalIndex);
+        device.physical = sample.physical;
+        device.linkBitsPerSecond = sample.linkBitsPerSecond;
+        m_networkUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_networkUtilDevices.size()) - 1;
+        m_networkDeviceIndex.insert(static_cast<quint64>(sample.interfaceKey), deviceIndex);
     }
-
-    // device 用途：为新发现的网卡接口保留 UI 控件和增量采样基线。
-    NetworkUtilizationDevice device;
-    device.interfaceKey = sample.interfaceKey;
-    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
-    device.displayNameText = useDefaultDisplayName
-        ? QStringLiteral("以太网 %1").arg(ordinalIndex)
-        : sample.displayNameText;
-    if (useDefaultDisplayName)
+    auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
     {
-        device.displayNameText = ks::i18n::contextText(
-            QStringLiteral("hardware.utilization.card.network.prefix"),
-            QStringLiteral("以太网")) + device.displayNameText.mid(QStringLiteral("以太网").size());
-    }
-    device.linkBitsPerSecond = sample.linkBitsPerSecond;
-    device.physical = sample.physical;
-    device.lastOperational = sample.operational;
-    device.lastRxBytes = sample.totalRxBytes;
-    device.lastTxBytes = sample.totalTxBytes;
-    device.lastSampleMs = QDateTime::currentMSecsSinceEpoch();
-    device.hasPreviousSample = true;
-    if (!sample.physical)
-    {
-        ensureVirtualNetworkPage();
-    }
-    createNetworkUtilizationDevicePage(&device);
-    m_networkUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_networkUtilDevices.size()) - 1;
-    NetworkUtilizationDevice& createdDevice = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
-    if (sample.physical)
-    {
-        createdDevice.navCard = addUtilizationSidebarCard(
-            createdDevice.pageWidget,
-            createdDevice.displayNameText,
-            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
-            UtilizationDeviceKind::Network,
-            deviceIndex);
-        if (createdDevice.navCard != nullptr)
+        if (!device.physical) ensureVirtualNetworkPage();
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
+        createNetworkUtilizationDevicePage(&device);
+        device.displayNameText = sourceTitle;
+        m_presentedNetworkDevices.insert(deviceIndex);
+        if (device.physical)
         {
-            createdDevice.navCard->setSeriesColors(
+                device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
+                KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
+                UtilizationDeviceKind::Network, deviceIndex);
+            if (device.navCard != nullptr) device.navCard->setSeriesColors(
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
         }
+        else relayoutVirtualNetworkTiles();
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Network;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
+        scheduleUtilizationLayoutRefresh();
     }
-    else
-    {
-        if (m_virtualNetworkGrid != nullptr && createdDevice.pageWidget != nullptr)
-        {
-            relayoutVirtualNetworkTiles();
-        }
-    }
-    scheduleUtilizationLayoutRefresh();
-    if (!sample.physical && m_utilizationFloatingPage == m_virtualNetworkPage)
-    {
-        QTimer::singleShot(0, this, [this]() { applyUtilizationFloatingContentScale(); });
-    }
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
@@ -7678,6 +9223,10 @@ void HardwareDock::ensureVirtualNetworkPage()
     m_virtualNetworkGrid->setVerticalSpacing(10);
     m_virtualNetworkGrid->setAlignment(Qt::AlignTop);
     m_virtualNetworkScrollArea->setWidget(m_virtualNetworkGridHost);
+    connect(m_virtualNetworkScrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]()
+    {
+        QTimer::singleShot(0, this, [this]() { retireInactiveDeviceViews(); });
+    });
     m_utilizationDetailStack->addWidget(m_virtualNetworkPage);
     m_networkNavCard = addUtilizationSidebarCard(m_virtualNetworkPage,
         titleLabel->text(), KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
@@ -7703,25 +9252,29 @@ void HardwareDock::relayoutVirtualNetworkTiles()
     tiles.reserve(m_networkUtilDevices.size());
     for (NetworkUtilizationDevice& device : m_networkUtilDevices)
     {
-        if (!device.physical && device.pageWidget != nullptr)
+        if (!device.physical)
         {
-            tiles.push_back(device.pageWidget);
+            if (device.pageWidget != nullptr) tiles.push_back(device.pageWidget);
+            else if (device.archive.offlineButton) tiles.push_back(device.archive.offlineButton);
         }
     }
-    if (m_virtualNetworkColumnCount == columns
-        && m_virtualNetworkTileCount == static_cast<int>(tiles.size()))
+    bool sameTiles = m_virtualNetworkLaidOutTiles.size() == static_cast<qsizetype>(tiles.size());
+    for (std::size_t index = 0; sameTiles && index < tiles.size(); ++index)
+        sameTiles = m_virtualNetworkLaidOutTiles[static_cast<qsizetype>(index)] == tiles[index];
+    if (m_virtualNetworkColumnCount == columns && sameTiles)
     {
         return;
     }
-    for (QWidget* const tile : tiles)
-    {
-        m_virtualNetworkGrid->removeWidget(tile);
-    }
+    while (auto* item = m_virtualNetworkGrid->takeAt(0)) delete item;
+    m_virtualNetworkLaidOutTiles.clear();
+    for (QWidget* tile : tiles) m_virtualNetworkLaidOutTiles.push_back(tile);
+    ++m_utilizationMirrorStructureRevision;
     for (int index = 0; index < static_cast<int>(tiles.size()); ++index)
     {
         m_virtualNetworkGrid->addWidget(tiles[static_cast<std::size_t>(index)],
             index / columns, index % columns);
     }
+    ++m_utilizationMirrorStructureRevision;
     m_virtualNetworkColumnCount = columns;
     m_virtualNetworkTileCount = static_cast<int>(tiles.size());
     m_virtualNetworkGrid->setColumnStretch(0, 1);
@@ -7731,47 +9284,45 @@ void HardwareDock::relayoutVirtualNetworkTiles()
 
 int HardwareDock::findGpuUtilizationDeviceIndexByKey(const std::uint64_t adapterKey) const
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_gpuUtilDevices.size()); ++indexValue)
-    {
-        const GpuUtilizationDevice& device = m_gpuUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (device.adapterKeyAssigned && device.adapterKey == adapterKey)
-        {
-            return indexValue;
-        }
-    }
-    return -1;
+    return m_gpuDeviceIndex.value(static_cast<quint64>(adapterKey), -1);
 }
 
-int HardwareDock::ensureGpuUtilizationDevice(
-    const GpuUsageSample& sample,
-    const int ordinalIndex)
+int HardwareDock::ensureGpuUtilizationDevice(const GpuUsageSample& sample, const int ordinalIndex)
 {
-    const int existingIndex = findGpuUtilizationDeviceIndexByKey(sample.adapterKey);
-    if (existingIndex >= 0)
+    int deviceIndex = findGpuUtilizationDeviceIndexByKey(sample.adapterKey);
+    if (deviceIndex < 0)
     {
-        return existingIndex;
+        GpuUtilizationDevice device;
+        device.adapterKey = sample.adapterKey;
+        device.adapterKeyAssigned = true;
+        device.adapterIndex = sample.adapterIndex;
+        device.displayNameText = gpuUtilizationDisplayName(ordinalIndex);
+        m_gpuUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_gpuUtilDevices.size()) - 1;
+        m_gpuDeviceIndex.insert(static_cast<quint64>(sample.adapterKey), deviceIndex);
     }
-
-    // device 用途：为新发现的 DXGI 适配器保留任务管理器风格 GPU 详情页。
-    GpuUtilizationDevice device;
-    device.adapterKey = sample.adapterKey;
-    device.adapterKeyAssigned = true;
-    device.adapterIndex = sample.adapterIndex;
-    device.displayNameText = ks::i18n::contextText(
-        QStringLiteral("hardware.utilization.card.gpu.prefix"),
-        QStringLiteral("GPU"))
-        + QStringLiteral(" %1").arg(ordinalIndex);
-    createGpuUtilizationDevicePage(&device);
-    m_gpuUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_gpuUtilDevices.size()) - 1;
-    m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
-        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
-        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
-        UtilizationDeviceKind::Gpu,
-        deviceIndex);
-    scheduleUtilizationLayoutRefresh();
+    auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
+    {
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
+        createGpuUtilizationDevicePage(&device);
+        device.displayNameText = sourceTitle;
+        m_presentedGpuDevices.insert(deviceIndex);
+        device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
+            UtilizationDeviceKind::Gpu, deviceIndex);
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Gpu;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
+        scheduleUtilizationLayoutRefresh();
+    }
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
@@ -7861,6 +9412,7 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
         devicePointer->writeAreaSeries->attachAxis(devicePointer->axisY);
     }
     devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+    prepareNewUtilizationChartTheme(devicePointer->chartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(
@@ -7875,6 +9427,8 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     pageLayout->addWidget(devicePointer->detailLabel, 0);
 
     m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("read"), devicePointer->readLineSeries, devicePointer->readBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("write"), devicePointer->writeLineSeries, devicePointer->writeBaselineSeries);
 }
 
 void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer)
@@ -7982,6 +9536,7 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
         devicePointer->txAreaSeries->attachAxis(devicePointer->axisY);
     }
     devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+    prepareNewUtilizationChartTheme(devicePointer->chartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     if (!devicePointer->physical)
     {
         devicePointer->chartView->setFixedHeight(135);
@@ -7999,6 +9554,8 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     {
         m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
     }
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("rx"), devicePointer->rxLineSeries, devicePointer->rxBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("tx"), devicePointer->txLineSeries, devicePointer->txBaselineSeries);
 }
 
 void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer)
@@ -8098,6 +9655,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
                 chartEntry.areaSeries->attachAxis(chartEntry.axisY);
             }
             chartEntry.chartView = createPlotBackgroundChartView(chart, cellWidget);
+            prepareNewUtilizationEngineChartTheme(chartEntry.chartView, keyText);
             cellLayout->addWidget(chartEntry.chartView, 1);
 
             devicePointer->engineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
@@ -8154,6 +9712,9 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
                 (*areaSeriesOut)->attachAxis(*axisYOut);
             }
             *chartViewOut = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+            const auto role = chartViewOut == &devicePointer->dedicatedMemoryChartView
+                ? KswordTheme::PerformanceRole::DedicatedMemory : KswordTheme::PerformanceRole::SharedMemory;
+            prepareNewUtilizationChartTheme(*chartViewOut, role, role);
         };
 
     createMemoryChart(
@@ -8193,6 +9754,10 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     pageLayout->addWidget(devicePointer->detailLabel, 0);
 
     m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("dedicated"), devicePointer->dedicatedMemoryLineSeries, devicePointer->dedicatedMemoryBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("shared"), devicePointer->sharedMemoryLineSeries, devicePointer->sharedMemoryBaselineSeries);
+    for (auto& engine : devicePointer->engineCharts)
+        attachDeviceHistory(devicePointer->archive, engine.engineKeyText, engine.lineSeries, engine.baselineSeries);
 }
 
 void HardwareDock::refreshCpuTopologyStaticInfo()
@@ -8331,108 +9896,97 @@ void HardwareDock::refreshSystemVolumeInfo()
 
 void HardwareDock::initializePerformanceCounters()
 {
-    // 计数器初始化整体异步化：
-    // - PdhOpenQueryW + 逐核 PdhAddEnglishCounterW + \Processor Information 首次触达合计上百毫秒；
-    // - 原来只是延后到首帧之后，仍然压在 UI 线程；现在交给线程池，完成后回投接管句柄；
-    // - 句柄就绪前 samplePerCoreUsage 直接返回 false，界面按 0 占位显示。
-    if (m_cpuPerfQueryHandle != nullptr)
+    if (m_samplingThread != nullptr) return;
+    m_samplingThread = new QThread(this);
+    m_samplingThread->setObjectName(QStringLiteral("HardwareSampling"));
+    m_samplingState = new SamplingState();
+    m_samplingState->moveToThread(m_samplingThread);
+    connect(m_samplingThread, &QThread::finished, m_samplingState, &QObject::deleteLater);
+    m_samplingThread->start();
+}
+
+void HardwareDock::reconcilePerformanceSample()
+{
+    const auto receipt = m_samplingReceipt;
+    if (!receipt) return;
+    std::shared_ptr<PerformanceSample> sample;
     {
-        return;
+        std::lock_guard<std::mutex> lock(receipt->mutex);
+        if (!receipt->finished) return;
+        sample = std::move(receipt->sample);
     }
-
-    // expectedInitializingValue 用途：CAS 期望值（false=当前没有初始化任务在跑）。
-    bool expectedInitializingValue = false;
-    if (!hardwareDockCpuCounterInitializing.compare_exchange_strong(expectedInitializingValue, true))
-    {
-        return;
-    }
-
-    // coreCount 必须在 UI 线程读取：m_coreChartEntries 保存的是图表控件。
-    const int coreCount = static_cast<int>(m_coreChartEntries.size());
-
-    // applicationContext 与事件循环同寿命；工作线程不解引用 Dock 指针。
-    QObject* const applicationContext = QCoreApplication::instance();
-    if (applicationContext == nullptr)
-    {
-        hardwareDockCpuCounterInitializing.store(false);
-        return;
-    }
-
-    // safeThis 用途：后台任务可能晚于 Dock 销毁，回投后必须验证生命周期。
-    const QPointer<HardwareDock> safeThis(this);
-    QThreadPool::globalInstance()->start(
-        [applicationContext, safeThis, coreCount]()
-        {
-            // 后台线程只做纯数据采集，产出可跨线程搬运的句柄值类型。
-            const HardwareDockCpuCounterBundle counterBundle = createHardwareDockCpuCounters(coreCount);
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                applicationContext,
-                [safeThis, counterBundle]()
-                {
-                    if (safeThis.isNull())
-                    {
-                        closeHardwareDockCpuCounters(counterBundle);
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    if (counterBundle.cpuQueryHandle == nullptr)
-                    {
-                        kLogEvent event;
-                        warn << event
-                            << "[HardwareDock] 初始化PDH失败：PdhOpenQueryW, status="
-                            << counterBundle.openQueryStatus
-                            << eol;
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    if (safeThis->m_cpuPerfQueryHandle != nullptr)
-                    {
-                        // 更早一轮初始化已经接管句柄，本轮结果直接释放避免泄漏。
-                        closeHardwareDockCpuCounters(counterBundle);
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    safeThis->m_cpuPerfQueryHandle = counterBundle.cpuQueryHandle;
-                    safeThis->m_coreCounterHandles = counterBundle.coreCounterHandles;
-                    safeThis->m_cpuPerformanceCounterHandle = counterBundle.cpuPerformanceCounterHandle;
-                    safeThis->m_cpuFrequencyCounterHandle = counterBundle.cpuFrequencyCounterHandle;
-                    hardwareDockCpuCounterInitializing.store(false);
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk)
-            {
-                closeHardwareDockCpuCounters(counterBundle);
-                hardwareDockCpuCounterInitializing.store(false);
-            }
-        });
+    // Clear ownership before applying: a late old delivery cannot consume a newer frame.
+    m_samplingReceipt.reset();
+    m_samplingInFlight = false;
+    if (sample) applyPerformanceSample(*sample);
 }
 
 void HardwareDock::refreshAllViews()
 {
-    std::vector<double> coreUsageList;
-    coreUsageList.reserve(m_coreChartEntries.size());
-    double totalCpuUsage = 0.0;
-    m_metricCpuValid = samplePerCoreUsage(&coreUsageList, &totalCpuUsage);
-    if (!m_metricCpuValid)
+    // Also recover a physically completed frame if Qt discarded its delivery event.
+    reconcilePerformanceSample();
+    if (m_samplingInFlight) return;
+    initializePerformanceCounters();
+    if (m_samplingState == nullptr) return;
+    if (!m_samplingDispatcher)
+        m_samplingDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+    const auto dispatcher = m_samplingDispatcher;
+    const auto receipt = std::make_shared<SamplingReceipt>();
+    m_samplingReceipt = receipt;
+    m_samplingInFlight = true;
+    SamplingState* const state = m_samplingState;
+    bool queued = false;
+    try
     {
-        coreUsageList.assign(m_coreChartEntries.size(), 0.0);
-        totalCpuUsage = 0.0;
+        queued = QMetaObject::invokeMethod(state,
+            [dispatcher, receipt, state, receiver = this]()
+            {
+                std::shared_ptr<PerformanceSample> sample;
+                try { sample = std::make_shared<PerformanceSample>(state->collect()); }
+                catch (...) { /* A failed provider/allocation still retires the physical lane. */ }
+                {
+                    std::lock_guard<std::mutex> lock(receipt->mutex);
+                    receipt->sample = std::move(sample);
+                    receipt->finished = true;
+                }
+                // Only the lifecycle-gated UI callback dereferences receiver. A failed or
+                // discarded post retains the pure value receipt for the next timer tick.
+                try { dispatcher->post([receiver, receipt]()
+                {
+                    if (receiver->m_samplingReceipt == receipt)
+                        receiver->reconcilePerformanceSample();
+                }); } catch (...) {}
+            }, Qt::QueuedConnection);
     }
+    catch (...) {}
+    if (!queued)
+    {
+        // No worker accepted this request; publish the same physical terminal state
+        // and let the receipt owner alone release the GUI gate.
+        {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            receipt->finished = true;
+        }
+        reconcilePerformanceSample();
+    }
+}
 
-    double memoryUsagePercent = 0.0;
-    sampleMemoryUsage(&memoryUsagePercent);
-
+void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
+{
+    m_lastPerformanceSample = sample;
+    const std::vector<double>& coreUsageList = sample.coreUsage;
+    const double totalCpuUsage = sample.cpuValid ? sample.totalCpuUsage : 0.0;
+    const double memoryUsagePercent = sample.memoryUsagePercent;
+    m_metricCpuValid = sample.cpuValid;
+    m_metricCoreValid = sample.coreValid;
+    m_primaryNetworkAdapterName = sample.primaryNetworkAdapterName;
+    m_primaryNetworkLinkBitsPerSecond = sample.primaryNetworkLinkBitsPerSecond;
     double diskReadBytesPerSec = 0.0;
     double diskWriteBytesPerSec = 0.0;
     double diskReadAverageBytesPerSec = 0.0;
     double diskWriteAverageBytesPerSec = 0.0;
-    std::vector<DiskRateSample> diskSampleList;
-    m_metricDiskValid = sampleDiskRates(&diskSampleList);
+    const auto& diskSampleList = sample.diskSamples;
+    m_metricDiskValid = sample.diskValid;
     if (m_metricDiskValid)
     {
         for (const DiskRateSample& sample : diskSampleList)
@@ -8457,8 +10011,8 @@ void HardwareDock::refreshAllViews()
     double networkTxBytesPerSec = 0.0;
     double networkRxAverageBytesPerSec = 0.0;
     double networkTxAverageBytesPerSec = 0.0;
-    std::vector<NetworkRateSample> networkSampleList;
-    m_metricNetworkValid = sampleNetworkRates(&networkSampleList);
+    const auto& networkSampleList = sample.networkSamples;
+    m_metricNetworkValid = sample.networkValid;
     if (m_metricNetworkValid)
     {
         for (const NetworkRateSample& sample : networkSampleList)
@@ -8482,7 +10036,17 @@ void HardwareDock::refreshAllViews()
     double gpuUsagePercent = 0.0;
     double gpuUsageAveragePercent = 0.0;
     std::vector<GpuUsageSample> gpuSampleList;
-    m_metricGpuValid = sampleGpuUsages(&gpuSampleList);
+    if (m_restoringUtilizationHistory)
+    {
+        gpuSampleList = m_lastGpuSamples;
+        m_metricGpuValid = m_lastGpuValid;
+    }
+    else
+    {
+        m_metricGpuValid = sampleGpuUsages(&gpuSampleList);
+        m_lastGpuSamples = gpuSampleList;
+        m_lastGpuValid = m_metricGpuValid;
+    }
     if (m_metricGpuValid)
     {
         double gpuUsageSum = 0.0;
@@ -8501,51 +10065,70 @@ void HardwareDock::refreshAllViews()
         gpuUsagePercent = 0.0;
     }
 
-    std::vector<CpuPowerSnapshot> powerInfoList;
-    sampleCpuPowerInfo(&powerInfoList);
-    double sampledCpuSpeedGhz = 0.0;
-    m_lastCpuSpeedGhz = sampleCpuEffectiveSpeed(&sampledCpuSpeedGhz)
-        ? sampledCpuSpeedGhz
-        : 0.0;
-
-    m_metricSampleTimeMs = QDateTime::currentMSecsSinceEpoch(); // 本帧图表共用真实采样时刻。
-    ++m_sampleCounter;
-    pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
-    pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
-    pushBoundedHistorySample(&m_gpuUsageHistoryPercent, gpuUsagePercent);
-    pushBoundedHistorySample(
-        &m_diskAggregateHistoryBytesPerSec,
-        std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec));
-    pushBoundedHistorySample(
-        &m_networkAggregateHistoryBytesPerSec,
-        std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec));
-    if (m_hardwareDetailsSamplingEnabled)
+    const auto& powerInfoList = sample.powerInfo;
+    m_lastCpuSpeedGhz = sample.cpuSpeedGhz;
+    m_metricSampleTimeMs = sample.sampleTimeMs;
+    if (!m_restoringUtilizationHistory)
+    {
+        ++m_sampleCounter;
+        pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
+        pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
+        pushBoundedHistorySample(&m_gpuUsageHistoryPercent, gpuUsagePercent);
+        pushBoundedHistorySample(
+            &m_diskAggregateHistoryBytesPerSec,
+            std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec));
+        pushBoundedHistorySample(
+            &m_networkAggregateHistoryBytesPerSec,
+            std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec));
+        while (m_coreHistory.size() < coreUsageList.size())
+        {
+            m_coreHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+            m_coreBaselineHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+        }
+        for (std::size_t index = 0; index < m_coreHistory.size(); ++index)
+        {
+            const bool valid = m_metricCpuValid && index < coreUsageList.size()
+                && index < m_metricCoreValid.size() && m_metricCoreValid[index];
+            const double value = index < coreUsageList.size() ? coreUsageList[index] : 0.0;
+            m_coreHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, value, valid});
+            m_coreBaselineHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, 0.0, valid});
+        }
+        recordDeviceSamples(diskSampleList, networkSampleList, gpuSampleList);
+        m_presentationHistory.push_back({sample, gpuSampleList, m_metricGpuValid, m_sampleCounter});
+        while (m_presentationHistory.size() > static_cast<std::size_t>(m_historyLength))
+            m_presentationHistory.pop_front();
+    }
+    if (!m_restoringUtilizationHistory && m_hardwareDetailsSamplingEnabled)
     {
         requestAsyncR0HardwareHealthRefresh();
     }
     updateOverviewText(totalCpuUsage, memoryUsagePercent);
-    updateUtilizationView(
-        coreUsageList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
-    updateAdditionalDiskUtilizationDevices(diskSampleList);
-    updateAdditionalNetworkUtilizationDevices(networkSampleList);
-    updateAdditionalGpuUtilizationDevices(gpuSampleList);
+    if (m_utilizationDetailsInitialized)
+    {
+        updateUtilizationView(
+            coreUsageList,
+            memoryUsagePercent,
+            diskReadBytesPerSec,
+            diskWriteBytesPerSec,
+            networkRxBytesPerSec,
+            networkTxBytesPerSec,
+            gpuUsagePercent);
+        updateAdditionalDiskUtilizationDevices(diskSampleList);
+        updateAdditionalNetworkUtilizationDevices(networkSampleList);
+        updateAdditionalGpuUtilizationDevices(gpuSampleList);
+        if (!m_restoringUtilizationHistory) retireInactiveDeviceViews();
+        updateTaskManagerDetailLabels(
+            coreUsageList,
+            powerInfoList,
+            memoryUsagePercent,
+            diskReadBytesPerSec,
+            diskWriteBytesPerSec,
+            networkRxBytesPerSec,
+            networkTxBytesPerSec,
+            gpuUsagePercent);
+    }
     updateCpuDetailTable(coreUsageList, powerInfoList);
-    updateTaskManagerDetailLabels(
-        coreUsageList,
-        powerInfoList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
-    emit performanceSnapshotChanged(
+    if (!m_restoringUtilizationHistory) emit performanceSnapshotChanged(
         totalCpuUsage,
         memoryUsagePercent,
         diskReadAverageBytesPerSec,
@@ -8553,541 +10136,28 @@ void HardwareDock::refreshAllViews()
         networkRxAverageBytesPerSec,
         networkTxAverageBytesPerSec,
         gpuUsageAveragePercent);
-    if (m_utilizationFloatingMode == UtilizationFloatingMode::Detail)
-    {
-        // Device discovery can add chart views after the page has been floated.
-        applyUtilizationFloatingTheme();
-    }
     // 高度重排只在 resize/tab 切换时执行，避免每秒重算导致核心图容器抖动。
 
     // 周期刷新策略：
     // - 传感器每 5 秒异步更新一次；
     // - 静态文本每 60 秒异步更新一次（兼顾信息时效与系统开销）。
-    if ((m_sampleCounter % 5) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 5) == 1)
     {
         requestAsyncSensorRefresh();
     }
-    if ((m_sampleCounter % 60) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 60) == 1)
     {
         requestAsyncStaticInfoRefresh();
     }
 }
 
-bool HardwareDock::samplePerCoreUsage(
-    std::vector<double>* coreUsageOut,
-    double* totalUsageOut)
-{
-    if (coreUsageOut == nullptr || totalUsageOut == nullptr)
-    {
-        return false;
-    }
-    coreUsageOut->clear();
-    m_metricCoreValid.clear();
-    *totalUsageOut = 0.0; // 查询早退也不能保留上一帧的有效性或总值。
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        initializePerformanceCounters();
-    }
-    coreUsageOut->assign(m_coreCounterHandles.size(), 0.0);
-    m_metricCoreValid.assign(m_coreCounterHandles.size(), false);
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        return false;
-    }
 
-    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle);
-    const PDH_STATUS collectStatus = ::PdhCollectQueryData(queryHandle);
-    if (collectStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
 
-    double usageSum = 0.0;
-    int validCount = 0;
 
-    for (std::size_t coreIndex = 0; coreIndex < m_coreCounterHandles.size(); ++coreIndex)
-    {
-        void* counterHandleVoid = m_coreCounterHandles[coreIndex];
-        if (counterHandleVoid == nullptr)
-        {
-            continue;
-        }
 
-        PDH_FMT_COUNTERVALUE formattedValue{};
-        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
-            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
-            PDH_FMT_DOUBLE,
-            nullptr,
-            &formattedValue);
-        if (readStatus != ERROR_SUCCESS
-            || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
-                && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
-            || !std::isfinite(formattedValue.doubleValue))
-        {
-            continue;
-        }
 
-        const double usageValue = std::clamp(formattedValue.doubleValue, 0.0, 100.0);
-        (*coreUsageOut)[coreIndex] = usageValue;
-        m_metricCoreValid[coreIndex] = true; // 部分失败核的0占位不能成为有效历史样本。
-        usageSum += usageValue;
-        ++validCount;
-    }
 
-    *totalUsageOut = validCount > 0 ? (usageSum / static_cast<double>(validCount)) : 0.0;
-    return validCount > 0;
-}
 
-bool HardwareDock::sampleCpuEffectiveSpeed(double* speedGhzOut) const
-{
-    if (speedGhzOut == nullptr
-        || m_cpuPerformanceCounterHandle == nullptr
-        || m_cpuFrequencyCounterHandle == nullptr)
-    {
-        return false;
-    }
-
-    const auto readCounterValue =
-        [](void* counterHandle, double* valueOut)
-        {
-            if (counterHandle == nullptr || valueOut == nullptr)
-            {
-                return false;
-            }
-            PDH_FMT_COUNTERVALUE formattedValue{};
-            const PDH_STATUS status = ::PdhGetFormattedCounterValue(
-                reinterpret_cast<PDH_HCOUNTER>(counterHandle),
-                PDH_FMT_DOUBLE,
-                nullptr,
-                &formattedValue);
-            if (status != ERROR_SUCCESS
-                || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
-                    && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
-                || !std::isfinite(formattedValue.doubleValue))
-            {
-                return false;
-            }
-            *valueOut = formattedValue.doubleValue;
-            return true;
-        };
-
-    double performancePercent = 0.0;
-    double baseFrequencyMhz = 0.0;
-    if (!readCounterValue(m_cpuPerformanceCounterHandle, &performancePercent)
-        || !readCounterValue(m_cpuFrequencyCounterHandle, &baseFrequencyMhz))
-    {
-        return false;
-    }
-
-    const double effectiveFrequencyMhz = baseFrequencyMhz * performancePercent / 100.0;
-    if (!std::isfinite(effectiveFrequencyMhz)
-        || effectiveFrequencyMhz <= 0.0
-        || effectiveFrequencyMhz > 20000.0)
-    {
-        return false;
-    }
-
-    *speedGhzOut = effectiveFrequencyMhz / 1000.0;
-    return true;
-}
-
-bool HardwareDock::sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut)
-{
-    if (powerInfoOut == nullptr)
-    {
-        return false;
-    }
-
-    const ULONG logicalProcessorCount = std::max<ULONG>(
-        1,
-        static_cast<ULONG>(m_coreChartEntries.size()));
-    // KsProcessorPowerInformation 用途：
-    // - 与 CallNtPowerInformation(ProcessorInformation) 输出结构保持二进制兼容；
-    // - 避免不同 SDK 版本缺少 PROCESSOR_POWER_INFORMATION 定义导致编译失败。
-    struct KsProcessorPowerInformation
-    {
-        ULONG Number;            // Number：逻辑处理器编号。
-        ULONG MaxMhz;            // MaxMhz：最大频率。
-        ULONG CurrentMhz;        // CurrentMhz：当前频率。
-        ULONG MhzLimit;          // MhzLimit：限频上限。
-        ULONG MaxIdleState;      // MaxIdleState：最大空闲状态。
-        ULONG CurrentIdleState;  // CurrentIdleState：当前空闲状态。
-    };
-    std::vector<KsProcessorPowerInformation> nativeInfoList(logicalProcessorCount);
-
-    const NTSTATUS ntStatus = ::CallNtPowerInformation(
-        ProcessorInformation,
-        nullptr,
-        0,
-        nativeInfoList.data(),
-        static_cast<ULONG>(nativeInfoList.size() * sizeof(KsProcessorPowerInformation)));
-    if (ntStatus != 0)
-    {
-        return false;
-    }
-
-    powerInfoOut->clear();
-    powerInfoOut->reserve(nativeInfoList.size());
-    for (const KsProcessorPowerInformation& nativeInfo : nativeInfoList)
-    {
-        CpuPowerSnapshot snapshot;
-        snapshot.coreIndex = nativeInfo.Number;
-        snapshot.currentMhz = nativeInfo.CurrentMhz;
-        snapshot.maxMhz = nativeInfo.MaxMhz;
-        snapshot.limitMhz = nativeInfo.MhzLimit;
-        powerInfoOut->push_back(snapshot);
-    }
-    return true;
-}
-
-bool HardwareDock::sampleMemoryUsage(double* memoryUsagePercentOut)
-{
-    if (memoryUsagePercentOut == nullptr)
-    {
-        return false;
-    }
-
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
-    {
-        *memoryUsagePercentOut = 0.0;
-        return false;
-    }
-
-    *memoryUsagePercentOut = static_cast<double>(memoryStatus.dwMemoryLoad);
-    return true;
-}
-
-bool HardwareDock::sampleDiskRates(std::vector<DiskRateSample>* sampleListOut)
-{
-    if (sampleListOut == nullptr)
-    {
-        return false;
-    }
-
-    if (m_diskPerfQueryHandle == nullptr)
-    {
-        PDH_HQUERY queryHandle = nullptr;
-        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
-        {
-            return false;
-        }
-
-        PDH_HCOUNTER readCounterHandle = nullptr;
-        PDH_HCOUNTER writeCounterHandle = nullptr;
-        const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
-            queryHandle,
-            L"\\PhysicalDisk(*)\\Disk Read Bytes/sec",
-            0,
-            &readCounterHandle);
-        const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
-            queryHandle,
-            L"\\PhysicalDisk(*)\\Disk Write Bytes/sec",
-            0,
-            &writeCounterHandle);
-        if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
-        {
-            ::PdhCloseQuery(queryHandle);
-            return false;
-        }
-
-        m_diskPerfQueryHandle = queryHandle;
-        m_diskReadCounterHandle = readCounterHandle;
-        m_diskWriteCounterHandle = writeCounterHandle;
-        ::PdhCollectQueryData(queryHandle);
-    }
-
-    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
-    if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    DWORD readBufferSize = 0;
-    DWORD readItemCount = 0;
-    PDH_STATUS readQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
-        PDH_FMT_DOUBLE,
-        &readBufferSize,
-        &readItemCount,
-        nullptr);
-    if (readQueryStatus != PDH_MORE_DATA || readBufferSize == 0 || readItemCount == 0)
-    {
-        sampleListOut->clear();
-        return true;
-    }
-
-    std::vector<unsigned char> readBuffer(readBufferSize);
-    PDH_FMT_COUNTERVALUE_ITEM_W* readItemPointer =
-        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(readBuffer.data());
-    readQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
-        PDH_FMT_DOUBLE,
-        &readBufferSize,
-        &readItemCount,
-        readItemPointer);
-    if (readQueryStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    DWORD writeBufferSize = 0;
-    DWORD writeItemCount = 0;
-    PDH_STATUS writeQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
-        PDH_FMT_DOUBLE,
-        &writeBufferSize,
-        &writeItemCount,
-        nullptr);
-    if (writeQueryStatus != PDH_MORE_DATA || writeBufferSize == 0 || writeItemCount == 0)
-    {
-        return false;
-    }
-
-    std::vector<unsigned char> writeBuffer(writeBufferSize);
-    PDH_FMT_COUNTERVALUE_ITEM_W* writeItemPointer =
-        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(writeBuffer.data());
-    writeQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
-        PDH_FMT_DOUBLE,
-        &writeBufferSize,
-        &writeItemCount,
-        writeItemPointer);
-    if (writeQueryStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    sampleListOut->clear();
-    sampleListOut->reserve(readItemCount);
-    for (DWORD readIndex = 0; readIndex < readItemCount; ++readIndex)
-    {
-        const PDH_FMT_COUNTERVALUE_ITEM_W& readItem = readItemPointer[readIndex];
-        const QString instanceNameText = QString::fromWCharArray(
-            readItem.szName != nullptr ? readItem.szName : L"").trimmed();
-        if (instanceNameText.isEmpty() || instanceNameText == QStringLiteral("_Total"))
-        {
-            continue;
-        }
-        if (readItem.FmtValue.CStatus != ERROR_SUCCESS)
-        {
-            continue;
-        }
-
-        DiskRateSample sample;
-        sample.instanceNameText = instanceNameText;
-        sample.displayNameText = simplifyDiskInstanceName(instanceNameText);
-        sample.readBytesPerSec = std::max(0.0, readItem.FmtValue.doubleValue);
-        for (DWORD writeIndex = 0; writeIndex < writeItemCount; ++writeIndex)
-        {
-            const PDH_FMT_COUNTERVALUE_ITEM_W& writeItem = writeItemPointer[writeIndex];
-            const QString writeInstanceNameText = QString::fromWCharArray(
-                writeItem.szName != nullptr ? writeItem.szName : L"").trimmed();
-            if (QString::compare(writeInstanceNameText, instanceNameText, Qt::CaseInsensitive) == 0
-                && writeItem.FmtValue.CStatus == ERROR_SUCCESS)
-            {
-                sample.writeBytesPerSec = std::max(0.0, writeItem.FmtValue.doubleValue);
-                break;
-            }
-        }
-        sampleListOut->push_back(sample);
-    }
-    return true;
-}
-
-bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut)
-{
-    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    std::vector<DiskRateSample> sampleList;
-    const bool sampleOk = sampleDiskRates(&sampleList);
-    if (!sampleOk)
-    {
-        return false;
-    }
-
-    double totalReadBytesPerSec = 0.0;
-    double totalWriteBytesPerSec = 0.0;
-    for (const DiskRateSample& sample : sampleList)
-    {
-        totalReadBytesPerSec += std::max(0.0, sample.readBytesPerSec);
-        totalWriteBytesPerSec += std::max(0.0, sample.writeBytesPerSec);
-    }
-    *readBytesPerSecOut = totalReadBytesPerSec;
-    *writeBytesPerSecOut = totalWriteBytesPerSec;
-    return true;
-}
-
-bool HardwareDock::sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut)
-{
-    if (rxBytesPerSecOut == nullptr || txBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    MIB_IF_TABLE2* tablePointer = nullptr;
-    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
-    {
-        return false;
-    }
-
-    std::uint64_t totalRxBytes = 0;
-    std::uint64_t totalTxBytes = 0;
-    std::uint64_t primaryTrafficBytes = 0;
-    QString primaryAdapterName;
-    std::uint64_t primaryLinkBitsPerSecond = 0;
-    std::unordered_set<std::uint64_t> ipInterfaceKeys;
-    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
-    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
-    {
-        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
-        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
-        {
-            continue;
-        }
-
-        totalRxBytes += static_cast<std::uint64_t>(rowValue.InOctets);
-        totalTxBytes += static_cast<std::uint64_t>(rowValue.OutOctets);
-
-        // 对齐任务管理器展示口径：
-        // - 选择当前“累计流量最高”的活动网卡作为主展示网卡；
-        // - 记录其链路速率，供详情页显示。
-        const std::uint64_t rowTrafficBytes = static_cast<std::uint64_t>(rowValue.InOctets)
-            + static_cast<std::uint64_t>(rowValue.OutOctets);
-        if (rowTrafficBytes >= primaryTrafficBytes)
-        {
-            primaryTrafficBytes = rowTrafficBytes;
-            primaryAdapterName = QString::fromWCharArray(rowValue.Alias);
-            primaryLinkBitsPerSecond = std::max<std::uint64_t>(
-                static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
-                static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
-        }
-    }
-    ::FreeMibTable(tablePointer);
-
-    m_primaryNetworkAdapterName = primaryAdapterName;
-    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
-
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastNetworkSampleMs <= 0)
-    {
-        m_lastNetworkSampleMs = nowMs;
-        m_lastNetworkRxBytes = totalRxBytes;
-        m_lastNetworkTxBytes = totalTxBytes;
-        *rxBytesPerSecOut = 0.0;
-        *txBytesPerSecOut = 0.0;
-        return true;
-    }
-
-    const qint64 elapsedMs = nowMs - m_lastNetworkSampleMs;
-    if (elapsedMs <= 0)
-    {
-        return false;
-    }
-
-    const std::uint64_t deltaRx = totalRxBytes >= m_lastNetworkRxBytes
-        ? (totalRxBytes - m_lastNetworkRxBytes)
-        : 0;
-    const std::uint64_t deltaTx = totalTxBytes >= m_lastNetworkTxBytes
-        ? (totalTxBytes - m_lastNetworkTxBytes)
-        : 0;
-    m_lastNetworkSampleMs = nowMs;
-    m_lastNetworkRxBytes = totalRxBytes;
-    m_lastNetworkTxBytes = totalTxBytes;
-
-    *rxBytesPerSecOut = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
-    *txBytesPerSecOut = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
-    return true;
-}
-
-bool HardwareDock::sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut)
-{
-    if (sampleListOut == nullptr)
-    {
-        return false;
-    }
-
-    MIB_IF_TABLE2* tablePointer = nullptr;
-    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
-    {
-        return false;
-    }
-
-    sampleListOut->clear();
-    sampleListOut->reserve(tablePointer->NumEntries);
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    std::uint64_t primaryTrafficBytes = 0;
-    QString primaryAdapterName;
-    std::uint64_t primaryLinkBitsPerSecond = 0;
-    std::unordered_set<std::uint64_t> ipInterfaceKeys;
-    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
-    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
-    {
-        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
-        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
-        {
-            continue;
-        }
-
-        NetworkRateSample sample;
-        sample.interfaceKey = interfaceLuidToKey(static_cast<std::uint64_t>(rowValue.InterfaceLuid.Value));
-        sample.displayNameText = QString::fromWCharArray(rowValue.Alias).trimmed();
-        if (sample.displayNameText.isEmpty())
-        {
-            sample.displayNameText = QString::fromWCharArray(rowValue.Description).trimmed();
-        }
-        sample.linkBitsPerSecond = std::max<std::uint64_t>(
-            static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
-            static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
-        sample.physical = rowValue.InterfaceAndOperStatusFlags.HardwareInterface != 0;
-        sample.operational = rowValue.OperStatus == IfOperStatusUp;
-        sample.totalRxBytes = static_cast<std::uint64_t>(rowValue.InOctets);
-        sample.totalTxBytes = static_cast<std::uint64_t>(rowValue.OutOctets);
-
-        const int deviceIndex = ensureNetworkUtilizationDevice(
-            sample,
-            static_cast<int>(sampleListOut->size()));
-        if (deviceIndex >= 0 && deviceIndex < static_cast<int>(m_networkUtilDevices.size()))
-        {
-            NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
-            const qint64 elapsedMs = nowMs - device.lastSampleMs;
-            if (sample.operational && device.lastOperational
-                && device.hasPreviousSample && elapsedMs > 0)
-            {
-                const std::uint64_t deltaRx = sample.totalRxBytes >= device.lastRxBytes
-                    ? (sample.totalRxBytes - device.lastRxBytes)
-                    : 0;
-                const std::uint64_t deltaTx = sample.totalTxBytes >= device.lastTxBytes
-                    ? (sample.totalTxBytes - device.lastTxBytes)
-                    : 0;
-                sample.rxBytesPerSec = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
-                sample.txBytesPerSec = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
-            }
-            device.lastRxBytes = sample.totalRxBytes;
-            device.lastTxBytes = sample.totalTxBytes;
-            device.lastSampleMs = nowMs;
-            device.linkBitsPerSecond = sample.linkBitsPerSecond;
-            device.lastOperational = sample.operational;
-            device.hasPreviousSample = true;
-        }
-        const std::uint64_t trafficBytes = sample.totalRxBytes + sample.totalTxBytes;
-        if (sample.operational && trafficBytes >= primaryTrafficBytes)
-        {
-            primaryTrafficBytes = trafficBytes;
-            primaryAdapterName = sample.displayNameText;
-            primaryLinkBitsPerSecond = sample.linkBitsPerSecond;
-        }
-        sampleListOut->push_back(sample);
-    }
-    ::FreeMibTable(tablePointer);
-    m_primaryNetworkAdapterName = primaryAdapterName;
-    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
-    return true;
-}
 
 bool HardwareDock::sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut)
 {
@@ -9536,7 +10606,8 @@ bool HardwareDock::sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut)
     }
 
     // 详情页创建与卡片注册只能在 UI 线程做，因此放在快照回到本线程之后。
-    for (int sampleIndex = 0; sampleIndex < static_cast<int>(sampleListOut->size()); ++sampleIndex)
+    for (int sampleIndex = 0; m_utilizationDetailsInitialized
+        && sampleIndex < static_cast<int>(sampleListOut->size()); ++sampleIndex)
     {
         ensureGpuUtilizationDevice(
             (*sampleListOut)[static_cast<std::size_t>(sampleIndex)],
@@ -9800,32 +10871,6 @@ bool HardwareDock::sampleGpuMemoryInfoByDxgi()
     return querySuccess;
 }
 
-bool HardwareDock::sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const
-{
-    if (snapshotOut == nullptr)
-    {
-        return false;
-    }
-
-    PERFORMANCE_INFORMATION perfInfo{};
-    perfInfo.cb = sizeof(perfInfo);
-    if (::GetPerformanceInfo(&perfInfo, sizeof(perfInfo)) == FALSE)
-    {
-        return false;
-    }
-
-    // pageSizeBytes 用途：把页数指标统一转换为字节单位。
-    const std::uint64_t pageSizeBytes = static_cast<std::uint64_t>(perfInfo.PageSize);
-    snapshotOut->processCount = static_cast<std::uint32_t>(perfInfo.ProcessCount);
-    snapshotOut->threadCount = static_cast<std::uint32_t>(perfInfo.ThreadCount);
-    snapshotOut->handleCount = static_cast<std::uint32_t>(perfInfo.HandleCount);
-    snapshotOut->commitTotalBytes = static_cast<std::uint64_t>(perfInfo.CommitTotal) * pageSizeBytes;
-    snapshotOut->commitLimitBytes = static_cast<std::uint64_t>(perfInfo.CommitLimit) * pageSizeBytes;
-    snapshotOut->cachedBytes = static_cast<std::uint64_t>(perfInfo.SystemCache) * pageSizeBytes;
-    snapshotOut->pagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelPaged) * pageSizeBytes;
-    snapshotOut->nonPagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelNonpaged) * pageSizeBytes;
-    return true;
-}
 
 void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double memoryUsagePercent)
 {
@@ -9834,17 +10879,14 @@ void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double
         return;
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    ::GlobalMemoryStatusEx(&memoryStatus);
 
     const QString summaryText = ks::i18n::contextText(
         QStringLiteral("hardware.overview.summary"),
         QStringLiteral("CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4    %5"))
         .arg(cpuUsagePercent, 0, 'f', 1)
         .arg(memoryUsagePercent, 0, 'f', 1)
-        .arg(bytesToGiBText(memoryStatus.ullAvailPhys))
-        .arg(bytesToGiBText(memoryStatus.ullTotalPhys))
+        .arg(bytesToGiBText(m_lastPerformanceSample.availablePhysicalBytes))
+        .arg(bytesToGiBText(m_lastPerformanceSample.totalPhysicalBytes))
         .arg(m_r0HardwareHealthSummaryText);
     m_overviewSummaryLabel->setText(summaryText);
 }
@@ -9923,14 +10965,11 @@ void HardwareDock::updateUtilizationView(
         MemoryCompositionHistoryWidget::CompositionSample memorySample;
         memorySample.usedPercent = memoryUsagePercent;
 
-        SystemPerformanceSnapshot perfSnapshot;
-        const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
-        MEMORYSTATUSEX memoryStatus{};
-        memoryStatus.dwLength = sizeof(memoryStatus);
-        const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
-        if (perfOk && memoryStatusOk && memoryStatus.ullTotalPhys > 0ULL)
+        const auto& perfSnapshot = m_lastPerformanceSample.systemPerformance;
+        const bool perfOk = m_lastPerformanceSample.systemPerformanceValid;
+        if (perfOk && m_lastPerformanceSample.memoryValid && m_lastPerformanceSample.totalPhysicalBytes > 0ULL)
         {
-            const double totalPhysicalBytes = static_cast<double>(memoryStatus.ullTotalPhys);
+            const double totalPhysicalBytes = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes);
             memorySample.cachedPercent = static_cast<double>(perfSnapshot.cachedBytes) / totalPhysicalBytes * 100.0;
             memorySample.pagedPoolPercent = static_cast<double>(perfSnapshot.pagedPoolBytes) / totalPhysicalBytes * 100.0;
             memorySample.nonPagedPoolPercent = static_cast<double>(perfSnapshot.nonPagedPoolBytes) / totalPhysicalBytes * 100.0;
@@ -10111,13 +11150,11 @@ void HardwareDock::updateUtilizationSidebarCards(
         m_cpuNavCard->appendSample(cpuUsagePercent);
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (m_memoryNavCard != nullptr && ::GlobalMemoryStatusEx(&memoryStatus) == TRUE)
+    if (m_memoryNavCard != nullptr && m_lastPerformanceSample.memoryValid)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double totalGiB = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB =
-            static_cast<double>(memoryStatus.ullTotalPhys - memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+            static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes - m_lastPerformanceSample.availablePhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double cachedPercent = std::clamp(
             100.0 - memoryUsagePercent,
             0.0,
@@ -10284,7 +11321,7 @@ void HardwareDock::updateDiskUtilizationDevice(
         device.axisY,
         0.0);
 
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         rebuildDualRateNavCard(
             device.navCard,
@@ -10358,7 +11395,7 @@ void HardwareDock::updateNetworkUtilizationDevice(
         device.axisY,
         0.0);
 
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         rebuildDualRateNavCard(
             device.navCard,
@@ -10542,7 +11579,7 @@ void HardwareDock::updateGpuUtilizationDevice(
             .arg(sharedCapacityGiB, 0, 'f', 2)
             .arg(sample.adapterIndex));
     }
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         device.navCard->setSubtitleText(
             ks::i18n::contextText(
@@ -10609,8 +11646,8 @@ void HardwareDock::updateTaskManagerDetailLabels(
     const UtilizationStatisticSnapshot cpuStats = buildStatisticSnapshot(m_cpuUsageHistoryPercent);
 
     // 系统性能快照用于进程/线程/句柄与提交内存统计。
-    SystemPerformanceSnapshot perfSnapshot;
-    const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
+    const auto& perfSnapshot = m_lastPerformanceSample.systemPerformance;
+    const bool perfOk = m_lastPerformanceSample.systemPerformanceValid;
 
     // uptimeSeconds 用途：系统已运行秒数，显示为任务管理器风格时间串。
     const std::uint64_t uptimeSeconds = static_cast<std::uint64_t>(::GetTickCount64() / 1000ULL);
@@ -10739,13 +11776,11 @@ void HardwareDock::updateTaskManagerDetailLabels(
     // 返回行为：无返回值，CPU 页面会在当前事件循环内按最新文本高度完成重排。
     adjustUtilizationChartHeights();
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
+    const bool memoryStatusOk = m_lastPerformanceSample.memoryValid;
     if (memoryStatusOk)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
-        const double availableGiB = static_cast<double>(memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double totalGiB = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
+        const double availableGiB = static_cast<double>(m_lastPerformanceSample.availablePhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB = totalGiB - availableGiB;
         if (m_memoryCapacityLabel != nullptr)
         {
@@ -10780,11 +11815,10 @@ void HardwareDock::updateTaskManagerDetailLabels(
 
     if (m_memoryUtilSecondaryDetailLabel != nullptr)
     {
-        ULONGLONG installedMemoryKb = 0;
-        ::GetPhysicallyInstalledSystemMemory(&installedMemoryKb);
+        const auto installedMemoryKb = m_lastPerformanceSample.installedMemoryKb;
         const double installedBytes = static_cast<double>(installedMemoryKb) * 1024.0;
         const double reservedBytes = memoryStatusOk
-            ? std::max(0.0, installedBytes - static_cast<double>(memoryStatus.ullTotalPhys))
+            ? std::max(0.0, installedBytes - static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes))
             : 0.0;
         m_memoryUtilSecondaryDetailLabel->setText(
             ks::i18n::contextText(
@@ -10803,7 +11837,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
             .arg(m_r0PhysicalMemoryDetailText));
     }
 
-    if ((m_sampleCounter % 15) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 15) == 1)
     {
         refreshSystemVolumeInfo();
     }
@@ -11667,7 +12701,7 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
         // 这样自动刷新不再每 60 秒连续提交 Device/Input/USB 三个大体积 R0 查询。
         std::uint32_t deviceAuditRefreshMask = 0U;
         QWidget* const currentPage = m_sideTabWidget != nullptr
-            ? m_sideTabWidget->currentWidget()
+            ? currentHardwarePage()
             : nullptr;
         if (currentPage == m_deviceStackPage)
         {
@@ -11696,37 +12730,32 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
         }
     }
 
-    if (m_overviewEditor != nullptr && !m_cachedOverviewFields.isEmpty())
+    const auto present = [this](const std::size_t index, QWidget* page,
+        ks::ui::StructuredFieldView* editor, const ks::ui::FieldDocument& document,
+        QTableWidget* table = nullptr, const QVector<QStringList>* rows = nullptr)
     {
-        m_overviewEditor->setDocument(m_cachedOverviewFields);
-    }
-    if (m_gpuEditor != nullptr && !m_cachedGpuFields.isEmpty())
-    {
-        m_gpuEditor->setDocument(m_cachedGpuFields);
-    }
-    if (m_memoryEditor != nullptr && !m_cachedMemoryFields.isEmpty())
-    {
-        m_memoryEditor->setDocument(m_cachedMemoryFields);
-    }
-    if (m_deviceStackEditor != nullptr && !m_cachedDeviceStackFields.isEmpty())
-    {
-        m_deviceStackEditor->setDocument(m_cachedDeviceStackFields);
-    }
-    populateDeviceAuditTable(m_deviceStackTable, m_cachedDeviceStackRows);
-    if (m_keyboardMouseHidEditor != nullptr && !m_cachedKeyboardMouseHidFields.isEmpty())
-    {
-        m_keyboardMouseHidEditor->setDocument(m_cachedKeyboardMouseHidFields);
-    }
-    populateDeviceAuditTable(m_keyboardMouseHidTable, m_cachedKeyboardMouseHidRows);
-    if (m_usbTopologyEditor != nullptr && !m_cachedUsbTopologyFields.isEmpty())
-    {
-        m_usbTopologyEditor->setDocument(m_cachedUsbTopologyFields);
-    }
-    populateDeviceAuditTable(m_usbTopologyTable, m_cachedUsbTopologyRows);
-    if (m_pnpAcpiPciEditor != nullptr && !m_cachedPnpAcpiPciFields.isEmpty())
-    {
-        m_pnpAcpiPciEditor->setDocument(m_cachedPnpAcpiPciFields);
-    }
+        // Newly mounted content becomes visible after QLayout's queued show. Its selected
+        // host is already visible, so fill it now instead of waiting for a second tab visit.
+        if (page == nullptr || (!page->isVisible()
+                && (!isVisible() || currentHardwarePage() != page))
+            || m_staticPresentedRevisions[index] == m_staticDataRevisions[index])
+        {
+            return;
+        }
+        if (editor != nullptr) editor->setDocument(document);
+        if (table != nullptr && rows != nullptr) populateDeviceAuditTable(table, *rows);
+        m_staticPresentedRevisions[index] = m_staticDataRevisions[index];
+    };
+    present(0, m_overviewPage, m_overviewEditor, m_cachedOverviewFields);
+    present(1, m_gpuPage, m_gpuEditor, m_cachedGpuFields);
+    present(2, m_memoryPage, m_memoryEditor, m_cachedMemoryFields);
+    present(3, m_deviceStackPage, m_deviceStackEditor, m_cachedDeviceStackFields,
+        m_deviceStackTable, &m_cachedDeviceStackRows);
+    present(4, m_keyboardMouseHidPage, m_keyboardMouseHidEditor, m_cachedKeyboardMouseHidFields,
+        m_keyboardMouseHidTable, &m_cachedKeyboardMouseHidRows);
+    present(5, m_usbTopologyPage, m_usbTopologyEditor, m_cachedUsbTopologyFields,
+        m_usbTopologyTable, &m_cachedUsbTopologyRows);
+    present(6, m_pnpAcpiPciPage, m_pnpAcpiPciEditor, m_cachedPnpAcpiPciFields);
 }
 
 void HardwareDock::requestAsyncStaticInfoRefresh()
@@ -11769,11 +12798,24 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
                     return;
                 }
 
-                safeThis->m_cachedOverviewFields = overviewFields;
+                if (safeThis->m_cachedOverviewFields != overviewFields)
+                {
+                    safeThis->m_cachedOverviewFields = overviewFields;
+                    ++safeThis->m_staticDataRevisions[0];
+                }
                 if (includeHardwareDetails)
                 {
-                    safeThis->m_cachedGpuFields = buildGpuHardwareSummaryFields(gpuSummary, gpuWmiFields);
-                    safeThis->m_cachedMemoryFields = memoryFields;
+                    const auto gpuFields = buildGpuHardwareSummaryFields(gpuSummary, gpuWmiFields);
+                    if (safeThis->m_cachedGpuFields != gpuFields)
+                    {
+                        safeThis->m_cachedGpuFields = gpuFields;
+                        ++safeThis->m_staticDataRevisions[1];
+                    }
+                    if (safeThis->m_cachedMemoryFields != memoryFields)
+                    {
+                        safeThis->m_cachedMemoryFields = memoryFields;
+                        ++safeThis->m_staticDataRevisions[2];
+                    }
                     safeThis->m_memorySpeedMhz = memorySummary.speedMhz;
                     safeThis->m_memorySlotUsed = memorySummary.usedSlots;
                     safeThis->m_memorySlotTotal = memorySummary.totalSlots;
@@ -11937,24 +12979,31 @@ void HardwareDock::applyDeviceAuditRefreshResult(
         return;
     }
 
-    if ((requestedMask & DeviceStackAuditRefresh) != 0U)
+    if ((requestedMask & DeviceStackAuditRefresh) != 0U
+        && (m_cachedDeviceStackFields != deviceStackSnapshot.summaryFields || m_cachedDeviceStackRows != deviceStackSnapshot.rows))
     {
         m_cachedDeviceStackFields = std::move(deviceStackSnapshot.summaryFields);
         m_cachedDeviceStackRows = std::move(deviceStackSnapshot.rows);
+        ++m_staticDataRevisions[3];
     }
-    if ((requestedMask & InputStackAuditRefresh) != 0U)
+    if ((requestedMask & InputStackAuditRefresh) != 0U
+        && (m_cachedKeyboardMouseHidFields != inputStackSnapshot.summaryFields || m_cachedKeyboardMouseHidRows != inputStackSnapshot.rows))
     {
         m_cachedKeyboardMouseHidFields = std::move(inputStackSnapshot.summaryFields);
         m_cachedKeyboardMouseHidRows = std::move(inputStackSnapshot.rows);
+        ++m_staticDataRevisions[4];
     }
-    if ((requestedMask & UsbTopologyAuditRefresh) != 0U)
+    if ((requestedMask & UsbTopologyAuditRefresh) != 0U
+        && (m_cachedUsbTopologyFields != usbTopologySnapshot.summaryFields || m_cachedUsbTopologyRows != usbTopologySnapshot.rows))
     {
         m_cachedUsbTopologyFields = std::move(usbTopologySnapshot.summaryFields);
         m_cachedUsbTopologyRows = std::move(usbTopologySnapshot.rows);
+        ++m_staticDataRevisions[5];
     }
-    if ((requestedMask & PnpAcpiPciRefresh) != 0U)
+    if ((requestedMask & PnpAcpiPciRefresh) != 0U && m_cachedPnpAcpiPciFields != pnpAcpiPciFields)
     {
         m_cachedPnpAcpiPciFields = std::move(pnpAcpiPciFields);
+        ++m_staticDataRevisions[6];
     }
 
     refreshStaticHardwareTexts(false);

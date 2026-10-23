@@ -71,6 +71,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -158,6 +159,11 @@ namespace ksword::memwb
         // maxPendingBytes 默认是 64 MiB 常量；参数只为让测试能用小上限验证边界。
         explicit MemoryDiffOverlay(std::uint64_t maxPendingBytes = kMemoryDiffOverlayMaxPendingBytes);
 
+        // Copies and rvalue transfers keep both snapshot handles valid. Their
+        // immutable storage is shared; the first subsequent mutator detaches.
+        MemoryDiffOverlay(const MemoryDiffOverlay&) noexcept = default;
+        MemoryDiffOverlay& operator=(const MemoryDiffOverlay&) noexcept = default;
+
         // 载入新目标 / 新快照的基线，并清空全部暂存补丁。
         // 入参：identityKey 目标身份串（scope+pid+channel 等由调用方拼好）；
         //       baseAddress 窗口起始绝对地址；bytes 读到的字节；
@@ -244,6 +250,34 @@ namespace ksword::memwb
         // 本实例使用的暂存总量上限。
         std::uint64_t MaxPendingBytes() const;
 
+        // Value copies share an immutable revision until a mutator detaches.
+        // A worker may mutate its own copy while the GUI reads the original.
+        // The same instance must never be used concurrently by two threads.
+        // A projection witness keeps the storage control-block identity, not
+        // the large state itself. Unlock hooks may refresh the baseline without
+        // inheriting a full-map GUI detach from a finished value disposer.
+        struct Revision
+        {
+            std::weak_ptr<const void> storage;
+            std::uint64_t serial = 0;
+        };
+        Revision CaptureRevision() const noexcept { return {state_, mutationSerial_}; }
+        bool MatchesRevision(const Revision& revision) const noexcept
+        { return mutationSerial_ == revision.serial && revision.storage.lock() == state_; }
+        std::uint64_t MutationSerial() const noexcept { return mutationSerial_; }
+        std::size_t PendingBlockCount() const noexcept { return state_->patches_.size(); }
+        bool SameRevision(const MemoryDiffOverlay& other) const noexcept
+        { return mutationSerial_ == other.mutationSerial_ && state_ == other.state_; }
+        // Constant-time projection into this same overlay object. The prepared
+        // owner retains the displaced revision for disposal on its worker.
+        bool TryAdoptPrepared(const MemoryDiffOverlay& original, MemoryDiffOverlay& prepared) noexcept
+        {
+            if (!SameRevision(original)) return false;
+            state_.swap(prepared.state_);
+            ++mutationSerial_;
+            return true;
+        }
+
         // 区间 [address, address + length) 的终点是否能用 uint64 表示（全类统一的溢出判据）。
         static bool RangeRepresentable(std::uint64_t address, std::uint64_t length);
 
@@ -287,29 +321,36 @@ namespace ksword::memwb
         // address 是否落在当前基线窗口内。
         bool InWindow(std::uint64_t address) const;
 
-        // 暂存总量上限。
-        std::uint64_t maxPendingBytes_;
-        // 是否已载入基线。
-        bool hasBaseline_ = false;
-        // 当前基线的身份串。
-        std::string identityKey_;
-        // 窗口起始绝对地址。
-        std::uint64_t baseAddress_ = 0;
-        // 基线字节。
-        std::vector<std::uint8_t> baseline_;
-        // 基线有效掩码，与 baseline_ 等长，0 = 没读到，非零 = 真实读到。
-        std::vector<std::uint8_t> validMask_;
-        // 是否存在上次读取。
-        bool hasPrevious_ = false;
-        // 上次读取的字节（与 baseline_ 等长）。
-        std::vector<std::uint8_t> previous_;
-        // 上次读取的有效掩码。
-        std::vector<std::uint8_t> previousMask_;
-        // 自己写入标记，与 baseline_ 等长，1 = 刚被 AcceptWrite 写入。
-        std::vector<std::uint8_t> selfWritten_;
-        // 暂存补丁：键为块起始地址，值的 address 与键相同。块互不重叠也不相邻。
-        std::map<std::uint64_t, DiffBlock> patches_;
-        // 暂存补丁总字节数，等于各块 after.size() 之和。
-        std::uint64_t pendingBytes_ = 0;
+        struct State
+        {
+            // 暂存总量上限。
+            std::uint64_t maxPendingBytes_ = kMemoryDiffOverlayMaxPendingBytes;
+            // 是否已载入基线。
+            bool hasBaseline_ = false;
+            // 当前基线的身份串。
+            std::string identityKey_;
+            // 窗口起始绝对地址。
+            std::uint64_t baseAddress_ = 0;
+            // 基线字节。
+            std::vector<std::uint8_t> baseline_;
+            // 基线有效掩码，与 baseline_ 等长，0 = 没读到，非零 = 真实读到。
+            std::vector<std::uint8_t> validMask_;
+            // 是否存在上次读取。
+            bool hasPrevious_ = false;
+            // 上次读取的字节（与 baseline_ 等长）。
+            std::vector<std::uint8_t> previous_;
+            // 上次读取的有效掩码。
+            std::vector<std::uint8_t> previousMask_;
+            // 自己写入标记，与 baseline_ 等长，1 = 刚被 AcceptWrite 写入。
+            std::vector<std::uint8_t> selfWritten_;
+            // 暂存补丁：键为块起始地址，值的 address 与键相同。块互不重叠也不相邻。
+            std::map<std::uint64_t, DiffBlock> patches_;
+            // 暂存补丁总字节数，等于各块 after.size() 之和。
+            std::uint64_t pendingBytes_ = 0;
+        };
+        void Detach();
+        std::shared_ptr<State> state_;
+        std::uint64_t mutationSerial_ = 0;
+
     };
 }

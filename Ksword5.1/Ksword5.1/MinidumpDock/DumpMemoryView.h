@@ -13,11 +13,15 @@
 // ============================================================
 
 #include <QWidget>
+#include "../UI/PageNavigationCatalog.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <cstdint>
-#include <vector>
+#include <memory>
 
+class QEvent;
+struct DumpMemorySource;
+struct DumpMemoryReadResult;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -25,6 +29,7 @@ class QPushButton;
 namespace ks::ui
 {
     class HexView;
+    class AsyncOperation;
 }
 
 namespace ks::ui
@@ -44,10 +49,14 @@ namespace ks::minidump
 class DumpMemoryView final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const DumpMemoryView* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：创建地址输入、分页工具条、说明区与统一十六进制控件。
     explicit DumpMemoryView(QWidget* parent = nullptr);
+    ~DumpMemoryView() override;
 
-    // setDumpData 作用：替换当前转储的已验证内存范围并定位一个默认地址。
+    // setDumpData 作用：替换已验证来源并后台定位默认地址；相同来源仅重译。
     // 参数 result：解析器的自包含结果；本对象只复制轻量元数据，不保留文件映射。
     void setDumpData(const ks::minidump::DumpParseResult& result);
 
@@ -57,6 +66,9 @@ public:
     // retranslateUi 作用：按当前语言更新固定文案，并保持已加载的字节不变。
     void retranslateUi();
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
     // readAddressText 作用：解析用户输入的“地址”或“模块名+偏移”。
     // 返回 true 时写入 addressOut；模块名按完整路径与基本文件名进行不区分大小写匹配。
@@ -65,17 +77,20 @@ private:
     // findRangeIndex 作用：定位覆盖地址的捕获范围下标，找不到时返回 -1。
     int findRangeIndex(std::uint64_t address) const;
 
-    // findPreferredInitialAddress 作用：为首次打开选择含有效字节的已捕获范围。
-    // 先保留故障地址优先级；否则只读抽样每个范围，避免默认展示全零页而误导用户
-    // 以为查看器读取失败。没有非零字节时仍回退到第一个范围。
-    std::uint64_t findPreferredInitialAddress() const;
-
     // loadCurrentInput 作用：读取地址输入框内容并将结果显示到十六进制控件。
     void loadCurrentInput();
 
-    // loadAddress 作用：从已验证范围读取最多 64 KiB 的连续字节。
+    // loadAddress 作用：请求后台从已验证范围读取最多 64 KiB 的连续字节。
     // 读取失败时保留错误原因，绝不显示部分或越界数据。
-    bool loadAddress(std::uint64_t address);
+    void loadAddress(std::uint64_t address);
+
+    // 单个共享异步通道：默认探测、手动读取与分页都只在 worker 执行文件 I/O。
+    void submitRead(std::uint64_t address, bool chooseInitialAddress);
+    void finishRead(const DumpMemoryReadResult& result);
+    void updateReadControls();
+    void refreshDiagnostic();
+
+    enum class ViewState { Idle, NoRanges, Reading, InvalidInput, ReadResult };
 
     // goPreviousPage / goNextPage：在当前或相邻捕获范围中按读取大小翻页。
     void goPreviousPage();
@@ -102,13 +117,11 @@ private:
     ks::ui::SnapshotWorkbenchWidget* m_memoryEditor = nullptr; // 已捕获字节的只读多视图。
     ks::ui::HexView* m_hexEditor = nullptr; // 保留十六进制查找、复制和导出入口。
 
-    QString m_filePath;                 // m_filePath：解析时的原始 DMP 路径。
-    std::uint64_t m_expectedFileSize = 0; // m_expectedFileSize：解析时文件大小。
-    std::int64_t m_expectedFileLastModifiedUtcMs = -1; // 解析时的 UTC 修改时间戳。
-    std::vector<ks::minidump::DumpMemoryRange> m_ranges; // m_ranges：按虚拟地址排序的可读范围。
-    std::vector<ks::minidump::ModuleEntry> m_modules; // m_modules：模块名+偏移输入与归属提示。
-    std::vector<ks::minidump::MemoryRegionEntry> m_memoryRegions; // m_memoryRegions：地址属性提示。
-    std::uint32_t m_pointerSize = 8; // 从转储元数据取得目标指针宽度。
+    std::shared_ptr<const DumpMemorySource> m_source; // worker 与 GUI 共用不可变来源值。
+    std::shared_ptr<const DumpMemoryReadResult> m_lastRead; // 语言重译仅重投影，不重新读文件。
+    ks::ui::AsyncOperation* m_readOperation = nullptr; // QObject 子对象，析构第一步 close。
+    std::uint64_t m_sourceGeneration = 0; // 来源替换/清空拒绝迟到结果。
+    ViewState m_viewState = ViewState::Idle;
     bool m_architectureInitialized = false; // 翻页保留手动选择的架构。
     std::uint64_t m_currentAddress = 0; // m_currentAddress：当前页首地址。
     std::uint64_t m_currentReadBytes = 0; // m_currentReadBytes：当前页实际加载字节数。

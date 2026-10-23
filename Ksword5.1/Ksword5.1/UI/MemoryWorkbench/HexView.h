@@ -162,6 +162,7 @@
 #include <vector>
 
 class QMenu;
+class QShowEvent;
 class QShortcut;
 class QSplitter;
 class QVBoxLayout;
@@ -292,6 +293,11 @@ namespace ks::ui
         // byteEdited：用户编辑使缓冲里的字节真的变了。
         void byteEdited(quint64 absoluteAddress, quint8 oldValue, quint8 newValue);
 
+        // One final notification per edit transaction, after legacy byteEdited slots.
+        // Reentrant edits and quiet rollback addresses are merged. A replacement
+        // buffer makes rangeComplete false and requires a full host synchronization.
+        void bytesEdited(quint64 absoluteAddress, quint64 length, bool rangeComplete);
+
         // caretMoved：插入点（绝对地址）变化。
         void caretMoved(quint64 absoluteAddress);
 
@@ -334,6 +340,7 @@ namespace ks::ui
         void installBaseline(const QByteArray& previousRead = QByteArray());
         bool applyDiffPatches();
         void syncBufferFromOverlay(std::uint64_t address, std::uint64_t length);
+        void noteEditedRange(std::uint64_t first, std::uint64_t last);
         void onEditStaged(quint64 address, quint64 length);
         void onEditDiscarded(quint64 address, quint64 length);
         void onDataReplaced();
@@ -353,6 +360,10 @@ namespace ks::ui
         void showStatusMessage(HexViewStatusBar::Kind kind, const QString& text);
         bool runExport(hexexport::Kind kind, const QString& path, QString* messageOut = nullptr);
         void runExportWithDialog(hexexport::Kind kind);
+        bool captureExport(hexexport::Kind kind, hexexport::ExportSnapshot& value, QString& error) const;
+        bool startExport(std::shared_ptr<const hexexport::ExportSnapshot> value, const QString& path);
+        void finishExport(bool ok, const QString& message);
+        void showEvent(QShowEvent* event) override;
 
         // ---- 数据 ----
         std::uint64_t m_baseAddress = 0;                            // 缓冲起始地址
@@ -382,11 +393,31 @@ namespace ks::ui
         QMenu* m_exportMenu = nullptr;                              // 导出菜单
         QShortcut* m_escapeShortcut = nullptr;                      // Esc 快捷键（仅有条打开时启用）
 
+        // Nested legacy signal handlers can edit or replace the buffer synchronously.
+        std::uint64_t m_bufferGeneration = 0;
+        unsigned m_editNotificationDepth = 0;
+        bool m_batchDirty = false;
+        bool m_batchRangeComplete = true;
+        std::uint64_t m_batchFirst = 0;
+        std::uint64_t m_batchLast = 0;
+
         // ---- 状态 ----
         bool m_inspectorShown = false;                              // 解释器面板是否显示
         std::vector<HexCanvas::AddressRange> m_findRanges;          // 当前查找高亮区间（主题变化后重新着色用）
         bool m_visibleValid = false;                                // 是否收到过画布的可见范围
         std::uint64_t m_visibleFirst = 0;                           // 画布最近一次报告的可见起点
         std::uint64_t m_visibleLast = 0;                            // 画布最近一次报告的可见终点
+
+        struct ExportState final
+        {
+            std::shared_ptr<hexexport::ExportControl> control;
+            std::unique_ptr<CompleteExportOperation> operation;
+            ~ExportState()
+            {
+                if (control) control->cancelPreparation();
+                if (operation) operation->close();
+            }
+        };
+        std::unique_ptr<ExportState> m_exportState; // Last member: cancel preparation/close delivery before buffer members.
     };
 }

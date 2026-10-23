@@ -28,7 +28,10 @@
 //   heightForWidth 相关两处是为了让"遵守该协议"的宿主在会话条换行时拿到正确高度。
 // ============================================================
 
+#include "../MemoryPageNavigationSchema.h"
 #include "MemoryWorkbenchView.h"
+#include <QHideEvent>
+#include <QTimer>
 #include "../ToolbarMetrics.h"
 #include "MemoryWorkbenchView.Internal.h"
 
@@ -168,12 +171,7 @@ namespace ks::ui
         // 自己用 QPainter 画文字（自绘控件），运行期整树扫描够不到它的私有
         // QStringList 成员，必须在源头就翻译好（AGENTS.md i18n 规则）。
         subTabSegmented_ = new HexViewSegmented(
-            QStringList{
-                ks::i18n::sourceText(QStringLiteral("十六进制")),
-                ks::i18n::sourceText(QStringLiteral("反汇编")),
-                ks::i18n::sourceText(QStringLiteral("文本")),
-                ks::i18n::sourceText(QStringLiteral("对比")),
-                ks::i18n::sourceText(QStringLiteral("C 伪代码"))},
+            MemoryNavigationTabTitles(MemoryNavigationGroup::Workbench),
             this);
 
         // 子页签那一行：左边分段钮，右边"视图"菜单钮（行宽/分组/字号，只在十六进制子页显示，
@@ -199,7 +197,8 @@ namespace ks::ui
         hexPane_->setSourceRevisionProvider([this]() -> std::uint64_t {
             return target_ ? target_->revisions().Source() : 0ULL;
         });
-        connect(hexPane_->canvas(), &HexCanvas::editStaged, writeController_.get(), &WorkbenchWriteController::onEditCompleted);
+        // Connected canvas staging is completed by the controller value job;
+        // it notes content and enters immediate mode exactly once there.
 
         // DisasmBytesProviderAdapter 的完整类定义只在 MemoryWorkbenchView.cpp
         // 里（头文件只前置声明），本文件（.Ui.cpp）看不到它继承
@@ -522,7 +521,54 @@ namespace ks::ui
     void MemoryWorkbenchView::showEvent(QShowEvent* event)
     {
         QWidget::showEvent(event);
+        pageExposed_ = true;
+        QWidget* const top = window();
+        if (confirmationWindow_ != top)
+        {
+            if (confirmationWindow_) confirmationWindow_->removeEventFilter(this);
+            confirmationWindow_ = top;
+            if (top) top->installEventFilter(this);
+            windowExposed_ = top && top->isVisible();
+        }
+        schedulePendingWriteConfirmation();
         syncInt3Context();
+    }
+
+    void MemoryWorkbenchView::hideEvent(QHideEvent* event)
+    {
+        pageExposed_ = false;
+        QWidget::hideEvent(event);
+    }
+
+    bool MemoryWorkbenchView::eventFilter(QObject* watched, QEvent* event)
+    {
+        if (watched == confirmationWindow_ && event)
+        {
+            if (event->type() == QEvent::Hide) windowExposed_ = false;
+            else if (event->type() == QEvent::Show)
+            {
+                windowExposed_ = true;
+                schedulePendingWriteConfirmation();
+            }
+            else if (event->type() == QEvent::WindowStateChange) schedulePendingWriteConfirmation();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    bool MemoryWorkbenchView::canPresentWriteConfirmation() const
+    {
+        return pageExposed_ && windowExposed_ && confirmationWindow_ && isVisible()
+            && confirmationWindow_->isVisible() && !confirmationWindow_->isMinimized();
+    }
+
+    void MemoryWorkbenchView::schedulePendingWriteConfirmation()
+    {
+        if (confirmationResumeQueued_) return;
+        confirmationResumeQueued_ = true;
+        QTimer::singleShot(0, this, [this]() {
+            confirmationResumeQueued_ = false;
+            if (writeController_ && canPresentWriteConfirmation()) writeController_->resumePendingConfirmation();
+        });
     }
 
     // changeEvent：窗口激活变化时重新声明一次。内嵌进程详情窗口与主窗口同时可见时，
@@ -686,7 +732,7 @@ namespace ks::ui
         }
         sessionBar_->setPendingPatches(
             hexPane_->overlay().PendingByteCount(),
-            static_cast<quint64>(hexPane_->overlay().DiffBlocks().size()));
+            static_cast<quint64>(hexPane_->overlay().PendingBlockCount()));
     }
 
     // clearScopeSwitchPrompt：见头文件声明处的注释。

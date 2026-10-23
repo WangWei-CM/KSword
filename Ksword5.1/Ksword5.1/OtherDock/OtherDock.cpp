@@ -2,7 +2,17 @@
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/ResultTableHost.h"
 #include "OtherDock.h"
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kWindowNavigation[] = {
+    {"window.tab.list", "", "window.tab.list", "窗口列表", true},
+    {"window.tab.desktop", "", "window.tab.desktop", "桌面管理", false}
+};
+}
+
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -10,6 +20,7 @@
 #include "../Framework/DestructiveActionConfirmation.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/DetailDialogChrome.h"
@@ -35,6 +46,9 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QItemSelectionModel>
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -44,10 +58,13 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDialog>
+#include <QDataStream>
+#include <QEvent>
+#include <QImage>
 #include <QFile>
 #include <QFileDialog>
-#include <QFileIconProvider>
 #include <QFileInfo>
+#include <QDir>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QGridLayout>
@@ -67,6 +84,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QScreen>
 #include <QSlider>
 #include "../UI/ThemedSlider.h"
@@ -105,6 +123,8 @@
 #endif
 #include <Windows.h>
 #include <Psapi.h>
+#include <Shellapi.h>
+#include <Objbase.h>
 #include <TlHelp32.h>
 
 namespace
@@ -563,23 +583,6 @@ namespace
         return slashPos >= 0 ? fullPath.mid(slashPos + 1) : fullPath;
     }
 
-    // queryProcessLogoIconByPath：
-    // - 根据进程路径获取系统文件图标；
-    // - 若路径无效或无法提取图标，则回退默认进程图标。
-    QIcon queryProcessLogoIconByPath(const QString& imagePathText)
-    {
-        static QFileIconProvider iconProvider;
-        if (!imagePathText.trimmed().isEmpty())
-        {
-            const QIcon fileIcon = iconProvider.icon(QFileInfo(imagePathText));
-            if (!fileIcon.isNull())
-            {
-                return fileIcon;
-            }
-        }
-        return QIcon(":/Icon/process_main.svg");
-    }
-
     // 快照状态文本：把最小化/最大化/正常映射到统一字符串。
     QString windowStateText(
         const bool validState,
@@ -769,7 +772,7 @@ namespace
     }
 
     // 按 PID 采集模块预览，每个模块保留独立身份、地址和大小字段。
-    ks::ui::FieldDocument buildModuleSummaryDocument(const std::uint32_t processId, const int maxRenderCount, int* moduleCountOut)
+    ks::ui::FieldDocument buildModuleSummaryDocument(const std::uint32_t processId, const int maxRenderCount, int* moduleCountOut, const std::function<bool()>& canceled = {})
     {
         if (moduleCountOut != nullptr)
         {
@@ -795,6 +798,7 @@ namespace
         {
             do
             {
+                if (canceled && canceled()) break;
                 ++moduleCount;
                 if (moduleCount <= maxRenderCount)
                 {
@@ -1146,6 +1150,569 @@ namespace
 // - 独立非模态窗口属性对话框；
 // - 提供标签页化属性查看与部分实时修改能力。
 // ============================================================
+template<class Value, class... Args>
+static std::shared_ptr<Value> makeWindowBackgroundValue(Args&&... args)
+{
+    return std::shared_ptr<Value>(new Value(std::forward<Args>(args)...), [](Value* value) {
+        // Large canonical/visual containers can retire from close, cancellation,
+        // a menu replacement or a dropped delivery; never destroy them on GUI.
+        QThreadPool::globalInstance()->start(QRunnable::create([value] { delete value; }));
+    });
+}
+
+namespace ks::windowlist
+{
+    static QString fileIconIdentity(const QString& path)
+    {
+        if (path.isEmpty()) return {};
+        BY_HANDLE_FILE_INFORMATION information{};
+        HANDLE file = ::CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool known = file != INVALID_HANDLE_VALUE && ::GetFileInformationByHandle(file, &information);
+        if (file != INVALID_HANDLE_VALUE) ::CloseHandle(file);
+        return path.toCaseFolded() + QStringLiteral("/%1/%2/%3/%4/%5/%6/%7/%8")
+            .arg(known).arg(information.dwVolumeSerialNumber).arg(information.nFileIndexHigh).arg(information.nFileIndexLow)
+            .arg(information.ftLastWriteTime.dwHighDateTime).arg(information.ftLastWriteTime.dwLowDateTime)
+            .arg(information.nFileSizeHigh).arg(information.nFileSizeLow);
+    }
+    struct Snapshot
+    {
+        std::vector<OtherDock::WindowInfo> current;
+        std::vector<OtherDock::WindowInfo> records;
+        std::vector<QString> searchKeys;
+        std::vector<QString> iconKeys;
+        QHash<quint64, size_t> byHwnd;
+        QSet<QString> newIdentities;
+        int total = 0, visible = 0, system = 0;
+        quint64 revision = 0;
+    };
+    inline QString identity(const OtherDock::WindowInfo& value)
+    {
+        return ks::window::windowIdentityKey(value.hwndValue, value.processId,
+            value.threadId, value.processCreationTime100ns);
+    }
+    static std::shared_ptr<const Snapshot> mergeSnapshot(std::vector<OtherDock::WindowInfo> current,
+        const std::shared_ptr<const Snapshot>& previous)
+    {
+        auto next = makeWindowBackgroundValue<Snapshot>();
+        next->revision = previous ? previous->revision + 1 : 1;
+        QSet<QString> oldIdentities, currentIdentities;
+        if (previous)
+            for (const auto& value : previous->current)
+                if (value.valid) oldIdentities.insert(identity(value));
+        for (const auto& value : current)
+        {
+            const auto key = identity(value);
+            currentIdentities.insert(key);
+            if (!oldIdentities.contains(key)) next->newIdentities.insert(key);
+        }
+        next->current = std::move(current);
+        next->records = next->current;
+        if (previous)
+            for (const auto& old : previous->current)
+            {
+                if (!old.valid || currentIdentities.contains(identity(old))) continue;
+                auto exited = old;
+                exited.valid = exited.visible = exited.enabled = exited.topMost = exited.minimized = exited.maximized = false;
+                exited.titleText = QStringLiteral("[已退出] %1").arg(old.titleText);
+                next->records.push_back(std::move(exited));
+            }
+        next->searchKeys.reserve(next->records.size());
+        next->iconKeys.reserve(next->records.size());
+        QHash<QString, QString> iconIdentities;
+        for (size_t index = 0; index < next->records.size(); ++index)
+        {
+            const auto& value = next->records[index];
+            const QString imagePath = value.processImagePathText.trimmed().isEmpty() ? QString() : QDir::cleanPath(value.processImagePathText.trimmed());
+            const auto foundIdentity = iconIdentities.constFind(imagePath);
+            if (foundIdentity == iconIdentities.cend()) iconIdentities.insert(imagePath, fileIconIdentity(imagePath));
+            next->iconKeys.push_back(iconIdentities.value(imagePath));
+            // Current identity wins over the one-round exited row when HWND is reused.
+            if (!next->byHwnd.contains(value.hwndValue)) next->byHwnd.insert(value.hwndValue, index);
+            next->searchKeys.push_back(QStringLiteral("%1 %2 %3 %4 %5")
+                .arg(value.titleText, value.classNameText, value.processNameText)
+                .arg(value.processId).arg(hwndToText(value.hwndValue)).toLower());
+            if (!value.valid) continue;
+            ++next->total;
+            if (value.visible) ++next->visible;
+            if (value.processId <= 4 || value.processNameText.compare(QStringLiteral("System"), Qt::CaseInsensitive) == 0 ||
+                value.processNameText.compare(QStringLiteral("csrss.exe"), Qt::CaseInsensitive) == 0) ++next->system;
+        }
+        return next;
+    }
+    struct Projection;
+    struct ProjectionRequest
+    {
+        std::shared_ptr<const Snapshot> state;
+        std::shared_ptr<const Projection> previous;
+        QSet<quint32> processIds;
+        QString keyword;
+        int filter = 0;
+        int grouping = 0;
+        quint64 desktopHwnd = 0;
+        std::vector<std::pair<QRect, QString>> screens;
+        ks::i18n::SourceTextSnapshot language;
+    };
+    struct Node
+    {
+        std::array<QString, 13> cells;
+        std::vector<int> children;
+        QString key, iconKey, iconPath;
+        size_t record = 0;
+        int parent = -1, row = 0;
+        bool group = false, newRow = false;
+    };
+    struct Projection
+    {
+        std::shared_ptr<const Snapshot> state;
+        std::vector<Node> nodes;
+        std::vector<int> roots;
+        QHash<QString, int> byIdentity;
+        int grouping = 0;
+    };
+    static bool accepts(const ProjectionRequest& request, size_t index)
+    {
+        const auto& value = request.state->records[index];
+        if (!request.processIds.isEmpty() && !request.processIds.contains(value.processId)) return false;
+        switch (request.filter)
+        {
+        case 1: if (!value.visible || !value.valid) return false; break;
+        case 2: if (value.visible || !value.valid) return false; break;
+        case 3: if (value.isChildWindow || !value.valid) return false; break;
+        case 4: if (!value.isChildWindow || !value.valid) return false; break;
+        case 5: if (value.valid) return false; break;
+        default: break;
+        }
+        return request.keyword.isEmpty() || request.state->searchKeys[index].contains(request.keyword);
+    }
+    static std::shared_ptr<const Projection> prepareProjection(const ProjectionRequest& request,
+        const ks::ui::AsyncOperationToken* token)
+    {
+        auto projection = makeWindowBackgroundValue<Projection>();
+        projection->state = request.state;
+        projection->grouping = request.grouping;
+        if (!request.state) return projection;
+        std::vector<size_t> order;
+        order.reserve(request.state->records.size());
+        for (size_t index = 0; index < request.state->records.size(); ++index)
+            if (accepts(request, index)) order.push_back(index);
+        if (request.grouping == 1)
+            std::stable_sort(order.begin(), order.end(), [&request](size_t left, size_t right) {
+                return request.state->records[left].zOrder < request.state->records[right].zOrder;
+            });
+        QHash<QString, int> groups;
+        for (const auto record : order)
+        {
+            if (token && token->isCanceled()) return {};
+            const auto& value = request.state->records[record];
+            QString groupKey, groupTitle;
+            if (request.grouping == 0)
+            {
+                groupKey = QStringLiteral("pid/%1/%2").arg(value.processId).arg(value.processCreationTime100ns);
+                groupTitle = QStringLiteral("%1 (PID:%2)").arg(value.processNameText).arg(value.processId);
+            }
+            else if (request.grouping == 2)
+            {
+                groupKey = value.hwndValue == request.desktopHwnd ? QStringLiteral("桌面窗口") : value.isChildWindow ? QStringLiteral("子窗口") :
+                    (value.styleValue & WS_POPUP) ? QStringLiteral("弹出窗口") : (value.exStyleValue & WS_EX_TOOLWINDOW) ? QStringLiteral("工具窗口") : QStringLiteral("顶级窗口");
+                groupTitle = request.language.sourceText(groupKey);
+            }
+            else if (request.grouping != 1)
+            {
+                groupKey = QStringLiteral("unknown-monitor");
+                groupTitle = request.language.sourceText(QStringLiteral("未知显示器"));
+                for (size_t index = 0; index < request.screens.size(); ++index)
+                    if (request.screens[index].first.contains(value.windowRect.center()))
+                    {
+                        groupKey = QStringLiteral("monitor/%1/%2").arg(index).arg(request.screens[index].second);
+                        groupTitle = request.language.sourceText(QStringLiteral("显示器%1: %2")).arg(index + 1).arg(request.screens[index].second);
+                        break;
+                    }
+            }
+            const QString iconPath = value.processImagePathText.trimmed().isEmpty() ? QString() : QDir::cleanPath(value.processImagePathText.trimmed());
+            const QString iconKey = request.state->iconKeys[record];
+            int parent = -1;
+            if (!groupKey.isEmpty())
+            {
+                const auto found = groups.constFind(groupKey);
+                if (found == groups.cend())
+                {
+                    parent = static_cast<int>(projection->nodes.size());
+                    Node group;
+                    group.group = true; group.record = record;
+                    group.key = QStringLiteral("group/%1/%2").arg(request.grouping).arg(groupKey);
+                    group.cells[0] = groupTitle;
+                    group.row = static_cast<int>(projection->roots.size());
+                    if (request.grouping == 0) { group.iconKey = iconKey; group.iconPath = iconPath; }
+                    projection->nodes.push_back(std::move(group));
+                    projection->roots.push_back(parent);
+                    groups.insert(groupKey, parent);
+                    projection->byIdentity.insert(projection->nodes[parent].key, parent);
+                }
+                else parent = found.value();
+            }
+            Node node;
+            node.parent = parent; node.record = record;
+            node.key = identity(value); node.iconKey = iconKey; node.iconPath = iconPath;
+            node.newRow = request.state->newIdentities.contains(node.key);
+            node.cells = {value.titleText.isEmpty() ? request.language.sourceText(QStringLiteral("<无标题>")) : value.titleText,
+                hwndToText(value.hwndValue), value.enumApiName, value.classNameText, QString::number(value.processId), value.processNameText,
+                QString::number(value.threadId), QStringLiteral("%1 x %2").arg(value.windowRect.width()).arg(value.windowRect.height()),
+                request.language.sourceText(boolText(value.visible)), request.language.sourceText(boolText(value.enabled)),
+                request.language.sourceText(boolText(value.topMost)), request.language.sourceText(windowStateText(value.valid, value.minimized, value.maximized)),
+                QString::number(value.alphaValue)};
+            node.row = parent < 0 ? static_cast<int>(projection->roots.size()) : static_cast<int>(projection->nodes[parent].children.size());
+            const int index = static_cast<int>(projection->nodes.size());
+            projection->nodes.push_back(std::move(node));
+            projection->byIdentity.insert(projection->nodes.back().key, index);
+            if (parent < 0) projection->roots.push_back(index);
+            else projection->nodes[parent].children.push_back(index);
+        }
+        // An unchanged visible representation retains the exact model/selection
+        // and avoids any reset/layout/decoration requests on periodic samples.
+        if (request.previous && request.previous->grouping == projection->grouping &&
+            request.previous->roots == projection->roots && request.previous->nodes.size() == projection->nodes.size())
+        {
+            bool equal = true;
+            for (size_t index = 0; index < projection->nodes.size(); ++index)
+            {
+                const auto& left = request.previous->nodes[index]; const auto& right = projection->nodes[index];
+                if (left.cells != right.cells || left.children != right.children || left.key != right.key ||
+                    left.iconKey != right.iconKey || left.iconPath != right.iconPath || left.parent != right.parent || left.row != right.row ||
+                    left.group != right.group || left.newRow != right.newRow ||
+                    request.previous->state->records[left.record].valid != projection->state->records[right.record].valid)
+                { equal = false; break; }
+            }
+            if (equal) return request.previous;
+        }
+        return projection;
+    }
+    struct IconRequest { QString key, path; };
+    struct IconResult { QString key; QImage image; };
+    static std::vector<IconResult> prepareIcons(const std::vector<IconRequest>& requests,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        // Native icon pixels are prepared off GUI. Cache identity includes path,
+        // file size and write time, never PID alone or a lazy QIcon engine.
+        static std::mutex cacheMutex;
+        static QHash<QString, QImage> cache;
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::vector<IconResult> result;
+        for (const auto& request : requests)
+        {
+            if (token.isCanceled()) break;
+            // Projection paths are normalized by QDir::cleanPath (forward slashes).
+            // Shell parsing requires the native path, while the cache key stays canonical.
+            const QString nativePath = QDir::toNativeSeparators(request.path);
+            const auto* path = reinterpret_cast<const wchar_t*>(nativePath.utf16());
+            const QString identity = fileIconIdentity(request.path);
+            QImage image;
+            { std::lock_guard<std::mutex> lock(cacheMutex); image = cache.value(identity); }
+            if (image.isNull() && !request.path.isEmpty())
+            {
+                SHFILEINFOW info{};
+                if (::SHGetFileInfoW(path, 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON) && info.hIcon)
+                {
+                    image = QImage::fromHICON(info.hIcon);
+                    ::DestroyIcon(info.hIcon);
+                }
+                if (!image.isNull()) { std::lock_guard<std::mutex> lock(cacheMutex); cache.insert(identity, image); }
+            }
+            result.push_back({request.key, std::move(image)});
+        }
+        if (SUCCEEDED(initialized)) ::CoUninitialize();
+        return result;
+    }
+    class SnapshotModel final : public QAbstractItemModel
+    {
+    public:
+        explicit SnapshotModel(QObject* parent) : QAbstractItemModel(parent), m_iconOperation(new ks::ui::AsyncOperation(this))
+        {
+            m_iconOperation->setStateChangedCallback([this] { if (!m_iconOperation->isBusy()) startIconBatch(); });
+        }
+        ~SnapshotModel() override { m_iconOperation->close(); }
+        int columnCount(const QModelIndex& = {}) const override { return 13; }
+        int rowCount(const QModelIndex& parent = {}) const override
+        {
+            if (!snapshot || (parent.isValid() && parent.column() != 0)) return 0;
+            const auto* node = get(parent);
+            return static_cast<int>(node ? node->children.size() : snapshot->roots.size());
+        }
+        QModelIndex index(int row, int column, const QModelIndex& parent = {}) const override
+        {
+            if (!snapshot || row < 0 || column < 0 || column >= 13 || row >= rowCount(parent)) return {};
+            const auto* node = get(parent);
+            const int number = node ? node->children[row] : snapshot->roots[row];
+            return createIndex(row, column, static_cast<quintptr>(number + 1));
+        }
+        QModelIndex parent(const QModelIndex& child) const override
+        {
+            const auto* node = get(child);
+            return !node || node->parent < 0 ? QModelIndex() : nodeIndex(node->parent);
+        }
+        QModelIndex nodeIndex(int number, int column = 0) const
+        {
+            if (!snapshot || number < 0 || number >= static_cast<int>(snapshot->nodes.size())) return {};
+            return createIndex(snapshot->nodes[number].row, column, static_cast<quintptr>(number + 1));
+        }
+        QModelIndex indexForIdentity(const QString& key) const
+        {
+            if (!snapshot) return {};
+            const auto found = snapshot->byIdentity.constFind(key);
+            return found == snapshot->byIdentity.cend() ? QModelIndex() : nodeIndex(found.value());
+        }
+        QString key(const QModelIndex& index) const { const auto* node = get(index); return node ? node->key : QString(); }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            const auto* node = get(index);
+            if (!node || index.column() < 0 || index.column() >= 13) return {};
+            const auto& value = snapshot->state->records[node->record];
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return node->cells[index.column()];
+            if (role == Qt::UserRole) return node->group ? QVariant() : QVariant::fromValue(value.hwndValue);
+            if (role == Qt::UserRole + 1) return node->group;
+            if (role == Qt::UserRole + 2) return value.processId;
+            if (role == Qt::UserRole + 3) return value.threadId;
+            if (role == Qt::UserRole + 4) return QVariant::fromValue<qulonglong>(value.processCreationTime100ns);
+            if (!node->group && role == Qt::ForegroundRole && !value.valid) return QBrush(KswordTheme::ExitedRowForegroundColor());
+            if (!node->group && role == Qt::BackgroundRole)
+            {
+                if (!value.valid) return QBrush(KswordTheme::ExitedRowBackgroundColor());
+                if (node->newRow) return QBrush(KswordTheme::NewRowBackgroundColor());
+            }
+            if (role == Qt::DecorationRole && ((node->group && index.column() == 0) || (!node->group && index.column() == kWindowColumnProcessName)))
+            {
+                if (node->group && node->iconPath.isEmpty())
+                    return snapshot->grouping == 2 ? m_treeIcon : m_listIcon;
+                return logo(node->iconKey, node->iconPath);
+            }
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            if (orientation == Qt::Horizontal) return headerRoles.value(section).value(role);
+            return QAbstractItemModel::headerData(section, orientation, role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size()) return false;
+            if (role != Qt::DisplayRole && role != Qt::EditRole) { headerRoles[section].insert(role, value); return true; }
+            if (headers[section] == value.toString()) return true;
+            headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
+        }
+        void publish(std::shared_ptr<const Projection> value)
+        {
+            const QPointer<SnapshotModel> alive(this);
+            beginResetModel();
+            if (!alive) return;
+            snapshot = std::move(value);
+            endResetModel();
+        }
+        QHash<int, QHash<int, QVariant>> headerRoles;
+        QStringList headers;
+        std::shared_ptr<const Projection> snapshot;
+        std::function<void()> iconsChanged;
+    private:
+        const Node* get(const QModelIndex& index) const
+        {
+            const auto number = index.internalId();
+            return snapshot && index.isValid() && number && number <= snapshot->nodes.size() ? &snapshot->nodes[number - 1] : nullptr;
+        }
+        QIcon logo(const QString& key, const QString& path) const
+        {
+            const auto found = m_icons.constFind(key);
+            if (found != m_icons.cend()) return found.value();
+            if (!path.isEmpty() && !m_requested.contains(key))
+            {
+                m_requested.insert(key);
+                m_pending.push_back({key, path});
+                if (!m_iconWakeQueued)
+                {
+                    m_iconWakeQueued = true;
+                    QTimer::singleShot(0, const_cast<SnapshotModel*>(this), [this] {
+                        m_iconWakeQueued = false;
+                        const_cast<SnapshotModel*>(this)->startIconBatch();
+                    });
+                }
+            }
+            return m_defaultIcon;
+        }
+        void startIconBatch()
+        {
+            if (m_pending.empty() || m_iconOperation->isBusy()) return;
+            std::vector<IconRequest> batch;
+            while (!m_pending.empty() && batch.size() < 16)
+            { batch.push_back(std::move(m_pending.front())); m_pending.pop_front(); }
+            m_iconOperation->submit<std::vector<IconRequest>, std::vector<IconResult>>(
+                std::move(batch), prepareIcons,
+                [this](const std::vector<IconResult>& values, std::uint64_t) {
+                    for (const auto& value : values)
+                        m_icons.insert(value.key, value.image.isNull() ? m_defaultIcon : QIcon(QPixmap::fromImage(value.image)));
+                    if (iconsChanged) iconsChanged();
+                    return true;
+                }, [](std::exception_ptr) {});
+        }
+        ks::ui::AsyncOperation* m_iconOperation;
+        mutable QHash<QString, QIcon> m_icons;
+        mutable QSet<QString> m_requested;
+        mutable std::deque<IconRequest> m_pending;
+        mutable bool m_iconWakeQueued = false;
+        QIcon m_defaultIcon{QStringLiteral(":/Icon/process_main.svg")};
+        QIcon m_treeIcon{QStringLiteral(":/Icon/process_tree.svg")};
+        QIcon m_listIcon{QStringLiteral(":/Icon/process_list.svg")};
+    };
+}
+
+namespace
+{
+    struct WindowMessageRecord
+    {
+        QString channelText;
+        quint64 hwndValue = 0;
+        quint64 messageId = 0;
+        quint64 wParamValue = 0;
+        quint64 lParamValue = 0;
+        quint64 resultValue = 0;
+        QString extraText;
+        QDateTime capturedAt;
+        quint64 sequence = 0;
+    };
+    struct WindowMessageArchive
+    {
+        std::mutex mutex;
+        std::deque<std::shared_ptr<const WindowMessageRecord>> rows;
+        quint64 nextSequence = 1;
+        quint64 revision = 1;
+        quint64 clearGeneration = 1;
+        quint64 captured = 0;
+        quint64 dropped = 0;
+        size_t limit = 5000;
+    };
+    struct WindowMessagePort
+    {
+        std::shared_ptr<WindowMessageArchive> archive;
+        quint64 targetHwnd = 0;
+        bool active = true; // protected by archive->mutex, including stop/clear boundaries
+    };
+    struct WindowMessageDisplayRow
+    {
+        quint64 sequence = 0;
+        std::array<QString, 8> cells;
+    };
+    struct WindowMessageSnapshot
+    {
+        std::vector<std::shared_ptr<const WindowMessageDisplayRow>> rows;
+        quint64 revision = 0;
+        quint64 clearGeneration = 0;
+    };
+    static void recordWindowMessage(const std::shared_ptr<WindowMessagePort>& port, WindowMessageRecord record)
+    {
+        if (!port || record.hwndValue != port->targetHwnd) return;
+        // Capture time belongs to the event, never to a later GUI flush.
+        record.capturedAt = QDateTime::currentDateTime();
+        auto value = std::make_shared<WindowMessageRecord>(std::move(record));
+        std::lock_guard<std::mutex> lock(port->archive->mutex);
+        if (!port->active) return;
+        auto& archive = *port->archive;
+        value->sequence = archive.nextSequence++;
+        ++archive.captured;
+        while (archive.rows.size() >= archive.limit)
+        {
+            archive.rows.pop_front();
+            ++archive.dropped;
+        }
+        archive.rows.push_back(std::move(value));
+        ++archive.revision;
+    }
+    static WindowMessageSnapshot prepareWindowMessages(
+        const std::shared_ptr<WindowMessageArchive>& archive,
+        const std::shared_ptr<const WindowMessageSnapshot>& previous,
+        const ks::ui::AsyncOperationToken* token)
+    {
+        WindowMessageSnapshot result;
+        std::vector<std::shared_ptr<const WindowMessageRecord>> records;
+        {
+            std::lock_guard<std::mutex> lock(archive->mutex);
+            records.assign(archive->rows.begin(), archive->rows.end());
+            result.revision = archive->revision;
+            result.clearGeneration = archive->clearGeneration;
+        }
+        result.rows.reserve(records.size());
+        const quint64 first = previous && !previous->rows.empty() ? previous->rows.front()->sequence : 0;
+        for (const auto& record : records)
+        {
+            if (token && token->isCanceled()) return {};
+            const quint64 offset = record->sequence - first;
+            if (previous && first && record->sequence >= first && offset < previous->rows.size() &&
+                previous->rows[static_cast<size_t>(offset)]->sequence == record->sequence)
+            {
+                result.rows.push_back(previous->rows[static_cast<size_t>(offset)]);
+                continue;
+            }
+            auto row = std::make_shared<WindowMessageDisplayRow>();
+            row->sequence = record->sequence;
+            row->cells = { record->capturedAt.toString(QStringLiteral("HH:mm:ss.zzz")),
+                record->channelText, hwndToText(record->hwndValue),
+                QStringLiteral("0x%1").arg(record->messageId, 4, 16, QChar('0')).toUpper(),
+                record->channelText.contains(QStringLiteral("WinEvent")) ? winEventName(static_cast<DWORD>(record->messageId))
+                    : windowMessageName(static_cast<UINT>(record->messageId)),
+                toHexText64(record->wParamValue), toHexText64(record->lParamValue),
+                record->extraText.trimmed().isEmpty() ? toHexText64(record->resultValue)
+                    : QStringLiteral("%1 | %2").arg(toHexText64(record->resultValue), record->extraText) };
+            result.rows.push_back(std::move(row));
+        }
+        return result;
+    }
+    class WindowMessageModel final : public QAbstractTableModel
+    {
+    public:
+        explicit WindowMessageModel(QObject* parent) : QAbstractTableModel(parent) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+            { return parent.isValid() || !snapshot ? 0 : static_cast<int>(snapshot->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 8; }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 || index.column() >= 8) return {};
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole)
+                return snapshot->rows[static_cast<size_t>(index.row())]->cells[static_cast<size_t>(index.column())];
+            if (role == Qt::UserRole) return QVariant::fromValue(snapshot->rows[static_cast<size_t>(index.row())]->sequence);
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            if (orientation == Qt::Horizontal) return headerRoles.value(section).value(role);
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size()) return false;
+            if (role != Qt::DisplayRole && role != Qt::EditRole) { headerRoles[section].insert(role, value); return true; }
+            if (headers[section] == value.toString()) return true;
+            headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
+        }
+        void publish(std::shared_ptr<const WindowMessageSnapshot> value)
+        {
+            const QPointer<WindowMessageModel> alive(this);
+            beginResetModel();
+            if (!alive) return;
+            snapshot = std::move(value);
+            endResetModel();
+        }
+        quint64 sequenceAt(int row) const
+            { return row < 0 || row >= rowCount() ? 0 : snapshot->rows[static_cast<size_t>(row)]->sequence; }
+        int rowForSequence(quint64 sequence) const
+        {
+            if (!snapshot || snapshot->rows.empty() || sequence < snapshot->rows.front()->sequence) return -1;
+            const auto offset = sequence - snapshot->rows.front()->sequence;
+            return offset < snapshot->rows.size() && snapshot->rows[static_cast<size_t>(offset)]->sequence == sequence ? static_cast<int>(offset) : -1;
+        }
+        QHash<int, QHash<int, QVariant>> headerRoles;
+        QStringList headers;
+        std::shared_ptr<const WindowMessageSnapshot> snapshot;
+    };
+}
+
 class WindowDetailDialog final : public QDialog
 {
 public:
@@ -1170,14 +1737,31 @@ public:
         initializeUi();
         setStyleSheet(ks::ui::BuildDetailDialogChromeStyle());
         ks::ui::applyResponsiveWindowGeometry(this, parent, QSize(1000, 820), QSize(640, 480));
-        refreshRuntimeInfo();
-        startMessageMonitor();
+        m_messageSnapshotOperation = new ks::ui::AsyncOperation(this);
+        m_messageFlushTimer = new QTimer(this);
+        m_messageFlushTimer->setInterval(40);
+        connect(m_messageFlushTimer, &QTimer::timeout, this, [this] { flushDeferredMessageRows(); });
+        m_messageFlushTimer->start();
+        m_runtimeOperation = new ks::ui::AsyncOperation(this);
+        RuntimeSnapshot initial;
+        initial.info = m_info; initial.valid = m_info.valid; initial.native = false;
+        initial.style = runtimeStyleDocument(m_info.styleValue, m_info.exStyleValue);
+        applyRuntimeBase(initial);
+        const auto unread = ks::ui::FieldDocument{}.note(QStringLiteral("未读取"));
+        for (auto* fields : {m_processThreadText, m_classText, m_hookText, m_advancedText}) fields->setDocument(unread);
+        for (auto* spin : {m_xSpin, m_ySpin, m_widthSpin, m_heightSpin})
+            connect(spin, &QSpinBox::valueChanged, this, [this] { if (!m_runtimeApplying) ++m_runtimeEditRevision; });
+        connect(m_tabWidget, &QTabWidget::currentChanged, this, [this] { requestRuntimeInfo(currentRuntimeMask()); });
+        requestRuntimeInfo(currentRuntimeMask());
     }
 
     // 析构函数：
     // - 作用：确保关闭详情窗时释放消息钩子句柄，避免系统残留回调。
     ~WindowDetailDialog() override
     {
+        if (m_tabWidget) disconnect(m_tabWidget, nullptr, this, nullptr);
+        if (m_messageSnapshotOperation) m_messageSnapshotOperation->close();
+        if (m_runtimeOperation) m_runtimeOperation->close();
         stopMessageMonitor();
     }
 
@@ -1192,19 +1776,6 @@ private:
         QString styleDescriptionText;     // styleDescriptionText：样式说明（用于提示）。
         quint64 styleMaskValue = 0;       // styleMaskValue：Win32 样式位掩码。
         QCheckBox* checkBox = nullptr;    // checkBox：与样式位绑定的勾选控件。
-    };
-
-    // PendingMessageRow：右键菜单打开期间暂存的消息行。
-    // 消息流不能使用 latest-wins 丢弃中间事件，因此先保存在对话框队列中。
-    struct PendingMessageRow
-    {
-        QString channelText;
-        quint64 hwndValue = 0;
-        quint64 messageId = 0;
-        quint64 wParamValue = 0;
-        quint64 lParamValue = 0;
-        quint64 resultValue = 0;
-        QString extraText;
     };
 
     // appendStyleCheckBoxGroup：
@@ -1254,6 +1825,7 @@ private:
                     return;
                 }
 
+                if (!m_runtimeApplying) ++m_runtimeEditRevision;
                 // 变更后即时刷新“状态面板”的置顶/分层联动显示。
                 updateDerivedStyleControlsFromCheckBoxes();
                 if (m_styleApplyButton != nullptr)
@@ -1341,6 +1913,7 @@ private:
 
     void markAppearanceChangesPending()
     {
+        if (!m_runtimeApplying) ++m_runtimeEditRevision;
         m_styleApplyButton->setEnabled(true);
         m_applyButton->setEnabled(true);
     }
@@ -1380,32 +1953,6 @@ private:
         }
         m_styleCheckSyncing = false;
         updateDerivedStyleControlsFromCheckBoxes();
-    }
-
-    // buildStyleSummaryText：
-    // - 作用：拼接“十六进制样式值 + 每个复选框状态”的详细文本；
-    // - 调用：refreshRuntimeInfo 刷新样式文本区时调用；
-    // - 传入 styleValue/exStyleValue：实时样式值；
-    // - 传出：返回可直接写入 m_styleText 的说明文本。
-    ks::ui::FieldDocument buildStyleSummaryText(const quint64 styleValue, const quint64 exStyleValue) const
-    {
-        ks::ui::FieldDocument styleText;
-        styleText.field(QStringLiteral("Style"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(styleValue, 0, 16)));
-        styleText.field(QStringLiteral("ExStyle"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(exStyleValue, 0, 16)));
-        styleText.section(QStringLiteral("窗口样式 WS_*"));
-        for (const StyleCheckBinding& binding : m_styleCheckBindingList)
-        {
-            const bool enabled = (styleValue & binding.styleMaskValue) != 0;
-            styleText.field(binding.styleNameText, boolText(enabled));
-        }
-
-        styleText.section(QStringLiteral("扩展样式 WS_EX_*"));
-        for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
-        {
-            const bool enabled = (exStyleValue & binding.styleMaskValue) != 0;
-            styleText.field(binding.styleNameText, boolText(enabled));
-        }
-        return styleText;
     }
 
     // applyStyleCheckBoxChanges：
@@ -1761,6 +2308,7 @@ private:
         processLayout->setContentsMargins(8, 8, 8, 8);
         processLayout->setSpacing(6);
         m_processThreadText = new ks::ui::StructuredFieldView(processPage);
+        m_runtimePageMasks.insert(processPage, RuntimeProcess);
 
         processLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_processThreadText, processLayout->parentWidget()), 1);
         m_tabWidget->addTab(processPage, QIcon(QStringLiteral(":/Icon/process_threads.svg")), QStringLiteral("进程与线程"));
@@ -1773,6 +2321,7 @@ private:
         classLayout->setContentsMargins(8, 8, 8, 8);
         classLayout->setSpacing(6);
         m_classText = new ks::ui::StructuredFieldView(classPage);
+        m_runtimePageMasks.insert(classPage, RuntimeClass);
 
         classLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_classText, classLayout->parentWidget()), 1);
         m_tabWidget->addTab(classPage, QIcon(QStringLiteral(":/Icon/knowledge_book.svg")), QStringLiteral("类信息"));
@@ -1793,6 +2342,7 @@ private:
 
         // 概览文本：保留原有消息队列状态、焦点等摘要，便于快速判断窗口活性。
         m_hookText = new ks::ui::StructuredFieldView(hookPage);
+        m_runtimePageMasks.insert(hookPage, RuntimeHooks);
 
         auto* hookSplitter = new QSplitter(Qt::Vertical, hookPage);
         hookSplitter->setChildrenCollapsible(false);
@@ -1823,6 +2373,16 @@ private:
         m_messageMaxRowsSpin->setRange(200, 50000);
         m_messageMaxRowsSpin->setValue(5000);
         m_messageMaxRowsSpin->setStyleSheet(blueInputStyle());
+        connect(m_messageMaxRowsSpin, &QSpinBox::valueChanged, this, [this](int limit) {
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            m_messageArchive->limit = static_cast<size_t>(limit);
+            while (m_messageArchive->rows.size() > m_messageArchive->limit)
+            {
+                m_messageArchive->rows.pop_front();
+                ++m_messageArchive->dropped;
+            }
+            ++m_messageArchive->revision;
+        });
         monitorControlLayout->addWidget(m_messageMaxRowsSpin, 0);
 
         m_messageModeLabel = new QLabel(QStringLiteral("采集模式：未启动"), hookPage);
@@ -1844,11 +2404,18 @@ private:
         hookLayout->addLayout(monitorStatusLayout);
 
         // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
-        m_messageTable = new ks::ui::VisibleTableWidget(hookPage);
+        m_messageTable = new ks::ui::TableActionTableView(hookPage);
+        m_messageModel = new WindowMessageModel(m_messageTable);
+        m_messageDisplayModel = new QSortFilterProxyModel(m_messageTable);
+        m_messageDisplayModel->setSortRole(Qt::DisplayRole);
+        m_messageDisplayModel->setSortCaseSensitivity(Qt::CaseSensitive);
+        m_messageDisplayModel->setSortLocaleAware(true);
+        m_messageDisplayModel->setDynamicSortFilter(false);
+        m_messageDisplayModel->setSourceModel(m_messageModel);
+        m_messageTable->setProperty("ks_i18n_preserve_model_data", true);
         // 消息流的顺序由采集器记录，已有启停/清理动作；保留复制导出而非通用快照对比。
         ks::ui::SetTableActionBarMode(m_messageTable, ks::ui::TableActionBarMode::Compact);
-        m_messageTable->setColumnCount(8);
-        m_messageTable->setHorizontalHeaderLabels(QStringList{
+        m_messageModel->headers = QStringList{
             QStringLiteral("时间"),
             QStringLiteral("通道"),
             QStringLiteral("HWND"),
@@ -1857,7 +2424,15 @@ private:
             QStringLiteral("WPARAM"),
             QStringLiteral("LPARAM"),
             QStringLiteral("结果/附加")
-        });
+        };
+        ks::ui::ResultTableCapabilities messageCapabilities;
+        messageCapabilities.actionBar = ks::ui::TableActionBarMode::Compact;
+        messageCapabilities.headerClickSorting = true;
+        ks::ui::ResultTableHost::ensure(m_messageTable)->bindModel(m_messageDisplayModel,
+            {{0, QStringLiteral("time")}, {1, QStringLiteral("channel")}, {2, QStringLiteral("hwnd")},
+             {3, QStringLiteral("message_id")}, {4, QStringLiteral("message_name")}, {5, QStringLiteral("wparam")},
+             {6, QStringLiteral("lparam")}, {7, QStringLiteral("result")}}, messageCapabilities);
+        ks::ui::InstallTableHeaderClickSorting(m_messageTable);
         m_messageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_messageTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
         m_messageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1872,7 +2447,7 @@ private:
         hookLayout->addWidget(hookSplitter, 1);
 
         // 表格右键：支持复制整行，方便与日志或抓包结果做对比分析。
-        connect(m_messageTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        connect(m_messageTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
             if (m_messageTable == nullptr)
             {
                 return;
@@ -1890,19 +2465,13 @@ private:
             }
 
             QStringList rowTexts;
-            const QList<QTableWidgetSelectionRange> selectionRanges = m_messageTable->selectedRanges();
-            for (const QTableWidgetSelectionRange& range : selectionRanges)
+            const auto rows = m_messageTable->selectionModel()->selectedRows();
+            for (const auto& index : rows)
             {
-                for (int row = range.topRow(); row <= range.bottomRow(); ++row)
-                {
-                    QStringList singleRow;
-                    for (int col = 0; col < m_messageTable->columnCount(); ++col)
-                    {
-                        QTableWidgetItem* item = m_messageTable->item(row, col);
-                        singleRow << (item == nullptr ? QString() : item->text());
-                    }
-                    rowTexts << singleRow.join('\t');
-                }
+                QStringList singleRow;
+                for (int col = 0; col < m_messageModel->columnCount(); ++col)
+                    singleRow << index.siblingAtColumn(col).data().toString();
+                rowTexts << singleRow.join('\t');
             }
             if (!rowTexts.isEmpty())
             {
@@ -1912,9 +2481,11 @@ private:
 
         // 监控控制绑定：开始/停止/清空动作。
         connect(m_messageStartButton, &QPushButton::clicked, this, [this]() {
+            m_runtimeMonitorInitialDone = true;
             startMessageMonitor();
         });
         connect(m_messageStopButton, &QPushButton::clicked, this, [this]() {
+            m_runtimeMonitorInitialDone = true;
             stopMessageMonitor();
         });
         connect(m_messageClearButton, &QPushButton::clicked, this, [this]() {
@@ -1931,6 +2502,7 @@ private:
         advancedLayout->setContentsMargins(8, 8, 8, 8);
         advancedLayout->setSpacing(6);
         m_advancedText = new ks::ui::StructuredFieldView(advancedPage);
+        m_runtimePageMasks.insert(advancedPage, RuntimeAdvanced);
 
         advancedLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_advancedText, advancedLayout->parentWidget()), 1);
         m_tabWidget->addTab(advancedPage, QIcon(QStringLiteral(":/Icon/process_settings.svg")), QStringLiteral("高级属性"));
@@ -1993,96 +2565,77 @@ private:
         ks::ui::InstallDetailWindowFramework(this);
     }
 
-    // 刷新运行时信息：对句柄重新采样，避免显示陈旧数据。
-    void refreshRuntimeInfo()
+    enum : unsigned { RuntimeProcess = 1, RuntimeClass = 2, RuntimeHooks = 4, RuntimeAdvanced = 8, RuntimeAll = 15 };
+    struct RuntimeRequest
     {
-        HWND windowHandle = toHwnd(m_info.hwndValue);
-        if (::IsWindow(windowHandle) == FALSE)
+        OtherDock::WindowInfo info;
+        unsigned mask = 0;
+        DWORD queueStatus = 0; // caller GUI queue status; not the pool thread queue
+        quint64 editRevision = 0;
+    };
+    struct RuntimeSnapshot
+    {
+        OtherDock::WindowInfo info;
+        unsigned mask = 0;
+        quint64 editRevision = 0, instance = 0;
+        bool valid = false, native = true;
+        QString failure;
+        ks::ui::FieldDocument style, process, classInfo, hooks, advanced;
+    };
+    static ks::ui::FieldDocument runtimeStyleDocument(quint64 style, quint64 extended)
+    {
+        ks::ui::FieldDocument document;
+        document.field(QStringLiteral("Style"), QStringLiteral("0x%1").arg(style, 0, 16));
+        document.field(QStringLiteral("ExStyle"), QStringLiteral("0x%1").arg(extended, 0, 16));
+        document.section(QStringLiteral("窗口样式 WS_*"));
+        for (const auto& value : windowStyleFlagDefinitionList())
+            document.field(QString::fromLatin1(value.styleNameText), boolText((style & value.styleMaskValue) != 0));
+        document.section(QStringLiteral("扩展样式 WS_EX_*"));
+        for (const auto& value : windowExStyleFlagDefinitionList())
+            document.field(QString::fromLatin1(value.styleNameText), boolText((extended & value.styleMaskValue) != 0));
+        return document;
+    }
+    static std::shared_ptr<const RuntimeSnapshot> collectRuntime(const RuntimeRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        auto snapshot = makeWindowBackgroundValue<RuntimeSnapshot>();
+        auto& result = *snapshot;
+        result.info = request.info;
+        result.mask = request.mask;
+        result.editRevision = request.editRevision;
+        HWND windowHandle = toHwnd(request.info.hwndValue);
+        if (!ks::window::windowIdentityMatches(request.info.hwndValue, request.info.processId,
+            request.info.threadId, request.info.processCreationTime100ns))
         {
-            m_stateLabel->setText(QStringLiteral("窗口已失效"));
-            m_topMostCheck->setEnabled(false);
-            m_alphaSlider->setEnabled(false);
-            m_alphaSpin->setEnabled(false);
-            m_applyButton->setEnabled(false);
-            m_styleApplyButton->setEnabled(false);
-            return;
+            result.failure = QStringLiteral("目标窗口身份已变化或无法验证");
+            return snapshot;
         }
-
-        // 句柄与基础状态字段。
-        m_handleLabel->setText(hwndToText(m_info.hwndValue));
-        m_parentHandleLabel->setText(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetParent(windowHandle)))));
-        m_ownerHandleLabel->setText(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetWindow(windowHandle, GW_OWNER)))));
-        m_classNameLabel->setText(m_info.classNameText);
-        m_titleEdit->setText(m_info.titleText);
-        m_instanceLabel->setText(hwndToText(static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWLP_HINSTANCE))));
-
-        const bool visible = ::IsWindowVisible(windowHandle) != FALSE;
-        const bool enabled = ::IsWindowEnabled(windowHandle) != FALSE;
-        const bool minimized = ::IsIconic(windowHandle) != FALSE;
-        const bool maximized = ::IsZoomed(windowHandle) != FALSE;
-
-        m_stateLabel->setText(QStringLiteral("可见:%1, 可用:%2, 状态:%3")
-            .arg(boolText(visible), boolText(enabled), windowStateText(true, minimized, maximized)));
-        m_relationLabel->setText(QStringLiteral("PID=%1, TID=%2")
-            .arg(m_info.processId)
-            .arg(m_info.threadId));
-
-        // 样式信息：输出十六进制样式值与常见标记判断。
-        const quint64 styleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
-        const quint64 exStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
-        syncStyleCheckBoxes(styleValue, exStyleValue);
-        m_styleText->setDocument(buildStyleSummaryText(styleValue, exStyleValue));
-
-        // 窗口位置与尺寸写回编辑控件。
+        result.info.parentHwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(::GetParent(windowHandle)));
+        result.info.ownerHwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(::GetWindow(windowHandle, GW_OWNER)));
+        result.instance = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWLP_HINSTANCE));
+        result.info.visible = ::IsWindowVisible(windowHandle) != FALSE;
+        result.info.enabled = ::IsWindowEnabled(windowHandle) != FALSE;
+        result.info.minimized = ::IsIconic(windowHandle) != FALSE;
+        result.info.maximized = ::IsZoomed(windowHandle) != FALSE;
+        result.info.styleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
+        result.info.exStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
         RECT rect{};
-        const bool windowRectReady = (::GetWindowRect(windowHandle, &rect) != FALSE);
-        if (windowRectReady)
+        const bool windowRectReady = ::GetWindowRect(windowHandle, &rect) != FALSE;
+        result.info.windowRect = windowRectReady ? QRect(rect.left, rect.top, std::max<int>(1, rect.right - rect.left), std::max<int>(1, rect.bottom - rect.top)) : QRect(0, 0, 1, 1);
+        result.info.alphaValue = 255;
+        if ((result.info.exStyleValue & WS_EX_LAYERED) != 0)
         {
-            m_xSpin->setValue(rect.left);
-            m_ySpin->setValue(rect.top);
-            m_widthSpin->setValue(std::max<int>(1, static_cast<int>(rect.right - rect.left)));
-            m_heightSpin->setValue(std::max<int>(1, static_cast<int>(rect.bottom - rect.top)));
+            COLORREF key = 0; BYTE alpha = 255; DWORD flags = 0;
+            if (::GetLayeredWindowAttributes(windowHandle, &key, &alpha, &flags) && (flags & LWA_ALPHA)) result.info.alphaValue = alpha;
         }
-        else
+        result.style = runtimeStyleDocument(result.info.styleValue, result.info.exStyleValue);
+        if ((request.mask & 1) != 0 && !token.isCanceled())
         {
-            m_xSpin->setValue(0);
-            m_ySpin->setValue(0);
-            m_widthSpin->setValue(1);
-            m_heightSpin->setValue(1);
-        }
-
-        // 状态页：置顶与透明度。
-        m_topMostCheck->setEnabled(true);
-        int alphaValue = 255;
-        if ((exStyleValue & WS_EX_LAYERED) != 0)
-        {
-            COLORREF colorKey = 0;
-            BYTE alpha = 255;
-            DWORD flags = 0;
-            if (::GetLayeredWindowAttributes(windowHandle, &colorKey, &alpha, &flags) != FALSE)
-            {
-                Q_UNUSED(colorKey);
-                if ((flags & LWA_ALPHA) != 0)
-                {
-                    alphaValue = static_cast<int>(alpha);
-                }
-            }
-        }
-        const QSignalBlocker alphaSliderBlocker(m_alphaSlider);
-        const QSignalBlocker alphaSpinBlocker(m_alphaSpin);
-        m_alphaSlider->setValue(alphaValue);
-        m_alphaSpin->setValue(alphaValue);
-        m_alphaSlider->setEnabled(true);
-        m_alphaSpin->setEnabled(true);
-        m_alphaChanged = false;
-        m_applyButton->setEnabled(false);
-        m_styleApplyButton->setEnabled(false);
-
         // 进程线程信息：补齐路径、优先级、句柄计数、启动时间和模块摘要，便于排障和行为审计。
         ks::ui::FieldDocument processText;
-        processText.field(QStringLiteral("PID"), QStringLiteral("%1").arg(m_info.processId));
-        processText.field(QStringLiteral("ProcessName"), QStringLiteral("%1").arg(m_info.processNameText));
-        processText.field(QStringLiteral("TID"), QStringLiteral("%1").arg(m_info.threadId));
+        processText.field(QStringLiteral("PID"), QStringLiteral("%1").arg(request.info.processId));
+        processText.field(QStringLiteral("ProcessName"), QStringLiteral("%1").arg(request.info.processNameText));
+        processText.field(QStringLiteral("TID"), QStringLiteral("%1").arg(request.info.threadId));
         if (windowRectReady)
         {
             processText.field(QStringLiteral("WindowRect"), QStringLiteral("[%1,%2,%3,%4]").arg(QStringLiteral("%1").arg(rect.left)).arg(QStringLiteral("%1").arg(rect.top)).arg(QStringLiteral("%1").arg(rect.right)).arg(QStringLiteral("%1").arg(rect.bottom)));
@@ -2095,7 +2648,7 @@ private:
         HANDLE processHandle = ::OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
             FALSE,
-            m_info.processId);
+            request.info.processId);
         if (processHandle != nullptr)
         {
             wchar_t processPathBuffer[MAX_PATH * 2] = {};
@@ -2142,12 +2695,12 @@ private:
         }
 
         int moduleCount = 0;
-        const ks::ui::FieldDocument moduleSummary = buildModuleSummaryDocument(m_info.processId, 8, &moduleCount);
+        const ks::ui::FieldDocument moduleSummary = buildModuleSummaryDocument(request.info.processId, 8, &moduleCount, [&token] { return token.isCanceled(); });
         processText.field(QStringLiteral("ModuleCount"), QStringLiteral("%1").arg(moduleCount));
         processText.section(QStringLiteral("ModulePreview"));
         processText.nodes += moduleSummary.nodes;
 
-        HANDLE threadHandle = ::OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, m_info.threadId);
+        HANDLE threadHandle = ::OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, request.info.threadId);
         if (threadHandle != nullptr)
         {
             const int threadPriority = ::GetThreadPriority(threadHandle);
@@ -2165,11 +2718,14 @@ private:
             processText.field(QStringLiteral("ThreadOpen"), QStringLiteral("失败（线程可能已退出）"), true);
         }
         processText.field(QStringLiteral("提示"), QStringLiteral("可从右键菜单跳转到进程详细信息页。"), true);
-        m_processThreadText->setDocument(processText);
+        result.process = std::move(processText);
 
+        }
+        if ((request.mask & 2) != 0 && !token.isCanceled())
+        {
         // 类信息：展示类名、类样式、窗口过程地址以及类资源句柄。
         ks::ui::FieldDocument classText;
-        classText.field(QStringLiteral("ClassName"), QStringLiteral("%1").arg(m_info.classNameText));
+        classText.field(QStringLiteral("ClassName"), QStringLiteral("%1").arg(request.info.classNameText));
         classText.field(QStringLiteral("ClassAtom"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetClassLongPtrW(windowHandle, GCW_ATOM)), 0, 16)));
         classText.field(QStringLiteral("ClassStyle"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetClassLongPtrW(windowHandle, GCL_STYLE)), 0, 16)));
         classText.field(QStringLiteral("ClassExtraBytes"), QStringLiteral("%1").arg(static_cast<qlonglong>(::GetClassLongPtrW(windowHandle, GCL_CBCLSEXTRA))));
@@ -2195,8 +2751,11 @@ private:
                 classText.field(QStringLiteral("ClassModulePath"), QStringLiteral("%1").arg(QString::fromWCharArray(modulePathBuffer, static_cast<int>(pathLength))));
             }
         }
-        m_classText->setDocument(classText);
+        result.classInfo = std::move(classText);
 
+        }
+        if ((request.mask & 4) != 0 && !token.isCanceled())
+        {
         // 钩子/消息页：补齐消息队列状态与 GUI 线程焦点句柄，替代原先占位文本。
         int childWindowCount = 0;
         ::EnumChildWindows(
@@ -2235,9 +2794,9 @@ private:
 
         GUITHREADINFO guiThreadInfo{};
         guiThreadInfo.cbSize = sizeof(guiThreadInfo);
-        const bool guiInfoReady = (::GetGUIThreadInfo(m_info.threadId, &guiThreadInfo) != FALSE);
+        const bool guiInfoReady = (::GetGUIThreadInfo(request.info.threadId, &guiThreadInfo) != FALSE);
 
-        const DWORD queueStatus = ::GetQueueStatus(QS_ALLINPUT);
+        const DWORD queueStatus = request.queueStatus;
         ks::ui::FieldDocument hookText;
         hookText.field(QStringLiteral("IsHungAppWindow"), QStringLiteral("%1").arg(boolText(::IsHungAppWindow(windowHandle) != FALSE)));
         hookText.field(QStringLiteral("ChildWindowCount"), QStringLiteral("%1").arg(childWindowCount));
@@ -2258,8 +2817,11 @@ private:
         }
         hookText.field(QStringLiteral("ForegroundWindow"), QStringLiteral("%1").arg(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetForegroundWindow())))));
         hookText.field(QStringLiteral("说明"), QStringLiteral("系统级 Hook 链表不提供官方通用枚举接口，当前页聚焦可稳定获取的消息上下文。"), true);
-        m_hookText->setDocument(hookText);
+        result.hooks = std::move(hookText);
 
+        }
+        if ((request.mask & 8) != 0 && !token.isCanceled())
+        {
         // 高级页：补齐 DPI、属性表（GetProp/EnumPropsExW）与窗口额外字节等关键内容。
         ks::ui::FieldDocument advancedText;
         advancedText.field(QStringLiteral("UserData (GWLP_USERDATA)"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetWindowLongPtrW(windowHandle, GWLP_USERDATA)), 0, 16)));
@@ -2313,26 +2875,137 @@ private:
         {
             advancedText.field(QStringLiteral("Properties"), QStringLiteral("<none>"), true);
         }
-        m_advancedText->setDocument(advancedText);
+        result.advanced = std::move(advancedText);
 
-        // 刷新时同步更新消息监控状态标签，避免页面切换后显示陈旧模式文本。
-        updateMessageMonitorUiState();
+        }
+        if (!token.isCanceled() && ks::window::windowIdentityMatches(request.info.hwndValue,
+            request.info.processId, request.info.threadId, request.info.processCreationTime100ns)) result.valid = true;
+        else result.failure = QStringLiteral("目标窗口身份已变化或无法验证");
+        return snapshot;
+    }
+    unsigned currentRuntimeMask() const
+    { return m_runtimePageMasks.value(m_tabWidget->currentWidget(), 0); }
+
+    void refreshRuntimeInfo() { requestRuntimeInfo(RuntimeAll, true); }
+    void requestRuntimeInfo(unsigned mask, bool force = false)
+    {
+        if (!m_runtimeOperation) return;
+        if (!force && m_runtimeBaseLoaded && (mask & ~m_runtimeLoadedMask) == 0) return;
+        m_runtimePendingMask |= mask;
+        RuntimeRequest request{m_info, m_runtimePendingMask, 0, m_runtimeEditRevision};
+        if (request.mask & RuntimeHooks) request.queueStatus = ::GetQueueStatus(QS_ALLINPUT);
+        // QueueStatus is explicitly the original caller queue. Every external
+        // target query, module/tree/property walk happens only in the worker.
+        const QPointer<WindowDetailDialog> alive(this);
+        const auto pending = ks::ui::FieldDocument{}.note(QStringLiteral("读取中…"));
+        if ((mask & RuntimeProcess) && !(m_runtimeLoadedMask & RuntimeProcess)) m_processThreadText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeClass) && !(m_runtimeLoadedMask & RuntimeClass)) m_classText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeHooks) && !(m_runtimeLoadedMask & RuntimeHooks)) m_hookText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeAdvanced) && !(m_runtimeLoadedMask & RuntimeAdvanced)) m_advancedText->setDocument(pending);
+        if (!alive) return;
+        m_runtimeOperation->submit<RuntimeRequest, std::shared_ptr<const RuntimeSnapshot>>(
+            std::move(request), collectRuntime,
+            [this](const std::shared_ptr<const RuntimeSnapshot>& value, std::uint64_t) {
+                const QPointer<WindowDetailDialog> alive(this);
+                if (!value->valid)
+                {
+                    failRuntimeRead(value->mask, value->failure);
+                    return true;
+                }
+                applyRuntimeBase(*value);
+                if (!alive) return true;
+                if (!m_runtimeMonitorInitialDone)
+                {
+                    m_runtimeMonitorInitialDone = true;
+                    startMessageMonitor();
+                    if (!alive) return true;
+                }
+                if (value->mask & RuntimeProcess) { m_processThreadText->setDocument(value->process); if (!alive) return true; }
+                if (value->mask & RuntimeClass) { m_classText->setDocument(value->classInfo); if (!alive) return true; }
+                if (value->mask & RuntimeHooks) { m_hookText->setDocument(value->hooks); if (!alive) return true; }
+                if (value->mask & RuntimeAdvanced) { m_advancedText->setDocument(value->advanced); if (!alive) return true; }
+                m_runtimeLoadedMask |= value->mask;
+                m_runtimePendingMask &= ~value->mask;
+                m_runtimeBaseLoaded = true;
+                if (m_runtimeExportPending && (m_runtimeLoadedMask & RuntimeAll) == RuntimeAll)
+                {
+                    m_runtimeExportPending = false;
+                    m_exportButton->setEnabled(true);
+                    exportInfoNow();
+                }
+                return true;
+            }, [this](std::exception_ptr) { failRuntimeRead(m_runtimePendingMask, QStringLiteral("刷新失败")); });
+    }
+    void failRuntimeRead(unsigned mask, const QString& error)
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        m_stateLabel->setText(error);
+        const auto document = ks::ui::FieldDocument{}.note(error);
+        if ((mask & RuntimeProcess) && !(m_runtimeLoadedMask & RuntimeProcess)) { m_processThreadText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeClass) && !(m_runtimeLoadedMask & RuntimeClass)) { m_classText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeHooks) && !(m_runtimeLoadedMask & RuntimeHooks)) { m_hookText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeAdvanced) && !(m_runtimeLoadedMask & RuntimeAdvanced)) { m_advancedText->setDocument(document); if (!alive) return; }
+        m_applyButton->setEnabled(false);
+        m_styleApplyButton->setEnabled(false);
+        m_runtimeExportPending = false;
+        m_exportButton->setEnabled(true);
+    }
+    void applyRuntimeBase(const RuntimeSnapshot& value)
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        m_handleLabel->setText(hwndToText(value.info.hwndValue));
+        m_parentHandleLabel->setText(hwndToText(value.info.parentHwndValue));
+        m_ownerHandleLabel->setText(hwndToText(value.info.ownerHwndValue));
+        m_classNameLabel->setText(value.info.classNameText);
+        m_instanceLabel->setText(value.native ? hwndToText(value.instance) : QStringLiteral("未读取"));
+        m_stateLabel->setText(QStringLiteral("可见:%1, 可用:%2, 状态:%3")
+            .arg(boolText(value.info.visible), boolText(value.info.enabled), windowStateText(value.valid, value.info.minimized, value.info.maximized)));
+        m_relationLabel->setText(QStringLiteral("PID=%1, TID=%2").arg(value.info.processId).arg(value.info.threadId));
+        m_styleText->setDocument(value.style);
+        if (!alive || value.editRevision != m_runtimeEditRevision) return;
+        m_runtimeApplying = true;
+        m_titleEdit->setText(value.info.titleText);
+        syncStyleCheckBoxes(value.info.styleValue, value.info.exStyleValue);
+        m_xSpin->setValue(value.info.windowRect.x());
+        m_ySpin->setValue(value.info.windowRect.y());
+        m_widthSpin->setValue(std::max(1, value.info.windowRect.width()));
+        m_heightSpin->setValue(std::max(1, value.info.windowRect.height()));
+        m_topMostCheck->setEnabled(value.valid);
+        {
+            const QSignalBlocker first(m_alphaSlider), second(m_alphaSpin);
+            m_alphaSlider->setValue(value.info.alphaValue);
+            m_alphaSpin->setValue(value.info.alphaValue);
+        }
+        m_alphaSlider->setEnabled(value.valid);
+        m_alphaSpin->setEnabled(value.valid);
+        m_alphaChanged = false;
+        m_applyButton->setEnabled(false);
+        m_styleApplyButton->setEnabled(false);
+        m_runtimeApplying = false;
     }
 
     // 清空消息表：重置可视列表与计数器。
     void clearMessageTable()
     {
-        m_deferredMessageRows.clear();
-        if (m_messageTable != nullptr)
+        if (m_messageSnapshotOperation) m_messageSnapshotOperation->cancel();
+        auto retired = makeWindowBackgroundValue<std::deque<std::shared_ptr<const WindowMessageRecord>>>();
         {
-            m_messageTable->setRowCount(0);
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            retired->swap(m_messageArchive->rows);
+            m_messageArchive->captured = m_messageArchive->dropped = 0;
+            ++m_messageArchive->clearGeneration;
+            ++m_messageArchive->revision;
         }
-        m_capturedMessageCount = 0;
-        m_droppedMessageCount = 0;
-        if (m_messageCountLabel != nullptr)
-        {
-            m_messageCountLabel->setText(QStringLiteral("已记录: 0, 丢弃: 0"));
-        }
+        m_messagePrepared.reset();
+        m_messagePublishedRevision = 0;
+        const QPointer<WindowDetailDialog> alive(this);
+        if (m_messageModel) m_messageModel->publish({});
+        if (!alive) return;
+        m_capturedMessageCount = m_droppedMessageCount = 0;
+        updateMessageMonitorUiState();
     }
 
     // 启动消息监控：
@@ -2352,6 +3025,9 @@ private:
             return;
         }
 
+        m_messagePort = std::make_shared<WindowMessagePort>();
+        m_messagePort->archive = m_messageArchive;
+        m_messagePort->targetHwnd = m_info.hwndValue;
         bool monitorStarted = false;
         m_messageMonitorMode = QStringLiteral("未启动");
         m_winEventHookSnapshot = nullptr;
@@ -2429,6 +3105,11 @@ private:
     void stopMessageMonitor()
     {
         const bool wasRunning = m_messageMonitorRunning.exchange(false);
+        if (m_messagePort)
+        {
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            m_messagePort->active = false;
+        }
 
         if (m_callWndHook != nullptr)
         {
@@ -2506,137 +3187,101 @@ private:
         }
     }
 
-    // appendMessageRow 作用：
-    // - 仅在 UI 线程向表格追加一条消息记录；
-    // - 当超过最大行数时删除最早行，并累计丢弃计数。
-    void appendMessageRow(
-        const QString& channelText,
-        const quint64 hwndValue,
-        const quint64 messageId,
-        const quint64 wParamValue,
-        const quint64 lParamValue,
-        const quint64 resultValue,
-        const QString& extraText)
-    {
-        if (m_messageTable == nullptr)
-        {
-            return;
-        }
-
-        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_messageTable}))
-        {
-            const int maxDeferredRows =
-                (m_messageMaxRowsSpin == nullptr) ? 5000 : m_messageMaxRowsSpin->value();
-            while (static_cast<int>(m_deferredMessageRows.size()) >= maxDeferredRows)
-            {
-                m_deferredMessageRows.pop_front();
-                ++m_droppedMessageCount;
-            }
-            m_deferredMessageRows.push_back({
-                channelText,
-                hwndValue,
-                messageId,
-                wParamValue,
-                lParamValue,
-                resultValue,
-                extraText
-            });
-
-            const QPointer<WindowDetailDialog> safeThis(this);
-            ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                this,
-                QStringLiteral("window-message-stream-flush"),
-                {m_messageTable},
-                [safeThis]()
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->flushDeferredMessageRows();
-                    }
-                });
-            updateMessageMonitorUiState();
-            return;
-        }
-
-        const int maxRows = (m_messageMaxRowsSpin == nullptr) ? 5000 : m_messageMaxRowsSpin->value();
-        while (m_messageTable->rowCount() >= maxRows)
-        {
-            m_messageTable->removeRow(0);
-            ++m_droppedMessageCount;
-        }
-
-        const int rowIndex = m_messageTable->rowCount();
-        m_messageTable->insertRow(rowIndex);
-
-        const QString messageNameText = (channelText.contains(QStringLiteral("WinEvent")))
-            ? winEventName(static_cast<DWORD>(messageId))
-            : windowMessageName(static_cast<UINT>(messageId));
-
-        const QString messageIdText = channelText.contains(QStringLiteral("WinEvent"))
-            ? QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper()
-            : QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper();
-
-        const QString resultColumnText = extraText.trimmed().isEmpty()
-            ? toHexText64(resultValue)
-            : QStringLiteral("%1 | %2").arg(toHexText64(resultValue), extraText);
-
-        m_messageTable->setItem(rowIndex, 0, new QTableWidgetItem(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))));
-        m_messageTable->setItem(rowIndex, 1, new QTableWidgetItem(channelText));
-        m_messageTable->setItem(rowIndex, 2, new QTableWidgetItem(hwndToText(hwndValue)));
-        m_messageTable->setItem(rowIndex, 3, new QTableWidgetItem(messageIdText));
-        m_messageTable->setItem(rowIndex, 4, new QTableWidgetItem(messageNameText));
-        m_messageTable->setItem(rowIndex, 5, new QTableWidgetItem(toHexText64(wParamValue)));
-        m_messageTable->setItem(rowIndex, 6, new QTableWidgetItem(toHexText64(lParamValue)));
-        m_messageTable->setItem(rowIndex, 7, new QTableWidgetItem(resultColumnText));
-
-        ++m_capturedMessageCount;
-        updateMessageMonitorUiState();
-
-        if (m_messageAutoScrollCheck != nullptr && m_messageAutoScrollCheck->isChecked())
-        {
-            m_messageTable->scrollToBottom();
-        }
-    }
-
-    // flushDeferredMessageRows 作用：
-    // - 菜单关闭后按原始顺序补写全部暂存消息；
-    // - 若另一个菜单已打开，继续保留队列并等待下一次安全回投。
+    // Producers only append to the bounded value archive. The fixed poll never
+    // creates per-event Qt tasks; invisible pages retain events without projection.
     void flushDeferredMessageRows()
     {
-        if (m_deferredMessageRows.empty())
+        quint64 revision = 0;
         {
-            return;
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            revision = m_messageArchive->revision;
+            m_capturedMessageCount = m_messageArchive->captured;
+            m_droppedMessageCount = m_messageArchive->dropped;
         }
-
-        const QPointer<WindowDetailDialog> safeThis(this);
-        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("window-message-stream-flush"),
-            {m_messageTable},
-            [safeThis]()
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->flushDeferredMessageRows();
-                }
-            }))
+        updateMessageMonitorUiState();
+        if (!m_messageTable->isVisible() || revision == m_messagePublishedRevision ||
+            !m_messageSnapshotOperation || m_messageSnapshotOperation->isBusy()) return;
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+            QStringLiteral("window-message-stream-flush"), {m_messageTable},
+            [this] { flushDeferredMessageRows(); })) return;
+        struct Request
         {
-            return;
-        }
-
-        std::deque<PendingMessageRow> pendingRows;
-        pendingRows.swap(m_deferredMessageRows);
-        for (const PendingMessageRow& pendingRow : pendingRows)
-        {
-            appendMessageRow(
-                pendingRow.channelText,
-                pendingRow.hwndValue,
-                pendingRow.messageId,
-                pendingRow.wParamValue,
-                pendingRow.lParamValue,
-                pendingRow.resultValue,
-                pendingRow.extraText);
-        }
+            std::shared_ptr<WindowMessageArchive> archive;
+            std::shared_ptr<const WindowMessageSnapshot> previous;
+        };
+        m_messageSnapshotOperation->submit<Request, std::shared_ptr<const WindowMessageSnapshot>>(
+            {m_messageArchive, m_messagePrepared},
+            [](const Request& value, const ks::ui::AsyncOperationToken& token) {
+                return makeWindowBackgroundValue<WindowMessageSnapshot>(prepareWindowMessages(value.archive, value.previous, &token));
+            },
+            [this](const std::shared_ptr<const WindowMessageSnapshot>& snapshot, std::uint64_t generation) {
+                const auto commit = [this, snapshot, generation] {
+                    if (!m_messageSnapshotOperation->isCurrent(generation)) return;
+                    bool current = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+                        current = snapshot->clearGeneration == m_messageArchive->clearGeneration;
+                    }
+                    if (current && m_messageTable->isVisible())
+                    {
+                        // Preserve selection using sequence ranges, not one index
+                        // for each of up to 50000 selected rows.
+                        std::vector<std::pair<quint64, quint64>> ranges;
+                        const auto sourceSelection = m_messageDisplayModel->mapSelectionToSource(
+                            m_messageTable->selectionModel()->selection());
+                        for (const auto& range : sourceSelection)
+                            ranges.emplace_back(m_messageModel->sequenceAt(range.top()), m_messageModel->sequenceAt(range.bottom()));
+                        const auto currentIndex = m_messageTable->currentIndex();
+                        const quint64 currentSequence = m_messageModel->sequenceAt(m_messageDisplayModel->mapToSource(currentIndex).row());
+                        const int currentColumn = currentIndex.column();
+                        const auto topIndex = m_messageTable->indexAt(QPoint(0, 0));
+                        const quint64 topSequence = m_messageModel->sequenceAt(m_messageDisplayModel->mapToSource(topIndex).row());
+                        const int topOffset = topIndex.isValid() ? m_messageTable->visualRect(topIndex).top() : 0;
+                        const QPointer<WindowDetailDialog> alive(this);
+                        // A fresh capture invalidated the old widget's one-shot
+                        // sort too. Keep canonical FIFO and reset only its view.
+                        m_messageDisplayModel->sort(-1);
+                        if (!alive) return;
+                        m_messagePrepared = snapshot;
+                        m_messageModel->publish(snapshot);
+                        if (!alive) return;
+                        QItemSelection selection;
+                        if (!snapshot->rows.empty())
+                        {
+                            const quint64 first = snapshot->rows.front()->sequence, last = snapshot->rows.back()->sequence;
+                            for (const auto& range : ranges)
+                            {
+                                const quint64 from = std::max(first, range.first), to = std::min(last, range.second);
+                                if (from <= to)
+                                    selection.select(m_messageModel->index(m_messageModel->rowForSequence(from), 0),
+                                        m_messageModel->index(m_messageModel->rowForSequence(to), 7));
+                            }
+                        }
+                        m_messageTable->selectionModel()->select(m_messageDisplayModel->mapSelectionFromSource(selection), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                        if (!alive) return;
+                        const int currentRow = m_messageModel->rowForSequence(currentSequence);
+                        if (currentRow >= 0) m_messageTable->selectionModel()->setCurrentIndex(
+                            m_messageDisplayModel->mapFromSource(m_messageModel->index(currentRow, std::max(0, currentColumn))), QItemSelectionModel::NoUpdate);
+                        if (!alive) return;
+                        m_messagePublishedRevision = snapshot->revision;
+                        if (m_messageAutoScrollCheck->isChecked()) m_messageTable->scrollToBottom();
+                        else if (!snapshot->rows.empty())
+                        {
+                            const int top = std::max(0, m_messageModel->rowForSequence(topSequence));
+                            m_messageTable->scrollTo(m_messageDisplayModel->mapFromSource(m_messageModel->index(top, 0)), QAbstractItemView::PositionAtTop);
+                            if (m_messageTable->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+                                m_messageTable->verticalScrollBar()->setValue(m_messageTable->verticalScrollBar()->value() - topOffset);
+                        }
+                        if (!alive) return;
+                    }
+                    m_messageSnapshotOperation->completeDeferred(generation);
+                };
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("window-message-stream-publish"), {m_messageTable}, commit)) return false;
+                commit();
+                return true;
+            },
+            [](std::exception_ptr) {});
     }
 
     // threadHookDispatch 作用：
@@ -2651,49 +3296,18 @@ private:
         const LPARAM lParamValue,
         const LRESULT resultValue)
     {
-        std::vector<WindowDetailDialog*> dialogList;
+        std::vector<std::shared_ptr<WindowMessagePort>> ports;
         {
-            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-            const auto it = s_threadDialogMap.find(threadId);
-            if (it != s_threadDialogMap.end())
-            {
-                dialogList = it->second;
-            }
+            std::lock_guard<std::mutex> lock(s_monitorRegistryMutex);
+            const auto found = s_threadDialogMap.find(threadId);
+            if (found != s_threadDialogMap.end()) ports = found->second;
         }
-
-        if (dialogList.empty() || targetHwnd == nullptr)
-        {
-            return;
-        }
-
-        for (WindowDetailDialog* dialog : dialogList)
-        {
-            if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
-            {
-                continue;
-            }
-            if (targetHwnd != dialog->targetWindowHandle())
-            {
-                continue;
-            }
-
-            const QPointer<WindowDetailDialog> guardDialog(dialog);
-            const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(targetHwnd));
-            QMetaObject::invokeMethod(qApp, [guardDialog, channelText, hwndValue, messageId, wParamValue, lParamValue, resultValue]() {
-                if (guardDialog == nullptr)
-                {
-                    return;
-                }
-                guardDialog->appendMessageRow(
-                    channelText,
-                    hwndValue,
-                    static_cast<quint64>(messageId),
-                    static_cast<quint64>(wParamValue),
-                    static_cast<quint64>(lParamValue),
-                    static_cast<quint64>(resultValue),
-                    QString());
-                }, Qt::QueuedConnection);
-        }
+        if (!targetHwnd) return;
+        for (const auto& port : ports)
+            recordWindowMessage(port, {channelText,
+                static_cast<quint64>(reinterpret_cast<quintptr>(targetHwnd)),
+                static_cast<quint64>(messageId), static_cast<quint64>(wParamValue),
+                static_cast<quint64>(lParamValue), static_cast<quint64>(resultValue), QString()});
     }
 
     // callWndHookProc：捕获 SendMessage 路径的入站消息（调用前）。
@@ -2769,45 +3383,19 @@ private:
         const DWORD eventThreadId,
         const DWORD eventTimeMs)
     {
-        WindowDetailDialog* dialog = nullptr;
+        std::shared_ptr<WindowMessagePort> port;
         {
-            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-            const auto it = s_eventHookMap.find(hookHandle);
-            if (it != s_eventHookMap.end())
-            {
-                dialog = it->second;
-            }
+            std::lock_guard<std::mutex> lock(s_monitorRegistryMutex);
+            const auto found = s_eventHookMap.find(hookHandle);
+            if (found != s_eventHookMap.end()) port = found->second;
         }
-        if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
-        {
-            return;
-        }
-        if (windowHandle == nullptr || windowHandle != dialog->targetWindowHandle())
-        {
-            return;
-        }
-
-        const QPointer<WindowDetailDialog> guardDialog(dialog);
-        const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle));
-        const QString extraText = QStringLiteral("obj=%1, child=%2, thread=%3, time=%4")
-            .arg(objectId)
-            .arg(childId)
-            .arg(eventThreadId)
-            .arg(eventTimeMs);
-        QMetaObject::invokeMethod(qApp, [guardDialog, hwndValue, eventId, objectId, childId, eventThreadId, eventTimeMs, extraText]() {
-            if (guardDialog == nullptr)
-            {
-                return;
-            }
-            guardDialog->appendMessageRow(
-                QStringLiteral("WinEvent"),
-                hwndValue,
-                static_cast<quint64>(eventId),
-                static_cast<quint64>(static_cast<qint64>(objectId)),
-                static_cast<quint64>(static_cast<qint64>(childId)),
-                static_cast<quint64>(eventThreadId),
-                extraText + QStringLiteral(", tick=%1").arg(eventTimeMs));
-            }, Qt::QueuedConnection);
+        const QString extra = QStringLiteral("obj=%1, child=%2, thread=%3, time=%4")
+            .arg(objectId).arg(childId).arg(eventThreadId).arg(eventTimeMs);
+        recordWindowMessage(port, {QStringLiteral("WinEvent"),
+            static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle)),
+            static_cast<quint64>(eventId), static_cast<quint64>(static_cast<qint64>(objectId)),
+            static_cast<quint64>(static_cast<qint64>(childId)), static_cast<quint64>(eventThreadId),
+            extra + QStringLiteral(", tick=%1").arg(eventTimeMs)});
     }
 
     // 注册 thread -> dialog 映射：支持同一线程被多个详情窗同时观察。
@@ -2818,11 +3406,11 @@ private:
             return;
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-        std::vector<WindowDetailDialog*>& dialogList = s_threadDialogMap[threadId];
-        const bool existed = std::find(dialogList.begin(), dialogList.end(), dialog) != dialogList.end();
+        std::vector<std::shared_ptr<WindowMessagePort>>& dialogList = s_threadDialogMap[threadId];
+        const bool existed = std::find(dialogList.begin(), dialogList.end(), dialog->m_messagePort) != dialogList.end();
         if (!existed)
         {
-            dialogList.push_back(dialog);
+            dialogList.push_back(dialog->m_messagePort);
         }
     }
 
@@ -2840,8 +3428,8 @@ private:
             return;
         }
 
-        std::vector<WindowDetailDialog*>& dialogList = it->second;
-        dialogList.erase(std::remove(dialogList.begin(), dialogList.end(), dialog), dialogList.end());
+        std::vector<std::shared_ptr<WindowMessagePort>>& dialogList = it->second;
+        dialogList.erase(std::remove(dialogList.begin(), dialogList.end(), dialog->m_messagePort), dialogList.end());
         if (dialogList.empty())
         {
             s_threadDialogMap.erase(it);
@@ -2856,7 +3444,7 @@ private:
             return;
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-        s_eventHookMap[hookHandle] = dialog;
+        s_eventHookMap[hookHandle] = dialog->m_messagePort;
     }
 
     // 反注册 WinEvent 映射：窗口关闭或停止监控时必须调用。
@@ -2868,7 +3456,7 @@ private:
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
         const auto it = s_eventHookMap.find(hookHandle);
-        if (it != s_eventHookMap.end() && it->second == dialog)
+        if (it != s_eventHookMap.end() && it->second == dialog->m_messagePort)
         {
             s_eventHookMap.erase(it);
         }
@@ -2916,6 +3504,15 @@ private:
     // 导出信息：把当前所有标签页关键内容写入文本文件。
     void exportInfo()
     {
+        if (m_runtimeExportPending) return;
+        m_runtimeExportPending = true;
+        m_exportButton->setEnabled(false);
+        requestRuntimeInfo(RuntimeAll, true);
+    }
+    void exportInfoNow()
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        const QString reportText = buildReportText();
         const QString defaultName = QStringLiteral("window_detail_%1_%2.txt")
             .arg(QString::number(m_info.processId))
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
@@ -2925,7 +3522,7 @@ private:
             QStringLiteral("导出窗口详情"),
             defaultName,
             QStringLiteral("文本文件 (*.txt)"));
-        if (outputPath.trimmed().isEmpty())
+        if (!alive || outputPath.trimmed().isEmpty())
         {
             return;
         }
@@ -2939,10 +3536,15 @@ private:
 
         QTextStream out(&file);
         out.setEncoding(QStringConverter::Utf8);
-        out << buildReportText();
+        out << reportText;
         file.close();
 
         QMessageBox::information(this, QStringLiteral("导出成功"), QStringLiteral("已保存到：%1").arg(outputPath));
+    }
+
+    WindowMessageSnapshot prepareWindowMessagesForExport() const
+    {
+        return prepareWindowMessages(m_messageArchive, m_messagePrepared, nullptr);
     }
 
     // 组装导出文本：集中输出所有页核心内容，便于审计留档。
@@ -2974,34 +3576,32 @@ private:
         text += QStringLiteral("[消息记录]\n");
         if (m_messageTable != nullptr)
         {
-            QStringList headerList;
-            for (int col = 0; col < m_messageTable->columnCount(); ++col)
+            text += m_messageModel->headers.join('\t') + QStringLiteral("\n");
+            // Explicit export reads the canonical retained archive, not a stale
+            // hidden visual snapshot. No accepted record is lost to UI cadence.
+            auto snapshot = prepareWindowMessagesForExport();
+            for (const auto& row : snapshot.rows)
             {
-                const QTableWidgetItem* headerItem = m_messageTable->horizontalHeaderItem(col);
-                headerList << (headerItem == nullptr ? QStringLiteral("Col%1").arg(col) : headerItem->text());
-            }
-            text += headerList.join('\t');
-            text += QStringLiteral("\n");
-
-            for (int row = 0; row < m_messageTable->rowCount(); ++row)
-            {
-                QStringList rowTextList;
-                for (int col = 0; col < m_messageTable->columnCount(); ++col)
-                {
-                    QTableWidgetItem* item = m_messageTable->item(row, col);
-                    rowTextList << (item == nullptr ? QString() : item->text());
-                }
-                text += rowTextList.join('\t');
-                text += QStringLiteral("\n");
+                QStringList cells;
+                for (const auto& cell : row->cells) cells << cell;
+                text += cells.join('\t') + QStringLiteral("\n");
             }
         }
         text += QStringLiteral("\n");
+
         text += QStringLiteral("[高级属性]\n%1\n").arg(m_advancedText->plainText());
         return text;
     }
 
 private:
     OtherDock::WindowInfo m_info;          // 目标窗口快照。
+    ks::ui::AsyncOperation* m_runtimeOperation = nullptr;
+    QHash<QWidget*, unsigned> m_runtimePageMasks;
+    unsigned m_runtimeLoadedMask = 0, m_runtimePendingMask = 0;
+    quint64 m_runtimeEditRevision = 0;
+    bool m_runtimeBaseLoaded = false, m_runtimeApplying = false, m_runtimeExportPending = false;
+    bool m_runtimeMonitorInitialDone = false;
+
 
     QTabWidget* m_tabWidget = nullptr;     // 标签页容器。
 
@@ -3039,7 +3639,15 @@ private:
     QSpinBox* m_messageMaxRowsSpin = nullptr;      // 消息表最大保留行数。
     QLabel* m_messageModeLabel = nullptr;          // 当前采集模式标签。
     QLabel* m_messageCountLabel = nullptr;         // 已记录/丢弃计数标签。
-    QTableWidget* m_messageTable = nullptr;        // 消息列表表格。
+    QTableView* m_messageTable = nullptr;
+    WindowMessageModel* m_messageModel = nullptr;
+    QSortFilterProxyModel* m_messageDisplayModel = nullptr;
+    std::shared_ptr<WindowMessageArchive> m_messageArchive = makeWindowBackgroundValue<WindowMessageArchive>();
+    std::shared_ptr<WindowMessagePort> m_messagePort;
+    std::shared_ptr<const WindowMessageSnapshot> m_messagePrepared;
+    ks::ui::AsyncOperation* m_messageSnapshotOperation = nullptr;
+    QTimer* m_messageFlushTimer = nullptr;
+    quint64 m_messagePublishedRevision = 0;        // 消息列表表格。
     ks::ui::StructuredFieldView* m_advancedText = nullptr;      // 高级页文本（统一文本编辑器，只读）。
 
     QPushButton* m_refreshButton = nullptr;    // 刷新按钮。
@@ -3055,29 +3663,59 @@ private:
     std::atomic_bool m_messageMonitorRunning{ false }; // 消息监控运行状态。
     bool m_threadRegistered = false;           // 是否已注册 thread->dialog 映射。
     bool m_eventRegistered = false;            // 是否已注册 eventHook->dialog 映射。
-    int m_capturedMessageCount = 0;            // 已写入消息表的消息数量。
-    int m_droppedMessageCount = 0;             // 因超过最大行数而丢弃的消息数量。
-    std::deque<PendingMessageRow> m_deferredMessageRows; // 菜单期间保持顺序的待提交消息。
+    quint64 m_capturedMessageCount = 0;            // 已写入消息表的消息数量。
+    quint64 m_droppedMessageCount = 0;             // 因超过最大行数而丢弃的消息数量。
     QString m_messageMonitorMode = QStringLiteral("未启动"); // 当前监控模式文本。
 
     static std::mutex s_monitorRegistryMutex;  // 回调映射表互斥锁，防止并发竞态。
-    static std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> s_threadDialogMap; // threadId -> 详情窗列表。
-    static std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> s_eventHookMap; // WinEvent hook -> 详情窗。
+    static std::unordered_map<DWORD, std::vector<std::shared_ptr<WindowMessagePort>>> s_threadDialogMap; // threadId -> 详情窗列表。
+    static std::unordered_map<HWINEVENTHOOK, std::shared_ptr<WindowMessagePort>> s_eventHookMap; // WinEvent hook -> 详情窗。
 };
 
 // 静态成员定义：统一管理消息回调分发映射。
 std::mutex WindowDetailDialog::s_monitorRegistryMutex;
-std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> WindowDetailDialog::s_threadDialogMap;
-std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> WindowDetailDialog::s_eventHookMap;
+std::unordered_map<DWORD, std::vector<std::shared_ptr<WindowMessagePort>>> WindowDetailDialog::s_threadDialogMap;
+std::unordered_map<HWINEVENTHOOK, std::shared_ptr<WindowMessagePort>> WindowDetailDialog::s_eventHookMap;
 
 OtherDock::OtherDock(QWidget* parent)
-    : QWidget(parent)
+    : OtherDock(parent, PageScope::Main, {})
 {
+}
+
+OtherDock::OtherDock(QWidget* parent, PageScope scope, const QVector<quint32>& processIds)
+    : QWidget(parent), m_pageScope(scope)
+{
+    // Caller scope is complete before controls or the first sampling/projection
+    // request exist. A process detail host never creates a hidden desktop page.
+    for (quint32 pid : processIds)
+        if (pid != 0) m_externalProcessIdFilterSet.insert(pid);
+
     kLogEvent event;
     info << event << "[OtherDock] 构造开始，初始化窗口管理页。" << eol;
 
+    m_windowState = makeWindowBackgroundValue<ks::windowlist::Snapshot>();
+    if (m_pageScope == PageScope::Main) {
+        m_desktopOperation = new ks::ui::AsyncOperation(this);
+        m_desktopPresentationOperation = new ks::ui::AsyncOperation(this);
+    }
+    m_windowRefreshOperation = new ks::ui::AsyncOperation(this);
+    m_windowProjectionOperation = new ks::ui::AsyncOperation(this);
+    m_windowFilterTimer = new QTimer(this);
+    m_windowFilterTimer->setSingleShot(true);
+    m_windowFilterTimer->setInterval(120);
+    connect(m_windowFilterTimer, &QTimer::timeout, this, [this] { rebuildWindowTreeFromSnapshot(); });
     initializeUi();
     initializeConnections();
+    m_previewScaleOperation = new ks::ui::AsyncOperation(this);
+    m_thumbnailLabel->installEventFilter(this);
+    m_previewTimer = new QTimer(this);
+    m_previewTimer->setInterval(1000);
+    connect(m_previewTimer, &QTimer::timeout, this, [this] {
+        m_previewCaptureDue = true;
+        if (m_previewWidget->isVisible()) scheduleWindowSelectionUi();
+    });
+    m_previewTimer->start();
+    initializeWindowTransactions();
     m_autoRefreshCheck->setChecked(true);
     applyViewMode();
     refreshWindowListAsync();
@@ -3085,6 +3723,12 @@ OtherDock::OtherDock(QWidget* parent)
 
 OtherDock::~OtherDock()
 {
+    if (m_previewScaleOperation) m_previewScaleOperation->close();
+    if (m_windowActionOperation) m_windowActionOperation->close();
+    if (m_windowRefreshOperation) m_windowRefreshOperation->close();
+    if (m_desktopOperation) m_desktopOperation->close();
+    if (m_desktopPresentationOperation) m_desktopPresentationOperation->close();
+    if (m_windowProjectionOperation) m_windowProjectionOperation->close();
     if (m_autoRefreshTimer != nullptr)
     {
         m_autoRefreshTimer->stop();
@@ -3093,7 +3737,7 @@ OtherDock::~OtherDock()
     // 关闭本进程主动保留的新建桌面句柄，避免桌面对象在程序退出后残留引用。
     for (const CreatedDesktopRecord& desktopRecord : m_createdDesktopHandles)
     {
-        if (desktopRecord.desktopHandle != nullptr)
+        if (desktopRecord.desktopHandle != nullptr && !desktopRecord.handleLease)
         {
             ::CloseDesktop(reinterpret_cast<HDESK>(desktopRecord.desktopHandle));
         }
@@ -3184,7 +3828,7 @@ void OtherDock::initializeUi()
     m_clearExternalProcessFilterButton->setToolTip(QStringLiteral("清除进程页跳转带入的 PID 筛选"));
     m_clearExternalProcessFilterButton->setStyleSheet(blueButtonStyle());
     m_clearExternalProcessFilterButton->setFixedWidth(32);
-    m_clearExternalProcessFilterButton->setEnabled(false);
+    m_clearExternalProcessFilterButton->setEnabled(!m_externalProcessIdFilterSet.isEmpty());
 
     m_autoRefreshCheck = new QCheckBox(QStringLiteral("自动"), m_toolBarWidget);
     m_autoRefreshCheck->setToolTip(QStringLiteral("启用自动刷新窗口列表"));
@@ -3338,7 +3982,12 @@ void OtherDock::initializeUi()
     m_mainSplitter = new QSplitter(Qt::Horizontal, m_windowListPage);
     m_windowListPageLayout->addWidget(m_mainSplitter, 1);
 
-    m_windowTree = new QTreeWidget(m_mainSplitter);
+    m_windowTree = new QTreeView(m_mainSplitter);
+    m_windowModel = new ks::windowlist::SnapshotModel(m_windowTree);
+    m_windowTree->setProperty("ks_i18n_preserve_model_data", true);
+    m_windowTree->setModel(m_windowModel);
+    m_windowModel->iconsChanged = [this] { m_windowTree->viewport()->update(); };
+    m_windowTree->installEventFilter(this);
     m_windowTree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_windowTree->setRootIsDecorated(true);
     m_windowTree->setAlternatingRowColors(true);
@@ -3347,8 +3996,7 @@ void OtherDock::initializeUi()
     m_windowTree->setUniformRowHeights(true);
     m_windowTree->setSortingEnabled(false);
     m_windowTree->header()->setStyleSheet(blueHeaderStyle());
-    m_windowTree->setColumnCount(13);
-    m_windowTree->setHeaderLabels({
+    m_windowModel->headers = {
         QStringLiteral("窗口标题"),
         QStringLiteral("句柄"),
         QStringLiteral("枚举API"),
@@ -3362,7 +4010,7 @@ void OtherDock::initializeUi()
         QStringLiteral("顶层"),
         QStringLiteral("状态"),
         QStringLiteral("透明度")
-        });
+        };
     ks::window::configureWindowListColumnSizing(m_windowTree);
 
     m_previewWidget = new QWidget(m_mainSplitter);
@@ -3372,6 +4020,10 @@ void OtherDock::initializeUi()
 
     m_thumbnailLabel = new QLabel(m_previewWidget);
     m_thumbnailLabel->setMinimumSize(320, 220);
+    // The pixmap is a projection into this layout slot, never a new size hint.
+    // QLabel otherwise adds its frame to each captured size on every refresh,
+    // steadily enlarging the preview and taking height from the properties.
+    m_thumbnailLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     m_thumbnailLabel->setAlignment(Qt::AlignCenter);
     m_thumbnailLabel->setStyleSheet(QStringLiteral(
         "border:1px solid %1;background:%2;")
@@ -3398,90 +4050,76 @@ void OtherDock::initializeUi()
     // 默认把左侧窗口列表区域放宽，避免窗口标题被截断。
     m_mainSplitter->setStretchFactor(0, 4);
     m_mainSplitter->setStretchFactor(1, 1);
-    m_contentTabWidget->addTab(m_windowListPage, QStringLiteral("窗口列表"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_contentTabWidget, m_windowListPage, QStringLiteral("window.tab.list"), QStringLiteral("窗口列表"));
+    m_navigationTabs.add(kWindowNavigation[0], m_contentTabWidget, m_windowListPage);
 
     // 桌面管理页：列出窗口站与桌面，并补充 SessionId / SID / 权限状态等上下文。
-    m_desktopPage = new QWidget(m_contentTabWidget);
-    m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
-    m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
-    m_desktopPageLayout->setSpacing(6);
+    if (m_pageScope == PageScope::Main)
+    {
+        m_desktopPage = new QWidget(m_contentTabWidget);
+        m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
+        m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
+        m_desktopPageLayout->setSpacing(6);
 
-    m_desktopToolLayout = new QHBoxLayout();
-    m_desktopToolLayout->setContentsMargins(0, 0, 0, 0);
-    m_desktopToolLayout->setSpacing(6);
+        m_desktopToolLayout = new QHBoxLayout();
+        m_desktopToolLayout->setContentsMargins(0, 0, 0, 0);
+        m_desktopToolLayout->setSpacing(6);
 
-    m_desktopRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_desktopPage);
-    m_desktopRefreshButton->setToolTip(QStringLiteral("刷新可用桌面列表"));
-    m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
-    m_desktopRefreshButton->setFixedWidth(32);
+        m_desktopRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_desktopPage);
+        m_desktopRefreshButton->setToolTip(QStringLiteral("刷新可用桌面列表"));
+        m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
+        m_desktopRefreshButton->setFixedWidth(32);
 
-    m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/desktop_switch.svg"), QString(), m_desktopPage);
-    m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
-    m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
-    m_desktopSwitchButton->setFixedWidth(32);
+        m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/desktop_switch.svg"), QString(), m_desktopPage);
+        m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
+        m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
+        m_desktopSwitchButton->setFixedWidth(32);
 
-    m_desktopCreateButton = new QPushButton(QIcon(":/Icon/desktop_create.svg"), QString(), m_desktopPage);
-    m_desktopCreateButton->setToolTip(QStringLiteral("新建桌面：在弹出窗口中设置名称、权限、安全描述符和私有访问参数"));
-    m_desktopCreateButton->setStyleSheet(blueButtonStyle());
-    m_desktopCreateButton->setFixedWidth(32);
+        m_desktopCreateButton = new QPushButton(QIcon(":/Icon/desktop_create.svg"), QString(), m_desktopPage);
+        m_desktopCreateButton->setToolTip(QStringLiteral("新建桌面：在弹出窗口中设置名称、权限、安全描述符和私有访问参数"));
+        m_desktopCreateButton->setStyleSheet(blueButtonStyle());
+        m_desktopCreateButton->setFixedWidth(32);
 
-    m_desktopStatusLabel = new QLabel(
-        QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
-        m_desktopPage);
-    m_desktopStatusLabel->setWordWrap(true);
+        m_desktopStatusLabel = new QLabel(
+            QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
+            m_desktopPage);
+        m_desktopStatusLabel->setWordWrap(true);
 
-    m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopCreateButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
-    ks::ui::NormalizeToolbarRow(m_desktopToolLayout);
-    m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
+        m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopCreateButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
+        ks::ui::NormalizeToolbarRow(m_desktopToolLayout);
+        m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
-    m_desktopTable = new ks::ui::VisibleTableWidget(m_desktopPage);
-    // 桌面/窗口站是动态系统现场，明确保留完整快照和对比。
-    ks::ui::SetTableActionBarMode(m_desktopTable, ks::ui::TableActionBarMode::Full);
-    m_desktopTable->setColumnCount(13);
-    m_desktopTable->setHorizontalHeaderLabels({
-        QStringLiteral("窗口站"),
-        QStringLiteral("桌面名称"),
-        QStringLiteral("当前站"),
-        QStringLiteral("当前桌面"),
-        QStringLiteral("交互式"),
-        QStringLiteral("可读"),
-        QStringLiteral("可切换"),
-        QStringLiteral("SessionId"),
-        QStringLiteral("所有者"),
-        QStringLiteral("SID"),
-        QStringLiteral("SID详情"),
-        QStringLiteral("堆(KB)"),
-        QStringLiteral("备注")
-        });
-    m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_desktopTable->setAlternatingRowColors(true);
-    m_desktopTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(11, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(12, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_desktopPageLayout->addWidget(m_desktopTable, 1);
+        m_desktopTable = new ks::ui::TableActionTableView(m_desktopPage);
+        initializeDesktopTableModel();
+        m_desktopTable->installEventFilter(this);
+        m_desktopStatusLabel->setToolTip(m_desktopStatusLabel->text());
+        m_desktopStatusLabel->setText(QStringLiteral("未读取"));
+        m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_desktopTable->setAlternatingRowColors(true);
+        m_desktopTable->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(11, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(12, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+        m_desktopPageLayout->addWidget(m_desktopTable, 1);
 
-    m_contentTabWidget->addTab(m_desktopPage, QStringLiteral("桌面管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_contentTabWidget, m_desktopPage, QStringLiteral("window.tab.desktop"), QStringLiteral("桌面管理"));
+        m_navigationTabs.add(kWindowNavigation[1], m_contentTabWidget, m_desktopPage);
+
+    }
 
     // 底部状态栏：展示总数、可见数、系统窗口数和当前选中信息。
     m_statusBar = new QStatusBar(this);
@@ -3499,8 +4137,7 @@ void OtherDock::initializeUi()
     m_autoRefreshTimer = new QTimer(this);
     m_autoRefreshTimer->setInterval(m_autoRefreshIntervalSpin->value());
 
-    // 初始化一次桌面列表，确保打开页签后立即可见。
-    refreshDesktopList();
+    // Desktop enumeration starts on the actual table Show event below.
     // 页头、内容Tab及状态栏共享同一外壳，四角只放在整页根并保留原4px留白。
     ks::ui::StyleWorkspaceContentFrame(this, 4);
 }
@@ -3561,7 +4198,8 @@ void OtherDock::initializeConnections()
             << "[OtherDock] 关键字过滤变更, keyword="
             << text.toStdString()
             << eol;
-        rebuildWindowTreeFromSnapshot();
+        m_windowProjectionDirty = true;
+        m_windowFilterTimer->start();
     });
     connect(m_filterModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
         kLogEvent event;
@@ -3615,7 +4253,7 @@ void OtherDock::initializeConnections()
     });
 
     // 右键菜单：窗口操作入口。
-    connect(m_windowTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+    connect(m_windowTree, &QTreeView::customContextMenuRequested, this, [this](const QPoint& pos) {
         showWindowContextMenu(pos);
     });
 
@@ -3628,14 +4266,14 @@ void OtherDock::initializeConnections()
     });
 
     // 双击行：直接打开窗口详细信息。
-    connect(m_windowTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
-        if (item == nullptr || item->data(0, Qt::UserRole + 1).toBool())
+    connect(m_windowTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& item) {
+        if (!item.isValid() || item.data(Qt::UserRole + 1).toBool())
         {
             return;
         }
-        const quint64 hwndValue = item->data(0, Qt::UserRole).toULongLong();
+        const quint64 hwndValue = item.data(Qt::UserRole).toULongLong();
         const WindowInfo* windowInfo = findInfoByHwnd(hwndValue);
-        if (windowInfo != nullptr)
+        if (windowInfo != nullptr && ks::windowlist::identity(*windowInfo) == ks::window::windowItemIdentity(item))
         {
             kLogEvent event;
             info << event
@@ -3649,15 +4287,15 @@ void OtherDock::initializeConnections()
     });
 
     // Preview follows the current selected leaf; the status counts the whole selection.
-    connect(m_windowTree, &QTreeWidget::currentItemChanged, this,
-        [this](QTreeWidgetItem*, QTreeWidgetItem*) { updateWindowSelectionUi(); });
-    connect(m_windowTree, &QTreeWidget::itemSelectionChanged, this,
-        [this] { updateWindowSelectionUi(); });
+    connect(m_windowTree->selectionModel(), &QItemSelectionModel::currentChanged, this,
+        [this](const QModelIndex&, const QModelIndex&) { scheduleWindowSelectionUi(); });
+    connect(m_windowTree->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+        [this](const QItemSelection&, const QItemSelection&) { scheduleWindowSelectionUi(); });
 
     // 截图按钮：把当前选中窗口抓图并保存到文件。
     connect(m_captureButton, &QPushButton::clicked, this, [this]() {
-        QTreeWidgetItem* item = m_windowTree->currentItem();
-        if (item == nullptr || item->data(0, Qt::UserRole + 1).toBool())
+        const auto item = m_windowTree->currentIndex();
+        if (!item.isValid() || item.data(Qt::UserRole + 1).toBool())
         {
             kLogEvent event;
             warn << event
@@ -3667,7 +4305,7 @@ void OtherDock::initializeConnections()
             return;
         }
 
-        const quint64 hwndValue = item->data(0, Qt::UserRole).toULongLong();
+        const quint64 hwndValue = item.data(Qt::UserRole).toULongLong();
         const QPixmap pixmap = grabWindowPreviewPixmap(hwndValue, QSize(900, 600));
         if (pixmap.isNull())
         {
@@ -3720,26 +4358,29 @@ void OtherDock::initializeConnections()
         QMessageBox::information(this, QStringLiteral("窗口截图"), QStringLiteral("截图已保存：%1").arg(savePath));
     });
 
-    // 桌面管理页连接：刷新、切换、新建、双击和右键菜单分别进入对应桌面操作链路。
-    connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
-        kLogEvent event;
-        info << event
-            << "[OtherDock] 用户点击刷新桌面列表。"
-            << eol;
-        refreshDesktopList();
-    });
-    connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
-        switchToSelectedDesktop();
-    });
-    connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
-        showCreateDesktopDialog();
-    });
-    connect(m_desktopTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
-        switchToSelectedDesktop();
-    });
-    connect(m_desktopTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-        showDesktopContextMenu(pos);
-    });
+    if (m_desktopTable != nullptr)
+    {
+        // 桌面管理页连接：刷新、切换、新建、双击和右键菜单分别进入对应桌面操作链路。
+        connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
+            kLogEvent event;
+            info << event
+                << "[OtherDock] 用户点击刷新桌面列表。"
+                << eol;
+            refreshDesktopList();
+        });
+        connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
+            switchToSelectedDesktop();
+        });
+        connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
+            showCreateDesktopDialog();
+        });
+        connect(m_desktopTable, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
+            switchToSelectedDesktop();
+        });
+        connect(m_desktopTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
+            showDesktopContextMenu(pos);
+        });
+    }
 }
 
 void OtherDock::applyViewMode()
@@ -3749,7 +4390,7 @@ void OtherDock::applyViewMode()
     if (mode == 0)
     {
         // 图标视图：保留关键列，降低信息密度。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             const bool keepVisible =
                 (col == kWindowColumnTitle
@@ -3762,7 +4403,7 @@ void OtherDock::applyViewMode()
     else if (mode == 1)
     {
         // 列表视图：比图标模式多保留 PID、状态、可见性。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             const bool keepVisible =
                 (col == kWindowColumnTitle
@@ -3777,7 +4418,7 @@ void OtherDock::applyViewMode()
     else
     {
         // 详细信息视图：显示所有列，满足审计场景。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             m_windowTree->setColumnHidden(col, false);
         }
@@ -3794,533 +4435,250 @@ void OtherDock::applyViewMode()
 
 void OtherDock::refreshWindowListAsync(const bool reportProgress)
 {
-    // 防并发刷新：上一轮未完成时直接忽略当前请求。
-    if (m_refreshRunning.exchange(true))
-    {
-        kLogEvent event;
-        dbg << event
-            << "[OtherDock] 跳过刷新：已有枚举任务在执行。"
-            << eol;
-        return;
-    }
-
-    // 异步刷新链路统一复用 refreshEvent，确保“开始/完成”日志可按同一 GUID 追踪。
-    kLogEvent refreshEvent;
-    const int enumMode = m_enumModeCombo != nullptr ? m_enumModeCombo->currentIndex() : 0;
-    info << refreshEvent
-        << "[OtherDock] 启动异步窗口枚举, filterMode="
-        << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
-        << ", groupMode="
-        << groupModeText(m_groupModeCombo->currentIndex()).toStdString()
-        << ", enumMode="
-        << enumModeText(enumMode).toStdString()
-        << ", keyword="
-        << m_filterEdit->text().toStdString()
-        << eol;
-
+    // Auto ticks never cancel an in-flight sample. Explicit mode/refresh requests
+    // merge as latest query; accepted side effects use their separate controller.
+    if (!reportProgress && m_windowRefreshOperation->isBusy()) return;
+    const int mode = m_enumModeCombo ? m_enumModeCombo->currentIndex() : 0;
     if (reportProgress)
     {
-        if (m_refreshProgressPid == 0)
-        {
-            m_refreshProgressPid = kPro.addReusable(this, "窗口", "窗口枚举");
-        }
+        if (!m_refreshProgressPid) m_refreshProgressPid = kPro.addReusable(this, "窗口", "窗口枚举");
         kPro.set(m_refreshProgressPid, "开始枚举窗口", 0, 5.0f);
     }
-
-    QPointer<OtherDock> guardThis(this);
-    std::thread([guardThis, refreshEvent, enumMode, reportProgress]() {
-        std::vector<WindowInfo> snapshot;
-        // collectWindowSnapshotByMode 用途：根据用户选择策略采集窗口并去重。
-        collectWindowSnapshotByMode(enumMode, snapshot);
-
-        if (guardThis == nullptr)
-        {
-            return;
-        }
-        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot), refreshEvent, enumMode, reportProgress]() mutable {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            if (reportProgress)
-            {
-                kPro.set(guardThis->m_refreshProgressPid, "合并窗口快照", 0, 70.0f);
-            }
-
-            // 记录上一轮有效窗口，作为“新增/退出”对比基线。
-            std::vector<WindowInfo> previousValidList;
-            previousValidList.reserve(guardThis->m_windowSnapshot.size());
-            for (const WindowInfo& info : guardThis->m_windowSnapshot)
-            {
-                if (info.valid)
-                {
-                    previousValidList.push_back(info);
-                }
-            }
-
-            std::unordered_set<quint64> currentHandleSet;
-            currentHandleSet.reserve(snapshot.size());
-            for (const WindowInfo& info : snapshot)
-            {
-                currentHandleSet.insert(info.hwndValue);
-            }
-
-            std::unordered_set<quint64> previousHandleSet;
-            previousHandleSet.reserve(previousValidList.size());
-            for (const WindowInfo& info : previousValidList)
-            {
-                previousHandleSet.insert(info.hwndValue);
-            }
-
-            // 计算新增窗口，用于绿色高亮。
-            guardThis->m_newWindowHandles.clear();
-            for (const WindowInfo& info : snapshot)
-            {
-                if (previousHandleSet.find(info.hwndValue) == previousHandleSet.end())
-                {
-                    guardThis->m_newWindowHandles.push_back(info.hwndValue);
-                }
-            }
-
-            // 计算退出窗口：保留一轮并置灰显示。
-            guardThis->m_exitedOneRound.clear();
-            for (const WindowInfo& oldInfo : previousValidList)
-            {
-                if (currentHandleSet.find(oldInfo.hwndValue) != currentHandleSet.end())
-                {
-                    continue;
-                }
-
-                WindowInfo exitedInfo = oldInfo;
-                exitedInfo.valid = false;
-                exitedInfo.visible = false;
-                exitedInfo.enabled = false;
-                exitedInfo.topMost = false;
-                exitedInfo.minimized = false;
-                exitedInfo.maximized = false;
-                exitedInfo.titleText = QStringLiteral("[已退出] %1").arg(oldInfo.titleText);
-                guardThis->m_exitedOneRound.push_back(exitedInfo);
-            }
-
-            // 当前显示列表 = 当前快照 + 退出保留一轮。
-            guardThis->m_previousSnapshot = snapshot;
-            guardThis->m_windowSnapshot = snapshot;
-            guardThis->m_windowSnapshot.insert(
-                guardThis->m_windowSnapshot.end(),
-                guardThis->m_exitedOneRound.begin(),
-                guardThis->m_exitedOneRound.end());
-
-            guardThis->rebuildWindowTreeFromSnapshot();
-            guardThis->updateStatusBar();
-            guardThis->m_refreshRunning.store(false);
-            if (reportProgress)
-            {
-                kPro.set(guardThis->m_refreshProgressPid, "窗口枚举完成", 0, 100.0f);
-            }
-
-            info << refreshEvent
-                << "[OtherDock] 枚举完成，当前窗口="
-                << snapshot.size()
-                << ", enumMode="
-                << enumModeText(enumMode).toStdString()
-                << ", 退出保留="
-                << guardThis->m_exitedOneRound.size()
-                << eol;
-        }, Qt::QueuedConnection);
-    }).detach();
-}
-
-bool OtherDock::passFilter(const WindowInfo& info) const
-{
-    // 外部 PID 过滤（从进程页“查看窗口”跳过来时设置）只是一层额外收窄，
-    // 不能顶替下拉条件和关键字：此前这里直接 return，导致跳转过来之后
-    // “过滤模式”下拉和关键字输入框还亮着、还能改，却对结果毫无影响——
-    // 界面显示“可见窗口”，实际按“该 PID 的全部窗口”执行。
-    if (!m_externalProcessIdFilterSet.isEmpty() &&
-        !m_externalProcessIdFilterSet.contains(static_cast<quint32>(info.processId)))
-    {
-        return false;
-    }
-
-    // 条件过滤：先按下拉条件筛掉不符合的项。
-    const int mode = m_filterModeCombo->currentIndex();
-    switch (mode)
-    {
-    case 0:
-        break;
-    case 1:
-        if (!info.visible || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 2:
-        if (info.visible || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 3:
-        if (info.isChildWindow || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 4:
-        if (!info.isChildWindow || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 5:
-        if (info.valid)
-        {
-            return false;
-        }
-        break;
-    default:
-        break;
-    }
-
-    // 关键字过滤：支持标题、类名、进程名和句柄文本。
-    const QString keyword = m_filterEdit->text().trimmed();
-    if (keyword.isEmpty())
-    {
-        return true;
-    }
-
-    const QString keywordLower = keyword.toLower();
-    const QString joinedText = QStringLiteral("%1 %2 %3 %4 %5")
-        .arg(info.titleText)
-        .arg(info.classNameText)
-        .arg(info.processNameText)
-        .arg(info.processId)
-        .arg(hwndToText(info.hwndValue))
-        .toLower();
-    return joinedText.contains(keywordLower);
+    struct Request { int mode; std::shared_ptr<const ks::windowlist::Snapshot> previous; };
+    m_windowRefreshOperation->submit<Request, std::shared_ptr<const ks::windowlist::Snapshot>>(
+        {mode, m_windowState},
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) {
+            std::vector<WindowInfo> current;
+            collectWindowSnapshotByMode(value.mode, current);
+            if (token.isCanceled()) return std::shared_ptr<const ks::windowlist::Snapshot>();
+            return ks::windowlist::mergeSnapshot(std::move(current), value.previous);
+        },
+        [this, reportProgress](const std::shared_ptr<const ks::windowlist::Snapshot>& result, std::uint64_t) {
+            if (!result) return true;
+            m_windowState = result;
+            m_windowProjectionDirty = true;
+            updateStatusBar();
+            rebuildWindowTreeFromSnapshot();
+            if (reportProgress) kPro.set(m_refreshProgressPid, "窗口枚举完成", 0, 100.0f);
+            return true;
+        }, [](std::exception_ptr) {});
 }
 
 void OtherDock::rebuildWindowTreeFromSnapshot()
 {
-    // 重建树链路统一复用 rebuildEvent，确保“开始/完成”日志可按同一 GUID 追踪。
-    kLogEvent rebuildEvent;
-    dbg << rebuildEvent
-        << "[OtherDock] 重建窗口树开始, snapshotCount="
-        << m_windowSnapshot.size()
-        << ", filterMode="
-        << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
-        << ", groupMode="
-        << groupModeText(m_groupModeCombo->currentIndex()).toStdString()
-        << eol;
-
-    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
-        QStringLiteral("window_tree_rebuild"), {m_windowTree},
-        [this] { rebuildWindowTreeFromSnapshot(); })) return;
-
-    // Items retain the identity captured when rendered, even after the snapshot
-    // has already been replaced. Do not restore selection onto a reused HWND.
-    const auto selection = ks::window::captureWindowSelection(m_windowTree);
-    const QSignalBlocker selectionBlocker(m_windowTree);
-    m_windowTree->clear();
-
-    // 进程图标缓存：
-    // - 以 PID 作为 key，避免同一进程重复提取图标；
-    // - 缓存命中可显著降低刷新时的图标查询开销。
-    std::unordered_map<std::uint32_t, QIcon> processLogoCache;
-    auto resolveProcessLogo = [&processLogoCache](const WindowInfo& info) -> QIcon {
-        const auto found = processLogoCache.find(info.processId);
-        if (found != processLogoCache.end())
-        {
-            return found->second;
-        }
-        const QIcon processLogo = queryProcessLogoIconByPath(info.processImagePathText);
-        processLogoCache.emplace(info.processId, processLogo);
-        return processLogo;
-    };
-
-    // 公共叶子节点生成函数：统一填充列与高亮规则。
-    auto appendLeafItem = [this, &resolveProcessLogo](QTreeWidgetItem* parent, const WindowInfo& info) {
-        QTreeWidgetItem* item = nullptr;
-        if (parent != nullptr)
-        {
-            item = new QTreeWidgetItem(parent);
-        }
-        else
-        {
-            item = new QTreeWidgetItem(m_windowTree);
-        }
-
-        const QString sizeText = QStringLiteral("%1 x %2")
-            .arg(info.windowRect.width())
-            .arg(info.windowRect.height());
-
-        item->setText(kWindowColumnTitle, info.titleText.isEmpty() ? QStringLiteral("<无标题>") : info.titleText);
-        item->setText(kWindowColumnHandle, hwndToText(info.hwndValue));
-        item->setText(kWindowColumnEnumApi, info.enumApiName);
-        item->setText(kWindowColumnClassName, info.classNameText);
-        item->setText(kWindowColumnPid, QString::number(info.processId));
-        item->setText(kWindowColumnProcessName, info.processNameText);
-        item->setText(kWindowColumnTid, QString::number(info.threadId));
-        item->setText(kWindowColumnSize, sizeText);
-        item->setText(kWindowColumnVisible, boolText(info.visible));
-        item->setText(kWindowColumnEnabled, boolText(info.enabled));
-        item->setText(kWindowColumnTopMost, boolText(info.topMost));
-        item->setText(kWindowColumnState, windowStateText(info.valid, info.minimized, info.maximized));
-        item->setText(kWindowColumnAlpha, QString::number(info.alphaValue));
-
-        item->setData(kWindowColumnTitle, Qt::UserRole, QVariant::fromValue(static_cast<qulonglong>(info.hwndValue)));
-        item->setData(kWindowColumnTitle, Qt::UserRole + 1, false);
-        item->setData(0, Qt::UserRole + 2, info.processId);
-        item->setData(0, Qt::UserRole + 3, info.threadId);
-        item->setData(0, Qt::UserRole + 4, QVariant::fromValue<qulonglong>(info.processCreationTime100ns));
-
-        // 叶子图标改为显示“进程 logo”，并放到进程列，避免标题列图标干扰阅读。
-        item->setIcon(kWindowColumnProcessName, resolveProcessLogo(info));
-
-        // 新增窗口高亮绿色，退出窗口置灰。
-        const bool isNew = std::find(
-            m_newWindowHandles.begin(),
-            m_newWindowHandles.end(),
-            info.hwndValue) != m_newWindowHandles.end();
-
-        if (!info.valid)
-        {
-            for (int col = 0; col < m_windowTree->columnCount(); ++col)
-            {
-                item->setForeground(col, QBrush(KswordTheme::ExitedRowForegroundColor()));
-                item->setBackground(col, QBrush(KswordTheme::ExitedRowBackgroundColor()));
-            }
-        }
-        else if (isNew)
-        {
-            for (int col = 0; col < m_windowTree->columnCount(); ++col)
-            {
-                item->setBackground(col, QBrush(KswordTheme::NewRowBackgroundColor()));
-            }
-        }
-    };
-
-    // 根据分组选项重建树结构。
-    const int groupMode = m_groupModeCombo->currentIndex();
-
-    if (groupMode == 0)
-    {
-        // 按进程分组：进程节点下挂对应窗口子节点。
-        std::map<QString, QTreeWidgetItem*> processMap;
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            const QString processKey = QStringLiteral("%1 (PID:%2)")
-                .arg(info.processNameText, QString::number(info.processId));
-            QTreeWidgetItem* groupItem = nullptr;
-            auto found = processMap.find(processKey);
-            if (found == processMap.end())
-            {
-                groupItem = new QTreeWidgetItem(m_windowTree);
-                groupItem->setText(0, processKey);
-                // 进程分组节点同样展示进程 logo，满足“所有进程都显示图标”的需求。
-                groupItem->setIcon(0, resolveProcessLogo(info));
-                groupItem->setData(0, Qt::UserRole + 1, true);
-                processMap.emplace(processKey, groupItem);
-            }
-            else
-            {
-                groupItem = found->second;
-            }
-            appendLeafItem(groupItem, info);
-        }
-    }
-    else if (groupMode == 1)
-    {
-        // 按 Z 序：平铺显示，按枚举顺序排序。
-        std::vector<WindowInfo> orderedList = m_windowSnapshot;
-        std::sort(
-            orderedList.begin(),
-            orderedList.end(),
-            [](const WindowInfo& left, const WindowInfo& right) {
-                return left.zOrder < right.zOrder;
-            });
-        for (const WindowInfo& info : orderedList)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-            appendLeafItem(nullptr, info);
-        }
-    }
-    else if (groupMode == 2)
-    {
-        // 按层级：桌面/顶层/子窗口/弹出窗口/工具窗口分类。
-        std::map<QString, QTreeWidgetItem*> levelGroupMap;
-        auto getLevelGroup = [this, &levelGroupMap](const QString& key) -> QTreeWidgetItem* {
-            auto found = levelGroupMap.find(key);
-            if (found != levelGroupMap.end())
-            {
-                return found->second;
-            }
-            QTreeWidgetItem* item = new QTreeWidgetItem(m_windowTree);
-            item->setText(0, key);
-            item->setIcon(0, QIcon(":/Icon/process_tree.svg"));
-            item->setData(0, Qt::UserRole + 1, true);
-            levelGroupMap.emplace(key, item);
-            return item;
-        };
-
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            QString groupKey = QStringLiteral("顶级窗口");
-            if (info.hwndValue == static_cast<quint64>(reinterpret_cast<quintptr>(::GetDesktopWindow())))
-            {
-                groupKey = QStringLiteral("桌面窗口");
-            }
-            else if (info.isChildWindow)
-            {
-                groupKey = QStringLiteral("子窗口");
-            }
-            else if ((info.styleValue & WS_POPUP) != 0)
-            {
-                groupKey = QStringLiteral("弹出窗口");
-            }
-            else if ((info.exStyleValue & WS_EX_TOOLWINDOW) != 0)
-            {
-                groupKey = QStringLiteral("工具窗口");
-            }
-
-            appendLeafItem(getLevelGroup(groupKey), info);
-        }
-    }
-    else
-    {
-        // 按显示器：依据窗口中心点所在屏幕分组。
-        std::map<QString, QTreeWidgetItem*> monitorGroupMap;
-        const QList<QScreen*> screenList = QGuiApplication::screens();
-
-        auto getMonitorGroup = [this, &monitorGroupMap](const QString& key) -> QTreeWidgetItem* {
-            auto found = monitorGroupMap.find(key);
-            if (found != monitorGroupMap.end())
-            {
-                return found->second;
-            }
-            QTreeWidgetItem* item = new QTreeWidgetItem(m_windowTree);
-            item->setText(0, key);
-            item->setIcon(0, QIcon(":/Icon/process_list.svg"));
-            item->setData(0, Qt::UserRole + 1, true);
-            monitorGroupMap.emplace(key, item);
-            return item;
-        };
-
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            QString groupKey = QStringLiteral("未知显示器");
-            const QPoint centerPoint = info.windowRect.center();
-            for (int i = 0; i < screenList.size(); ++i)
-            {
-                QScreen* screen = screenList.at(i);
-                if (screen != nullptr && screen->geometry().contains(centerPoint))
+    m_windowProjectionDirty = true;
+    if (!m_windowTree->isVisible()) return;
+    ks::windowlist::ProjectionRequest request;
+    request.state = m_windowState;
+    request.previous = m_windowModel->snapshot;
+    request.processIds = m_externalProcessIdFilterSet;
+    request.keyword = m_filterEdit->text().trimmed().toLower();
+    request.filter = m_filterModeCombo->currentIndex();
+    request.grouping = m_groupModeCombo->currentIndex();
+    request.desktopHwnd = static_cast<quint64>(reinterpret_cast<quintptr>(::GetDesktopWindow()));
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    for (const auto* screen : QGuiApplication::screens())
+        if (screen) request.screens.emplace_back(screen->geometry(), screen->name());
+    m_windowProjectionOperation->submit<ks::windowlist::ProjectionRequest, std::shared_ptr<const ks::windowlist::Projection>>(
+        std::move(request),
+        [](const ks::windowlist::ProjectionRequest& value, const ks::ui::AsyncOperationToken& token) {
+            return ks::windowlist::prepareProjection(value, &token);
+        },
+        [this, sourceState = m_windowState](const std::shared_ptr<const ks::windowlist::Projection>& result, std::uint64_t generation) {
+            const auto commit = [this, result, sourceState, generation] {
+                if (!m_windowProjectionOperation->isCurrent(generation)) return;
+                if (result && sourceState == m_windowState && m_windowTree->isVisible())
                 {
-                    groupKey = QStringLiteral("显示器%1: %2")
-                        .arg(i + 1)
-                        .arg(screen->name());
-                    break;
+                    if (result == m_windowModel->snapshot)
+                    {
+                        m_windowProjectionDirty = false;
+                        scheduleWindowSelectionUi();
+                        m_windowProjectionOperation->completeDeferred(generation);
+                        return;
+                    }
                 }
-            }
-            appendLeafItem(getMonitorGroup(groupKey), info);
-        }
-    }
-
-    // 统一展开第一层节点，便于用户直接看到数据。
-    for (int i = 0; i < m_windowTree->topLevelItemCount(); ++i)
-    {
-        QTreeWidgetItem* topItem = m_windowTree->topLevelItem(i);
-        if (topItem != nullptr && topItem->data(0, Qt::UserRole + 1).toBool())
-        {
-            topItem->setExpanded(true);
-        }
-    }
-
-    ks::window::restoreWindowSelection(m_windowTree, selection);
-    updateWindowSelectionUi();
-
-    dbg << rebuildEvent
-        << "[OtherDock] 重建窗口树完成, topLevelCount="
-        << m_windowTree->topLevelItemCount()
-        << eol;
+                if (result && sourceState == m_windowState && m_windowTree->isVisible())
+                {
+                    const auto selected = ks::window::captureWindowSelection(m_windowTree);
+                    QSet<QString> expanded;
+                    const bool sameGrouping = m_windowModel->snapshot && m_windowModel->snapshot->grouping == result->grouping;
+                    if (m_windowModel->snapshot)
+                        for (int root : m_windowModel->snapshot->roots)
+                        {
+                            const auto index = m_windowModel->nodeIndex(root);
+                            if (m_windowTree->isExpanded(index)) expanded.insert(m_windowModel->key(index));
+                        }
+                    const auto top = m_windowTree->indexAt(QPoint(0, 0));
+                    const QString topKey = m_windowModel->key(top);
+                    const int topOffset = top.isValid() ? m_windowTree->visualRect(top).top() : 0;
+                    const QPointer<OtherDock> alive(this);
+                    m_windowModel->publish(result);
+                    if (!alive) return;
+                    if (!sameGrouping) { m_windowTree->expandToDepth(0); if (!alive) return; }
+                    else
+                    {
+                        // One shared view expansion pass avoids requesting a full
+                        // layout after each of thousands of process-group roots.
+                        m_windowTree->expandToDepth(0);
+                        if (!alive) return;
+                        for (int root : result->roots)
+                        {
+                            const auto index = m_windowModel->nodeIndex(root);
+                            if (index.data(Qt::UserRole + 1).toBool() && !expanded.contains(m_windowModel->key(index)))
+                            {
+                                m_windowTree->setExpanded(index, false);
+                                if (!alive) return;
+                            }
+                        }
+                    }
+                    if (!alive) return;
+                    std::vector<int> selectedNodes;
+                    selectedNodes.reserve(selected.identities.size());
+                    for (const auto& key : selected.identities)
+                    {
+                        const auto found = result->byIdentity.constFind(key);
+                        if (found != result->byIdentity.cend()) selectedNodes.push_back(found.value());
+                    }
+                    std::sort(selectedNodes.begin(), selectedNodes.end(), [&result](int left, int right) {
+                        const auto& a = result->nodes[left]; const auto& b = result->nodes[right];
+                        return a.parent != b.parent ? a.parent < b.parent : a.row < b.row;
+                    });
+                    QItemSelection selection;
+                    for (size_t begin = 0; begin < selectedNodes.size();)
+                    {
+                        size_t end = begin;
+                        while (end + 1 < selectedNodes.size() &&
+                            result->nodes[selectedNodes[end + 1]].parent == result->nodes[selectedNodes[begin]].parent &&
+                            result->nodes[selectedNodes[end + 1]].row == result->nodes[selectedNodes[end]].row + 1) ++end;
+                        selection.select(m_windowModel->nodeIndex(selectedNodes[begin]), m_windowModel->nodeIndex(selectedNodes[end], 12));
+                        begin = end + 1;
+                    }
+                    m_windowTree->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                    if (!alive) return;
+                    const auto current = m_windowModel->indexForIdentity(selected.current);
+                    if (current.isValid()) m_windowTree->selectionModel()->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
+                    if (!alive) return;
+                    const auto anchor = m_windowModel->indexForIdentity(topKey);
+                    if (anchor.isValid())
+                    {
+                        m_windowTree->scrollTo(anchor, QAbstractItemView::PositionAtTop);
+                        if (m_windowTree->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+                            m_windowTree->verticalScrollBar()->setValue(m_windowTree->verticalScrollBar()->value() - topOffset);
+                    }
+                    if (!alive) return;
+                    m_windowProjectionDirty = false;
+                    scheduleWindowSelectionUi();
+                }
+                m_windowProjectionOperation->completeDeferred(generation);
+            };
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                QStringLiteral("window_tree_rebuild"), {m_windowTree}, commit)) return false;
+            commit(); return true;
+        }, [](std::exception_ptr) {});
 }
 
 void OtherDock::updateStatusBar()
 {
-    int totalCount = 0;
-    int visibleCount = 0;
-    int systemCount = 0;
-    for (const WindowInfo& info : m_windowSnapshot)
-    {
-        if (!info.valid)
-        {
-            continue;
-        }
-        ++totalCount;
-        if (info.visible)
-        {
-            ++visibleCount;
-        }
-        if (info.processId <= 4
-            || info.processNameText.compare(QStringLiteral("System"), Qt::CaseInsensitive) == 0
-            || info.processNameText.compare(QStringLiteral("csrss.exe"), Qt::CaseInsensitive) == 0)
-        {
-            ++systemCount;
-        }
-    }
-
-    m_totalLabel->setText(QStringLiteral("总数: %1").arg(totalCount));
-    m_visibleLabel->setText(QStringLiteral("可见: %1").arg(visibleCount));
-    m_systemLabel->setText(QStringLiteral("系统: %1").arg(systemCount));
-
-    kLogEvent event;
-    dbg << event
-        << "[OtherDock] 状态栏更新, total="
-        << totalCount
-        << ", visible="
-        << visibleCount
-        << ", system="
-        << systemCount
-        << eol;
+    m_totalLabel->setText(QStringLiteral("总数: %1").arg(m_windowState ? m_windowState->total : 0));
+    m_visibleLabel->setText(QStringLiteral("可见: %1").arg(m_windowState ? m_windowState->visible : 0));
+    m_systemLabel->setText(QStringLiteral("系统: %1").arg(m_windowState ? m_windowState->system : 0));
 }
 
 void OtherDock::updatePreviewPanel(const WindowInfo* info)
 {
-    // 无选中项时清空预览，防止显示过期信息。
-    if (info == nullptr)
+    // 隐藏只延后预览投影，不影响窗口枚举及其新增/退出状态。
+    if (!m_previewWidget->isVisible() || !m_thumbnailLabel->isVisible())
     {
-        m_thumbnailLabel->setPixmap(QPixmap());
-        m_quickInfoText->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择左侧窗口项查看预览。")));
-        kLogEvent event;
-        dbg << event
-            << "[OtherDock] 预览面板清空（无有效选中项）。"
-            << eol;
+        m_previewCaptureDue = true;
         return;
     }
-
-    // 抓取缩略图并更新右侧关键属性摘要。
-    const QPixmap previewPixmap = grabWindowPreviewPixmap(
-        info->hwndValue,
-        m_thumbnailLabel->size());
-    m_thumbnailLabel->setPixmap(previewPixmap);
+    const QString identity = info ? ks::window::windowIdentityKey(info->hwndValue,
+        info->processId, info->threadId, info->processCreationTime100ns) : QString();
+    if (!info)
+    {
+        if (!m_previewIdentity.isEmpty() || m_previewSummaryKey.isEmpty())
+        {
+            if (m_previewScaleOperation) m_previewScaleOperation->cancel();
+            m_thumbnailLabel->setPixmap(QPixmap());
+            m_quickInfoText->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择左侧窗口项查看预览。")));
+        }
+        m_previewIdentity.clear();
+        m_previewSummaryKey = QByteArrayLiteral("empty");
+        m_previewCaptureDue = true;
+        return;
+    }
+    const bool targetChanged = identity != m_previewIdentity;
+    if (targetChanged)
+    {
+        m_previewIdentity = identity;
+        m_previewCaptureDue = true;
+        m_thumbnailLabel->setPixmap(QPixmap());
+    }
+    const QSize targetSize = m_thumbnailLabel->contentsRect().size();
+    const qreal dpr = m_thumbnailLabel->devicePixelRatioF();
+    if (targetSize != m_previewSize || dpr != m_previewDpr)
+        m_previewCaptureDue = true;
+    if (m_previewCaptureDue && m_previewScaleOperation &&
+        (targetChanged || !m_previewScaleOperation->isBusy()))
+    {
+        // QScreen/QPixmap remain on their GUI thread. Only owned QImage pixels
+        // and size/DPR values cross the worker boundary.
+        QPixmap source;
+        if (info->valid && !info->windowRect.isEmpty())
+            if (auto* screen = QGuiApplication::primaryScreen())
+                source = screen->grabWindow(static_cast<WId>(info->hwndValue));
+        m_previewCaptureDue = false;
+        m_previewSize = targetSize;
+        m_previewDpr = dpr;
+        if (source.isNull())
+        {
+            m_previewScaleOperation->cancel();
+            QPixmap fallback(targetSize);
+            fallback.fill(KswordTheme::SurfaceColor());
+            QPainter painter(&fallback);
+            painter.setPen(KswordTheme::TextSecondaryColor());
+            painter.drawRect(fallback.rect().adjusted(0, 0, -1, -1));
+            painter.drawText(fallback.rect(), Qt::AlignCenter,
+                ks::i18n::contextText(QStringLiteral("other.thumbnail.none"), QStringLiteral("无可用缩略图")));
+            painter.end();
+            m_thumbnailLabel->setPixmap(fallback);
+        }
+        else
+        {
+            struct ScaleRequest { QImage image; QSize size; qreal dpr; QString identity; };
+            struct ScaleResult { QImage image; QSize size; qreal dpr; QString identity; };
+            m_previewScaleOperation->submit<ScaleRequest, ScaleResult>(
+                {source.toImage(), targetSize, dpr, identity},
+                [](const ScaleRequest& value, const ks::ui::AsyncOperationToken&) {
+                    QImage scaled = value.image.scaled(value.size * value.dpr,
+                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    scaled.setDevicePixelRatio(value.dpr);
+                    return ScaleResult{std::move(scaled), value.size, value.dpr, value.identity};
+                },
+                [this](const ScaleResult& result, std::uint64_t) {
+                    const auto current = m_windowTree->currentIndex();
+                    if (!current.isValid() || !m_windowTree->selectionModel()->isSelected(current) || ks::window::windowItemIdentity(current) != result.identity ||
+                        result.identity != m_previewIdentity || !m_thumbnailLabel->isVisible() ||
+                        result.size != m_thumbnailLabel->contentsRect().size() || result.dpr != m_thumbnailLabel->devicePixelRatioF())
+                    {
+                        m_previewCaptureDue = true;
+                        return true;
+                    }
+                    m_thumbnailLabel->setPixmap(QPixmap::fromImage(result.image));
+                    return true;
+                },
+                [this](std::exception_ptr) { m_previewCaptureDue = true; });
+        }
+    }
+    QByteArray summaryKey;
+    QDataStream summaryStream(&summaryKey, QIODevice::WriteOnly);
+    summaryStream << identity << info->titleText << info->classNameText << info->processNameText
+        << info->windowRect << info->visible << info->enabled << info->topMost << info->valid
+        << info->minimized << info->maximized << info->alphaValue << info->displayAffinityKnown
+        << info->displayAffinityValue << info->displayAffinityError
+        << KswordTheme::SurfaceColor().rgba() << ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (summaryKey == m_previewSummaryKey) return;
+    m_previewSummaryKey = summaryKey;
 
     ks::ui::FieldDocument quickText;
     quickText.field(QStringLiteral("句柄"), QStringLiteral("%1").arg(hwndToText(info->hwndValue)));
@@ -4461,13 +4819,51 @@ std::vector<OtherDock::WindowInfo> OtherDock::selectedWindowSnapshots() const
     return windows;
 }
 
+bool OtherDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_desktopTable && event->type() == QEvent::LanguageChange && m_desktopSnapshot)
+        refreshDesktopPresentation();
+    if (watched == m_windowTree && event->type() == QEvent::LanguageChange)
+    {
+        m_windowProjectionDirty = true;
+        QTimer::singleShot(0, this, [this] { rebuildWindowTreeFromSnapshot(); });
+    }
+    if (watched == m_desktopTable && event->type() == QEvent::Show)
+    {
+        if (!m_desktopLoaded) refreshDesktopList();
+        else if (m_desktopProjectionDirty) refreshDesktopPresentation();
+    }
+
+    if (watched == m_windowTree && event->type() == QEvent::Show && m_windowProjectionDirty)
+        QTimer::singleShot(0, this, [this] { if (m_windowProjectionDirty) rebuildWindowTreeFromSnapshot(); });
+
+    if (watched == m_thumbnailLabel &&
+        (event->type() == QEvent::Show || event->type() == QEvent::Resize ||
+         event->type() == QEvent::DevicePixelRatioChange || event->type() == QEvent::PaletteChange))
+    {
+        m_previewCaptureDue = true;
+        scheduleWindowSelectionUi();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void OtherDock::scheduleWindowSelectionUi()
+{
+    if (m_selectionUiQueued) return;
+    m_selectionUiQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_selectionUiQueued = false;
+        updateWindowSelectionUi();
+    });
+}
+
 void OtherDock::updateWindowSelectionUi()
 {
     const auto windows = selectedWindowSnapshots();
-    const auto* current = m_windowTree->currentItem();
+    const auto current = m_windowTree->currentIndex();
     const auto previewIt = std::find_if(windows.begin(), windows.end(), [current](const WindowInfo& window) {
-        return current && !current->data(0, Qt::UserRole + 1).toBool()
-            && window.hwndValue == current->data(0, Qt::UserRole).toULongLong();
+        return current.isValid() && !current.data(Qt::UserRole + 1).toBool()
+            && window.hwndValue == current.data(Qt::UserRole).toULongLong();
     });
     const WindowInfo* preview = previewIt != windows.end() ? &*previewIt : nullptr;
     updatePreviewPanel(preview);
@@ -4476,16 +4872,16 @@ void OtherDock::updateWindowSelectionUi()
         m_selectedLabel->setText(QStringLiteral("选中: %1  %2")
             .arg(hwndToText(windows.front().hwndValue), windows.front().titleText));
     else m_selectedLabel->setText(QStringLiteral("选中: %1 个窗口").arg(windows.size()));
-    m_protectCaptureButton->setEnabled(!windows.empty());
-    m_unprotectCaptureButton->setEnabled(!windows.empty());
+    m_protectCaptureButton->setEnabled(!windows.empty() && !windowTransactionBusy());
+    m_unprotectCaptureButton->setEnabled(!windows.empty() && !windowTransactionBusy());
     m_captureButton->setEnabled(windows.size() == 1 && preview);
     m_windowInputButton->setEnabled(windows.size() == 1);
 }
 
 void OtherDock::showWindowContextMenu(const QPoint& localPos)
 {
-    auto* item = m_windowTree->itemAt(localPos);
-    if (!item) return;
+    const auto item = m_windowTree->indexAt(localPos);
+    if (!item.isValid()) return;
     // Right-clicking within a selection must keep the other selected rows.
     ks::window::selectContextWindow(m_windowTree, item);
     // Copy before QMenu::exec: timers and asynchronous enumeration can replace
@@ -4524,7 +4920,7 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     auto* processDetail = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     auto* windowDetail = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("在详细信息中打开"));
     auto* sendMessage = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("发送测试消息"));
-    sendMessage->setEnabled(!multiple);
+    sendMessage->setEnabled(!multiple && !windowTransactionBusy());
     const WindowInfo uploadSnapshot = windows.front();
     auto* upload = ks::online_scan::addVirusTotalSandboxMenu(&menu, this,
         [uploadSnapshot]() -> ks::online_scan::SandboxUploadTarget {
@@ -4538,11 +4934,19 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     if (uploadMenu) uploadMenu->menuAction()->setEnabled(!multiple);
     menu.addSeparator();
     auto* terminate = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("结束进程"));
+    protect->setEnabled(!windowTransactionBusy());
+    unprotect->setEnabled(!windowTransactionBusy());
     auto* action = menu.exec(m_windowTree->viewport()->mapToGlobal(localPos));
     if (!action || (uploadMenu && uploadMenu->actions().contains(action))) return;
     if (action == protect || action == unprotect)
     {
         setCaptureProtectionForWindows(windows, action == protect);
+        return;
+    }
+
+    if (action == sendMessage)
+    {
+        sendTestMessagesForWindows(windows);
         return;
     }
 
@@ -4632,11 +5036,6 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
             const bool target = multiple ? action == enable : !::IsWindowEnabled(hwnd);
             ok = ks::window::setWindowEnabled(hwnd, target);
         }
-        else if (ok && action == sendMessage)
-        {
-            DWORD_PTR result = 0;
-            ok = ::SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1200, &result) != 0;
-        }
         if (ok) ++succeeded;
         else if (failures.size() == failureCountBefore)
             failures.push_back(hwndToText(window.hwndValue));
@@ -4657,38 +5056,26 @@ void OtherDock::exportVisibleRowsToTsv()
     QStringList lines;
 
     QStringList header;
-    for (int col = 0; col < m_windowTree->columnCount(); ++col)
+    for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
     {
         if (m_windowTree->isColumnHidden(col))
         {
             continue;
         }
-        header << m_windowTree->headerItem()->text(col);
+        header << m_windowModel->headerData(col, Qt::Horizontal, Qt::DisplayRole).toString();
     }
     lines << header.join('\t');
 
-    QTreeWidgetItemIterator iterator(m_windowTree);
-    while (*iterator != nullptr)
-    {
-        QTreeWidgetItem* item = *iterator;
-        ++iterator;
-
-        if (item->data(0, Qt::UserRole + 1).toBool())
+    const auto projection = m_windowModel->snapshot;
+    if (projection)
+        for (const auto& node : projection->nodes)
         {
-            continue;
+            if (node.group) continue;
+            QStringList values;
+            for (int column = 0; column < 13; ++column)
+                if (!m_windowTree->isColumnHidden(column)) values << QString(node.cells[column]).replace('\t', ' ');
+            lines << values.join('\t');
         }
-
-        QStringList rowValues;
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
-        {
-            if (m_windowTree->isColumnHidden(col))
-            {
-                continue;
-            }
-            rowValues << item->text(col).replace('\t', ' ');
-        }
-        lines << rowValues.join('\t');
-    }
 
     if (lines.size() <= 1)
     {
@@ -4765,27 +5152,21 @@ void OtherDock::openWindowDetailDialog(const WindowInfo& windowInfo, bool inputS
 
 const OtherDock::WindowInfo* OtherDock::findInfoByHwnd(const quint64 hwndValue) const
 {
-    const auto finder = [hwndValue](const WindowInfo& info) {
-        return info.hwndValue == hwndValue;
-    };
-
-    const auto currentIt = std::find_if(
-        m_windowSnapshot.begin(),
-        m_windowSnapshot.end(),
-        finder);
-    if (currentIt != m_windowSnapshot.end())
-    {
-        return &(*currentIt);
-    }
-
-    const auto exitIt = std::find_if(
-        m_exitedOneRound.begin(),
-        m_exitedOneRound.end(),
-        finder);
-    if (exitIt != m_exitedOneRound.end())
-    {
-        return &(*exitIt);
-    }
-
-    return nullptr;
+    if (!m_windowState) return nullptr;
+    const auto found = m_windowState->byHwnd.constFind(hwndValue);
+    return found == m_windowState->byHwnd.cend() ? nullptr : &m_windowState->records[found.value()];
 }
+
+ks::ui::PageNavigationCatalog OtherDock::navigationCatalog(const OtherDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kWindowNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* OtherDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kWindowNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<OtherDock>(QStringLiteral("window")); }

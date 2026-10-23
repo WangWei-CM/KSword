@@ -3,6 +3,8 @@
 #include "../../theme.h"
 #include "../../MonitorDock/WinApiMonitorProtocol.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
+#include "../../Internationalization/LanguageManager.h"
+#include "../../UI/TableInteractionSupport.h"
 
 #include <QApplication>
 #include <QBrush>
@@ -18,6 +20,8 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScrollBar>
+#include <QTimer>
 #include <QSignalBlocker>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -33,6 +37,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <functional>
 
 // ============================================================
 // ClipboardGuardPage.Session.cpp
@@ -100,6 +105,182 @@ namespace ks::misc
             rowValue.seq = parseDetailField(detailText, QStringLiteral("seq")).toULongLong();
             return rowValue;
         }
+    }
+
+    void ClipboardGuardInbox::push(ClipboardGuardEventRow row)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++received;
+        if (pendingRows.size() >= PendingCapacity) { pendingRows.pop_front(); ++dropped; }
+        pendingRows.push_back(std::move(row));
+    }
+
+    std::vector<ClipboardGuardEventRow> ClipboardGuardInbox::take(const std::size_t limit)
+    {
+        std::vector<ClipboardGuardEventRow> rows;
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto count = std::min(limit, pendingRows.size()); rows.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) { rows.push_back(std::move(pendingRows.front())); pendingRows.pop_front(); }
+        return rows;
+    }
+
+    QString ClipboardGuardInbox::processName(const quint32 pid)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = processNames.find(pid);
+        return found == processNames.end() ? QStringLiteral("PID %1").arg(pid) : found->second;
+    }
+
+    void ClipboardGuardInbox::replaceNames(std::unordered_map<quint32, QString> names)
+    {
+        { std::lock_guard<std::mutex> lock(mutex); processNames.swap(names); }
+    }
+
+    void ClipboardGuardInbox::noteAgentDropped(const quint64 session, const quint64 count)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        agentDropped[session] = std::max(agentDropped[session], count);
+    }
+
+    void ClipboardGuardInbox::finishSessionDrops(const quint64 session)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = agentDropped.find(session);
+        if (found == agentDropped.end()) return;
+        completedAgentDropped += found->second;
+        agentDropped.erase(found);
+    }
+
+    ClipboardGuardInbox::Counts ClipboardGuardInbox::counts() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        Counts value{ received, dropped, completedAgentDropped, pendingRows.size() };
+        for (const auto& item : agentDropped) value.agentDropped += item.second;
+        return value;
+    }
+
+    ClipboardGuardRuntime::ClipboardGuardRuntime(std::shared_ptr<ClipboardGuardInbox> inbox)
+        : m_inbox(std::move(inbox)) {}
+
+    void ClipboardGuardRuntime::requestStop()
+    {
+        { std::lock_guard<std::mutex> lock(m_queueMutex); m_stopRequested.store(true); }
+        m_wake.notify_all();
+    }
+
+    bool ClipboardGuardRuntime::requestScan(std::vector<ClipboardGuardRule> rules, QString agentBasePath)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_stopRequested.load()) return false;
+        if (!m_started.load())
+        {
+            const std::weak_ptr<ClipboardGuardRuntime> weak = shared_from_this();
+            m_cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire([weak]()
+            { if (const auto runtime = weak.lock()) runtime->requestStop(); });
+            if (!m_cleanupLease) return false;
+            m_started.store(true);
+            try { std::thread([runtime = shared_from_this()]() { runtime->run(); }).detach(); }
+            catch (...) { m_stopRequested.store(true); m_started.store(false); m_finished.store(true); m_cleanupLease.reset(); return false; }
+        }
+        // Only unstarted policy snapshots coalesce; an entered scan/transaction is
+        // never superseded. Runtime stop is observed at safe per-target boundaries.
+        m_summary.ruleCount = rules.size();
+        m_pending = ScanRequest{ std::move(rules), std::move(agentBasePath) };
+        m_wake.notify_all();
+        return true;
+    }
+
+    void ClipboardGuardRuntime::run()
+    {
+        try
+        {
+            for (;;)
+            {
+                std::optional<ScanRequest> request;
+                {
+                    std::unique_lock<std::mutex> lock(m_queueMutex);
+                    m_wake.wait(lock, [this]() { return m_stopRequested.load() || m_pending.has_value(); });
+                    if (m_stopRequested.load()) { m_pending.reset(); break; }
+                    request = std::move(m_pending); m_pending.reset();
+                }
+                scan(*request);
+            }
+        }
+        catch (...)
+        {
+            requestStop();
+            kLogEvent event; err << event << "[ClipboardGuard] runtime scan failed; stopping owned sessions" << eol;
+        }
+        // All accepted native sessions remain owned here after QWidget destruction.
+        // STOP/config ACL, CancelSynchronousIo and joins are still real cleanup.
+        for (;;)
+        {
+            std::uint32_t pid = 0;
+            { std::lock_guard<std::mutex> lock(m_sessionsMutex); if (m_sessions.empty()) break; pid = m_sessions.front()->pid; }
+            teardownSession(pid);
+        }
+        m_cleanupLease.reset(); // owned local pipe/session handles and PID leases ended
+        m_finished.store(true);
+    }
+
+    ClipboardGuardRuntime::Summary ClipboardGuardRuntime::summary() const
+    {
+        Summary result;
+        { std::lock_guard<std::mutex> lock(m_queueMutex); result = m_summary; }
+        { std::lock_guard<std::mutex> lock(m_sessionsMutex);
+            for (const auto& session : m_sessions)
+                if (session && session->hooksInstalled.load() && !session->pipeThreadExited.load()) ++result.protectedCount;
+        }
+        result.stopping = m_stopRequested.load();
+        return result;
+    }
+
+    void ClipboardGuardRuntime::scan(const ScanRequest& request)
+    {
+        if (m_stopRequested.load()) return;
+        m_agentBasePath = request.agentBasePath;
+        const auto processList = ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto);
+        if (m_stopRequested.load()) return;
+        std::unordered_map<quint32, QString> names;
+        std::unordered_map<quint32, std::uint64_t> identities;
+        for (const auto& process : processList)
+        {
+            if (m_stopRequested.load()) return;
+            names.emplace(process.pid, QString::fromStdString(process.processName));
+            identities.emplace(process.pid, process.creationTime100ns);
+        }
+        m_inbox->replaceNames(std::move(names));
+        const auto selfPid = static_cast<std::uint32_t>(::GetCurrentProcessId());
+        std::vector<std::uint32_t> matched;
+        Summary result; result.ruleCount = request.rules.size();
+        for (const auto& process : processList)
+        {
+            if (m_stopRequested.load()) return;
+            if (process.pid == 0 || process.pid == 4 || process.pid == selfPid) continue;
+            const auto* rule = findMatchingRuleIn(request.rules, process);
+            if (!rule) continue;
+            matched.push_back(process.pid);
+            QString error;
+            if (!ensureProcessProtected(process, *rule, &error))
+            { ++result.failureCount; result.lastError = error; }
+        }
+        if (m_stopRequested.load()) return;
+        std::vector<std::uint32_t> sessionPids;
+        { std::lock_guard<std::mutex> lock(m_sessionsMutex); for (const auto& session : m_sessions) if (session) sessionPids.push_back(session->pid); }
+        for (const auto pid : sessionPids)
+        {
+            if (m_stopRequested.load()) return;
+            if (std::find(matched.begin(), matched.end(), pid) == matched.end()) teardownSession(pid);
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_inbox->mutex);
+            for (auto it = m_inbox->residentAgentCreationTimes.begin(); it != m_inbox->residentAgentCreationTimes.end();)
+            {
+                const auto found = identities.find(it->first);
+                it = found != identities.end() && found->second == it->second ? std::next(it) : m_inbox->residentAgentCreationTimes.erase(it);
+            }
+        }
+        { std::lock_guard<std::mutex> lock(m_queueMutex); m_summary = std::move(result); }
     }
 
     void ClipboardGuardPage::refreshRuleTable()
@@ -225,12 +406,7 @@ namespace ks::misc
         }
     }
 
-    const ClipboardGuardRule* ClipboardGuardPage::findMatchingRule(const ks::process::ProcessRecord& processRecord) const
-    {
-        return findMatchingRuleIn(m_rules, processRecord);
-    }
-
-    const ClipboardGuardRule* ClipboardGuardPage::findMatchingRuleIn(
+    const ClipboardGuardRule* ClipboardGuardRuntime::findMatchingRuleIn(
         const std::vector<ClipboardGuardRule>& rules, const ks::process::ProcessRecord& processRecord)
     {
         const QString imagePath = QString::fromStdString(processRecord.imagePath);
@@ -278,13 +454,13 @@ namespace ks::misc
         return globalRulePointer;
     }
 
-    bool ClipboardGuardPage::writeSessionConfigForPid(
+    bool ClipboardGuardRuntime::writeSessionConfigForPid(
         const std::uint32_t pid, const ClipboardGuardRule& matchedRule,
         const QString& sessionId, QString* const errorTextOut) const
     {
         std::wstring agentDllPath, platformError;
         if (!ks::winapi_monitor::resolveAgentPath(pid,
-                (QCoreApplication::applicationDirPath() + QStringLiteral("/APIMonitor_x64.dll")).toStdWString(),
+                m_agentBasePath.toStdWString(),
                 &agentDllPath, &platformError))
         {
             if (errorTextOut) *errorTextOut = QStringLiteral("无法选择匹配目标进程位数的 Agent DLL：%1")
@@ -293,6 +469,13 @@ namespace ks::misc
         }
 
         const QString configPath = QString::fromStdWString(ks::winapi_monitor::buildConfigPathForPid(pid));
+        std::wstring sessionError;
+        if (!ks::winapi_monitor::addSessionDirectoryReader(pid, &sessionError))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法准备跨账户会话目录：%1")
+                .arg(QString::fromStdWString(sessionError));
+            return false;
+        }
         if (!QDir().mkpath(QFileInfo(configPath).absolutePath()))
         {
             if (errorTextOut != nullptr)
@@ -328,6 +511,13 @@ namespace ks::misc
         outputStream << "pipe_name=" << QString::fromStdWString(ks::winapi_monitor::buildPipeNameForPid(pid)) << '\n';
         outputStream << "stop_flag_path=" << QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pid)) << '\n';
         outputStream << "session_id=" << sessionId << '\n';
+        std::wstring controllerSid;
+        if (!ks::winapi_monitor::currentProcessUserSidString(&controllerSid))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法读取当前控制端 SID。");
+            return false;
+        }
+        outputStream << "controller_sid=" << QString::fromStdWString(controllerSid) << '\n';
         outputStream << "agent_dll_path=" << QDir::toNativeSeparators(QString::fromStdWString(agentDllPath)) << '\n';
         // 只开剪贴板分类，不随手把通用文件/注册表/网络/进程/加载器监控一起打开——
         // "剪贴板保护"和通用 API 监控是两个不同的使用场景，这里只要剪贴板这一份。
@@ -352,6 +542,13 @@ namespace ks::misc
             }
             return false;
         }
+        std::wstring aclError;
+        if (!ks::winapi_monitor::grantSessionFileRead(configPath.toStdWString(), pid, &aclError))
+        {
+            if (errorTextOut) *errorTextOut = QStringLiteral("无法授予目标进程读取会话配置的权限：%1")
+                .arg(QString::fromStdWString(aclError));
+            return false;
+        }
         // 新配置完整提交后再撤销上一次会话的停止标记；否则常驻 Agent
         // 在 WaitForNextSessionConfig 中会一直等待，无法重启同一 PID 的监控。
         const QString stopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pid));
@@ -366,18 +563,31 @@ namespace ks::misc
         return true;
     }
 
-    bool ClipboardGuardPage::ensureProcessProtected(
+    bool ClipboardGuardRuntime::ensureProcessProtected(
         const ks::process::ProcessRecord& processRecord, const ClipboardGuardRule& matchedRule, QString* const errorTextOut)
     {
+        if (m_stopRequested.load()) return false;
+        std::uint64_t creationTime = 0;
+        const std::unique_ptr<void, decltype(&::CloseHandle)> process(
+            ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processRecord.pid), &::CloseHandle);
+        if (process) creationTime = ks::winapi_monitor::processCreationIdentity(process.get());
+        if (creationTime == 0 || (processRecord.creationTime100ns != 0
+            && processRecord.creationTime100ns != creationTime))
+        {
+            if (errorTextOut) *errorTextOut = QString::number(ERROR_INVALID_PARAMETER);
+            return false;
+        }
         QString existingSessionId;
         bool actionsUnchanged = false;
         bool pipeThreadExited = false;
+        bool identityChanged = false;
         {
             std::lock_guard<std::mutex> lock(m_sessionsMutex);
             for (const std::unique_ptr<Session>& sessionPointer : m_sessions)
             {
                 if (sessionPointer != nullptr && sessionPointer->pid == processRecord.pid)
                 {
+                    identityChanged = sessionPointer->creationTime100ns != creationTime;
                     existingSessionId = sessionPointer->sessionId;
                     pipeThreadExited = sessionPointer->pipeThreadExited.load();
                     actionsUnchanged = sessionPointer->readAction == matchedRule.readAction
@@ -387,7 +597,7 @@ namespace ks::misc
                 }
             }
         }
-        if (pipeThreadExited)
+        if (pipeThreadExited || identityChanged)
         {
             teardownSession(processRecord.pid);
             existingSessionId.clear();
@@ -410,6 +620,7 @@ namespace ks::misc
                 .arg(processRecord.pid).arg(leaseError);
             return false;
         }
+        if (m_stopRequested.load()) return false;
         QString writeError;
         if (!writeSessionConfigForPid(processRecord.pid, matchedRule, sessionId, &writeError))
         {
@@ -420,21 +631,31 @@ namespace ks::misc
             return false;
         }
 
+        if (m_stopRequested.load())
+        {
+            writeStopFlag(processRecord.pid);
+            return false;
+        }
         if (newSession)
         {
             // 先启动管道客户端，再注入 Agent；它建立服务端后即可连接。
-            startPipeReadThreadForPid(processRecord.pid, sessionId, matchedRule, std::move(lease));
-            const auto residentIt = m_residentAgentCreationTimes.find(processRecord.pid);
-            const bool reuseResidentAgent = processRecord.creationTime100ns != 0
-                && residentIt != m_residentAgentCreationTimes.cend()
-                && residentIt->second == processRecord.creationTime100ns;
+            try { startPipeReadThreadForPid(processRecord.pid, creationTime, sessionId, matchedRule, std::move(lease)); }
+            catch (...) { writeStopFlag(processRecord.pid); teardownSession(processRecord.pid); throw; }
+            if (m_stopRequested.load()) { teardownSession(processRecord.pid); return false; }
+            bool reuseResidentAgent = false;
+            {
+                std::lock_guard<std::mutex> lock(m_inbox->mutex);
+                const auto residentIt = m_inbox->residentAgentCreationTimes.find(processRecord.pid);
+                reuseResidentAgent = residentIt != m_inbox->residentAgentCreationTimes.cend()
+                    && residentIt->second == creationTime;
+            }
             if (!reuseResidentAgent)
             {
                 std::wstring agentDllPath, injectError;
                 if (!ks::winapi_monitor::resolveAgentPath(processRecord.pid,
-                        (QCoreApplication::applicationDirPath() + QStringLiteral("/APIMonitor_x64.dll")).toStdWString(),
+                        m_agentBasePath.toStdWString(),
                         &agentDllPath, &injectError)
-                    || !ks::winapi_monitor::injectAgent(processRecord.pid, agentDllPath, &injectError))
+                    || !ks::winapi_monitor::injectAgentNative(processRecord.pid, agentDllPath, &injectError, creationTime, nullptr))
                 {
                     teardownSession(processRecord.pid);
                     if (errorTextOut != nullptr)
@@ -444,9 +665,9 @@ namespace ks::misc
                     }
                     return false;
                 }
-                if (processRecord.creationTime100ns != 0)
                 {
-                    m_residentAgentCreationTimes[processRecord.pid] = processRecord.creationTime100ns;
+                    std::lock_guard<std::mutex> lock(m_inbox->mutex);
+                    m_inbox->residentAgentCreationTimes[processRecord.pid] = creationTime;
                 }
             }
         }
@@ -468,7 +689,22 @@ namespace ks::misc
         return true;
     }
 
-    void ClipboardGuardPage::teardownSession(const std::uint32_t pid)
+    void ClipboardGuardRuntime::writeStopFlag(const std::uint32_t pid)
+    {
+        // 写停止标记，让 Agent 自己的 250ms 轮询发现后主动卸载 hook、退出会话。
+        const QString stopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pid));
+        QFile stopFile(stopFlagPath);
+        if (stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            stopFile.write("stop");
+            stopFile.close();
+            std::wstring aclError;
+            (void)ks::winapi_monitor::grantSessionFileRead(stopFlagPath.toStdWString(), pid, &aclError);
+        }
+
+    }
+
+    void ClipboardGuardRuntime::teardownSession(const std::uint32_t pid)
     {
         std::unique_ptr<Session> sessionPointer;
         {
@@ -483,14 +719,7 @@ namespace ks::misc
             m_sessions.erase(sessionIt);
         }
 
-        // 写停止标记，让 Agent 自己的 250ms 轮询发现后主动卸载 hook、退出会话。
-        const QString stopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pid));
-        QFile stopFile(stopFlagPath);
-        if (stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        {
-            stopFile.write("stop");
-            stopFile.close();
-        }
+        writeStopFlag(pid);
 
         sessionPointer->stopFlag.store(true);
         if (sessionPointer->pipeThread != nullptr && sessionPointer->pipeThread->joinable())
@@ -501,24 +730,30 @@ namespace ks::misc
             ::CancelSynchronousIo(sessionPointer->pipeThread->native_handle());
             sessionPointer->pipeThread->join();
         }
+        m_inbox->finishSessionDrops(ks::winapi_monitor::sessionIdentity(sessionPointer->sessionId.toStdWString()));
     }
 
-    void ClipboardGuardPage::startPipeReadThreadForPid(
-        const std::uint32_t pid, const QString& sessionId, const ClipboardGuardRule& rule, ks::winapi_monitor::SessionLease lease)
+    void ClipboardGuardRuntime::startPipeReadThreadForPid(
+        const std::uint32_t pid, const std::uint64_t creationTime, const QString& sessionId, const ClipboardGuardRule& rule, ks::winapi_monitor::SessionLease lease)
     {
         auto sessionPointer = std::make_unique<Session>();
         sessionPointer->lease = std::move(lease);
         sessionPointer->pid = pid;
         sessionPointer->sessionId = sessionId;
+        sessionPointer->creationTime100ns = creationTime;
         sessionPointer->readAction = rule.readAction;
         sessionPointer->writeAction = rule.writeAction;
         sessionPointer->enumAction = rule.enumAction;
         Session* const sessionRawPointer = sessionPointer.get();
 
         const QString pipeNameText = QString::fromStdWString(ks::winapi_monitor::buildPipeNameForPid(pid));
-        QPointer<ClipboardGuardPage> guardThis(this);
+        const auto inbox = m_inbox;
+        {
+            std::lock_guard<std::mutex> lock(m_sessionsMutex);
+            m_sessions.push_back(std::move(sessionPointer));
+        }
 
-        sessionPointer->pipeThread = std::make_unique<std::thread>([guardThis, sessionRawPointer, pipeNameText, pid]() {
+        sessionRawPointer->pipeThread = std::make_unique<std::thread>([inbox, sessionRawPointer, pipeNameText, pid]() {
             HANDLE pipeHandle = INVALID_HANDLE_VALUE;
             for (int attempt = 0; attempt < 120; ++attempt)
             {
@@ -557,7 +792,7 @@ namespace ks::misc
                 {
                     break;
                 }
-                if (packetValue.size != sizeof(packetValue)
+                if (packetValue.size != sizeof(packetValue) || packetValue.pid != pid
                     || packetValue.version != ks::winapi_monitor::kProtocolVersion)
                 {
                     continue;
@@ -572,6 +807,12 @@ namespace ks::misc
                     {
                         sessionRawPointer->hooksInstalled.store(true);
                     }
+                    else if (wideBufferToText(packetValue.apiName) == QStringLiteral("EventsDropped"))
+                    {
+                        bool ok = false;
+                        const auto count = wideBufferToText(packetValue.detailText).toULongLong(&ok);
+                        if (ok) inbox->noteAgentDropped(packetValue.sessionIdentity, count);
+                    }
                     continue;
                 }
                 // 只关心剪贴板分类；本会话的 INI 已经只开了这一类，这里再过滤一层双保险。
@@ -580,14 +821,7 @@ namespace ks::misc
                     continue;
                 }
 
-                QMetaObject::invokeMethod(qApp, [guardThis, packetValue, pid]() {
-                    if (guardThis.isNull())
-                    {
-                        return;
-                    }
-                    const QString processText = guardThis->resolveProcessNameForPid(pid);
-                    guardThis->enqueuePendingRow(packetToEventRow(packetValue, processText));
-                }, Qt::QueuedConnection);
+                inbox->push(packetToEventRow(packetValue, inbox->processName(pid)));
             }
 
             const std::uintptr_t storedHandleValue = sessionRawPointer->pipeHandleValue.exchange(0);
@@ -599,58 +833,95 @@ namespace ks::misc
             sessionRawPointer->pipeThreadExited.store(true);
         });
 
-        std::lock_guard<std::mutex> lock(m_sessionsMutex);
-        m_sessions.push_back(std::move(sessionPointer));
     }
 
-    void ClipboardGuardPage::enqueuePendingRow(ClipboardGuardEventRow rowValue)
+    void ClipboardGuardPage::scheduleEventProjection()
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        if (m_pendingRows.size() >= kPendingRowCapacity)
+        if (m_projectionScheduled || !isVisible()) return;
+        m_projectionScheduled = true;
+        QTimer::singleShot(0, this, [this]()
         {
-            m_pendingRows.pop_front();
-        }
-        m_pendingRows.push_back(std::move(rowValue));
+            m_projectionScheduled = false;
+            flushPendingRows();
+        });
     }
 
     void ClipboardGuardPage::flushPendingRows()
     {
-        std::vector<ClipboardGuardEventRow> rowList;
-        {
-            std::lock_guard<std::mutex> lock(m_pendingMutex);
-            const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
-            rowList.reserve(takeCount);
-            for (std::size_t index = 0; index < takeCount; ++index)
-            {
-                rowList.push_back(std::move(m_pendingRows.front()));
-                m_pendingRows.pop_front();
-            }
-        }
-        if (rowList.empty() || m_eventTable == nullptr)
-        {
-            return;
-        }
+        // Sampling, matching and native protection continue while hidden. Only
+        // item construction/painting is demand-driven; the existing inbox owns
+        // every accepted row until projected or explicitly counted as evicted.
+        if (!m_eventTable || !isVisible() || !m_eventTable->isVisible()) return;
+        const QPointer<ClipboardGuardPage> self(this);
+        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                QStringLiteral("clipboard_guard_events"), { m_eventTable },
+                [self]() { if (self) self->flushPendingRows(); })) return;
 
+        QElapsedTimer budget;
+        budget.start();
+        if (m_projectionRows.empty())
+        {
+            auto rows = m_inbox->take(kUiFlushRowLimit);
+            for (auto& row : rows) m_projectionRows.push_back(std::move(row));
+        }
+        if (m_projectionRows.empty()) { updateRuntimeStatus(); return; }
+
+        auto* const scrollbar = m_eventTable->verticalScrollBar();
+        const bool followTail = scrollbar && scrollbar->value() >= scrollbar->maximum() - 1;
         const bool updatesEnabled = m_eventTable->updatesEnabled();
+        const bool sortingEnabled = m_eventTable->isSortingEnabled();
         m_eventTable->setUpdatesEnabled(false);
-        for (const ClipboardGuardEventRow& rowValue : rowList)
+        // A whole row is installed before sorting can relocate it; item roles,
+        // selection and the identity used by quick rules/call-stack stay aligned.
+        if (sortingEnabled) m_eventTable->setSortingEnabled(false);
+        std::size_t projected = 0;
+        while (!m_projectionRows.empty() && projected < kUiFlushRowLimit
+            && (projected == 0 || budget.elapsed() < kProjectionBudgetMs))
         {
-            appendEventRow(rowValue);
+            appendEventRow(m_projectionRows.front());
+            m_projectionRows.pop_front();
+            ++projected;
         }
-        const int removeCount = std::max(0, m_eventTable->rowCount() - 6000);
-        if (removeCount > 0 && m_eventTable->model() != nullptr)
-        {
-            m_eventTable->model()->removeRows(0, removeCount);
-        }
+        trimRetainedEventRows();
+        if (sortingEnabled) m_eventTable->setSortingEnabled(true);
         m_eventTable->setUpdatesEnabled(updatesEnabled);
-        m_eventTable->scrollToBottom();
+        if (followTail) m_eventTable->scrollToBottom();
+        updateRuntimeStatus();
+        if (!m_projectionRows.empty() || m_inbox->counts().pending != 0)
+            scheduleEventProjection();
+    }
+
+    void ClipboardGuardPage::trimRetainedEventRows()
+    {
+        const int excess = m_eventTable->rowCount() - kRetainedEventRows;
+        if (excess <= 0) return;
+        std::vector<int> removeRows;
+        removeRows.reserve(static_cast<std::size_t>(excess));
+        for (int i = 0; i < excess; ++i)
+        {
+            removeRows.push_back(m_retainedEventAnchors.front()->row());
+            m_retainedEventAnchors.pop_front();
+        }
+        // Retain the latest arrivals even under a user sort. Delete descending
+        // contiguous spans to keep the other anchor pointers and selection valid.
+        std::sort(removeRows.begin(), removeRows.end(), std::greater<int>());
+        for (std::size_t i = 0; i < removeRows.size();)
+        {
+            const int last = removeRows[i];
+            int first = last;
+            while (++i < removeRows.size() && removeRows[i] == first - 1) --first;
+            m_eventTable->model()->removeRows(first, last - first + 1);
+            m_evictedRows += static_cast<std::uint64_t>(last - first + 1);
+        }
     }
 
     void ClipboardGuardPage::appendEventRow(const ClipboardGuardEventRow& rowValue)
     {
         const int row = m_eventTable->rowCount();
         m_eventTable->insertRow(row);
-        m_eventTable->setItem(row, ColumnTime, createReadOnlyItem(rowValue.timeText));
+        auto* const timeItem = createReadOnlyItem(rowValue.timeText);
+        m_eventTable->setItem(row, ColumnTime, timeItem);
+        m_retainedEventAnchors.push_back(timeItem);
         m_eventTable->setItem(row, ColumnProcess, createReadOnlyItem(rowValue.processText));
         m_eventTable->setItem(row, ColumnPid, createReadOnlyItem(QString::number(rowValue.pid)));
         m_eventTable->setItem(row, ColumnOperation, createReadOnlyItem(rowValue.operationText));
@@ -671,159 +942,29 @@ namespace ks::misc
         m_eventTable->item(row, ColumnPid)->setData(Qt::UserRole, rowValue.pid);
     }
 
-    QString ClipboardGuardPage::resolveProcessNameForPid(const quint32 pid)
+    void ClipboardGuardPage::updateRuntimeStatus()
     {
-        std::lock_guard<std::mutex> lock(m_processNameCacheMutex);
-        const auto cacheIt = m_processNameCache.find(pid);
-        if (cacheIt != m_processNameCache.end())
-        {
-            return cacheIt->second;
-        }
-        return QStringLiteral("PID %1").arg(pid);
+        if (!isVisible() || !m_runtime || !m_runtime->hasStarted() || !m_statusLabel) return;
+        if (m_statusUpdateClock.isValid() && m_statusUpdateClock.elapsed() < 200) return;
+        m_statusUpdateClock.start();
+        const auto value = m_runtime->summary();
+        const auto counts = m_inbox->counts();
+        QString text = ks::i18n::sourceText(QStringLiteral("规则 %1 条，当前受保护进程 %2 个。"))
+            .arg(value.ruleCount).arg(value.protectedCount);
+        if (value.failureCount > 0)
+            text += ks::i18n::sourceText(QStringLiteral(" 有 %1 个进程处理失败，最后一次错误：%2"))
+                .arg(value.failureCount).arg(value.lastError);
+        text += ks::i18n::sourceText(QStringLiteral(" | Agent 丢失=%1，UI 丢失=%2，已移出表格=%3，待显示=%4"))
+            .arg(counts.agentDropped).arg(counts.dropped).arg(m_evictedRows)
+            .arg(counts.pending + m_projectionRows.size());
+        if (m_statusLabel->text() != text) m_statusLabel->setText(text);
     }
 
     void ClipboardGuardPage::refreshProcessListAndSessionsAsync()
     {
-        if (m_processScanInFlight.exchange(true))
-        {
-            // 上一轮扫描还没结束（进程数很多或磁盘慢），跳过本轮，避免任务在线程池里堆积。
-            return;
-        }
-
-        // m_rules 只能在 UI 线程读写（规则编辑对话框、toggleGlobalMonitor 等都在 UI 线程改它），
-        // 这里先拷一份快照带进后台线程，后台线程全程不碰 m_rules 本体，避免和规则编辑产生数据竞争。
-        std::vector<ClipboardGuardRule> rulesSnapshot = m_rules;
-
-        // 用本页面私有的 m_scanThreadPool 而不是全局线程池提交——见 .h 里
-        // m_scanThreadPool 的注释和析构函数里 waitForDone() 的说明。
-        QPointer<ClipboardGuardPage> guardThis(this);
-        m_scanThreadPool.start([guardThis, rulesSnapshot = std::move(rulesSnapshot)]() {
-            std::vector<ks::process::ProcessRecord> processList =
-                ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto);
-
-            std::unordered_map<quint32, QString> processNameCache;
-            processNameCache.reserve(processList.size());
-            for (const ks::process::ProcessRecord& processRecord : processList)
-            {
-                processNameCache.emplace(processRecord.pid, QString::fromStdString(processRecord.processName));
-            }
-
-            // 按当前规则逐一核对：命中就确保已保护，退出的进程回收会话。
-            // PID 0/4（System Idle/System）不是可注入的普通进程；本进程自己
-            // 也没必要监控自己——全局规则打开后这两类会被排除，避免每轮都
-            // 白跑一次注入尝试。
-            //
-            // 这整段匹配 + 注入 + 会话回收必须留在这个后台线程里跑完：全局监控打开时
-            // 命中的进程可能有一两百个，每个 ensureProcessProtected 都可能触发一次同步
-            // 的 CreateRemoteThread 注入调用（单次最坏情况等到 InjectDllByPath 内部
-            // 10 秒超时）；之前这段逻辑排回了 UI 线程执行，累计耗时超过系统判定无响应
-            // 的阈值，2026-09-22 20:29:42 的 Windows Error Reporting AppHangB1 记录
-            // （Ksword5.1.exe 被系统判定无响应并关闭）就是这里卡死的。
-            const std::uint32_t selfPid = static_cast<std::uint32_t>(::GetCurrentProcessId());
-            std::vector<std::uint32_t> matchedPids;
-            int failureCount = 0;
-            QString lastErrorText;
-            for (const ks::process::ProcessRecord& processRecord : processList)
-            {
-                if (processRecord.pid == 0U || processRecord.pid == 4U || processRecord.pid == selfPid)
-                {
-                    continue;
-                }
-                const ClipboardGuardRule* const matchedRule =
-                    ClipboardGuardPage::findMatchingRuleIn(rulesSnapshot, processRecord);
-                if (matchedRule == nullptr)
-                {
-                    continue;
-                }
-                if (guardThis.isNull())
-                {
-                    return;
-                }
-                matchedPids.push_back(processRecord.pid);
-                QString errorText;
-                if (!guardThis->ensureProcessProtected(processRecord, *matchedRule, &errorText))
-                {
-                    ++failureCount;
-                    lastErrorText = errorText;
-                }
-            }
-
-            if (guardThis.isNull())
-            {
-                return;
-            }
-
-            std::vector<std::uint32_t> sessionPids;
-            {
-                std::lock_guard<std::mutex> lock(guardThis->m_sessionsMutex);
-                for (const std::unique_ptr<Session>& sessionPointer : guardThis->m_sessions)
-                {
-                    if (sessionPointer != nullptr)
-                    {
-                        sessionPids.push_back(sessionPointer->pid);
-                    }
-                }
-            }
-            for (const std::uint32_t sessionPid : sessionPids)
-            {
-                if (std::find(matchedPids.cbegin(), matchedPids.cend(), sessionPid) == matchedPids.cend())
-                {
-                    // 进程退出或规则被删除/禁用：回收会话。写停止标记对已退出的进程是安全的空操作。
-                    guardThis->teardownSession(sessionPid);
-                }
-            }
-            for (auto residentIt = guardThis->m_residentAgentCreationTimes.begin();
-                residentIt != guardThis->m_residentAgentCreationTimes.end();)
-            {
-                const bool stillRunning = std::any_of(processList.cbegin(), processList.cend(),
-                    [residentIt](const ks::process::ProcessRecord& processRecord) {
-                        return processRecord.pid == residentIt->first
-                            && processRecord.creationTime100ns == residentIt->second;
-                    });
-                residentIt = stillRunning ? std::next(residentIt)
-                    : guardThis->m_residentAgentCreationTimes.erase(residentIt);
-            }
-
-            // 到这里为止全部工作都已经做完；剩下的只是把结果排回 UI 线程展示，
-            // 这一段本身很轻量，不会再造成卡顿。
-            const std::size_t ruleCount = rulesSnapshot.size();
-            std::size_t protectedCount = 0;
-            {
-                std::lock_guard<std::mutex> lock(guardThis->m_sessionsMutex);
-                for (const std::unique_ptr<Session>& sessionPointer : guardThis->m_sessions)
-                {
-                    if (sessionPointer != nullptr && sessionPointer->hooksInstalled.load()
-                        && !sessionPointer->pipeThreadExited.load())
-                    {
-                        ++protectedCount;
-                    }
-                }
-            }
-            QMetaObject::invokeMethod(qApp, [guardThis, processNameCache = std::move(processNameCache),
-                ruleCount, protectedCount, failureCount, lastErrorText]() mutable {
-                if (guardThis.isNull())
-                {
-                    return;
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(guardThis->m_processNameCacheMutex);
-                    guardThis->m_processNameCache = std::move(processNameCache);
-                }
-
-                if (guardThis->m_statusLabel != nullptr)
-                {
-                    QString statusText = QStringLiteral("规则 %1 条，当前受保护进程 %2 个。")
-                        .arg(ruleCount).arg(protectedCount);
-                    if (failureCount > 0)
-                    {
-                        statusText += QStringLiteral(" 有 %1 个进程处理失败，最后一次错误：%2")
-                            .arg(failureCount).arg(lastErrorText);
-                    }
-                    guardThis->m_statusLabel->setText(statusText);
-                }
-                guardThis->m_processScanInFlight.store(false);
-            }, Qt::QueuedConnection);
-        });
+        if (m_runtime->hasFinished()) m_runtime = std::make_shared<ClipboardGuardRuntime>(m_inbox);
+        (void)m_runtime->requestScan(m_rules,
+            QCoreApplication::applicationDirPath() + QStringLiteral("/APIMonitor_x64.dll"));
+        updateRuntimeStatus();
     }
 }

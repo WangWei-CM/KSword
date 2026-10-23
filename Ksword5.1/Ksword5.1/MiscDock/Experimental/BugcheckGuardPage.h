@@ -2,15 +2,18 @@
 #include "../../ArkDriverClient/ArkDriverTypes.h"
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QWidget>
+#include <atomic>
+#include <memory>
 
 class QCheckBox;
 class QLabel;
 class QPushButton;
 class QShowEvent;
 class QSpinBox;
-class QTimer;
+namespace ks::ui { class AsyncOperation; }
 
 namespace ks::misc
 {
@@ -20,8 +23,10 @@ namespace ks::misc
     class BugcheckGuardPage final : public QWidget
     {
     public:
+        // Complete unshown initial body; real Show still queries the driver.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
         explicit BugcheckGuardPage(QWidget* parent = nullptr);
-        ~BugcheckGuardPage() override = default;
+        ~BugcheckGuardPage() override;
 
     protected:
         void showEvent(QShowEvent* event) override;
@@ -36,7 +41,8 @@ namespace ks::misc
         void refreshStatus();
         void enableGuard();
         void disableGuard();
-        void pollForScreenshot();
+        void startScreenshotWatcher();
+        void stopScreenshotWatcher();
         void attemptScreenshot();
         void updateFromResponse(
             const KSWORD_ARK_BUGCHECK_GUARD_RESPONSE& response);
@@ -54,8 +60,8 @@ namespace ks::misc
         QCheckBox* m_acknowledgeCheck = nullptr;
         QPushButton* m_refreshButton = nullptr;
         QPushButton* m_enableButton = nullptr;
-        QTimer* m_screenshotPollTimer = nullptr;
-        ksword::ark::DriverHandle m_screenshotDriverHandle;
+        ks::ui::AsyncOperation* m_screenshotOperation = nullptr;
+        std::shared_ptr<std::atomic_bool> m_screenshotStop;
         bool m_supported = false;
         bool m_active = false;
         bool m_busy = false;

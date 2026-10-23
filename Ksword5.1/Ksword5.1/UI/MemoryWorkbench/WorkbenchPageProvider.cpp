@@ -21,7 +21,10 @@
 
 #include "WorkbenchPageProvider.Pool.h"
 
+#include <QScopeGuard>
+#include <algorithm>
 #include <limits>
+#include <set>
 #include <utility>
 
 namespace
@@ -139,8 +142,59 @@ namespace ks::ui
         gateInputsProvider_ = std::move(provider);
     }
 
+    void WorkbenchPageProvider::UpdateViewportInterest(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        if (hasViewportInterest_ && viewportInterestCanvasRevision_ == sourceRevision
+            && viewportInterest_ == ranges) return;
+        const bool hadPending = hasInFlightRequests();
+        hasViewportInterest_ = true;
+        viewportInterest_ = ranges;
+        viewportInterestCanvasRevision_ = sourceRevision;
+        const auto dropped = readSchedule_.updateInterest(++viewportInterestRevision_);
+        for (const auto ticket : dropped) discardQueuedJob(ticket);
+        const QPointer<WorkbenchPageProvider> alive(this);
+        dispatchNextJob();
+        if (alive && hadPending && !hasInFlightRequests()) emit jobLanded();
+    }
+
+    void WorkbenchPageProvider::ProtectPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        for (auto& entry : pendingJobs_)
+        {
+            auto& record = entry.second;
+            if (record.canvasRevision != sourceRevision || record.purpose != ReadPurpose::Browse) continue;
+            bool overlap = false;
+            for (const auto& pending : record.ranges)
+                for (const auto& wanted : ranges)
+                {
+                    if (!pending.pageCount || !wanted.pageCount) continue;
+                    const auto left = pending.firstPageStart / ksword::memwb::HexViewport::kPageBytes;
+                    const auto right = wanted.firstPageStart / ksword::memwb::HexViewport::kPageBytes;
+                    overlap = overlap || (left <= right ? right - left < pending.pageCount
+                        : left - right < wanted.pageCount);
+                }
+            if (overlap && readSchedule_.promote(entry.first))
+                record.purpose = ReadPurpose::ExplicitRead;
+        }
+    }
+
     void WorkbenchPageProvider::RequestPages(
         const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        requestPages(ranges, sourceRevision, ReadPurpose::Browse);
+    }
+
+    void WorkbenchPageProvider::RequestExplicitPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        ProtectPages(ranges, sourceRevision);
+        requestPages(ranges, sourceRevision, ReadPurpose::ExplicitRead);
+    }
+
+    void WorkbenchPageProvider::requestPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision, ReadPurpose purpose)
     {
         // 空请求没有任何事可做：不取会话、不判 Gate、不发起任何端口调用。
         if (ranges.empty())
@@ -193,13 +247,7 @@ namespace ks::ui
         // 变"）。
         const auto cancelRangesIfCanvasStillMatches = [this, canvasRevision](const std::vector<HexFetchRange>& list)
         {
-            if (canvas_ && canvas_->sourceRevision() == canvasRevision)
-            {
-                for (const HexFetchRange& range : list)
-                {
-                    canvas_->cancelPages(range);
-                }
-            }
+            cancelUnownedPages(list, canvasRevision);
         };
 
         const ksword::memwb::GateInputs gateInputs =
@@ -249,52 +297,185 @@ namespace ks::ui
             return;
         }
 
-        submitJob(cap, canvasRevision, targetRevision, isDdmaChannel, clampedRanges);
+        submitJob(cap, canvasRevision, targetRevision, isDdmaChannel, clampedRanges, purpose);
     }
 
-    void WorkbenchPageProvider::submitJob(
-        const TargetCapture& cap,
-        std::uint64_t canvasRevision,
-        std::uint64_t targetRevision,
-        bool isDdmaChannel,
-        const std::vector<HexFetchRange>& ranges)
+    bool WorkbenchPageProvider::pageInterested(std::uint64_t pageStart, std::uint64_t canvasRevision) const
     {
-        // ---- 投给唯一的单线程读池 ----
-        const std::uint64_t ticket = ++jobCounter_;
-        const std::uint64_t submissionGeneration = generation_;
+        if (!hasViewportInterest_) return true; // Legacy direct adapters have no interest contract.
+        if (canvasRevision != viewportInterestCanvasRevision_) return false;
+        constexpr auto pageBytes = ksword::memwb::HexViewport::kPageBytes;
+        for (const auto& range : viewportInterest_)
+            if (pageStart >= range.firstPageStart && (pageStart - range.firstPageStart) / pageBytes < range.pageCount)
+                return true;
+        return false;
+    }
 
-        // N2 修复：每个任务各自一份"是否已经开始跑"的标志，初值 false，与
-        // PendingJobRecord::started 共享引用计数（见文件头 N2 一节）。
+    void WorkbenchPageProvider::cancelUnownedPages(const std::vector<HexFetchRange>& ranges,
+        std::uint64_t canvasRevision)
+    {
+        if (!canvas_ || canvas_->sourceRevision() != canvasRevision) return;
+        constexpr auto pageBytes = ksword::memwb::HexViewport::kPageBytes;
+        const auto contains = [](const HexFetchRange& range, std::uint64_t page) {
+            return page >= range.firstPageStart
+                && (page - range.firstPageStart) / ksword::memwb::HexViewport::kPageBytes < range.pageCount;
+        };
+        for (const auto& range : ranges)
+            for (std::uint64_t index = 0; index < range.pageCount; ++index)
+            {
+                if (index > (UINT64_MAX - range.firstPageStart) / pageBytes) break;
+                const auto page = range.firstPageStart + index * pageBytes;
+                bool owned = false;
+                for (const auto& entry : pendingJobs_)
+                    if (entry.second.canvasRevision == canvasRevision)
+                        for (const auto& pending : entry.second.ranges)
+                            owned = owned || contains(pending, page);
+                // Known failures deliberately remain Pending until an explicit retry.
+                for (const auto& failed : failedRanges_) owned = owned || contains(failed, page);
+                if (!owned && canvas_ && canvas_->sourceRevision() == canvasRevision)
+                    canvas_->cancelPages(HexFetchRange{page, 1, 0});
+            }
+    }
+
+    void WorkbenchPageProvider::discardQueuedJob(std::uint64_t ticket)
+    {
+        const auto found = pendingJobs_.find(ticket);
+        if (found == pendingJobs_.end()) return;
+        const auto ranges = found->second.ranges;
+        const auto revision = found->second.canvasRevision;
+        pendingJobs_.erase(found);
+        cancelUnownedPages(ranges, revision);
+    }
+
+    void WorkbenchPageProvider::submitJob(const TargetCapture& cap,
+        std::uint64_t canvasRevision, std::uint64_t targetRevision, bool isDdmaChannel,
+        const std::vector<HexFetchRange>& ranges, ReadPurpose purpose)
+    {
+        std::vector<HexFetchRange> scheduled = ranges;
+        constexpr auto pageBytes = ksword::memwb::HexViewport::kPageBytes;
+        if (purpose == ReadPurpose::Browse)
+        {
+            std::set<std::uint64_t> pages;
+            const auto include = [&](const std::vector<HexFetchRange>& source) {
+                for (const auto& range : source)
+                    for (std::uint64_t index = 0; index < range.pageCount; ++index)
+                    {
+                        if (index > (UINT64_MAX - range.firstPageStart) / pageBytes) break;
+                        const auto page = range.firstPageStart + index * pageBytes;
+                        if (pageInterested(page, canvasRevision)) pages.insert(page);
+                    }
+            };
+            // PlanFetch excludes already-pending pages. Preserve the still-needed
+            // queued browse payload when a second fragment arrives for this interest.
+            for (const auto& entry : pendingJobs_)
+                if (entry.second.purpose == ReadPurpose::Browse && entry.first != dispatchedTicket_
+                    && entry.second.canvasRevision == canvasRevision && entry.second.targetRevision == targetRevision)
+                    include(entry.second.ranges);
+            include(ranges);
+            scheduled.clear();
+            std::size_t kept = 0;
+            for (const auto page : pages)
+            {
+                if (kept++ >= ksword::memwb::HexViewport::kMaxCachedPages) break;
+                if (!scheduled.empty() && page >= scheduled.back().firstPageStart
+                    && (page - scheduled.back().firstPageStart) / pageBytes == scheduled.back().pageCount)
+                    ++scheduled.back().pageCount;
+                else scheduled.push_back(HexFetchRange{page, 1, 0});
+            }
+        }
+        std::size_t pageCount = 0;
+        for (const auto& range : scheduled)
+        {
+            if (range.pageCount > SIZE_MAX - pageCount) { cancelUnownedPages(ranges, canvasRevision); return; }
+            pageCount += static_cast<std::size_t>(range.pageCount);
+        }
+        if (!pageCount) { cancelUnownedPages(ranges, canvasRevision); return; }
+
+        const auto ticket = ++jobCounter_;
         auto started = std::make_shared<std::atomic<bool>>(false);
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        const auto submissionGeneration = generation_;
+        auto start = [this, cap, ticket, canvasRevision, targetRevision, submissionGeneration,
+            isDdmaChannel, scheduled, started, cancel]() {
+            auto* job = new InFlightJob(QPointer<WorkbenchPageProvider>(this), port_.get(), cap.session,
+                ticket, canvasRevision, targetRevision, submissionGeneration, isDdmaChannel,
+                scheduled, cancel, readPool_->PoisonFlag(), started, readPool_.get());
+            readPool_->Submit(job, ticket, cancel);
+        };
+        pendingJobs_[ticket] = PendingJobRecord{canvasRevision, scheduled, started, purpose,
+            targetRevision, submissionGeneration, std::move(start)};
+        const auto accepted = readSchedule_.enqueue(ticket, purpose, pageCount, viewportInterestRevision_);
+        if (!accepted.accepted)
+        {
+            pendingJobs_.erase(ticket);
+            cancelUnownedPages(ranges, canvasRevision);
+            return;
+        }
+        for (const auto dropped : accepted.droppedBrowseTickets) discardQueuedJob(dropped);
+        // Release any malformed/excess browse registration without touching the
+        // retained union, protected overlap, or explicit-failure Pending pages.
+        if (purpose == ReadPurpose::Browse) cancelUnownedPages(ranges, canvasRevision);
+        dispatchNextJob();
+    }
 
-        // D4/D5/D6：登记这次提交的记账——canvasAllInFlight 丢弃"排队中、从未
-        // 真正跑过"的任务时，只能靠这张表知道该对画布做什么。正常落地（无论
-        // 新鲜/陈旧/失败/代次不符）都会在 onJobFinishedOnUiThread 开头把自己
-        // 的条目摘掉。
-        pendingJobs_[ticket] = PendingJobRecord{canvasRevision, ranges, started};
-
-        // D3：全新的一次提交，先把共享的"通道中毒"标志清回 false——保证这次
-        // 请求总有机会真正问一次端口。如果它恰好排在一个"即将中毒"的任务
-        // 后面，等它真正开始跑时，前一个任务可能早已把标志重新置位，这正是
-        // D3 要抓的"已排队任务不得再碰已知坏掉的通道"，不是本行的职责。
-        readPool_->ResetPoison();
-
-        auto cancelFlag = std::make_shared<std::atomic<bool>>(false);
-        auto* job = new InFlightJob(
-            QPointer<WorkbenchPageProvider>(this),
-            port_.get(),
-            cap.session,
-            ticket,
-            canvasRevision,
-            targetRevision,
-            submissionGeneration,
-            isDdmaChannel,
-            ranges,
-            cancelFlag,
-            readPool_->PoisonFlag(),
-            started,
-            readPool_.get());
-        readPool_->Submit(job, ticket, std::move(cancelFlag));
+    void WorkbenchPageProvider::dispatchNextJob()
+    {
+        if (dispatching_ || dispatchedTicket_) return;
+        const QPointer<WorkbenchPageProvider> alive(this);
+        dispatching_ = true;
+        const auto resetDispatch = qScopeGuard([alive]() { if (alive) alive->dispatching_ = false; });
+        while (const auto next = readSchedule_.popNext())
+        {
+            const auto ticket = next->ticket;
+            auto found = pendingJobs_.find(ticket);
+            if (found == pendingJobs_.end()) { readSchedule_.finish(ticket); continue; }
+            const auto targetRevision = found->second.targetRevision;
+            const auto requestGeneration = found->second.jobGeneration;
+            const auto canvasRevision = found->second.canvasRevision;
+            const bool fresh = isSourceFresh(targetRevision);
+            if (!alive) return;
+            found = pendingJobs_.find(ticket); // capture() may synchronously invalidate all descriptors.
+            if (found == pendingJobs_.end() || requestGeneration != generation_ || !fresh)
+            {
+                readSchedule_.finish(ticket);
+                discardQueuedJob(ticket);
+                continue;
+            }
+            const auto gateInputs = gateInputsProvider_ ? gateInputsProvider_() : ksword::memwb::GateInputs{};
+            if (!alive) return;
+            const auto capture = target_->capture();
+            if (!alive) return;
+            found = pendingJobs_.find(ticket);
+            if (found == pendingJobs_.end() || generation_ != requestGeneration || capture.rev.source != targetRevision)
+            {
+                readSchedule_.finish(ticket); discardQueuedJob(ticket); continue;
+            }
+            const auto gate = ksword::memwb::EvaluateChannel(capture.session.scope, capture.session.channel, gateInputs);
+            const bool dirty = capture.session.channel == ksword::memwb::Channel::Ddma
+                && scratchLatched_ && scratchLatchedForRevision_ == targetRevision;
+            if (!gate.available || dirty)
+            {
+                readSchedule_.finish(ticket);
+                discardQueuedJob(ticket);
+                if (!gate.available)
+                {
+                    if (!lastGateUnavailableReason_ || *lastGateUnavailableReason_ != gate.reason)
+                    { lastGateUnavailableReason_ = gate.reason; emit channelUnavailable(gate); }
+                }
+                else if (lastLatchRetryNotifiedFor_ != std::make_pair(targetRevision, canvasRevision))
+                { lastLatchRetryNotifiedFor_ = std::make_pair(targetRevision, canvasRevision); emit retryBlockedByLatch(canvasRevision); }
+                if (!alive) return;
+                continue;
+            }
+            // UI reset occurs only after the previous physical worker retired.
+            // Scrolling/ordinary explicit reads never heal a failed channel.
+            if (found->second.purpose == ReadPurpose::ExplicitRetry || poisonTargetRevision_ != targetRevision)
+            { readPool_->ResetPoison(); poisonTargetRevision_ = targetRevision; }
+            auto start = found->second.start;
+            dispatchedTicket_ = ticket;
+            start();
+            return;
+        }
     }
 
     void WorkbenchPageProvider::cancelAllInFlight()
@@ -322,6 +503,11 @@ namespace ks::ui
             }
         }
         pendingJobs_.clear();
+        readSchedule_.clear();
+        viewportInterest_.clear();
+        hasViewportInterest_ = false;
+        // dispatchedTicket_ remains occupied until its cancelled runnable lands.
+        // A new source must never reset poison or submit I/O while the old worker runs.
 
         // 身份变化之后，旧的"失败待重试"/"暂停待恢复"记账都不再对应任何
         // 有意义的地址——新地址空间会自己 InvalidateAll，继续留着只会让
@@ -432,7 +618,7 @@ namespace ks::ui
             return;
         }
 
-        RequestPages(normalized, canvas_->sourceRevision());
+        requestPages(normalized, canvas_->sourceRevision(), ReadPurpose::ExplicitRetry);
     }
 
     void WorkbenchPageProvider::rereadByteRange(std::uint64_t address, std::uint64_t length)
@@ -481,7 +667,8 @@ namespace ks::ui
             for (const auto& entry : pendingJobs_)
             {
                 const PendingJobRecord& record = entry.second;
-                if (record.started && record.started->load())
+                // A replaceable browsing read must never satisfy protected post-write readback.
+                if (record.purpose != ReadPurpose::PostWrite || (record.started && record.started->load()))
                 {
                     // 已经开始跑：不提供去重覆盖，看下一条记账。
                     continue;
@@ -510,7 +697,7 @@ namespace ks::ui
             return;
         }
 
-        RequestPages({range}, canvas_->sourceRevision());
+        requestPages({range}, canvas_->sourceRevision(), ReadPurpose::PostWrite);
     }
 
     bool WorkbenchPageProvider::isSourceFresh(std::uint64_t capturedTargetRevision)
@@ -531,249 +718,106 @@ namespace ks::ui
 
     void WorkbenchPageProvider::onJobFinishedOnUiThread(std::uint64_t jobTicket)
     {
-        if (!readPool_)
-        {
-            return;
-        }
-        std::optional<ReadPool::CompletedJob> maybeJob = readPool_->TakeCompleted(jobTicket);
-        if (!maybeJob)
-        {
-            // 票据不存在：可能从未存在，也可能这次结果已经被别的路径处理过。
-            // 没有东西可核对，直接返回。
-            return;
-        }
-        const ReadPool::CompletedJob& job = *maybeJob;
-
-        // 这份记账到这里就算"落地"了，不管接下来走哪条分支，provider 自己的
-        // 挂起表都不再需要它（D4/D5/D6）。
+        if (!readPool_) return;
+        auto maybeJob = readPool_->TakeCompleted(jobTicket);
+        if (!maybeJob) return;
+        const QPointer<WorkbenchPageProvider> alive(this);
+        if (dispatchedTicket_ == jobTicket) dispatchedTicket_.reset();
+        readSchedule_.finish(jobTicket);
+        const auto found = pendingJobs_.find(jobTicket);
+        const auto purpose = found != pendingJobs_.end() ? found->second.purpose : ReadPurpose::Browse;
         pendingJobs_.erase(jobTicket);
-
-        // Wave 3 wpJ5 新增（增量①）：从这一行开始，函数无论接下来走哪条分支
-        // return，都必须先发一次 jobLanded()——本函数下面的每一个 return 语句
-        // 前都手动补了一次 emit（不用"统一出口"的写法，是为了不触碰这段代码
-        // 既有的、已经独立审核过的控制流结构，降低引入新缺陷的风险；代价是
-        // 以后再加新的 return 分支时要记得同步补一次，已在每处加注释提醒）。
-        // 契约：hasInFlightRequests() 在 pendingJobs_.erase 之后、jobLanded()
-        // 发出之前的这一小段窗口内可能已经变回"空"（如果这是最后一个在途任务），
-        // 订阅者据此驱动的 noteDirty 要的正是"现在没有在途了"这个事实，顺序上
-        // 没有问题。
-
-        // D4：代次核对——cancelAllInFlight 在这份结果还没落地之前被调用过，
-        // 对应的 cancelPages 已经在 cancelAllInFlight 自己的调用栈里同步处理
-        // 过了（见该函数），这里只负责不把它当成新鲜结果展示，不重复触碰
-        // 画布。
-        if (job.jobGeneration != generation_)
-        {
-            emit jobLanded(); // wpJ5 增量①：这条分支也取到了真实的完成记账，照发。
-            return;
-        }
-
-        // 先扫一遍全部 range 的结果，汇总两个判断要用到的聚合信息，外加
-        // "第一条失败文本"：
-        // - anyCancelled：任一 range 带着 cancelled，说明这批任务在在途时被
-        //   cancelAllInFlight 作废过。正常情况下 D4 的代次核对已经先拦住了
-        //   这种结果（cancelFlag_ 只由 cancelAllInFlight 置位，而它恒会先
-        //   推进 generation_），这里保留只是防御——万一出现 cancelled=true
-        //   而代次恰好没变的边界情况，同样整批丢弃，不展示任何假数据。
-        // - anyScratchDirty：任一 range 报告过 DDMA 暂存区被弄脏；这个检查
-        //   与 channelFailed 互相独立，脏扇区信号要如实落地，不能因为走了
-        //   失败分支就漏报。
-        // N3 修复：不再汇总"anyChannelFailed"这个全局布尔——channelFailed
-        // 现在按 range 逐个处理（见下面的主循环），否则会退回 N3 的原始
-        // 缺陷（同批已读成功的 range 被另一个失败的 range 连带丢弃）。
-        bool anyCancelled = false;
-        bool anyScratchDirty = false;
-        QString firstFailureText;
-        for (const JobRangeResult& item : job.rangeResults)
-        {
-            if (item.result.cancelled)
-            {
-                anyCancelled = true;
-            }
-            if (item.result.channelFailed && firstFailureText.isEmpty() && !item.result.failure.empty())
-            {
-                firstFailureText = QString::fromStdString(item.result.failure);
-            }
-            if (item.result.scratchAreaDirty)
-            {
-                anyScratchDirty = true;
-            }
-        }
-
-        if (anyCancelled)
-        {
-            // 见上面的防御性说明：D4 的代次核对正常已经处理过，这里再补一次
-            // 画布代次守卫的 cancelPages 不会有副作用。"取消"是用户显式动作，
-            // 与 channelFailed 不是同一类事：整批撤销、不记进 failedRanges_。
-            if (canvas_ && canvas_->sourceRevision() == job.canvasRevision)
-            {
-                for (const JobRangeResult& item : job.rangeResults)
-                {
-                    canvas_->cancelPages(item.range);
-                }
-            }
-            emit jobLanded(); // wpJ5 增量①：被取消的任务也已经真正处理完毕。
-            return;
-        }
-
-        if (!canvas_)
-        {
-            // N6 修复：画布已经不在了（暂停或真销毁，分不清）。结果没地方
-            // 交付，但不能什么都不记——统一记进 pausedPendingRanges_，
-            // setCanvas() 侦测到"从空恢复为非空"时会消费它（见该函数）。
-            for (const JobRangeResult& item : job.rangeResults)
-            {
-                pausedPendingRanges_.push_back(PausedRangeRecord{job.canvasRevision, item.range});
-            }
-            emit jobLanded(); // wpJ5 增量①：丢弃也是处理完毕，记账已经补上。
-            return;
-        }
-
-        // N1 修复（D9 没修好的根因）：capture() 仍可能同步触发
-        // sessionChanged、同步调用 setCanvas(nullptr)；上一轮只在调用之前
-        // 判过一次 canvas_，这正是 0xC0000005 的根因——调用后立刻重新判空。
+        // Drain synchronous rejections before reporting idle to BaselineFeeder.
+        const auto completed = qScopeGuard([alive]() {
+            if (!alive) return;
+            alive->dispatchNextJob();
+            if (alive) emit alive->jobLanded();
+        });
+        const auto& job = *maybeJob;
+        if (job.jobGeneration != generation_) return;
         const bool sourceFresh = isSourceFresh(job.targetRevision);
-        if (!canvas_)
-        {
-            emit jobLanded(); // wpJ5 增量①：重入把画布摘空，同样算落地完毕。
-            return;
-        }
-
+        if (!alive || job.jobGeneration != generation_) return;
         if (!sourceFresh)
         {
-            // 核对不通过（**目标轴**已经前进）：整批 cancelPages（画布代次
-            // 仍等于提交时的 canvasRevision 才做，D6）。用原始 range 粒度，
-            // 整批撤销才能让它们恢复到"可以再次请求"的状态；这类与
-            // channelFailed 不同（目标变了不是通道坏了），不记进 failedRanges_。
-            if (canvas_->sourceRevision() == job.canvasRevision)
-            {
-                for (const JobRangeResult& item : job.rangeResults)
-                {
-                    canvas_->cancelPages(item.range);
-                }
-            }
-            emit jobLanded(); // wpJ5 增量①：目标轴已前进导致的整批撤销也是一次落地。
+            for (const auto& item : job.rangeResults)
+                cancelUnownedPages({item.range}, job.canvasRevision);
             return;
         }
-
-        // 核对通过，先落地 DDMA 脏扇区闩锁——与是否 channelFailed 无关，见
-        // 上面的聚合说明。闩锁键是**目标轴**（决策 2），只在"确实是 Ddma
-        // 通道的这次请求"且"闩锁尚未命中这个目标代次"时才置位并发信号，
-        // 保证同一目标代次内只发一次。
-        if (job.isDdma && anyScratchDirty)
+        bool anyCancelled = false;
+        bool anyScratchDirty = false;
+        QString firstFailure;
+        for (const auto& item : job.rangeResults)
         {
-            if (!scratchLatched_ || scratchLatchedForRevision_ != job.targetRevision)
-            {
-                scratchLatched_ = true;
-                scratchLatchedForRevision_ = job.targetRevision;
-                emit scratchAreaDirtyLatched();
-            }
+            anyCancelled = anyCancelled || item.result.cancelled;
+            anyScratchDirty = anyScratchDirty || item.result.scratchAreaDirty;
+            if (firstFailure.isEmpty() && item.result.channelFailed && !item.result.failure.empty())
+                firstFailure = QString::fromStdString(item.result.failure);
         }
-
-        // D6 续（本包自己测出的同族缺口，不是审核报告原文，记在这里防止
-        // 回归）：isSourceFresh 只核对**目标轴**，target 没变但 canvas 换了
-        // 地址空间（例如宿主在同一个目标上重建了可见窗口）时也会走到这里。
-        // deliverPage/deliverUnreadable 内部会用 job.canvasRevision 去比
-        // HexViewport 自己的 sourceRevision_，代次不符会被自动拒收，天然
-        // 安全；但 cancelPages 没有任何代次校验（HexViewport::CancelInFlight
-        // 只校验对齐/边界），如果这里不额外守卫，NotAttempted 分支的
-        // cancelPages 就会按"地址"直接抹掉新地址空间刚刚登记的同一地址的
-        // 在途页——即使这批结果本身因为代次不符根本不会被交付。canvasStale
-        // 为真时整段跳过，不逐页处理（既不交付也不撤销，让新地址空间自己的
-        // 登记原样保留）。
-        const bool canvasStale = (canvas_->sourceRevision() != job.canvasRevision);
-        if (canvasStale)
+        // A paused canvas cannot suppress real channel damage or failure evidence.
+        if (job.isDdma && anyScratchDirty
+            && (!scratchLatched_ || scratchLatchedForRevision_ != job.targetRevision))
         {
-            emit jobLanded(); // wpJ5 增量①：画布代次已经前进，这批结果整段跳过也算落地。
+            scratchLatched_ = true;
+            scratchLatchedForRevision_ = job.targetRevision;
+            emit scratchAreaDirtyLatched();
+            if (!alive || job.jobGeneration != generation_) return;
+        }
+        if (anyCancelled)
+        {
+            for (const auto& item : job.rangeResults) cancelUnownedPages({item.range}, job.canvasRevision);
             return;
         }
-
-        // N3/N4 修复：按 range 逐个处理，不再用一个全局布尔决定整批要不要
-        // 丢弃。deliverPageRecord 只负责"这一页怎么交付"，两个分支共用，
-        // 避免同一段转换代码抄两遍；NotAttempted 不在这里处理——两个分支
-        // 对它的处置不同，留给调用者自己决定（见下）。
-        const auto deliverPageRecord = [this, &job](const ksword::memwb::PageRecord& page)
+        // A real channel/latch failure is retained above, but old canvas-axis
+        // ranges must never enter the new canvas retry book. Pausing (nullptr)
+        // deliberately keeps failure evidence for the matching resumed canvas.
+        if (canvas_ && canvas_->sourceRevision() != job.canvasRevision) return;
+        const bool canvasFresh = canvas_ && canvas_->sourceRevision() == job.canvasRevision;
+        int failures = 0;
+        for (const auto& item : job.rangeResults)
         {
-            switch (page.state)
+            const bool failed = item.skippedDueToPoison || item.result.channelFailed;
+            if (failed)
             {
-            case ksword::memwb::PageState::Valid:
-            case ksword::memwb::PageState::PartiallyValid:
-            {
-                QByteArray bytes(
-                    reinterpret_cast<const char*>(page.bytes.data()), static_cast<int>(page.bytes.size()));
-                QByteArray mask(
-                    reinterpret_cast<const char*>(page.valid.data()), static_cast<int>(page.valid.size()));
-                // 回填画布必须原样带回**画布轴**（canvasRevision），不是
-                // 目标轴——这是决策 2 修复前"axismismatch"那类缺陷的
-                // 根因，HexViewport::InsertPage 比对的是它自己的
-                // sourceRevision_（即画布轴）。
-                canvas_->deliverPage(page.pageStart, bytes, mask, job.canvasRevision);
-                break;
-            }
-            case ksword::memwb::PageState::Unreadable:
-                canvas_->deliverUnreadable(HexFetchRange{page.pageStart, 1, 0}, job.canvasRevision);
-                break;
-            case ksword::memwb::PageState::NotAttempted:
-            default:
-                break; // 调用者自己处理 NotAttempted（见下面两个分支）。
-            }
-        };
-
-        // failedRangeCountThisJob：本次落地里新记进 failedRanges_ 的 range
-        // 条数，供 readFailed 信号携带（N3/N4 修复新增）。
-        int failedRangeCountThisJob = 0;
-        for (const JobRangeResult& item : job.rangeResults)
-        {
-            if (item.skippedDueToPoison)
-            {
-                // D3：整段从未问过端口，result.pages 恒为空。N4 修复：必须
-                // 记进 failedRanges_，否则这段地址永远卡在 Pending——没有
-                // 任何代码路径会再碰它。
                 failedRanges_.push_back(item.range);
-                ++failedRangeCountThisJob;
+                ++failures;
+            }
+            if (!canvasFresh)
+            {
+                if (!canvas_ && !failed)
+                    pausedPendingRanges_.push_back(PausedRangeRecord{job.canvasRevision, item.range});
                 continue;
             }
-            if (item.result.channelFailed)
+            for (const auto& page : item.result.pages)
             {
-                // N3 修复：通道失败的这一段**不**跟着整批丢弃同批其它已经
-                // 读成功的 range；它自己真正读到的页仍按 deliverPageRecord
-                // 正常交付（同一个 range 可能一半有效一半失败）。残留的
-                // NotAttempted 页**不** cancelPages（否则又会自动重试），
-                // 保持 Pending 并记进 failedRanges_，只能显式重试才再问端口。
-                for (const ksword::memwb::PageRecord& page : item.result.pages)
+                // Drop replaceable old browse projections before they can evict
+                // the current viewport. A promoted/explicit/post-write read is preserved.
+                if (purpose == ReadPurpose::Browse && !pageInterested(page.pageStart, job.canvasRevision))
                 {
-                    deliverPageRecord(page);
+                    cancelUnownedPages({HexFetchRange{page.pageStart, 1, 0}}, job.canvasRevision);
+                    continue;
                 }
-                failedRanges_.push_back(item.range);
-                ++failedRangeCountThisJob;
-                continue;
-            }
-
-            // 正常（channelFailed 与 skippedDueToPoison 都为假）：按原逻辑
-            // 逐页回填。NotAttempted 的唯一成因是"同一 range 内更早的块报
-            // scratchAreaDirty 导致整体停止"——cancelPages 允许之后重试，
-            // 下一次请求会先撞上闩锁前置判定，不会真的再碰端口。
-            for (const ksword::memwb::PageRecord& page : item.result.pages)
-            {
-                deliverPageRecord(page);
-                if (page.state == ksword::memwb::PageState::NotAttempted)
+                switch (page.state)
                 {
-                    canvas_->cancelPages(HexFetchRange{page.pageStart, 1, 0});
+                case ksword::memwb::PageState::Valid:
+                case ksword::memwb::PageState::PartiallyValid:
+                    canvas_->deliverPage(page.pageStart,
+                        QByteArray(reinterpret_cast<const char*>(page.bytes.data()), static_cast<int>(page.bytes.size())),
+                        QByteArray(reinterpret_cast<const char*>(page.valid.data()), static_cast<int>(page.valid.size())),
+                        job.canvasRevision);
+                    break;
+                case ksword::memwb::PageState::Unreadable:
+                    canvas_->deliverUnreadable(HexFetchRange{page.pageStart, 1, 0}, job.canvasRevision);
+                    break;
+                case ksword::memwb::PageState::NotAttempted:
+                default:
+                    if (!failed) cancelUnownedPages({HexFetchRange{page.pageStart, 1, 0}}, job.canvasRevision);
+                    break;
                 }
+                if (!alive || job.jobGeneration != generation_) return;
+                if (!canvas_ || canvas_->sourceRevision() != job.canvasRevision) return;
             }
         }
-
-        if (failedRangeCountThisJob > 0)
-        {
-            // D2 决策(a) 续：不自动重试，必须显式 retryFailedRanges/
-            // retryAllFailed 才会再问端口；count 是本次新增条数，供状态条
-            // 展示"N 处失败/待重试"。
-            emit readFailed(job.canvasRevision, firstFailureText, failedRangeCountThisJob);
-        }
-
-        // wpJ5 增量①：无论这次落地有没有失败的 range，都要发一次
-        // jobLanded()——"记账被处理完毕"与"结果是否全部成功"是两件事。
-        emit jobLanded();
+        if (failures) emit readFailed(job.canvasRevision, firstFailure, failures);
     }
 
     std::vector<HexFetchRange> WorkbenchPageProvider::failedRanges() const

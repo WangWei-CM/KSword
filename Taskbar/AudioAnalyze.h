@@ -30,6 +30,8 @@ public:
     void stopCapture();
     // 返回最近一次计算出的频谱快照。
     QVector<float> getSpectrumData() const;
+    // 仅在采样版本改变时复制最近16段快照，供GUI显示节拍读取。
+    bool readLatestSpectrum(quint64& revision, QVector<float>& data) const;
 
 signals:
     void spectrumDataReady(const QVector<float>& spectrumData);
@@ -70,6 +72,7 @@ private:
     QVector<float> m_previousSpectrum;
     QVector<float> m_magnitudes;
     mutable std::mutex m_spectrumMutex;
+    quint64 m_spectrumRevision = 0;
 
     // UI 线程只通过该原子标记请求退出；采集线程轮询并自行结束 Core Audio 会话。
     std::atomic<bool> m_isCapturing{ false };

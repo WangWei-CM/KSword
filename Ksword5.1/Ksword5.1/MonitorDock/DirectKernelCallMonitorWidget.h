@@ -1,3 +1,4 @@
+namespace ks::monitor { class MonitorCanonicalExport; }
 #include "../UI/StructuredFieldView.h"
 #pragma once
 
@@ -30,6 +31,7 @@
 #include <vector>
 
 class QPoint;
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -141,6 +143,7 @@ private:
     void applyFilter();
     void clearFilter();
     void exportVisibleRowsToTsv();
+    void updateExportAction();
     void showEventContextMenu(const QPoint& position);
     void openEventDetailViewerForRow(int rowIndex);
 
@@ -180,6 +183,7 @@ private:
     QPushButton* m_pauseButton = nullptr;
     QPushButton* m_clearButton = nullptr;
     QPushButton* m_exportButton = nullptr;
+    ks::monitor::MonitorCanonicalExport* m_tableExport = nullptr;
     QLabel* m_statusLabel = nullptr;
     QLabel* m_mapStatusLabel = nullptr;
 
@@ -194,6 +198,7 @@ private:
     QCheckBox* m_keepBottomCheck = nullptr;
     QPushButton* m_clearFilterButton = nullptr;
     QLabel* m_filterStatusLabel = nullptr;
+    ks::monitor::EventFilterProjection* m_eventFilterProjection = nullptr;
     QTableWidget* m_eventTable = nullptr;
     QTimer* m_uiUpdateTimer = nullptr;
     QTimer* m_filterDebounceTimer = nullptr;

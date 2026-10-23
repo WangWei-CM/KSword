@@ -12,14 +12,22 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include <memory>
+#include "../UI/PageNavigationTabCatalog.h"
+#include "DesktopDrawing/DesktopDrawingRenderer.h"
 
+namespace ks::window_input { struct InjectionInitialSnapshot; }
+
+class QShowEvent;
 class QTabWidget;
 class QVBoxLayout;
 class BootEditorTab;
 class MinidumpDock;
 class ScannerDock;
+namespace ks::ui { class AsyncOperation; }
 namespace ks::misc
 {
+    namespace disable_dse { enum class BlockReason; }
     class DiskEditorTab;
     class ContextMenuCleanerTab;
     class ApplicationControlPage;
@@ -41,11 +49,15 @@ class MiscDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MiscDock* existing = nullptr,
+        bool includeColdSearchBody = true);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：创建“杂项”根布局与内部 Tab。
     // - 参数 parent：Qt 父控件。
-    explicit MiscDock(QWidget* parent = nullptr);
-    ~MiscDock() override = default;
+    explicit MiscDock(QWidget* parent = nullptr, bool initializeCurrentPage = true);
+    ~MiscDock() override;
 
     // activateMinidumpTab 作用：
     // - 切换到“转储分析”子页并返回其控件；该页原为顶层 Dock，现已并入本页；
@@ -61,13 +73,26 @@ public:
 
     // prepareNavigationPages：按需构造可见的嵌套页，供全局搜索/Taskbar 目录建立真实路由。
     // 只执行一次，不改变当前页签；不调用“首次激活”回调，避免目录请求启动轮询。
-    void prepareNavigationPages();
+    // singleStep limits full search preparation to one existing page factory.
+    // useColdBodies skips only factories with complete initial body values;
+    // this does not mark their widgets materialized for compatibility callers.
+    ks::ui::PageSearchPreparation prepareNavigationPages(bool currentPageOnly = false,
+        bool singleStep = false, bool useColdBodies = false, std::function<void()> resume = {});
+
+protected:
+    void showEvent(QShowEvent* event) override;
 
 private:
+    bool m_initializeCurrentPageOnShow = false;
+    int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
+    QWidget* navigationHost(int index) const;
+    QWidget* navigationChild(int index) const;
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // initializeUi：
     // - 作用：初始化“杂项”页的控件树，只把页签占位控件建出来；
     // - 调用：构造函数中调用一次。
-    void initializeUi();
+    void initializeUi(bool initializeCurrentPage);
 
     // ensureTabInitialized：
     // - 作用：按需构造指定页签对应的真实子页，已构造过则直接返回；
@@ -177,5 +202,20 @@ private:
     ScannerDock* m_scannerPage = nullptr;   // m_scannerPage：PE/ELF/Mach-O 扫描与安全编辑页。
     MinidumpDock* m_minidumpPage = nullptr; // m_minidumpPage：崩溃转储分析页。
     QWidget* m_pluginPage = nullptr;        // m_pluginPage：进程隔离 Tab 插件宿主容器。
+    int m_navigationPrepareCursor = 0;
+    bool m_navigationPagePreparing = false;
     bool m_navigationPagesPrepared = false; // m_navigationPagesPrepared：导航索引已完成一次嵌套页准备。
+    bool m_navigationSkippedColdBodies = false;
+    ks::ui::AsyncOperation* m_disableDseSearchOperation = nullptr;
+    std::optional<ks::misc::disable_dse::BlockReason> m_disableDseSearchReason;
+    std::function<void()> m_disableDseSearchReady;
+    bool m_disableDseSearchFailed = false;
+    ks::ui::AsyncOperation* m_windowInjectionSearchOperation = nullptr;
+    std::shared_ptr<const ks::window_input::InjectionInitialSnapshot> m_windowInjectionSearchSnapshot;
+    std::function<void()> m_windowInjectionSearchReady;
+    bool m_windowInjectionSearchFailed = false;
+    ks::ui::AsyncOperation* m_desktopDrawingSearchOperation = nullptr;
+    std::optional<std::vector<ks::misc::desktop_drawing::Display>> m_desktopDrawingSearchDisplays;
+    std::function<void()> m_desktopDrawingSearchReady;
+    bool m_desktopDrawingSearchFailed = false;
 };

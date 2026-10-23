@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+
 #include "Json.h"
 
 #include <windows.h>
@@ -125,10 +130,20 @@ struct RuntimePaths {
     std::wstring markerPath;
 };
 
+struct CollectionProgressState {
+    std::mutex mutex;
+    int percent = 0;
+    std::wstring text;
+    std::uint64_t revision = 0;
+};
+
 struct CollectionProgress {
     HWND window = nullptr;
     HWND label = nullptr;
     HWND bar = nullptr;
+    // The worker receives only this channel; HWNDs remain on the owner thread.
+    std::shared_ptr<CollectionProgressState> state;
+    std::uint64_t appliedRevision = 0;
 };
 
 bool IsChineseUi();
@@ -169,6 +184,12 @@ void CloseCheckingWindow(HWND window);
 void ShowCollectionProgress(bool chinese, CollectionProgress* progress);
 void UpdateCollectionProgress(CollectionProgress* progress, int percent, const std::wstring& text);
 void CloseCollectionProgress(CollectionProgress* progress);
+void PresentCollectionProgress(CollectionProgress* progress);
+bool IsLauncherObserverAlive(HWND window, const void* owner);
+// Accepted value work completes while the caller continues dispatching messages.
+// Closing the observer never cancels an accepted collection filesystem transaction.
+bool RunLauncherValueTask(std::function<void()> work,
+    const std::function<void()>& present, const std::function<bool()>& observerAlive);
 
 bool RelaunchElevated(const LauncherOptions& options, bool forUpload);
 bool LaunchTarget(const RuntimePaths& paths, const LauncherOptions& options);

@@ -9,6 +9,9 @@
 // - avoid depending on Framework.h so non-Dock code can reuse logging.
 // ============================================================
 
+#include <array>
+#include <unordered_map>
+
 #include <cstddef> // std::size_t: revision counters and vector indexes.
 #include <cstdint> // std::uint32_t: compact log level filter mask.
 #include <ctime>   // std::time_t: log timestamps.
@@ -77,6 +80,40 @@ namespace ks::log
         std::time_t timestamp{};
     };
 
+    // ArchiveCursor belongs to one clear epoch and identifies the first unread row.
+    // It is captured atomically with the archive tail; consumers never infer clear from row counts.
+    struct ArchiveCursor
+    {
+        std::uint64_t epoch = 0;
+        std::size_t nextIndex = 0;
+    };
+
+    struct IncrementalSnapshot
+    {
+        ArchiveCursor cursor;
+        std::vector<Event> events;
+        bool hasMore = false;
+    };
+
+    // A projection token includes its query identity as well as the newest matching
+    // record, so unrelated writes cannot force a visible log model refresh.
+    struct RecentSnapshotToken
+    {
+        std::uint64_t epoch = 0;
+        std::uint64_t newestRecordSequence = 0;
+        std::size_t maxCount = 0;
+        std::uint32_t enabledLevelMask = 0;
+        bool isTracking = false;
+        GUID trackedGuid{};
+    };
+
+    struct RecentSnapshot
+    {
+        RecentSnapshotToken token;
+        std::vector<Event> events;
+        bool changed = true;
+    };
+
     // LogEntry is the thread-safe in-memory log store.
     // Input: add receives Event values; Save receives an output path.
     // Processing: a mutex protects records and the monotonic revision.
@@ -111,13 +148,31 @@ namespace ks::log
         // SnapshotRecent copies only the newest matching records for UI refresh.
         // Input: maxCount caps returned rows; enabledLevelMask uses one bit per Level value;
         //        trackedGuid optionally limits records to one logical event id.
-        // Processing: lock, scan records from newest to oldest, copy at most maxCount matches,
-        //             then restore chronological order in the returned vector.
+        // Processing: merge indexed level/GUID tails, copy at most maxCount matching
+        //             records and restore chronological order; never scan other history.
         // Return behavior: vector containing the newest matching Event records; internal storage remains full.
         std::vector<Event> SnapshotRecent(
             std::size_t maxCount,
             std::uint32_t enabledLevelMask,
             const GUID* trackedGuid = nullptr) const;
+
+        // Same recent-N semantics, but an unchanged matching projection returns no
+        // Event copies. The previous token is optional and includes filter/limit identity.
+        RecentSnapshot SnapshotRecentIfChanged(
+            std::size_t maxCount,
+            std::uint32_t enabledLevelMask,
+            const GUID* trackedGuid,
+            const RecentSnapshotToken* previousToken) const;
+
+        // TailCursor captures a baseline without copying archived records.
+        ArchiveCursor TailCursor() const;
+
+        // SnapshotAfter inspects at most maxRecords newly archived rows and copies only
+        // notification candidates. A stale clear epoch skips to the current tail, so
+        // clearing/re-enabling notifications never replays already archived history.
+        // Returned cursor advances across disabled levels as well as delivered events.
+        IncrementalSnapshot SnapshotAfter(
+            ArchiveCursor cursor, std::size_t maxRecords, int minimumLevel) const;
 
         // Snapshot copies all records for UI refresh/export consumers.
         // Input: none.
@@ -132,8 +187,28 @@ namespace ks::log
         std::size_t Revision() const;
 
     private:
-        mutable std::mutex m_mutex;   // Protects m_events and m_revision.
+        struct GuidLevelKey
+        {
+            GUID guid;
+            std::uint32_t level;
+        };
+        struct GuidLevelHash
+        {
+            std::size_t operator()(const GuidLevelKey& key) const noexcept;
+        };
+        struct GuidLevelEqual
+        {
+            bool operator()(const GuidLevelKey& left, const GuidLevelKey& right) const noexcept;
+        };
+
+        // A record belongs to exactly one severity tail and one GUID/severity tail.
+        // Offsets stay valid until clear; all three containers share the same mutex/epoch.
+        std::array<std::vector<std::size_t>, 32> m_levelIndexes;
+        std::unordered_map<GuidLevelKey, std::vector<std::size_t>, GuidLevelHash, GuidLevelEqual> m_guidLevelIndexes;
+
+        mutable std::mutex m_mutex;   // Protects archive, indexes, cursors and revision.
         std::vector<Event> m_events;  // Complete archived log stream.
+        std::uint64_t m_epoch = 1;    // Incremented only by clear; archive indexes are epoch-local.
         std::size_t m_revision = 0;   // Incremented after add/clear.
         std::uint64_t m_nextRecordSequence = 1; // 下一条归档日志的唯一序号；clear 后不复位，避免 UI 键重复。
     };

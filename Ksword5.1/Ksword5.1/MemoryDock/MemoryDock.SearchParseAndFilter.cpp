@@ -266,181 +266,39 @@ bool MemoryDock::parseSearchPatternFromUi(
     return true;
 }
 
-bool MemoryDock::collectSearchRegionsFromUi(
-    std::vector<RegionEntry>& regionsOut,
-    QString& errorTextOut)
+bool MemoryDock::captureFirstScanOptions(FirstScanOptions& options, QString& error) const
 {
-    // 收集扫描区域入口日志：记录范围模式与过滤开关。
-    kLogEvent collectRegionStartEvent;
-    info << collectRegionStartEvent
-        << "[MemoryDock] collectSearchRegionsFromUi: 开始收集扫描区域, rangeModeIndex="
-        << m_searchRangeCombo->currentIndex()
-        << ", imageOnly="
-        << (m_searchImageOnlyCheck->isChecked() ? "true" : "false")
-        << ", heapOnly="
-        << (m_searchHeapOnlyCheck->isChecked() ? "true" : "false")
-        << ", stackOnly="
-        << (m_searchStackOnlyCheck->isChecked() ? "true" : "false")
-        << eol;
-
-    // 扫描前必须已附加目标进程，否则 ReadProcessMemory 无法进行。
-    if (m_attachedProcessHandle == nullptr || m_attachedPid == 0)
-    {
-        errorTextOut = "请先附加目标进程。";
-        kLogEvent collectRegionNoAttachEvent;
-        warn << collectRegionNoAttachEvent
-            << "[MemoryDock] collectSearchRegionsFromUi: 未附加进程。"
-            << eol;
-        return false;
+    options.pid = m_attachedPid; options.generation = m_processAttachmentGeneration.load();
+    options.threads = m_scanThreadCount; options.chunkKB = m_scanChunkSizeKB;
+    options.backend = currentSearchBackend(); options.ddma = currentDdmaSession();
+    options.custom = m_searchRangeCombo->currentIndex() == 1;
+    options.image = m_searchImageOnlyCheck->isChecked(); options.heap = m_searchHeapOnlyCheck->isChecked(); options.stack = m_searchStackOnlyCheck->isChecked();
+    if (options.custom) {
+        if (!parseAddressText(m_searchRangeStartEdit->text().trimmed(), options.start)) { error = QStringLiteral("起始地址格式无效。"); return false; }
+        if (!parseAddressText(m_searchRangeEndEdit->text().trimmed(), options.end)) { error = QStringLiteral("结束地址格式无效。"); return false; }
+        if (options.end < options.start) { error = QStringLiteral("结束地址不能小于起始地址。"); return false; }
     }
-
-    // 区域缓存为空时主动刷新一次，避免首次进入扫描页时没有范围数据。
-    if (m_regionCache.empty())
-    {
-        refreshMemoryRegionList(true);
-    }
-
-    if (m_regionCache.empty())
-    {
-        errorTextOut = "当前没有可用的内存区域，请先刷新区域列表。";
-        kLogEvent collectRegionEmptyCacheEvent;
-        warn << collectRegionEmptyCacheEvent
-            << "[MemoryDock] collectSearchRegionsFromUi: 区域缓存为空。"
-            << eol;
-        return false;
-    }
-
-    // 自定义范围模式下，需要把用户输入地址解析成闭区间 [start, end]。
-    bool useCustomRange = (m_searchRangeCombo->currentIndex() == 1);
-    std::uint64_t rangeStart = 0;
-    std::uint64_t rangeEnd = std::numeric_limits<std::uint64_t>::max();
-    if (useCustomRange)
-    {
-        if (!parseAddressText(m_searchRangeStartEdit->text().trimmed(), rangeStart))
-        {
-            errorTextOut = "起始地址格式无效。";
-            kLogEvent collectRegionStartParseFailEvent;
-            warn << collectRegionStartParseFailEvent
-                << "[MemoryDock] collectSearchRegionsFromUi: 起始地址解析失败, text="
-                << m_searchRangeStartEdit->text().trimmed().toStdString()
-                << eol;
-            return false;
-        }
-        if (!parseAddressText(m_searchRangeEndEdit->text().trimmed(), rangeEnd))
-        {
-            errorTextOut = "结束地址格式无效。";
-            kLogEvent collectRegionEndParseFailEvent;
-            warn << collectRegionEndParseFailEvent
-                << "[MemoryDock] collectSearchRegionsFromUi: 结束地址解析失败, text="
-                << m_searchRangeEndEdit->text().trimmed().toStdString()
-                << eol;
-            return false;
-        }
-        if (rangeEnd < rangeStart)
-        {
-            errorTextOut = "结束地址不能小于起始地址。";
-            kLogEvent collectRegionRangeInvalidEvent;
-            warn << collectRegionRangeInvalidEvent
-                << "[MemoryDock] collectSearchRegionsFromUi: 自定义范围非法, start="
-                << formatAddress(rangeStart).toStdString()
-                << ", end="
-                << formatAddress(rangeEnd).toStdString()
-                << eol;
-            return false;
-        }
-    }
-
-    const bool imageOnly = m_searchImageOnlyCheck->isChecked();
-    const bool heapOnly = m_searchHeapOnlyCheck->isChecked();
-    const bool stackOnly = m_searchStackOnlyCheck->isChecked();
-
-    // “仅堆”和“仅栈”同时开启没有明确业务意义，这里直接提示用户二选一。
-    if (heapOnly && stackOnly)
-    {
-        errorTextOut = "“仅堆”与“仅栈”不能同时启用。";
-        kLogEvent collectRegionFilterConflictEvent;
-        warn << collectRegionFilterConflictEvent
-            << "[MemoryDock] collectSearchRegionsFromUi: heapOnly 与 stackOnly 同时启用。"
-            << eol;
-        return false;
-    }
-
-    regionsOut.clear();
-    regionsOut.reserve(m_regionCache.size());
-
-    for (const RegionEntry& region : m_regionCache)
-    {
-        // 只扫描已提交 + 可读区域，避免大量无效访问或 NOACCESS 报错。
-        if (region.state != MEM_COMMIT || !isReadableProtect(region.protect))
-        {
-            continue;
-        }
-
-        // 按类型过滤：仅映像 -> MEM_IMAGE；仅堆 -> MEM_PRIVATE（近似）。
-        if (imageOnly && region.type != MEM_IMAGE)
-        {
-            continue;
-        }
-        if (heapOnly && region.type != MEM_PRIVATE)
-        {
-            continue;
-        }
-
-        // 栈区域无法用单一字段准确识别，这里采用“PRIVATE + GUARD 或 RW”近似。
-        if (stackOnly)
-        {
-            const bool maybeStack =
-                (region.type == MEM_PRIVATE) &&
-                (((region.protect & PAGE_GUARD) != 0) || ((region.protect & PAGE_READWRITE) != 0));
-            if (!maybeStack)
-            {
-                continue;
-            }
-        }
-
-        // 非自定义范围时直接入选；自定义范围时按交集裁剪区域边界。
-        if (!useCustomRange)
-        {
-            regionsOut.push_back(region);
-            continue;
-        }
-
-        if (region.regionSize == 0)
-        {
-            continue;
-        }
-
-        const std::uint64_t regionStart = region.baseAddress;
-        const std::uint64_t regionEnd = region.baseAddress + region.regionSize - 1;
-        if (regionEnd < rangeStart || regionStart > rangeEnd)
-        {
-            continue;
-        }
-
-        RegionEntry clippedRegion = region;
-        clippedRegion.baseAddress = std::max(regionStart, rangeStart);
-        const std::uint64_t clippedEnd = std::min(regionEnd, rangeEnd);
-        clippedRegion.regionSize = clippedEnd - clippedRegion.baseAddress + 1;
-        regionsOut.push_back(std::move(clippedRegion));
-    }
-
-    if (regionsOut.empty())
-    {
-        errorTextOut = "过滤后没有可扫描区域，请调整范围/过滤条件。";
-        kLogEvent collectRegionEmptyResultEvent;
-        warn << collectRegionEmptyResultEvent
-            << "[MemoryDock] collectSearchRegionsFromUi: 过滤后区域为空。"
-            << eol;
-        return false;
-    }
-
-    // 收集成功日志：记录区域条目数。
-    kLogEvent collectRegionFinishEvent;
-    info << collectRegionFinishEvent
-        << "[MemoryDock] collectSearchRegionsFromUi: 收集完成, regionCount="
-        << regionsOut.size()
-        << eol;
-
+    if (options.heap && options.stack) { error = QStringLiteral("“仅堆”与“仅栈”不能同时启用。"); return false; }
     return true;
 }
 
+bool MemoryDock::filterFirstScanRegions(const FirstScanOptions& options, const std::vector<RegionEntry>& source, std::vector<RegionEntry>& rows, QString& error, const std::function<bool()>& cancelled)
+{
+    rows.clear(); rows.reserve(source.size());
+    for (const auto& region : source) {
+        if (cancelled && cancelled()) { return false; }
+        if (region.state != MEM_COMMIT || !isReadableProtect(region.protect)) { continue; }
+        if ((options.image && region.type != MEM_IMAGE) || (options.heap && region.type != MEM_PRIVATE)) { continue; }
+        if (options.stack && !(region.type == MEM_PRIVATE && ((region.protect & PAGE_GUARD) != 0 || (region.protect & PAGE_READWRITE) != 0))) { continue; }
+        if (!options.custom) { rows.push_back(region); continue; }
+        if (region.regionSize == 0) { continue; }
+        const auto end = region.regionSize - 1 > UINT64_MAX - region.baseAddress ? UINT64_MAX : region.baseAddress + region.regionSize - 1;
+        if (end < options.start || region.baseAddress > options.end) { continue; }
+        auto clipped = region; clipped.baseAddress = (std::max)(region.baseAddress, options.start);
+        const auto clippedEnd = (std::min)(end, options.end);
+        clipped.regionSize = clippedEnd - clipped.baseAddress + 1;
+        rows.push_back(std::move(clipped));
+    }
+    if (rows.empty()) { error = QStringLiteral("过滤后没有可扫描区域，请调整范围/过滤条件。"); return false; }
+    return true;
+}
