@@ -29,14 +29,16 @@
 /* Latch an owned target after incomplete content rollback. Only a successful
  * SHADOW_RESTORE with address=bytes=0 clears it; all direct STARTs are blocked. */
 #define KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE 12UL
-/* Open a process or thread handle via ObOpenObjectByPointer with
- * PreviousMode=KernelMode so Ob callbacks that strip access only for
- * UserMode opens (the common anti-cheat pattern) are bypassed. The
- * resulting handle is inserted into the requesting R3 process's handle
- * table and returned verbatim in Response.reserved0; callers close it
- * with CloseHandle. threadId=0 selects the process kind; threadId!=0
- * selects the thread kind (processId is still echoed). The desired
- * ACCESS_MASK is passed in Request.address (low 32 bits). */
+/* Open a process or thread by object pointer with PreviousMode=KernelMode,
+ * then copy its private kernel handle into the original IRP requestor's
+ * handle table. The verified, non-inheritable user handle is returned in
+ * Response.reserved0 and its granted ACCESS_MASK in Response.reserved1;
+ * the caller closes the handle with CloseHandle. A duplicate callback can
+ * reduce access; the actual granted mask in reserved1 lets callers decide
+ * which operations remain available.
+ * threadId=0 selects the process kind; threadId!=0 selects a thread that
+ * must belong to processId. Request.address contains the desired
+ * ACCESS_MASK in its low 32 bits. The packet size and version are unchanged. */
 #define KSWORD_ARK_DEBUGGER_OPEN_HANDLE 13UL
 #define KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED 1UL
 #define KSWORD_ARK_DEBUGGER_CAP_CONTEXT 1UL

@@ -1,3 +1,4 @@
+#include <ntifs.h>
 #include "debugger.h"
 #include "../../platform/pool_compat.h"
 
@@ -23,6 +24,34 @@ NTSYSAPI NTSTATUS NTAPI ZwAllocateVirtualMemory(HANDLE Process, PVOID* Base, ULO
     PSIZE_T Bytes, ULONG Type, ULONG Protection);
 /* Release only user virtual address space in the ID-bound process. */
 NTSYSAPI NTSTATUS NTAPI ZwFreeVirtualMemory(HANDLE Process, PVOID* Base, PSIZE_T Bytes, ULONG Type);
+
+/* Map Windows process/thread ACCESS_MASK bits to the existing safety operations. */
+#define KSW_DEBUGGER_POLICY_TERMINATE 0x01UL
+#define KSW_DEBUGGER_POLICY_SUSPEND 0x02UL
+#define KSW_DEBUGGER_POLICY_PROTECTION 0x04UL
+#define KSW_DEBUGGER_POLICY_INJECT 0x08UL
+#define KSW_DEBUGGER_POLICY_ALL 0x0FUL
+
+/* Process-specific rights are local constants because kernel WDK headers expose only a subset. */
+#define KSW_DEBUGGER_PROCESS_TERMINATE 0x0001UL
+#define KSW_DEBUGGER_PROCESS_CREATE_THREAD 0x0002UL
+#define KSW_DEBUGGER_PROCESS_SET_SESSIONID 0x0004UL
+#define KSW_DEBUGGER_PROCESS_VM_OPERATION 0x0008UL
+#define KSW_DEBUGGER_PROCESS_VM_READ 0x0010UL
+#define KSW_DEBUGGER_PROCESS_VM_WRITE 0x0020UL
+#define KSW_DEBUGGER_PROCESS_CREATE_PROCESS 0x0080UL
+#define KSW_DEBUGGER_PROCESS_SET_QUOTA 0x0100UL
+#define KSW_DEBUGGER_PROCESS_SET_INFORMATION 0x0200UL
+#define KSW_DEBUGGER_PROCESS_QUERY_INFORMATION 0x0400UL
+#define KSW_DEBUGGER_PROCESS_SUSPEND_RESUME 0x0800UL
+#define KSW_DEBUGGER_PROCESS_QUERY_LIMITED_INFORMATION 0x1000UL
+#define KSW_DEBUGGER_PROCESS_SET_LIMITED_INFORMATION 0x2000UL
+
+/* Thread-specific rights beyond the WDK subset retain their documented bit values. */
+#define KSW_DEBUGGER_THREAD_QUERY_INFORMATION 0x0040UL
+#define KSW_DEBUGGER_THREAD_SET_THREAD_TOKEN 0x0080UL
+#define KSW_DEBUGGER_THREAD_IMPERSONATE 0x0100UL
+#define KSW_DEBUGGER_THREAD_DIRECT_IMPERSONATION 0x0200UL
 
 /* This debugger ABI intentionally supports the AMD64 context layout only. */
 C_ASSERT(sizeof(CONTEXT) == KSWORD_ARK_DEBUGGER_CONTEXT_BYTES);
@@ -171,42 +200,151 @@ Complete:
     return status;
 }
 
-/* Broker a user-mode handle to the target process/thread opened via the
- * KernelMode previous-mode path. The resulting handle is inserted into the
- * requesting R3 process's handle table because ObOpenObjectByPointer
- * without OBJ_KERNEL_HANDLE binds to PsGetCurrentProcess()'s object table,
- * and the IOCTL handler runs on the requesting thread. Ob callbacks that
- * strip access only on UserMode-sourced opens (the common anti-cheat
- * pattern) see KernelHandle=TRUE and skip stripping. */
-static NTSTATUS KswordARKDebuggerOpenHandleForDebug(const KSWORD_ARK_DEBUGGER_REQUEST* Request,
-    KSWORD_ARK_DEBUGGER_RESPONSE* Response)
+/* Evaluate all existing safety groups reachable through the requested handle rights. */
+static NTSTATUS KswordARKDebuggerEvaluateHandleSafety(WDFDEVICE Device,
+    const KSWORD_ARK_DEBUGGER_REQUEST* Request)
 {
-    /* Hold an object reference across the handle-insert step. */
-    PVOID object = NULL;
-    /* Capture the open target's object type for pointer-based open. */
-    POBJECT_TYPE objectType = NULL;
-    /* The requested ACCESS_MASK rides in the ULONGLONG address field. */
-    ACCESS_MASK desiredAccess = (ACCESS_MASK)(Request->address & 0xFFFFFFFFULL);
-    /* The resulting R3 handle value lives in the requesting process's handle table. */
-    HANDLE handle = NULL;
-    /* Preserve exact native completion status for the typed response. */
+    /* Preserve the previous memory-write policy check for every broker request. */
+    KSWORD_ARK_SAFETY_CONTEXT safety = { 0 };
+    /* Classify the exact 32-bit ACCESS_MASK without changing the wire layout. */
+    ACCESS_MASK access = (ACCESS_MASK)Request->address;
+    /* The known mask lets future or generic rights conservatively use all groups. */
+    ACCESS_MASK known;
+    /* Track only policy groups in addition to the existing memory-write check. */
+    ULONG groups = 0UL;
+    /* Keep the first authoritative policy failure. */
     NTSTATUS status;
-    /* An empty ACCESS_MASK offers no debug utility — reject to make faults loud. */
-    if (desiredAccess == 0U) { return STATUS_INVALID_PARAMETER; }
-    /* Reject bits set outside the low 32 bits — those are not ACCESS_MASK territory. */
-    if ((Request->address & 0xFFFFFFFF00000000ULL) != 0ULL) { return STATUS_INVALID_PARAMETER; }
-    /* bytes/protection/allocationType/context must stay zero on this operation. */
-    if (Request->bytes != 0ULL || Request->protection != 0UL ||
-        Request->allocationType != 0UL || Request->contextFlags != 0UL) {
-        return STATUS_INVALID_PARAMETER;
+    /* Common object rights include read, deletion and security mutation. */
+    known = READ_CONTROL | SYNCHRONIZE | GENERIC_READ | DELETE |
+        WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
+    /* Standard DELETE and security-control rights have distinct existing policies. */
+    if ((access & DELETE) != 0UL) { groups |= KSW_DEBUGGER_POLICY_TERMINATE; }
+    if ((access & (WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY)) != 0UL) {
+        groups |= KSW_DEBUGGER_POLICY_PROTECTION;
     }
+    /* Interpret the object-specific low bits for the requested object kind. */
+    if (Request->threadId != 0UL) {
+        /* Read-only context and query rights require no additional policy group. */
+        known |= THREAD_GET_CONTEXT | KSW_DEBUGGER_THREAD_QUERY_INFORMATION |
+            THREAD_QUERY_LIMITED_INFORMATION;
+        /* Termination and scheduling rights follow their dedicated policies. */
+        known |= THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_ALERT | THREAD_RESUME;
+        if ((access & THREAD_TERMINATE) != 0UL) { groups |= KSW_DEBUGGER_POLICY_TERMINATE; }
+        if ((access & (THREAD_SUSPEND_RESUME | THREAD_ALERT | THREAD_RESUME)) != 0UL) {
+            groups |= KSW_DEBUGGER_POLICY_SUSPEND;
+        }
+        /* Context and impersonation control can alter another thread's execution. */
+        known |= THREAD_SET_CONTEXT | KSW_DEBUGGER_THREAD_SET_THREAD_TOKEN |
+            KSW_DEBUGGER_THREAD_IMPERSONATE | KSW_DEBUGGER_THREAD_DIRECT_IMPERSONATION;
+        if ((access & (THREAD_SET_CONTEXT | KSW_DEBUGGER_THREAD_SET_THREAD_TOKEN |
+            KSW_DEBUGGER_THREAD_IMPERSONATE | KSW_DEBUGGER_THREAD_DIRECT_IMPERSONATION)) != 0UL) {
+            groups |= KSW_DEBUGGER_POLICY_INJECT;
+        }
+        /* Thread information and security changes share protection policy. */
+        known |= THREAD_SET_INFORMATION | THREAD_SET_LIMITED_INFORMATION;
+        if ((access & (THREAD_SET_INFORMATION | THREAD_SET_LIMITED_INFORMATION)) != 0UL) {
+            groups |= KSW_DEBUGGER_POLICY_PROTECTION;
+        }
+    } else {
+        /* Read and query rights do not imply target mutation. */
+        known |= KSW_DEBUGGER_PROCESS_VM_READ | KSW_DEBUGGER_PROCESS_QUERY_INFORMATION |
+            KSW_DEBUGGER_PROCESS_QUERY_LIMITED_INFORMATION;
+        /* Termination, suspension and injection capabilities use their own policies. */
+        known |= KSW_DEBUGGER_PROCESS_TERMINATE | KSW_DEBUGGER_PROCESS_SUSPEND_RESUME |
+            KSW_DEBUGGER_PROCESS_CREATE_THREAD | KSW_DEBUGGER_PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE;
+        if ((access & KSW_DEBUGGER_PROCESS_TERMINATE) != 0UL) { groups |= KSW_DEBUGGER_POLICY_TERMINATE; }
+        if ((access & KSW_DEBUGGER_PROCESS_SUSPEND_RESUME) != 0UL) { groups |= KSW_DEBUGGER_POLICY_SUSPEND; }
+        if ((access & (KSW_DEBUGGER_PROCESS_CREATE_THREAD | KSW_DEBUGGER_PROCESS_CREATE_PROCESS)) != 0UL) {
+            groups |= KSW_DEBUGGER_POLICY_INJECT;
+        }
+        /* Duplicating arbitrary target handles reaches every existing policy group. */
+        if ((access & PROCESS_DUP_HANDLE) != 0UL) { groups |= KSW_DEBUGGER_POLICY_ALL; }
+        /* Virtual memory rights keep the existing memory-write classification. */
+        known |= KSW_DEBUGGER_PROCESS_VM_OPERATION | KSW_DEBUGGER_PROCESS_VM_WRITE;
+        /* Process information and quota changes follow protection policy. */
+        known |= KSW_DEBUGGER_PROCESS_SET_SESSIONID | KSW_DEBUGGER_PROCESS_SET_QUOTA |
+            KSW_DEBUGGER_PROCESS_SET_INFORMATION | KSW_DEBUGGER_PROCESS_SET_LIMITED_INFORMATION;
+        if ((access & (KSW_DEBUGGER_PROCESS_SET_SESSIONID | KSW_DEBUGGER_PROCESS_SET_QUOTA |
+            KSW_DEBUGGER_PROCESS_SET_INFORMATION | KSW_DEBUGGER_PROCESS_SET_LIMITED_INFORMATION)) != 0UL) {
+            groups |= KSW_DEBUGGER_POLICY_PROTECTION;
+        }
+    }
+    /* Generic write/all/execute, MAXIMUM_ALLOWED and future bits can expand broadly. */
+    if ((access & ~known) != 0UL) { groups |= KSW_DEBUGGER_POLICY_ALL; }
+    /* Bind every decision to the same selected target and confirmation state. */
+    safety.TargetProcessId = Request->processId;
+    safety.ContextFlags = (Request->flags & KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED) != 0UL
+        ? KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED : 0UL;
+    /* Preserve the broker's existing policy behavior before checking extra rights. */
+    safety.Operation = KSWORD_ARK_SAFETY_OPERATION_MEMORY_WRITE;
+    status = KswordARKSafetyEvaluate(Device, &safety);
+    if (!NT_SUCCESS(status)) { return status; }
+    /* Apply only the existing termination policy when that capability is requested. */
+    if ((groups & KSW_DEBUGGER_POLICY_TERMINATE) != 0UL) {
+        safety.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_TERMINATE;
+        status = KswordARKSafetyEvaluate(Device, &safety);
+        if (!NT_SUCCESS(status)) { return status; }
+    }
+    /* Apply only the existing suspension policy when that capability is requested. */
+    if ((groups & KSW_DEBUGGER_POLICY_SUSPEND) != 0UL) {
+        safety.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SUSPEND;
+        status = KswordARKSafetyEvaluate(Device, &safety);
+        if (!NT_SUCCESS(status)) { return status; }
+    }
+    /* Apply only the existing protection policy when that capability is requested. */
+    if ((groups & KSW_DEBUGGER_POLICY_PROTECTION) != 0UL) {
+        safety.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SET_PROTECTION;
+        status = KswordARKSafetyEvaluate(Device, &safety);
+        if (!NT_SUCCESS(status)) { return status; }
+    }
+    /* Apply only the existing injection policy when that capability is requested. */
+    if ((groups & KSW_DEBUGGER_POLICY_INJECT) != 0UL) {
+        safety.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_INJECT;
+        status = KswordARKSafetyEvaluate(Device, &safety);
+        if (!NT_SUCCESS(status)) { return status; }
+    }
+    /* Every requested capability passed its existing policy decision. */
+    return STATUS_SUCCESS;
+}
+
+/* Insert the KernelMode-opened target handle into the pinned IRP requestor's table. */
+static NTSTATUS KswordARKDebuggerOpenHandleForDebug(WDFDEVICE Device, ULONG OwnerProcessId, PEPROCESS OwnerProcess,
+    const KSWORD_ARK_DEBUGGER_REQUEST* Request, KSWORD_ARK_DEBUGGER_RESPONSE* Response)
+{
+    /* Keep the target object referenced through duplicate verification. */
+    PVOID object = NULL;
+    /* Match the opened object against its declared process or thread kind. */
+    POBJECT_TYPE objectType = NULL;
+    /* The requested ACCESS_MASK rides in the low half of the address field. */
+    ACCESS_MASK desiredAccess = (ACCESS_MASK)(Request->address & 0xFFFFFFFFULL);
+    /* All three private handles live in the system handle table. */
+    HANDLE sourceHandle = NULL, systemProcessHandle = NULL, ownerProcessHandle = NULL;
+    /* Only this handle is created in the original requestor's table. */
+    HANDLE userHandle = NULL;
+    /* Read the copied user's actual rights, including callback reductions. */
+    PUBLIC_OBJECT_BASIC_INFORMATION userInfo = { 0 };
+    /* Reference the copied user handle while checking type, identity and rights. */
+    PVOID verifiedObject = NULL;
+    /* Scope the short access check to the pinned requestor process. */
+    KAPC_STATE attachState;
+    /* Preserve the exact native result on all cleanup paths. */
+    NTSTATUS status;
+    /* Reject an unassociated or replaced requestor before touching a target. */
+    if (OwnerProcess == NULL || OwnerProcessId == 0UL ||
+        HandleToULong(PsGetProcessId(OwnerProcess)) != OwnerProcessId) { return STATUS_INVALID_CID; }
+    /* An empty ACCESS_MASK offers no debug utility. */
+    if (desiredAccess == 0U) { return STATUS_INVALID_PARAMETER; }
+    /* The upper half of the field is not part of ACCESS_MASK. */
+    if ((Request->address & 0xFFFFFFFF00000000ULL) != 0ULL) { return STATUS_INVALID_PARAMETER; }
+    /* This operation has no memory, protection, allocation or context payload. */
+    if (Request->bytes != 0ULL || Request->protection != 0UL ||
+        Request->allocationType != 0UL || Request->contextFlags != 0UL) { return STATUS_INVALID_PARAMETER; }
     /* Resolve the real target object by its authoritative identifier. */
     if (Request->threadId != 0UL) {
-        /* Thread kind: bind to TID; processId is echoed only for adapters. */
         PETHREAD thread = NULL;
         status = PsLookupThreadByThreadId(ULongToHandle(Request->threadId), &thread);
         if (!NT_SUCCESS(status)) { return status; }
-        /* Validate that the thread actually belongs to the declared process. */
+        /* A recycled thread ID must still belong to the declared target process. */
         if (HandleToULong(PsGetThreadProcessId(thread)) != Request->processId) {
             ObDereferenceObject(thread);
             return STATUS_INVALID_PARAMETER;
@@ -214,30 +352,72 @@ static NTSTATUS KswordARKDebuggerOpenHandleForDebug(const KSWORD_ARK_DEBUGGER_RE
         object = thread;
         objectType = *PsThreadType;
     } else {
-        /* Process kind: bind to PID. */
         PEPROCESS process = NULL;
         status = PsLookupProcessByProcessId(ULongToHandle(Request->processId), &process);
         if (!NT_SUCCESS(status)) { return status; }
         object = process;
         objectType = *PsProcessType;
     }
-    /* Open a user-mode (non-OBJ_KERNEL_HANDLE) handle in the requesting R3 process's
-     * handle table with PreviousMode=KernelMode. The callback bypass hinges on this
-     * second argument being zero — adding OBJ_KERNEL_HANDLE would route the handle
-     * into the system handle table and R3 cannot use it. */
-    status = ObOpenObjectByPointer(object, 0UL, NULL, desiredAccess,
-        objectType, KernelMode, &handle);
-    /* Balance the lookup reference irrespective of open success. */
-    ObDereferenceObject(object);
-    /* Publish the opened R3 handle only on success; close happens in R3 via CloseHandle. */
+    /* Evaluate requested rights only after the target object is referenced. */
+    status = KswordARKDebuggerEvaluateHandleSafety(Device, Request);
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    /* Never place a private source handle in an arbitrary WDF worker process. */
+    status = ObOpenObjectByPointer(object, OBJ_KERNEL_HANDLE, NULL, desiredAccess,
+        objectType, KernelMode, &sourceHandle);
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    /* Kernel handles are stored in the System process handle table. */
+    status = ObOpenObjectByPointer(PsInitialSystemProcess, OBJ_KERNEL_HANDLE, NULL,
+        PROCESS_DUP_HANDLE, *PsProcessType, KernelMode, &systemProcessHandle);
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    /* The requestor's referenced process object pins the intended destination. */
+    status = ObOpenObjectByPointer(OwnerProcess, OBJ_KERNEL_HANDLE, NULL,
+        PROCESS_DUP_HANDLE, *PsProcessType, KernelMode, &ownerProcessHandle);
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    /* An explicit target process makes duplication independent of queue-thread context. */
+    status = ZwDuplicateObject(systemProcessHandle, sourceHandle, ownerProcessHandle,
+        &userHandle, 0UL, 0UL, DUPLICATE_SAME_ACCESS);
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    /* A successful duplicate must still yield a real user-table handle. */
+    if (userHandle == NULL) { status = STATUS_INVALID_HANDLE; goto Complete; }
+    /* Read its actual grant and identity in the owning table; this window sends no I/O. */
+    KeStackAttachProcess((PRKPROCESS)OwnerProcess, &attachState);
+    status = ZwQueryObject(userHandle, ObjectBasicInformation, &userInfo,
+        (ULONG)sizeof(userInfo), NULL);
     if (NT_SUCCESS(status)) {
-        Response->reserved0 = (ULONGLONG)(ULONG_PTR)handle;
+        status = ObReferenceObjectByHandle(userHandle, 0UL,
+            objectType, UserMode, &verifiedObject, NULL);
     }
-    /* Return the authoritative native result inside the typed response envelope. */
+    KeUnstackDetachProcess(&attachState);
+    /* A wrong-type or unexpected object must never be reported as success. */
+    if (!NT_SUCCESS(status)) { goto Complete; }
+    if (verifiedObject != object) { status = STATUS_OBJECT_TYPE_MISMATCH; goto Complete; }
+    /* Publish even a reduced-rights handle so available operations remain usable. */
+    Response->reserved0 = (ULONGLONG)(ULONG_PTR)userHandle;
+    Response->reserved1 = (ULONGLONG)userInfo.GrantedAccess;
+Complete:
+    /* Release the short verification reference before the original target reference. */
+    if (verifiedObject != NULL) { ObDereferenceObject(verifiedObject); }
+    /* Close a destination handle created before any later verification failure. */
+    if (!NT_SUCCESS(status) && userHandle != NULL && ownerProcessHandle != NULL) {
+        NTSTATUS closeStatus = ZwDuplicateObject(ownerProcessHandle, userHandle, NULL,
+            NULL, 0UL, 0UL, DUPLICATE_CLOSE_SOURCE);
+        /* A concurrent close may invalidate the handle; try in-table close if needed. */
+        if (!NT_SUCCESS(closeStatus)) {
+            KeStackAttachProcess((PRKPROCESS)OwnerProcess, &attachState);
+            (void)ZwClose(userHandle);
+            KeUnstackDetachProcess(&attachState);
+        }
+    }
+    /* Balance every kernel handle and target lookup on both success and failure. */
+    if (ownerProcessHandle != NULL) { (void)ZwClose(ownerProcessHandle); }
+    if (systemProcessHandle != NULL) { (void)ZwClose(systemProcessHandle); }
+    if (sourceHandle != NULL) { (void)ZwClose(sourceHandle); }
+    if (object != NULL) { ObDereferenceObject(object); }
+    /* Keep operation failure inside the typed response envelope. */
     return status;
 }
 
-NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const KSWORD_ARK_DEBUGGER_REQUEST* Request,
+NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, PEPROCESS OwnerProcess, const KSWORD_ARK_DEBUGGER_REQUEST* Request,
     KSWORD_ARK_DEBUGGER_RESPONSE* Response)
 {
     /* Initialize the complete typed packet before returning any operation result. */
@@ -271,12 +451,11 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const 
     /* Kernel/system processes and null thread IDs are outside this user-debugger contract.
      * OPEN_HANDLE permits threadId=0 (process kind), so exempt it from the null-TID check. */
     if (Request->processId <= 4UL || (Request->operation <= KSWORD_ARK_DEBUGGER_RESUME && Request->threadId == 0UL)) { Response->status = STATUS_INVALID_PARAMETER; return STATUS_SUCCESS; }
-    /* Preserve central policy for each mutating user operation. OPEN_HANDLE grants an
-     * access-masked handle whose practical reach spans memory_write and suspend, so it
-     * belongs under the memory-write policy gate. */
+    /* Preserve central policy for every requested mutating operation. */
     if (Request->operation != KSWORD_ARK_DEBUGGER_GET_CONTEXT && Request->operation != KSWORD_ARK_DEBUGGER_RESUME &&
         Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_REMOVE && Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_RESTORE &&
-        Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE) {
+         Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE &&
+         Request->operation != KSWORD_ARK_DEBUGGER_OPEN_HANDLE) {
         /* Initialize policy evidence before mutating the target. */
         KSWORD_ARK_SAFETY_CONTEXT safety = { 0 };
         /* Classify thread suspension separately from memory/register edits. */
@@ -293,7 +472,7 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const 
     /* Dispatch target work into the corresponding feature helper. OPEN_HANDLE routes
      * to its own broker so Shadow/Thread/Memory handlers stay single-purpose. */
     if (Request->operation == KSWORD_ARK_DEBUGGER_OPEN_HANDLE) {
-        Response->status = KswordARKDebuggerOpenHandleForDebug(Request, Response);
+        Response->status = KswordARKDebuggerOpenHandleForDebug(Device, OwnerProcessId, OwnerProcess, Request, Response);
     } else {
         Response->status = Request->operation >= KSWORD_ARK_DEBUGGER_SHADOW_ADD
             ? KswordARKDebuggerShadow(OwnerProcessId, Request, Response)
