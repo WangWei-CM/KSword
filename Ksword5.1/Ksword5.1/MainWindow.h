@@ -711,6 +711,7 @@ private:
     QColor m_floatingDockAppearanceBaseColor;
     bool m_floatingDockAppearanceDarkMode = false;
     bool m_floatingDockAppearanceTransparency = false;
+    int m_floatingDockAppearanceDataSurfaceAlpha = -1; // 透明内容表面实际透明度；不透明宿主固定255。
 
     // buildAppearanceOverlayStyleSheet 作用：
     // - 生成深色/浅色覆盖样式字符串，叠加在基础 QSS 之后。

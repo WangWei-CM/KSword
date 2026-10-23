@@ -13984,13 +13984,15 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
 
     // 配方只依赖实际深浅模式/强调色/主背景及透明内容策略，所有浮动窗共享结果。
-    // 全局种子代次也会因保存相同配置递增，故比较真实输入，图片/opacity 更新不重建 QSS。
+    // 比较实际控件底面透明度；图片/背景图opacity更新仍不重建 QSS。
     const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
     const QColor accentColor = KswordTheme::PrimaryAccentColor();
+    const int dataSurfaceAlpha = enableDockContentTransparency ? ks::ui::MainDataSurfaceAlpha() : 255;
     if (m_floatingDockAppearanceDarkMode != darkModeEnabled
         || m_floatingDockAppearanceAccentColor != accentColor
         || m_floatingDockAppearanceBaseColor != baseColor
         || m_floatingDockAppearanceTransparency != enableDockContentTransparency
+        || m_floatingDockAppearanceDataSurfaceAlpha != dataSurfaceAlpha
         || m_floatingDockAppearanceStyleSheet.isEmpty())
     {
         m_floatingDockAppearanceStyleSheet =
@@ -14004,6 +14006,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
         m_floatingDockAppearanceAccentColor = accentColor;
         m_floatingDockAppearanceBaseColor = baseColor;
         m_floatingDockAppearanceTransparency = enableDockContentTransparency;
+        m_floatingDockAppearanceDataSurfaceAlpha = dataSurfaceAlpha;
     }
     ks::ui::RegisterSharedMainSurfaceButtonStyle(floatingWidget, m_floatingDockAppearanceStyleSheet);
     if (floatingWidget->styleSheet() != m_floatingDockAppearanceStyleSheet)
