@@ -100,12 +100,14 @@ namespace
         // 已初始化隐藏表只留原几何，Show时必然重算最新主题；首次Polish仍建立呈现基线。
         if (deferHidden && !view->isVisible() && view->property(kInitialized).toBool()) return;
         if (view->property(kPending).toBool()) return;
-        view->setProperty(kPending, true);
         const QPointer<QAbstractItemView> guardedView(view);
-        QTimer::singleShot(0, view, [guardedView]()
+        view->setProperty(kPending, true);
+        if (!guardedView) return; // 动态属性通知可同步销毁目标，不能再借原始 view。
+        QTimer::singleShot(0, guardedView.data(), [guardedView]()
         {
             if (guardedView.isNull() || !guardedView->property(kPending).toBool()) return;
             guardedView->setProperty(kPending, false);
+            if (!guardedView) return;
             const QVariant normalize = guardedView->property(kNormalizeHeader);
             ks::ui::ApplyTablePresentation(guardedView.data(), !normalize.isValid() || normalize.toBool());
         });
@@ -122,8 +124,13 @@ namespace
             switch (event->type())
             {
             case QEvent::Polish:
-                schedulePresentation(qobject_cast<QAbstractItemView*>(source));
+            {
+                const QPointer<QAbstractItemView> view(qobject_cast<QAbstractItemView*>(source));
+                if (!supportedView(view.data())) break;
+                schedulePresentation(view.data());
+                if (!view) return true;
                 break;
+            }
             case QEvent::Show:
             {
                 // Show 到达时视图构造已完成；先统一 frame/grid/表头，避免先绘旧尺寸再跳变。
@@ -144,16 +151,29 @@ namespace
             case QEvent::StyleChange:
             case QEvent::FontChange:
             case QEvent::PaletteChange:
+            {
+                // 全局过滤器只给支持的原表格/树标脏，不向普通控件或 Qt 内部视口写属性。
+                const QPointer<QAbstractItemView> view(qobject_cast<QAbstractItemView*>(source));
+                if (!supportedView(view.data())) break;
                 // 仅忽略此表格自己的样式回声，不吞真正的应用主题广播。
-                if (source->property(kApplying).toBool()) break;
-                source->setProperty(kThemeDirty, true);
-                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
+                if (view->property(kApplying).toBool()) break;
+                view->setProperty(kThemeDirty, true);
+                if (!view) return true;
+                schedulePresentation(view.data(), true);
+                if (!view) return true;
                 break;
+            }
             case QEvent::ApplicationPaletteChange:
-                // Only the view itself, never header/viewport/popup Show/Resize internals.
-                source->setProperty(kThemeDirty, true);
-                schedulePresentation(qobject_cast<QAbstractItemView*>(source), true);
+            {
+                // 应用广播仍不受 kApplying 抑制；隐藏表只保留 dirty，沿原 Show 时机准备。
+                const QPointer<QAbstractItemView> view(qobject_cast<QAbstractItemView*>(source));
+                if (!supportedView(view.data())) break;
+                view->setProperty(kThemeDirty, true);
+                if (!view) return true;
+                schedulePresentation(view.data(), true);
+                if (!view) return true;
                 break;
+            }
             default:
                 break;
             }
