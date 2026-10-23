@@ -719,9 +719,9 @@ namespace ks::misc::disable_dse
         {
             return BlockReason::UnsupportedBuild;
         }
-        // HVCI 不硬阻断：writeCiOptions 会尝试 RXPF 路径，但 VTL1 SLAT
-        // 保护使写入安全失败（STATUS_ACCESS_VIOLATION，不会崩溃）。
-        // 写入路径仍可运行以验证并报告失败原因。
+        // 保留 HVCI 下的既有可用性；实际写入仍由原路径处理。
+        // 保护机制可能阻止写入，源码不足以保证异常总能安全返回。
+        // 这里只评估可用性，不把它作为不会崩溃的验证结论。
         if (!driverAvailable())
         {
             return BlockReason::DriverUnavailable;
@@ -742,7 +742,7 @@ namespace ks::misc::disable_dse
         case BlockReason::UnsupportedBuild:
             return QStringLiteral("当前系统早于 Windows 8，DSE 开关在 nt!g_CiEnabled 而不是 CI.dll!g_CiOptions，本页不支持。");
         case BlockReason::HvciEnabled:
-            return QStringLiteral("已检测到 HVCI（内存完整性）。g_CiOptions 所在物理页受 VTL1 SLAT 只读保护，写入将安全失败而非崩溃。");
+            return QStringLiteral("已检测到 HVCI（内存完整性）。内核写入可能被保护机制阻止；尚未验证该路径能安全失败，不能保证不会蓝屏。");
         case BlockReason::NotLocated:
             return QStringLiteral("尚未定位到 g_CiOptions，请先执行定位。");
         case BlockReason::ValueMismatch:
@@ -1033,8 +1033,8 @@ namespace ks::misc::disable_dse
         }
 
         // ======== HVCI 路径：通过 RXPF 框架尝试写入 ========
-        // 实测确认：VTL1 的 SLAT 保护作用于物理帧，IoReadAccess MDL 创建的
-        // 别名只读，写入返回 STATUS_ACCESS_VIOLATION（不会崩溃）。
+        // 既有环境的访问失败回执不足以保证所有平台都能安全返回。
+        // 保留原写入流程，按本次请求的真实错误与回执报告结果。
         if (hvciEnabled)
         {
             // 1. 查询 RXPF 子系统支持状态。
@@ -1138,11 +1138,11 @@ namespace ks::misc::disable_dse
                 recordId, pageOffset, writeBytes);
             if (!writeInfo.ioSuccess)
             {
-                // HVCI 下 VTL1 SLAT 保护使写入安全失败（0xC0000005），
-                // METHOD_BUFFERED 不拷回输出缓冲，lastStatus 会是 0。
+                // ioSuccess 为 false 只说明请求传输失败，不能确定保护来源。
+                // 不用缺失或默认的响应字段推断目标状态。
                 result.detailText = QStringLiteral(
-                    "RXPF 写入失败（HVCI 环境下 VTL1 SLAT 阻止了写入）：%1\n"
-                    "g_CiOptions 所在物理页被 VTL1 标记为只读，VTL0 无法绕过。")
+                    "RXPF 写入请求失败：%1\n"
+                    "请求传输失败不能确定保护来源，也不能证明目标状态；请核对本次错误与回执。")
                     .arg(writeInfo.ioErrorText);
                 rxpf::unregisterPage(recordId);
                 return result;

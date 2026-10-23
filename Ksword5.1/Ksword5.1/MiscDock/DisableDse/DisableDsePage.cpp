@@ -652,7 +652,7 @@ namespace ks::misc
             runKsecLocateGadget();
         });
         connect(m_ksecDisableButton, &QPushButton::clicked, this, [this]() {
-            // HVCI 开启时追加二次确认：写入会安全失败，不会崩溃。
+            // HVCI 开启时沿用二次确认，明确该路径的安全失败尚未验证。
             if (m_posture.hvciEnabled)
             {
                 if (!askConfirmation(
@@ -662,7 +662,7 @@ namespace ks::misc
                             QStringLiteral("HVCI 写入限制")),
                         ks::i18n::text(
                             QStringLiteral("misc.disable_dse.hvci_confirm.message"),
-                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在物理页受 VTL1 SLAT 只读保护。\n\n写入将安全失败（不会蓝屏），但 DSE 状态不会被修改。\n\n确定要尝试吗？"))))
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），内核写入可能被保护机制阻止。\n\n不能保证该路径会安全失败或避免蓝屏；尝试可能失败或导致系统崩溃。\n\n确定要尝试吗？"))))
                 {
                     return;
                 }
@@ -691,7 +691,7 @@ namespace ks::misc
                             QStringLiteral("HVCI 写入限制")),
                         ks::i18n::text(
                             QStringLiteral("misc.disable_dse.hvci_confirm.message"),
-                            QStringLiteral("当前系统已开启内存完整性（HVCI），g_CiOptions 所在物理页受 VTL1 SLAT 只读保护。\n\n写入将安全失败（不会蓝屏），但 DSE 状态不会被修改。\n\n确定要尝试吗？"))))
+                            QStringLiteral("当前系统已开启内存完整性（HVCI），内核写入可能被保护机制阻止。\n\n不能保证该路径会安全失败或避免蓝屏；尝试可能失败或导致系统崩溃。\n\n确定要尝试吗？"))))
                 {
                     return;
                 }
@@ -1112,7 +1112,7 @@ namespace ks::misc
 
     void DisableDsePage::updateButtons()
     {
-        // HVCI 环境下 RXPF 写入会安全失败，按钮仍可用以便用户尝试。
+        // 保留 HVCI 环境下的既有按钮可用性，不据此承诺写入能安全失败。
         const bool allowed = !m_busy
             && (m_blockReason == disable_dse::BlockReason::None
                 || m_blockReason == disable_dse::BlockReason::HvciEnabled);
@@ -1244,7 +1244,7 @@ namespace ks::misc
             const QString reasonText = disable_dse::blockReasonText(m_blockReason);
             m_blockLabel->setText(reasonText);
             m_blockLabel->setVisible(!reasonText.isEmpty());
-            // HvciEnabled 是提示信息（写入会安全失败），用次要文字色；其它原因用警告色。
+            // HvciEnabled 沿用提示信息的次要文字色；其它原因用警告色。
             m_blockLabel->setStyleSheet(
                 QStringLiteral("color:%1;").arg(
                     m_blockReason == disable_dse::BlockReason::HvciEnabled
