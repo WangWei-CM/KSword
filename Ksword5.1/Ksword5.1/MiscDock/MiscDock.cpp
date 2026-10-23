@@ -271,8 +271,19 @@ void MiscDock::showEvent(QShowEvent* event)
 {
     const QPointer<MiscDock> owner(this);
     QWidget::showEvent(event);
-    if (owner && std::exchange(m_initializeCurrentPageOnShow, false) && m_mainTabWidget)
+    if (!owner || !m_mainTabWidget) return;
+    if (std::exchange(m_initializeCurrentPageOnShow, false))
+    {
         ensureTabInitialized(m_mainTabWidget->currentIndex());
+        return;
+    }
+    // Qt 先显示当前子分支再分派父 Show；复用已建页只消费 dirty，不触发业务激活。
+    const QPointer<QTabWidget> tabs(m_mainTabWidget);
+    const QPointer<QWidget> page(tabs->currentWidget());
+    if (!page || !page->isVisible()) return;
+    ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
+    if (!owner || !tabs || !page || tabs->currentWidget() != page || !page->isVisible()) return;
+    if (QLayout* layout = page->layout()) layout->activate(); // Qt 已激活的热页在此常数时间返回。
 }
 
 void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
@@ -283,20 +294,41 @@ void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
     }
 
     // 真正创建/挂载时才持有首帧守卫；复用页在业务激活后仅消费真实 dirty。
-    const auto ensurePage = [](QWidget* host, const bool needsConstruction, const auto& initialize)
+    const QPointer<QTabWidget> tabs(m_mainTabWidget); // 只准备本次已选中的真实分支。
+    const auto prepareMountedPage = [tabs](const QPointer<QWidget>& page)
+    {
+        const auto current = [&page, &tabs]
+        {
+            return page && tabs && tabs->currentWidget() == page && page->isVisible();
+        };
+        if (!current()) return;
+        // addWidget 默认把新子页 Show 排队；完整工厂返回后只显示明确单页壳的唯一正文。
+        QLayout* const hostLayout = page->layout();
+        const QPointer<QWidget> content(page->property("ksword_page_frame_host").toBool()
+            && hostLayout && hostLayout->count() == 1 ? hostLayout->itemAt(0)->widget() : nullptr);
+        if (content && content->parentWidget() == page && content->isHidden()
+            && !content->testAttribute(Qt::WA_WState_ExplicitShowHide))
+        {
+            content->show(); // 保留真正业务 hide；隐藏 Tab/后台构造不进入此分支。
+        }
+        if (!current()) return;
+        ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
+        if (!current()) return;
+        // 构造/复用均收口同一个当前宿主；Qt 已激活的热页在此常数时间返回。
+        if (QLayout* layout = page->layout()) layout->activate();
+    };
+    const auto ensurePage = [prepareMountedPage](QWidget* host, const bool needsConstruction, const auto& initialize)
     {
         if (needsConstruction)
         {
-            const ks::ui::ScopedWidgetThemePreparation themePreparation(host);
+            const QPointer<QWidget> page(host); // 工厂、Show 和主题回调均允许销毁/换页。
             initialize();
+            prepareMountedPage(page);
             return;
         }
         const QPointer<QWidget> page(host); // 激活回调可能关闭或重挂宿主。
         initialize();
-        if (page != nullptr && page->isVisible())
-        {
-            ks::ui::PrepareWidgetThemeBindingsForShow(page.data());
-        }
+        prepareMountedPage(page);
     };
 
     if (tabIndex == m_themeCheckTabIndex)
@@ -467,8 +499,11 @@ void MiscDock::activateTabByIndex(const int tabIndex)
 
     // 先构造再切换：currentChanged 在目标已经是当前页时不会触发，
     // 直接 setCurrentIndex 可能让调用方拿到尚未初始化的占位控件。
+    const QPointer<MiscDock> lifetime(this);
+    const QPointer<QTabWidget> tabs(m_mainTabWidget);
     ensureTabInitialized(tabIndex);
-    m_mainTabWidget->setCurrentIndex(tabIndex);
+    if (!lifetime || !tabs || lifetime->m_mainTabWidget != tabs) return;
+    tabs->setCurrentIndex(tabIndex);
 }
 
 ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool currentPageOnly,
@@ -642,8 +677,9 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
 
 MinidumpDock* MiscDock::activateMinidumpTab()
 {
+    const QPointer<MiscDock> lifetime(this); // 新正文 Show/原 currentChanged 均可关闭整个宿主。
     activateTabByIndex(m_minidumpTabIndex);
-    return m_minidumpPage;
+    return lifetime ? lifetime->m_minidumpPage : nullptr;
 }
 
 void MiscDock::setBugcheckDiagnosticsVisible(const bool visible)
