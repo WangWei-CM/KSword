@@ -385,13 +385,17 @@ struct AsyncLogTextView::State
         const int digits = std::max(2, static_cast<int>(QString::number(std::max(1, source->blocks)).size()));
         return 22 + q->fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
     }
-    void geometry()
+    bool geometry()
     {
+        const QPointer<AsyncLogTextView> guard(q);
         const int width = gutterWidth();
         const QMargins margins(width + kInset, kInset, kInset, kInset);
         if (q->viewportMargins() != margins) q->setViewportMargins(margins);
+        if (!guard) return false;
         const QRect rect = q->contentsRect();
         gutter->setGeometry(rect.left(), rect.top(), width, rect.height());
+        // 两次几何写入都可能同步分发事件；返回值只读取栈上的弱引用。
+        return !guard.isNull();
     }
     qreal scrollTop() const
     {
@@ -464,7 +468,7 @@ struct AsyncLogTextView::State
         QTimer::singleShot(0, q, [this] {
             layoutQueued = false;
             if (!q->isVisible() || sourceBusy || sourceCommands || !pending.empty()) return;
-            geometry();
+            if (!geometry()) return; // 宿主已销毁时，不再读取 State 或构造请求。
             LayoutRequest request{source, q->font(), std::max(1, q->viewport()->width()),
                 q->logicalDpiX(), q->logicalDpiY(), q->devicePixelRatioF(), epoch};
             failure.clear();
@@ -548,7 +552,7 @@ struct AsyncLogTextView::State
                     const bool moved = cursor != adjusted(cursor) || anchor != adjusted(anchor);
                     cursor = adjusted(cursor); anchor = adjusted(anchor);
                     bool observerFailed = false;
-                    try { geometry(); } catch (...) { observerFailed = true; }
+                    try { if (!geometry()) return true; } catch (...) { observerFailed = true; }
                     if (!guard) return true;
                     if (moved)
                     {
@@ -676,7 +680,8 @@ struct AsyncLogTextView::State
                 if (base > 0) fontScale = static_cast<double>(QFontInfo(current).pixelSize()) / base;
             }
         }
-        geometry(); requestLayout();
+        if (!geometry()) return;
+        requestLayout();
     }
     void applicationFontChange()
     {
@@ -695,7 +700,8 @@ struct AsyncLogTextView::State
             q->setFont(updated);
             if (!guard) return;
             updatingFont = false;
-            geometry(); requestLayout();
+            if (!geometry()) return;
+            requestLayout();
         });
     }
     void paintGutter(QPaintEvent*)
@@ -1066,14 +1072,21 @@ void AsyncLogTextView::paintEvent(QPaintEvent*)
 
 void AsyncLogTextView::resizeEvent(QResizeEvent* event)
 {
+    const QPointer<AsyncLogTextView> guard(this);
     QAbstractScrollArea::resizeEvent(event);
-    if (!d) return;
-    d->geometry(); d->requestLayout();
+    if (!guard || !d) return;
+    if (!d->geometry()) return;
+    d->requestLayout();
 }
 void AsyncLogTextView::showEvent(QShowEvent* event)
 {
+    const QPointer<AsyncLogTextView> guard(this);
     QAbstractScrollArea::showEvent(event);
-    d->applicationFontChange(); d->geometry(); d->drain();
+    if (!guard || !d) return;
+    d->applicationFontChange();
+    if (!guard || !d->geometry()) return;
+    d->drain();
+    if (!guard) return;
     if (!d->ready()) d->requestLayout();
 }
 void AsyncLogTextView::hideEvent(QHideEvent* event)
@@ -1085,8 +1098,9 @@ void AsyncLogTextView::hideEvent(QHideEvent* event)
 }
 void AsyncLogTextView::changeEvent(QEvent* event)
 {
+    const QPointer<AsyncLogTextView> guard(this);
     QAbstractScrollArea::changeEvent(event);
-    if (!d) return;
+    if (!guard || !d) return;
     switch (event->type())
     {
     case QEvent::FontChange: d->fontChange(); break;
@@ -1101,10 +1115,13 @@ void AsyncLogTextView::changeEvent(QEvent* event)
 }
 bool AsyncLogTextView::event(QEvent* event)
 {
+    const QPointer<AsyncLogTextView> guard(this);
     const bool handled = QAbstractScrollArea::event(event);
+    if (!guard) return handled;
     if (d && (event->type() == QEvent::DevicePixelRatioChange || event->type() == QEvent::ScreenChangeInternal))
     {
-        d->geometry(); d->requestLayout();
+        if (!d->geometry()) return handled;
+        d->requestLayout();
     }
     return handled;
 }
@@ -1256,8 +1273,9 @@ void AsyncLogTextView::wheelEvent(QWheelEvent* event)
 }
 void AsyncLogTextView::focusInEvent(QFocusEvent* event)
 {
+    const QPointer<AsyncLogTextView> guard(this);
     QAbstractScrollArea::focusInEvent(event);
-    if (!d) return;
+    if (!guard || !d) return;
     d->caretOn = true;
     const int flash = QApplication::styleHints()->cursorFlashTime();
     if (flash > 0) d->caretTimer->start(std::max(1, flash / 2));
