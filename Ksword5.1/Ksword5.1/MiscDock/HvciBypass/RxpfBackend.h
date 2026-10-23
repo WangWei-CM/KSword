@@ -100,6 +100,8 @@ namespace ks::misc::rxpf
         unsigned long originalProtection = 0;  // 原始保护属性。
         unsigned long currentProtection = 0;   // 当前保护属性。
         unsigned long writableAliasProtection = 0; // 别名实际保护（PAGE_READWRITE=可写）。
+        std::uint64_t requestedWriteLength = 0; // R3 调用者请求的长度。
+        unsigned long writtenLength = 0;    // R0 本次确认写入的长度；失败时为零。
     };
 
     // ----------------------------------------------------------
@@ -201,6 +203,14 @@ namespace ks::misc::rxpf
         QByteArray bytes;                   // 从 Backup 读到的字节；length==0 或 hasBackup==false 时为空。
     };
 
+    // ReadbackInfo：经现有只读内核内存接口读取恢复范围，不改变页面保护。
+    struct ReadbackInfo
+    {
+        bool ok = false;                    // 所请求字节均已读取。
+        QString errorText;                  // 传输或读取失败原因。
+        QByteArray bytes;                   // 完整回读数据，不接受补零/部分读取。
+    };
+
     // ----------------------------------------------------------
     // HookPointInfo：钩点设置操作的响应。
     // ----------------------------------------------------------
@@ -279,8 +289,12 @@ namespace ks::misc::rxpf
     BackupInfo queryBackup(std::uint64_t recordId,
         unsigned long offset, unsigned long length);
 
+    // readPageBytes：只读校验已恢复的页内范围，length 必须在 1..64 内。
+    ReadbackInfo readPageBytes(std::uint64_t targetAddress,
+        unsigned long offset, unsigned long length);
+
     // atomicCommit：原子提交——单次 IOCTL 完成 Register+Change(mode=2)+Write+
-    // Unregister(SKIP_BACKUP_RESTORE)，把 NX 窗口压缩到驱动函数内部（纳秒级）。
+    // Unregister(SKIP_BACKUP_RESTORE)。减少往返不提供全核隔离或无执行故障保证。
     // 仅支持 EXTERNAL_IMAGE 目标。返回完整 PageInfo（包含 mode=1 恢复后的状态）。
     // - targetAddress：目标页面虚拟地址。
     // - offset：页内偏移（0 ~ PAGE_SIZE-1）。

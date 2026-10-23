@@ -143,12 +143,15 @@ int main(VOID)
         IOCTL_KSWORD_ARK_CONTROL_STORAGE_CONTROLLER, IOCTL_KSWORD_ARK_TRANSFER_STORAGE_CONTROLLER,
         IOCTL_KSWORD_ARK_QUERY_STORAGE_CONTROLLER_AUDIT };
     const KSWORD_ARK_IOCTL_ENTRY* generic = KswordARKLookupIoctlEntry(IOCTL_KSWORD_ARK_TERMINATE_PROCESS);
-    CHECK("real registry contains all expected entries", count == 216U);
+    const KSWORD_ARK_IOCTL_ENTRY* backup = KswordARKLookupIoctlEntry(IOCTL_KSWORD_ARK_RXPF_QUERY_BACKUP);
+    const KSWORD_ARK_IOCTL_ENTRY* fileSubmit = KswordARKLookupIoctlEntry(IOCTL_KSWORD_ARK_FILE_IRP_SUBMIT);
+    CHECK("registry count covers every production row", count == KSWORD_TEST_EXPECTED_REGISTRY_COUNT);
     CHECK("real registry has no duplicate code", KswordARKGetDuplicateIoctlCount() == 0U);
     CHECK("registry lookup is bounded", KswordARKGetIoctlEntryByIndex(count) == NULL);
     for (index = 0U; index < count; ++index) {
         const KSWORD_ARK_IOCTL_ENTRY* entry = KswordARKGetIoctlEntryByIndex(index);
         const BOOLEAN controller = (entry->Flags & KSWORD_ARK_IOCTL_FLAG_CONTROLLER_ONLY) != 0U;
+        CHECK("each full control code routes to its exact registry row", KswordARKLookupIoctlEntry(entry->IoControlCode) == entry);
         if (controller) ++controllerEntries;
         Reset(); Dispatch(&controllerDevice, entry->IoControlCode);
         CHECK("controller endpoint completes each request once", request.completions == 1U);
@@ -162,6 +165,9 @@ int main(VOID)
         CHECK("primary rundown balances all rows", coreReaders == 0U && coreLeaves == (controller ? 0U : 1U));
         if (controller) CHECK("primary rejects controller before any primary read", coreEnters == 0U && logs == 0U && capabilityCalls == 0U && evidenceCalls == 0U);
     }
+    CHECK("backup query has a distinct full control code from file submit", IOCTL_KSWORD_ARK_RXPF_QUERY_BACKUP != IOCTL_KSWORD_ARK_FILE_IRP_SUBMIT);
+    CHECK("backup query routes to the backup handler", backup != NULL && backup->Handler == KswordARKRxpfIoctlQueryBackup);
+    CHECK("file submit keeps its original handler", fileSubmit != NULL && fileSubmit->Handler == KswordARKFileIrpIoctlSubmit);
     CHECK("exactly four controller-only entries", controllerEntries == 4U);
     for (index = 0U; index < 4U; ++index) {
         Reset(); controllerStatus = STATUS_INVALID_PARAMETER; Dispatch(&controllerDevice, operations[index]);
@@ -170,7 +176,7 @@ int main(VOID)
     Reset(); Dispatch(&controllerDevice, 0xFFFFFFFFUL);
     CHECK("unknown controller IOCTL does not read primary context", request.completions == 1U && request.status == STATUS_INVALID_DEVICE_REQUEST && logs == 0U && coreEnters == 0U);
     Reset(); Dispatch(&mainDevice, 0xFFFFFFFFUL);
-    CHECK("unknown primary IOCTL releases rundown", request.completions == 1U && request.status == STATUS_INVALID_DEVICE_REQUEST && coreEnters == 1U && coreLeaves == 1U && logs == 1U);
+    CHECK("unknown primary IOCTL logs receipt and denial with rundown", request.completions == 1U && request.status == STATUS_INVALID_DEVICE_REQUEST && coreEnters == 1U && coreLeaves == 1U && logs == 2U);
     Reset(); capabilityAllowed = FALSE; Dispatch(&mainDevice, generic->IoControlCode);
     CHECK("capability denial releases rundown without handler", genericCalls == 0U && coreLeaves == 1U && request.completions == 1U && request.status == STATUS_NOT_SUPPORTED);
     Reset(); coreAvailable = FALSE; Dispatch(&mainDevice, generic->IoControlCode);

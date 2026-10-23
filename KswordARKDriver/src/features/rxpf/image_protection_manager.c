@@ -1090,11 +1090,6 @@ KswRxpfImageProtectionCreateRecord(
                 RecordSource->Backup,
                 g_KswRxpfSelfImageTestPage,
                 PAGE_SIZE);
-        } else {
-            RtlCopyMemory(
-                RecordSource->Backup,
-                RecordSource->OriginalMapping,
-                PAGE_SIZE);
         }
     }
     __try {
@@ -1104,15 +1099,44 @@ KswRxpfImageProtectionCreateRecord(
                 RecordSource->CurrentContent,
                 g_KswRxpfSelfImageTestPage,
                 PAGE_SIZE);
+        } else if (TargetKind == KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE) {
+            /* 临时只读别名绑定已锁定 PFN，不依赖可被卸载的原始映像 VA。 */
+            PVOID readAlias = MmMapLockedPagesSpecifyCache(
+                RecordSource->Mdl,
+                KernelMode,
+                MmCached,
+                NULL,
+                FALSE,
+                (MM_PAGE_PRIORITY)(NormalPagePriority |
+                    MdlMappingNoWrite | MdlMappingNoExecute));
+            if (readAlias == NULL) {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            } else {
+                __try {
+                    RtlCopyMemory(RecordSource->CurrentContent, readAlias, PAGE_SIZE);
+                }
+                __finally {
+                    /* 私有映像保护调用前恢复 MDL 的未映射状态。 */
+                    MmUnmapLockedPages(readAlias, RecordSource->Mdl);
+                }
+            }
         } else {
             RtlCopyMemory(
                 RecordSource->CurrentContent,
                 RecordSource->OriginalMapping,
                 PAGE_SIZE);
         }
+        /* 备份与当前镜像来自同一次读取，且所有原始 VA 读取均受异常保护。 */
+        if (NT_SUCCESS(status) && RecordSource->Backup != NULL) {
+            RtlCopyMemory(RecordSource->Backup, RecordSource->CurrentContent, PAGE_SIZE);
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         status = GetExceptionCode();
+        KswRxpfImageProtectionReleaseRecord(RecordSource);
+        return status;
+    }
+    if (!NT_SUCCESS(status)) {
         KswRxpfImageProtectionReleaseRecord(RecordSource);
         return status;
     }
@@ -1243,6 +1267,8 @@ KswRxpfImageProtectionChangeToRwNx(
                 : PAGE_READONLY;
             if (!NT_SUCCESS(protStatus)) {
                 Record->LastStatus = protStatus;
+                /* 不发布虚假的 RW_NX；原始失败交给调用方处理及清理。 */
+                status = protStatus;
             }
         } else {
             Record->WritableAliasProtection =
@@ -1392,7 +1418,7 @@ KswRxpfPrepareReferenceDigest(
 
 /* MmChangeImageProtection 通过签名扫描解析——不在 CFG 位图中。 */
 __declspec(guard(nocf))
-VOID
+NTSTATUS
 KswRxpfRestoreExecutableProtection(
     _Inout_ PKSW_RXPF_PAGE_RECORD Record
     )
@@ -1403,16 +1429,20 @@ KswRxpfRestoreExecutableProtection(
 
     /* ChangeProtectionApplied 为 TRUE 表示 SLAT 保护已释放，
      * 释放记录前必须恢复为 RX，否则代码页丧失执行权。 */
-    if (!Record->ChangeProtectionApplied ||
-        Record->Mdl == NULL ||
-        !KswRxpfImageProtectionBuildSupported()) {
-        return;
+    if (Record == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!Record->ChangeProtectionApplied) {
+        return STATUS_SUCCESS;
+    }
+    if (Record->Mdl == NULL || !KswRxpfImageProtectionBuildSupported()) {
+        Record->LastStatus = STATUS_INVALID_DEVICE_STATE;
+        return Record->LastStatus;
     }
 
     /*
-     * mode=1 需要正确的参考摘要缓冲区：VTL1 用 SHA-512(目标页)[0x20,0x40)
-     * 与缓冲区内容做 memcmp。如果准备失败（例如外部映像暂不支持），
-     * 回退到 (pageBase, PAGE_SIZE) 使 VSL 退路可识别。
+     * mode=1 优先沿用现有参考缓冲区；外部映像目前使用整页参考回退。
+     * 该调用的成功或失败不单独证明 VTL1 内部采用何种摘要算法。
      *
      * 已实测：在 HVCI 来宾上 mode=1 对测试驱动的 .rxpftst 段统一返回
      *   STATUS_ACCESS_VIOLATION，即使页面内容未改动。
@@ -1433,30 +1463,65 @@ KswRxpfRestoreExecutableProtection(
             KSW_RXPF_MM_CHANGE_OPERATION_RX);
     }
     Record->LastStatus = status;
-    Record->ChangeProtectionApplied = FALSE;
-    Record->CurrentProtection = Record->OriginalProtection;
+    if (NT_SUCCESS(status)) {
+        /* 仅在实际成功后撤销恢复责任，失败保留重试所需的 MDL 和状态。 */
+        Record->ChangeProtectionApplied = FALSE;
+        Record->CurrentProtection = Record->OriginalProtection;
+    }
+    return status;
 }
 
-VOID
+NTSTATUS
 KswRxpfImageProtectionReleaseRecord(
     _Inout_ PKSW_RXPF_PAGE_RECORD Record
     )
 {
+    /* status：任一恢复步骤失败时停止释放，保留资源所有权。 */
+    NTSTATUS status = STATUS_SUCCESS;
+    /* retryAlias：先前 mode=1 失败且本次请求改为恢复备份时的临时别名。 */
+    PVOID retryAlias = NULL;
     /* Release only resources whose ownership flags were recorded at creation. */
     if (Record == NULL) {
-        return;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* mode=1 失败会要求先解映射别名。若重试时调用方要求恢复原字节，
+     * 必须从仍锁定的 MDL 重建别名，不能把第二次默认注销误当作已恢复备份。 */
+    if (!Record->SkipBackupRestoreOnRelease &&
+        Record->ChangeProtectionApplied &&
+        Record->Backup != NULL &&
+        Record->Mdl != NULL &&
+        !Record->MappingIsAlias) {
+        retryAlias = MmMapLockedPagesSpecifyCache(
+            Record->Mdl,
+            KernelMode,
+            MmCached,
+            NULL,
+            FALSE,
+            (MM_PAGE_PRIORITY)(NormalPagePriority | MdlMappingNoExecute));
+        if (retryAlias == NULL) {
+            Record->LastStatus = STATUS_INSUFFICIENT_RESOURCES;
+            return Record->LastStatus;
+        }
+        status = MmProtectMdlSystemAddress(Record->Mdl, PAGE_READWRITE);
+        if (!NT_SUCCESS(status)) {
+            MmUnmapLockedPages(retryAlias, Record->Mdl);
+            Record->LastStatus = status;
+            return status;
+        }
+        Record->WritableAlias = (ULONGLONG)(ULONG_PTR)retryAlias;
+        Record->MappingIsAlias = TRUE;
+        Record->WritableAliasProtection = PAGE_READWRITE;
     }
 
     /*
      * Phase F：在释放前自动把 Backup 还原到物理页。
-     * mode=1 (VTL1 digest attestation) 只验 current content 与 caller digest 匹配，
-     * **不会**把物理页内容还原到 catalog 中的原字节；若 Change 后曾写入过修改字节，
+     * mode=1 不负责把物理页内容还原为原字节；若 Change 后曾写入过修改字节，
      * 不做 restore 就 Unregister 必然导致 PTE 回 RX 后内核执行到被改字节 → bugcheck
      * (SYSTEM_SERVICE_EXCEPTION, What failed: <module>)。
      *
      * 需要在 alias 还 RW 且 mapped 时执行，所以放在 Protect(RO)/Unmap 之前。
-     * 同步刷新 CurrentContent 使 PrepareReferenceDigest 算到的 SHA-512 == Backup 的 SHA-512，
-     * VTL1 比对后放行。
+     * 同步刷新 CurrentContent，使控制路径的内容镜像与实际恢复字节保持一致。
      */
     if (!Record->SkipBackupRestoreOnRelease &&
         Record->MappingIsAlias && Record->WritableAlias != 0ULL &&
@@ -1469,7 +1534,7 @@ KswRxpfImageProtectionReleaseRecord(
                 (PVOID)(ULONG_PTR)Record->WritableAlias,
                 Record->Backup,
                 PAGE_SIZE);
-            /* 同步 CurrentContent 以保证 PrepareReferenceDigest 算到原内容的 SHA-512。 */
+            /* 同步 CurrentContent，避免恢复后的参考内容仍指向修改字节。 */
             RtlCopyMemory(
                 Record->CurrentContent,
                 Record->Backup,
@@ -1479,6 +1544,8 @@ KswRxpfImageProtectionReleaseRecord(
             /* restore 失败是致命：页内容仍是修改后的字节，接下去的 mode=1 若放行
              * 会让内核执行到坏指令。记录 LastFailureReason 以便 R3 诊断。 */
             Record->LastFailureReason = 0xBEEF0001U;
+            Record->LastStatus = GetExceptionCode();
+            return Record->LastStatus;
         }
     }
 
@@ -1493,9 +1560,13 @@ KswRxpfImageProtectionReleaseRecord(
         Record->Mdl != NULL) {
         /* Change 时若升过 RW，释放前先降回 RO 以匹配 PTE 清理约束。 */
         if (Record->WritableAliasProtection == PAGE_READWRITE) {
-            (void)MmProtectMdlSystemAddress(
+            status = MmProtectMdlSystemAddress(
                 Record->Mdl,
                 PAGE_READONLY);
+            if (!NT_SUCCESS(status)) {
+                Record->LastStatus = status;
+                return status;
+            }
             Record->WritableAliasProtection = PAGE_READONLY;
         }
         MmUnmapLockedPages(
@@ -1506,7 +1577,10 @@ KswRxpfImageProtectionReleaseRecord(
     }
 
     /* 恢复可执行节 SLAT 权限——必须在解锁之前，但现在在解映射之后。 */
-    KswRxpfRestoreExecutableProtection(Record);
+    status = KswRxpfRestoreExecutableProtection(Record);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
     if (Record->OwnsMdlPages &&
         Record->OriginalMapping != NULL && Record->Mdl != NULL) {
         MmUnmapLockedPages(Record->OriginalMapping, Record->Mdl);
@@ -1533,4 +1607,6 @@ KswRxpfImageProtectionReleaseRecord(
         ExFreePoolWithTag(Record->CurrentContent, KSW_RXPF_CONTENT_TAG);
         Record->CurrentContent = NULL;
     }
+    Record->LastStatus = STATUS_SUCCESS;
+    return STATUS_SUCCESS;
 }

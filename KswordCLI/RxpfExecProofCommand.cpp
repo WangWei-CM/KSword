@@ -83,8 +83,27 @@ namespace ks::cli
                     {L"length", Json::count(payload.size())}
                 }), {L"IOCTL transport failed before any R0 side effect. Driver must be loaded, signed and the control device must be reachable."}};
             }
-            // 注意：handler 返回 non-success NTSTATUS 时 DeviceIoControl 也返回 FALSE，
-            // 但 output buffer 仍被 WDF 填充。继续读 response 以获取 verdict/setupStatus。
+            // METHOD_BUFFERED + handler 返回 non-SUCCESS NTSTATUS 时，I/O manager
+            // 不 commit output buffer 到用户态，response 字段读到的是 user-side
+            // 初始化零值。不能据此判 verdict —— verdictCode==0 恰好匹配 SUCCESS，
+            // 会把真失败掩盖成 "verdict: success, exit 0"。
+            // bytesReturned != sizeof(response) 的信号就是：WDF 没把 Response 还给
+            // 我们，response 字段里全是客户端 zero-init 的垃圾。
+            if (!io.ok || io.bytesReturned != sizeof(response))
+            {
+                const unsigned char* rawRespBytes0 = reinterpret_cast<const unsigned char*>(&response);
+                std::vector<std::uint8_t> rawRespVec0(rawRespBytes0, rawRespBytes0 + sizeof(response));
+                return {1, Json::object({
+                    {L"source", Json::string(L"IOCTL_KSWORD_ARK_RXPF_EXEC_PROOF (ALLOCATED_TEST + shadow IDT emulator)")},
+                    {L"transportSuccess", Json::boolean(io.ok)},
+                    {L"win32Error", Json::number(io.win32Error)},
+                    {L"bytesReturned", Json::number(io.bytesReturned)},
+                    {L"expectedBytes", Json::count(sizeof(response))},
+                    {L"verdict", Json::string(L"handler-failed")},
+                    {L"payloadHex", Json::bytes(std::vector<std::uint8_t>(payload.begin(), payload.end()), payload.size())},
+                    {L"rawResponseHex", Json::bytes(rawRespVec0, rawRespVec0.size())}
+                }), {L"The IOCTL failed or returned an incomplete response. The zero-initialized user buffer is not proof that the handler ran; use win32Error and driver logs to locate the failing layer."}};
+            }
 
             // 诊断：dump raw response bytes 便于定位 handler 是否被调用。
             const unsigned char* rawResp = reinterpret_cast<const unsigned char*>(&response);
@@ -135,7 +154,7 @@ namespace ks::cli
                 {L"lastStatus", Json::hex(static_cast<std::uint32_t>(response.lastStatus))},
                 {L"setupStatus", Json::hex(static_cast<std::uint32_t>(response.setupStatus))},
                 {L"rawResponseHex", Json::bytes(rawRespBytes, rawRespBytes.size())}
-            }), {L"ALLOCATED_TEST page allocated by driver, bytes written to writable alias, shadow IDT installed, call rcx issued on every active CPU; each fetched byte is #PF→emulator. Return RAX is reported from worker 0 (all workers should agree). verdict=success means CPU-executed emulated bytes produced RAX==expectedReturnValue AND fault count non-zero (emulator did service the fetches)."}};
+            }), {L"The request used one inline worker on a driver-owned test page. A successful verdict requires the returned RAX to match and the handler fault count to increase; it proves the recorded emulation path, not native execution of modified image code."}};
         }
     }
 
@@ -145,7 +164,7 @@ namespace ks::cli
             L"KswordCLI.exe kernel rxpf-exec-proof --hex HEX --expected 0xN --confirm [--json]",
             L"Allocate a driver-owned test page, write custom payload, drive emulated execution via shadow IDT, verify RAX.",
             L"Required: --hex payload bytes (1..64), --expected 0xN RAX value payload is expected to produce, --confirm. Optional: --json.",
-            L"Writes caller bytes to a freshly-allocated driver-owned (ALLOCATED_TEST) page and drives emulated execution of them via the shadow IDT #PF handler on every active CPU. The page is NX and MmChangeImageProtection(mode=1) is never attempted — this bypasses the VTL1 SHA-512 restore-rejection that prevents direct CPU execution of modified EXTERNAL_IMAGE pages. Compare returnedValue to expectedReturnValue to verify payload executed as expected. Exit 0 on verdict=success (RAX matches AND fault count non-zero), 1 otherwise.",
+            L"Writes caller bytes to a driver-owned (ALLOCATED_TEST) page and requests one inline emulation run through the existing shadow IDT path. The current Microsoft Hv preflight may report unsupported. Exit 0 only when the returned RAX matches and the managed fault count is non-zero; this does not establish native execution of modified external image code.",
             callRxpfExecProof});
     }
 }

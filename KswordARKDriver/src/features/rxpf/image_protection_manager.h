@@ -52,11 +52,10 @@ KswRxpfImageProtectionChangeToRwNx(
 
 /*
  * mode=1 restore：对 Record 调用 MmChangeImageProtection(op=1)，
- * 内部计算当前页内容的 SHA-512 作为 reference 让 VTL1 验证通过，PTE 回 RX。
- * 实测在 HVCI guest 下 VTL1 会返回 STATUS_ACCESS_VIOLATION（见注释），
- * 在实体机 root partition 下保留修改字节且 PTE 回 RX。调用后看 Record->LastStatus。
+ * 返回实际恢复状态；失败时保留 ChangeProtectionApplied 和 MDL 供重试。
+ * 外部映像使用整页参考回退，不据此推断 VTL1 内部摘要验证算法。
  */
-VOID
+NTSTATUS
 KswRxpfRestoreExecutableProtection(
     _Inout_ PKSW_RXPF_PAGE_RECORD Record
     );
@@ -69,7 +68,8 @@ KswRxpfImageProtectionWrite(
     _In_ ULONG Length
     );
 
-VOID
+/* 释放失败时记录仍拥有全部未释放资源，调用方不得清槽。 */
+NTSTATUS
 KswRxpfImageProtectionReleaseRecord(
     _Inout_ PKSW_RXPF_PAGE_RECORD Record
     );

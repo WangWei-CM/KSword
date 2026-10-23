@@ -13,7 +13,7 @@
 
 [websec.net Microsoft Warbird 深度分析](https://websec.net/blog/a-deep-dive-into-microsoft-warbird-mss-kernel-mode-dynamic-packer-68ee2c87b251081f55ec8c31) 把 `MmChangeImageProtection` 归为"VTL1 哈希放行的 clipsp.sys 自调用"场景：caller 和 target 都在 clipsp.sys 内、哈希字节也在同模块的 `PAGEHrx` 节，VTL1 哈希 mismatch 时 EPTE 仍保持不可执行，execute 会 fault。该写法把本原语预判为**不可被第三方 driver 外部化**。
 
-相较 Prior-art，本任务新增：(1) 22621 实机复现与 BugCheck/VSL 返回收口；(2) **2026-10-19 26H2 实体机 CI/HVCI/HVCI-Strict/Secure-Boot 全开场景下 mode=1 restore 对修改后字节的放行实证**（§3 稳的、§6 实验 #7；pre=0X48 postWrite=0XB7 postRestore=0XB7），把 Warbird 写法预判为架构不可能的 "非 clipsp caller 持久改写 RX" 做出一个实测反例；(3) `.rxpftst` 非 catalog 证伪；(4) MDL 别名污染修复、SELF_IMAGE_TEST 门禁豁免、Backup auto-restore 工程实现；(5) KernelHookWizard GUI 把整条 Phase G 流程封装为 5 步线性向导。
+相较 Prior-art，本任务新增：(1) 22621 实机复现与 BugCheck/VSL 返回收口；(2) **2026-10-19 26H2 实体机 CI/HVCI/HVCI-Strict/Secure-Boot 全开场景下 mode=1 restore 对修改后字节的放行实证**（§3 稳的、§6 实验 #7；pre=0X48 postWrite=0XB7 postRestore=0XB7），把 Warbird 写法预判为架构不可能的 "非 clipsp caller 持久改写 RX" 做出一个实测反例；(3) `.rxpftst` 既有参数组合的失败样本及归因限制；(4) MDL 别名污染修复、SELF_IMAGE_TEST 门禁豁免、Backup auto-restore 工程实现；(5) KernelHookWizard GUI 把整条 Phase G 流程封装为 5 步线性向导。
 
 ## 2. 环境
 
@@ -53,11 +53,11 @@
 
 ### 稳的（high confidence，被 3/3 对抗 refuter 承认）
 
-- **mode=1 对 CI.dll+0x1000 实测可返 `STATUS_SUCCESS`**。**唯一样本**；NTOS/NDIS/FLTMGR 等其他 catalog 签名模块均**未实测**，不能外推。已验证的 payload 仅 0x90 和 0xCC 两种 1 字节覆盖 @ offset=0。
+- **早期 CI.dll+0x1000 样本记录了 mode=1 的 `STATUS_SUCCESS`**。后续有限模块对照见 next-exp #4；这些结果不能外推为任意 catalog 模块或任意 payload 均可用。
 - **本机 MiFlags & 0x4000 = 1**：原间接证据——`.rxpftst` 实验返 `0xC0000005`，而 `nt!MmChangeImageProtection` 的直接返回码（见 22621-report §Branches 表）里不包含 `0xC0000005`，故该值必然来自 `VslValidateDynamicCodePages` 内部 SEH #PF 转换；因此 VSL/VTL1 分支没有被跳过。**2026-10-19 已由 next-exp #7 R0 直读 `nt!MiFlags` 直接验证**：VM 26300.9457 全防护下 qword `0x000000C4F985FA6C`，bit 0x4000 = 1。
 - **MmChangeImageProtection 4 参数签名** 与 MDL 约束 `(MdlFlags & 7) == 2`、mode 分支语义经 22621 静态反汇编证实。
 - **外层返回 `STATUS_SUCCESS` 仅表示 VslValidate 返回非负值**（可能是 0 也可能是 0x12C）；VTL0 边界无法区分。
-- **mode=1 restore 真的让修改后的字节保留在 RX 页上，26H2 实体机 CI/HVCI/HVCI-Strict/Secure-Boot 全开实证**（2026-10-19 primary evidence，详见 §6 实验 #7 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）：R0 来源姿态 `CI=启用  HVCI=启用  HVCI Strict=启用  安全启动=启用  测试签名=关闭  来源=R0`，MmChangeImageProtection VA `0xfffff80498662300`，别名 VA `0xffffa882a687d000`；函数解析 / MDL 分配 / 页面锁定 / 映像保护变更 / 别名映射 / 写入测试 / RX 恢复七个阶段**全部**返 `(0x00000000)`；字节三元组 `pre=0X48  postWrite=0XB7  postRestore=0XB7`，"HVCI 绕过已确认：MDL 别名写入穿透了映像保护，恢复后修改仍然保留（0x48 → 0xb7）"。该样本独立于 CI.dll+0x1000 单样本，直接把之前 "Phase F SUCCESS 不独立证明放行修改字节" 的保留态升级为 **已证伪**；但 moduleName/offset、UBR、CI.dll version/sha256、nt-symbol-identity.json 等 §2 TBD-OPS 字段仍待操作者在实体机上补齐。
+- **26H2 实体机单页实验记录了恢复调用成功后的修改字节保留**（2026-10-19 primary evidence，详见 §6 实验 #7 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）：R0 来源姿态 `CI=启用  HVCI=启用  HVCI Strict=启用  安全启动=启用  测试签名=关闭  来源=R0`，MmChangeImageProtection VA `0xfffff80498662300`，别名 VA `0xffffa882a687d000`；函数解析 / MDL 分配 / 页面锁定 / 映像保护变更 / 别名映射 / 写入测试 / RX 恢复七个阶段**全部**返 `(0x00000000)`；字节三元组 `pre=0X48  postWrite=0XB7  postRestore=0XB7`，"HVCI 绕过已确认：MDL 别名写入穿透了映像保护，恢复后修改仍然保留（0x48 → 0xb7）"。该记录支持该单页的字节保留；它不是 Phase F auto-restore 的同一调用链，也未提供同一实体机的 live PTE 或 CPU 执行证据，不能据此证明整个 RXPF 流程或执行能力。moduleName/offset、UBR、CI.dll version/sha256、nt-symbol-identity.json 等 §2 TBD-OPS 字段仍待补齐。
 
 ### 必须撤回（REFUTED by workflow audit + 对抗 refuter 过验）
 
@@ -137,10 +137,10 @@ MmChangeImageProtection(mode=1)
       └─ MmUnlockPages
 ```
 
-**VTL1 return path**：
-- 若 digest match → `STATUS_SUCCESS`
-- `.rxpftst` 等 catalog 外段 → `STATUS_ACCESS_VIOLATION (0xC0000005)` （SEH #PF 转换）
-- 没验证到会否有 `STATUS_INVALID_IMAGE_HASH (0xC0000428)` 的情况（我们提供的 digest 一直是从 current content 算的，总是 match）
+**VTL0 可见的返回路径与证据边界**：
+- 外层将 VSL 非负返回值当作成功；这不暴露 VTL1 的内容验证算法，也不证明 digest 匹配。
+- `.rxpftst` 样本观察到 `STATUS_ACCESS_VIOLATION (0xC0000005)`；模块身份、节属性、签名与参考缓冲参数尚未隔离，不能把原因确定为 catalog 外段。
+- 未形成 `STATUS_INVALID_IMAGE_HASH (0xC0000428)` 或错误 digest 的对照证据。EXTERNAL_IMAGE 根本不传本项目的 SHA-512 digest，不能声称该组实验中 digest 总是匹配。
 
 **第二次 `MiSetImageProtection` 的 finalProt 决议**：当 VSL 返回 ≥ 0，`MmChangeImageProtection` 调第二次 `MiSetImageProtection(entry, StartVa, ByteCount, finalProt)` 把 PTE 翻回 RX。本仓库 `KswRxpfQuerySectionProtection`（`image_protection_manager.c:285-339`）**由 PE 节头 characteristics 推算 originalProtection=0x20**，不采样 live PTE/SLAT；所以响应里的 `originalProtection` 字段是 PE 节头静态解析的产物，不等于 nt 内核对该页 PTE 的实际回读。要独立确认 PTE 真回 RX，必须另跑 next-exp #8 的 live PTE qword 探针。
 
@@ -204,14 +204,16 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 | 0x908 | UNREGISTER | 0x0022A420 | RECORD_REQUEST | 24 | PAGE_RESPONSE | 192 |
 | 0x909 | SELF_TEST | 0x0022A424 | RECORD_REQUEST | 24 | SELF_TEST_RESPONSE | 56 |
 | 0x90A | SET_HOOK_POINT | 0x0022A428 | HOOK_POINT_REQUEST | ... | HOOK_POINT_RESPONSE | ... |
-| 0x90B | QUERY_BACKUP | 0x0022A42C | QUERY_BACKUP_REQUEST | 32 | QUERY_BACKUP_RESPONSE | 104 |
+| 0x931 | QUERY_BACKUP | 0x0022A4C4 | QUERY_BACKUP_REQUEST | 32 | QUERY_BACKUP_RESPONSE | 104 |
 
 （原表 CTL_CODE 列是写报告时手算错位的笔误；测试代码里的 C# `CTL_CODE` 公式写对了，实验结果不受影响。）
 
+当前 QUERY_BACKUP 已从 `0x90B` 迁移到 `0x931`：旧完整 CTL_CODE 与 FILE_IRP_SUBMIT 冲突，注册表会先命中文件 IRP handler。新旧 R3/R0 必须使用同一协议头重新构建；旧编号不能作为 RXPF 回退入口。
+
 **新增功能号常量**（`shared/driver/KswordArkRxPfIoctl.h`）：
 
-- `KSWORD_ARK_IOCTL_FUNCTION_RXPF_QUERY_BACKUP = 0x90BUL`
-- `IOCTL_KSWORD_ARK_RXPF_QUERY_BACKUP = CTL_CODE(0x22, 0x90B, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0022A42C`
+- `KSWORD_ARK_IOCTL_FUNCTION_RXPF_QUERY_BACKUP = 0x931UL`
+- `IOCTL_KSWORD_ARK_RXPF_QUERY_BACKUP = CTL_CODE(0x22, 0x931, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0022A4C4`
 
 用途：读 `Record->Backup`（Register(CAPTURE_BACKUP) 时拷贝的原页快照）的任意子段，供 `KernelHookWizard` 在 Unregister(SKIP_BACKUP_RESTORE) 之前把原字节缓存到 R3 作恢复用（见 §5.7 结构、§7.3 wizard）。dispatch 注册在 `KswordARKDriver/src/dispatch/ioctl_registry.c`，handler 在 `KswordARKDriver/src/features/rxpf/rxpf_ioctl.c` 的 `KswordARKRxpfIoctlQueryBackup` 和 `rxpf_runtime.c` 的 `KswRxpfRuntimeQueryBackup`。
 
@@ -357,7 +359,7 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 | 4 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+Write(0xCC@0)+Unregister | 未捕获到（立即蓝屏） | 立即 BSOD | **无 Arg 捕获** |
 | 5 | CI.dll +0x1000 (EXTERNAL_IMAGE) | Register+Change+**no write**+Unregister | `0x00000000` SUCCESS | OK，二次 Register origProt=0x20 ✓ | — |
 
-实验 5 是关键对照组：**不写入时 mode=1 可以干净往返**。实验 3/4 的 bugcheck 证明 mode=1 只翻 PTE 不还原内容。实验 1/2 的 `0xC0000005` 否决了"VTL1 用 digest 做 memcmp 后拒"的假设（内容未改也拒），真因是 `.rxpftst` 不在 catalog 内。
+实验 5 是不写入对照组，记录了该样本的 mode=1 成功返回。实验 3/4 的早期蓝屏记录不能证明 mode=1 后的内容或执行状态；后续收集的 0xFC 仅证明 mode=2 的 NX 页面被取指命中（见 next-exp #2）。实验 1/2 的 `0xC0000005` 也未隔离参考参数等混淆变量，不能据此确定 catalog 或 digest 拒绝原因。
 
 ### Phase F 完成（2026-10-18 补）
 
@@ -369,11 +371,11 @@ status = g_KswRxpfImageProtection.MmChangeImageProtection(
 
 | # | 对象 | 操作 | mode=1 返回 | VM 存活 |
 |---|------|------|-------------|---------|
-| 7 | 任意已加载内核模块页 (EXTERNAL_IMAGE，26H2 实体机) | Register(CB)+Change(mode=2)+Write(0xB7@?)+Unregister（**不走 auto-restore**，mode=1 restore 真的让修改字节保留） | `0x00000000` SUCCESS（函数解析/MDL 分配/页面锁定/映像保护变更/别名映射/写入测试/RX 恢复均 `(0x00000000)`） | **OK**（26H2 实体机 CI=启用 HVCI=启用 HVCI Strict=启用 安全启动=启用，R0 来源） |
+| 7 | 实体机单个目标页（26H2，模块身份待补） | R0 映像保护/MDL 别名写入/恢复实验，flags=`0x7`，记录字节 `0x48→0xB7→0xB7`；不作为 RXPF Register/Unregister 全流程验收 | `0x00000000` SUCCESS（函数解析/MDL 分配/页面锁定/映像保护变更/别名映射/写入测试/RX 恢复均 `(0x00000000)`） | **OK**（26H2 实体机 CI=启用 HVCI=启用 HVCI Strict=启用 安全启动=启用，R0 来源） |
 
-实验 #7 是本任务第一条 **26H2 实体机 primary evidence**（2026-10-19，来源于 R0 日志 `[07:22:21.863]..[07:22:24.431]`，详见 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）：目标 `0xFFFFF80429FE0000`、flags=`0x7`、funcOverride=`不可用`，别名 VA `0xffffa882a687d000`，MmChangeImageProtection VA `0xfffff80498662300`；**字节三元组 `pre=0X48  postWrite=0XB7  postRestore=0XB7`，恢复后修改仍然保留**；R0 结论原话 "HVCI 绕过已确认：MDL 别名写入穿透了映像保护，恢复后修改仍然保留（0x48 → 0xb7）"。本行将 §3 "稳的" 列表第 2 项（CI.dll+0x1000 仅 1 样本）扩展到 26H2 实体机的任意已加载内核模块；具体 moduleName/offset 由 R0 日志未直接给出，`<TBD-OPS: 对照 277 模块枚举表+PageBase 0xFFFFF80429FE0000 填 moduleName/offset>`。
+实验 #7 是本任务第一条 **26H2 实体机 primary evidence**（2026-10-19，来源于 R0 日志 `[07:22:21.863]..[07:22:24.431]`，详见 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）：目标 `0xFFFFF80429FE0000`、flags=`0x7`、funcOverride=`不可用`，别名 VA `0xffffa882a687d000`，MmChangeImageProtection VA `0xfffff80498662300`；**字节三元组 `pre=0X48  postWrite=0XB7  postRestore=0XB7`，恢复后修改仍然保留**；R0 结论原话 "HVCI 绕过已确认：MDL 别名写入穿透了映像保护，恢复后修改仍然保留（0x48 → 0xb7）"。该证据仅覆盖所记录的一个目标页；目标所属模块和页内位置尚未确定，不能扩展为任意已加载内核模块，也不能把它认定为 CI.dll+0x1000 的复现。具体 moduleName/offset 由 R0 日志未直接给出，`<TBD-OPS: 对照 277 模块枚举表+PageBase 0xFFFFF80429FE0000 填 moduleName/offset>`。
 
-Phase F 实现：`image_protection_manager.c:KswRxpfImageProtectionReleaseRecord` 在 alias 还 RW 的窗口里（Protect(RO)/Unmap 之前）把 Record->Backup 整页拷到 WritableAlias，同步 CurrentContent。然后 PrepareReferenceDigest 算到的 digest == 原字节的 SHA-512 == 当前物理页内容的 SHA-512 → VTL1 比对放行，PTE 回 RX，内容是原值，VM 存活。
+Phase F 实现：`image_protection_manager.c:KswRxpfImageProtectionReleaseRecord` 在 alias 还 RW 的窗口里（Protect(RO)/Unmap 之前）把 Record->Backup 整页拷到 WritableAlias，同步 CurrentContent。对 EXTERNAL_IMAGE，`KswRxpfPrepareReferenceDigest` 返回 `STATUS_NOT_SUPPORTED`，恢复调用走 `(PageBase, PAGE_SIZE)` fallback，不传本项目计算的 SHA-512 digest。该流程在 mode=1 前已还原内容，故成功返回不能归因为 digest 比对，更不能单独证明 VTL1 放行修改字节；具体 VTL1 验证算法仍未测明。
 
 ### 新 flag：FLAG_SKIP_BACKUP_RESTORE (0x4)
 
@@ -384,7 +386,7 @@ Unregister 可带 `KSWORD_ARK_RXPF_FLAG_SKIP_BACKUP_RESTORE` 让 ReleaseRecord *
 - allowed-mask：`rxpf_ioctl.c` 的 `KswordARKRxpfIoctlUnregisterPage` 已加
 - 透传：`rxpf_runtime.c:KswRxpfRuntimeUnregisterPage` 根据 header flag 写 Record
 
-**mode=1 的 SUCCESS 返回值不区分"内容原值"和"内容已改但 digest 匹配"**。两种都返 SUCCESS，区别只在 CPU 执行到页面时的后果。
+**mode=1 的 SUCCESS 返回值本身不能区分页面内容状态，也不能证明 digest 匹配**。内容是否保留需独立读回，实际可执行状态和 CPU 是否执行修改字节还需各自的证据。
 
 ## 7. 已修的两个真实缺陷（都保留，与结论无关都有价值）
 
@@ -549,7 +551,7 @@ function Format-NTSTATUS([int32]$v) {
 | NTSTATUS | 符号 | 含义 |
 |----------|------|------|
 | `0x00000000` | STATUS_SUCCESS | 成功 |
-| `0xC0000005` | STATUS_ACCESS_VIOLATION | VSL/VTL1 内部 #PF 被 SEH 捕获（典型：目标不在 catalog） |
+| `0xC0000005` | STATUS_ACCESS_VIOLATION | 观察到访问异常；具体产生层级及模块身份、参考参数等因素尚未隔离，不能等同于 catalog 拒绝 |
 | `0xC000000D` | STATUS_INVALID_PARAMETER | MDL flags/mode/length/ByteOffset/ByteCount 不符 |
 | `0xC0000018` | STATUS_CONFLICTING_ADDRESSES | address+length 不在模块范围内 |
 | `0xC0000225` | STATUS_NOT_FOUND | MiLookupDataTableEntry 找不到模块 |
@@ -578,7 +580,7 @@ Win32 错误转 NTSTATUS 的常见对照：
 9. **设备名是 `\\.\KswordARKLog`**，不是 `\\.\KswordARK`。
 10. **构建**：`Projects` 参数不支持；`Invoke-KSwordBuildCheck.ps1` 构建**全部**项目。单项目用直接 MSBuild。
 11. **mode=1 SUCCESS 不保证内容恢复**。必须自己管理 Backup/Restore。
-12. **自签驱动的自建 .text 段**（`.rxpftst` 之类）走 mode=1 恒 `0xC0000005`，不在 catalog 内。只能用 catalog 内的 Microsoft 签名模块（CI.dll / NTOS / NDIS / FLTMGR 等）。
+12. **`.rxpftst` 样本**在既有参数组合下返回 `0xC0000005`；尚未隔离签名、节属性与参考缓冲参数，不能推广为所有自签段恒拒或只有 catalog 内模块可用。
 
 ## 12. 相关 memory 文件（.claude/memory/）
 
@@ -605,20 +607,18 @@ Win32 错误转 NTSTATUS 的常见对照：
 - **PatchGuard 的检测窗口**是几分钟到几小时，取决于扫描周期。改了内容即使没执行到，PG 也会最终 bugcheck
 - **测试证书签名的驱动**在 testsigning on 的 VM 上可以加载，但不要尝试在 production HVCI 机上用
 - **禁止**在线符号服务器，禁止创建分支
-- 本任务已在两处环境验证：(1) Hyper-V 来宾（CI/HVCI/HVCI-Strict/Secure Boot 全开，详见 §6 实验 #1–#6 + §15 next-exp #4/#7/#8/#2 已完成项）；(2) 26H2 实体机（全防护开启，详见 §6 实验 #7 primary evidence 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）；两处结论一致（mode=1 restore 对修改后字节放行、PTE 顶字节 0x89↔0x09 直接可读、Phase G keep-modified 触发 0xFC NX 捕获）
+- 本任务已在两处环境验证：(1) Hyper-V 来宾（CI/HVCI/HVCI-Strict/Secure Boot 全开，详见 §6 实验 #1–#6 + §15 next-exp #4/#7/#8/#2 已完成项）；(2) 26H2 实体机（全防护开启，详见 §6 实验 #7 primary evidence 与 [`.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md`](../.claude/memory/ksword-rxpf-mode1-realhardware-26h2-confirmed.md)）；两处证据需分别使用：实体机记录单页字节三元组和恢复调用状态；live PTE 的 0x89↔0x09 与 0xFC NX 捕获来自所列 VM 实验，不能改写为实体机也完成了这两项验收
 
 ## 15. 下一步接续者该做的
 
 本节 next-exp 编号与 [`.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md`](../.claude/memory/ksword-rxpf-mode1-restore-structural-fail.md) 一致。已完成的（#3 keep-modified / #5 auto-restore / #6 Phase F 整合 / 26H2 primary evidence #7）不再重复列出。
 
-- **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照 — 归档**（2026-10-19 决策，由 §6 #7 primary evidence 间接回答）：
-  - **原目标**：临时解除 EXTERNAL_IMAGE 的 `STATUS_NOT_SUPPORTED` 短路，分别传 (随机 32B / SHA-256(页) / SHA-512(页)[0x20,0x40))，看 mode=1 返回能否区分 digest 内容——关掉 "VTL1 验 digest" 归因争议。
-  - **已间接回答**：§6 实验 #7 (26H2 实体机 primary evidence) 和 next-exp #2 (0xFC BugCheck) 一起证明，mode=1 走 EXTERNAL_IMAGE 的 fallback 分支（`refVA=pageBase, refLen=PAGE_SIZE`，见 `image_protection_manager.c:KswRxpfRestoreExecutableProtection` 的 else 分支）对 CI.dll+0x1000 返回 `STATUS_SUCCESS` 且**保留修改字节**（0x48→0xB7→0xB7）。这说明 **VTL1 在 fallback 模式下未严格验内容**（若严格验 SHA-X(页)，修改字节会使 digest 不匹配并返错）。
-  - **残留小尾巴**（不影响主结论，供后续接续者选做）：fallback 分支里 VTL1 到底做了什么？两种候选假设：
-    - H1：VTL1 识别 `refLen == PAGE_SIZE` 为"全页模式"，跳过 digest 比对（可能依赖其他鉴权）
-    - H2：VTL1 调用 `MmChangeImageProtection` 时根本没有强制 digest 比对的通路（纯 SLAT 翻位操作）
-    - 要分辨 H1/H2，需扩展 CHANGE_PAGE 协议传 32B digest + 解除 EXTERNAL_IMAGE 短路 + 三组对照（工程量约 100 行驱动改动 + Rebuild + 签名部署 + 实验，约 1 小时）。本会话决策推迟，理由：核心结论（HVCI mode=1 可用于 CI 旁路）已由 §6 #7 和 next-exp #2 直接证据覆盖；#1 的边际价值仅是进一步细化 VTL1 的内部语义，不改变可利用性结论。
-  - **归档不等于否决**：若后续发现 §3 "稳的" 结论在某台机器上失效、或 primary evidence 需要进一步归因到 VTL1 的具体校验算法时，接续者可按原设计重启 #1，参照 `image_protection_manager.c:1302 KswRxpfPrepareReferenceDigest` 的 EXTERNAL_IMAGE 分支和 `shared/driver/KswordArkRxPfIoctl.h:_KSWORD_ARK_RXPF_RECORD_REQUEST` 的 header.flags 扩展位。
+- **next-exp #1 — EXTERNAL_IMAGE bad-digest 对照 — 归档但未测量**（保留原 2026-10-19 归档时间）：
+  - **原目标**：比较不同参考缓冲内容与 mode=1 返回值，区分 VTL1 验证算法。
+  - **现有证据未回答该问题**：§6 #7 记录单页恢复后的字节保留，next-exp #2 记录 NX 取指失败；两者都没有构成错误 digest 对照，且不能合并为同一个目标、机器和调用链的证据。
+  - EXTERNAL_IMAGE 的当前实现传 `(PageBase, PAGE_SIZE)`，不传本项目 SHA-512 digest。VTL1 是否检查内容、检查哪种参考数据以及是否采用哈希，仍属未测明；不能据外层成功状态声称其跳过验证或严格验证已被否定。
+  - 归档是历史排期记录，不等于算法已被证明，也不授权执行新的内核修改实验。
+
 - **next-exp #2 — BugCheck Arg 捕获 — 部分完成（已修订过度宣称）**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
   - **流程**：`CrashDumpEnabled=2 + AlwaysKeepMemoryDump=1 + AutoReboot=1` 配好；用 `KswordCLI memory change-image-protection --address <CI.dll+0x1000> --operation 2 --flags 0x1`（mode=2 翻 NX + writeTest）；R0 返回 `imageProtectStatus=0x0` + `writeTestStatus=0x0` + `restoreStatus=0xC00000BB`；约 1 分钟后 VM 自发 BSOD + AutoReboot；拉 `C:\WINDOWS\Minidump\101926-4203-01.dmp` 到宿主用 cdb `!analyze -v` 分析。
   - **BugCheck 完整参数**（minidump 原文）：
@@ -639,7 +639,7 @@ Win32 错误转 NTSTATUS 的常见对照：
   - 判据工具链：`cdb -z <dmp> -y C:\Symbols -cf <script>`（本地符号路径，禁在线符号服务器）；minidump 虽然只有寄存器+栈但 BugCheck Code/Arg1-4 从 dump header 可直读。
   - **2026-10-19 后续补：6 次 BugCheck 0xFC 独立复现**（通过 driver 补 26300 build profile + GUI KernelHookWizard Phase G 流程走通 Register/Change(mode=2) 后）：Arg1 全部落在 CI.dll + **`0x1598`**（基址不同是 ASLR）；Arg2 PTE qword 顶字节恒为 `0x89`（bit 63 NX=1）。6 次独立 BugCheck 一致**证明 mode=2 的 R-only NX 位真的到 CPU 并被 OS 的 fetch 请求命中**。但同时发现**结构性缺口**：GUI 异步点击 "页 3 Write → 页 4 Unregister" 的用户态间隔（毫秒级）远大于 CI.dll+0x1598 这个高频 .text 入口的 CPU fetch 间隔，页面 PTE 被翻 NX 的瞬间 CPU 就已经 fetch 蓝屏，用户来不及把 payload 写入 → 没有机会观测到 "Arg1 == payload 地址" 的直接证据。要跨过这个窗口必须把 Change(mode=2)+Write(payload)+Change(mode=1 restore)+Unregister 四步合成 R0 一次原子调用（候选 Z/F），不作本会话推进（see next-exp #10）。
 - **next-exp #4 — 扩模块覆盖 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 全防护开启）：
-  - **结论：mode=1/2 对 catalog 内 Microsoft 签名的 4 KB 常规页模块可外推**，但 **ntoskrnl 本身的 .text 用 2 MB 大页布局，MmChangeImageProtection 结构性拒绝大页**（独立于签名的第二道门）。
+  - **结论限于表中已测模块与目标页**。成功的 4 KB 页面不证明任意 catalog 模块均可用；ntoskrnl 的所测目标是 2 MB 大页并返回 `CONFLICTING_ADDRESSES`，也不能仅据此概括所有 ntoskrnl .text 页。
   - 对照数据（三个成功模块的 PTE top byte 全部从 `0x09` 翻到 `0x89` 又回 `0x09`，模式完全一致）：
 
 | 模块 | 目标 VA 偏移 | 页类型 | `imageProtectStatus` | PTE qword |
@@ -650,7 +650,7 @@ Win32 错误转 NTSTATUS 的常见对照：
 | **CI.dll**（对照） | base + 0x1000 | 4 KB 常规 | `0x0 SUCCESS` | 同上 ✓ |
 
   - **ntoskrnl 大页硬门禁的意义**：之前认为 "nt 内核能被 mode=2 Change" 的推理在本机 build 结构上成立但实践上不可达——nt .text 以 2 MB 大页映射，MmChangeImageProtection 的内部逻辑拒绝接受大页目标。要操作 nt 本身必须先想办法让 nt .text 切回 4 KB 页（例如重编译 kernel 或靠调试 flag），本会话未探索。
-  - §6 实验 #7 的 26H2 primary-evidence PageBase `0xFFFFF80429FE0000` 对应 size 0x1450000（和 ntoskrnl 相同），结合本次 #4 发现，说明实体机 primary-evidence 的那次 mode=1 成功**不是** nt 本身，而是**另一个 catalog 内常规页模块**——需要 ops 在实体机对照 R0 日志里的模块枚举表确定具体 moduleName（见 §6 中 `<TBD-OPS>` 占位符）。
+  - §6 实验 #7 的 26H2 primary-evidence PageBase `0xFFFFF80429FE0000` 仍缺模块身份和实际页类型。VM 中一个 ntoskrnl 大页样本的失败不能反推出实体机成功样本必属于另一模块；需要对照原始模块枚举和页面证据补齐（见 §6 中 `<TBD-OPS>` 占位符）。
 - **next-exp #7 — MiFlags qword 直读 — 已完成**（2026-10-19，VM 26H2 build 26300.9457 CI/HVCI/HVCI-Strict/Secure Boot 全开）：
   - 原条目的 `RVA 0xD1EA48` **已过期**（可能是旧 build 偏移），本机 build 26300.9457 的 PDB 符号查询 (`ntkrnlmp.pdb` GUID `C29EBFB06B78B3C020DCA66D99713F9E` Age=1) 显示 `MiFlags` 真实 RVA = **`0xFC6AC8`**（public symbol, segment 27:0x1AC8）。
   - R0 读 `nt base + 0xFC6AC8 = 0xfffff803abbc6ac8` → `query-pte` 得 PA `0x1013C6AC8`（2 MB large page, pde `0x8A000001012009E3`, NX=1）→ `read-phys` 回 8 字节 `6c fa 85 f9 c4 00 00 00` ⇒ MiFlags qword = **`0x000000C4F985FA6C`**。
@@ -685,7 +685,7 @@ Win32 错误转 NTSTATUS 的常见对照：
 
 - `FLAG_SKIP_BACKUP_RESTORE = 0x4` 已加（§5.3）
 - Unregister 可选跳过 auto-restore
-- `IOCTL_QUERY_BACKUP (0x90B)` 已上线（§5.2/§5.7），Phase G R3 可读 Backup 恢复原字节
+- `IOCTL_QUERY_BACKUP (0x931)` 已上线（§5.2/§5.7），Phase G R3 可读 Backup 恢复原字节
 - `KernelHookWizard` GUI 已把整条链封装（§7.3）
 
 本报告路径: `docs/RXPF-mode1-VTL1-ABI-report-20261018.md`

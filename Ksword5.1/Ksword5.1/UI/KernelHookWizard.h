@@ -28,6 +28,7 @@
 
 #include <QDialog>
 #include <QByteArray>
+#include <QList>
 #include <QString>
 #include <cstdint>
 
@@ -37,12 +38,19 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QStackedWidget;
+class QCloseEvent;
 QT_END_NAMESPACE
 
 class CodeEditorWidget;
 
 namespace ks::ui
 {
+    // 单次实际写入范围的原字节；多次写入仍属于同一个页备份身份。
+    struct KernelHookBackupRange
+    {
+        unsigned long offset = 0;
+        QByteArray bytes;
+    };
     // ------------------------------------------------------------------------
     // KernelHookPlan：wizard 跨步共享的状态；每一步只读/写与自己相关的字段，
     // 下一步只读上一步的产物，不重新计算。
@@ -60,6 +68,12 @@ namespace ks::ui
         unsigned long originalProtection = 0; // Register 回显的保护属性（期望 0x20=RX）
         unsigned long aliasProtection = 0;    // Change 后 WritableAlias 保护（期望 0x4=RW）
         QByteArray backupBytes;             // QueryBackup 读到的原字节（用于恢复）
+        bool recordPrepared = false;        // 当前记录已成功变更为 RW/NX。
+        bool payloadPending = false;        // 已尝试写入，关闭前必须恢复并回读。
+        bool recoveryRecord = false;        // 恢复阶段新注册的记录，其 Backup 含补丁。
+        bool originalBytesWritten = false;  // 已向恢复记录写回原字节，清理失败可直接重试。
+        QList<KernelHookBackupRange> restoreRanges; // 当前页所有已写范围的原字节。
+        bool hasUncachedWrites = false;     // 存在没有完整原字节证据的写入。
 
         // 第 3 步 Write payload 后锁定：
         QByteArray payload;                 // 要写入的 payload（1..PAGE_SIZE 字节，由用户决定）
@@ -90,6 +104,12 @@ namespace ks::ui
         explicit KernelHookWizard(QWidget* parent = nullptr);
         ~KernelHookWizard() override;
 
+    protected:
+        // 关闭与 Esc 共用异步恢复；在途请求及未完成恢复不能丢弃记录。
+        void closeEvent(QCloseEvent* event) override;
+        void reject() override;
+        bool eventFilter(QObject* watched, QEvent* event) override;
+
     private:
         // UI 构造：每个 build*Page() 返回一个 QWidget 填进 QStackedWidget。
         void initializeUi();                // 装 stackedWidget + 导航按钮
@@ -102,6 +122,7 @@ namespace ks::ui
         // 步骤导航：
         void goTo(int step);                // 切到第 step 页，更新按钮启用态
         void updateNavButtons();            // 根据 m_currentStep 与 m_busy 更新按钮
+        void updateTargetFromInputs();      // 持有旧目标时先异步收尾，再切换目标快照。
 
         // 异步任务（走 QtConcurrent + QFutureWatcher，参照 RxpfPage）：
         void refreshModules();              // 枚举已加载内核模块填 m_moduleCombo
@@ -120,6 +141,10 @@ namespace ks::ui
         KernelHookPlan m_plan;              // 跨步共享状态
         bool m_busy = false;                // 是否有后台任务在跑
         int m_currentStep = 0;              // 0~4
+        bool m_closeAfterCleanup = false;   // 恢复成功后重试关闭当前向导。
+        bool m_targetChangePending = false; // 已选择新目标，等待旧目标收尾。
+        bool m_prepareAfterCleanup = false; // 重复准备先清理当前记录，再继续准备。
+        KernelHookPlan m_requestedTarget;   // 待切换的目标参数，与正在恢复的目标分开。
 
         QStackedWidget* m_stack = nullptr;  // 5 页容器
         QPushButton* m_prevBtn = nullptr;   // 上一步

@@ -7,11 +7,12 @@
  *            第 14 项（#PF）为计数桩，LIDT 后立即 SIDT 回读；只问 IDTR 是否生效。
  *   Phase C：仅当 Phase B 报告 LIDT 生效时触发一次已知的用户态非法读，看
  *            计数桩是否被交付（计数器是否被 lock inc 修改）；桩内链回原始处理器。
- *   Phase D：无论 Phase C 结果如何，立即 LIDT 回退到原 IDTR，释放拷贝，恢复亲和性。
+ *   Phase D：确认同一 CPU 的 IDTR 回到原值后才释放拷贝；未确认时保留资源，
+ *            禁止正常卸载并成功返回以保持驱动驻留，随后恢复线程亲和性。
  *
- * 本驱动不长期挂钩任何向量、不修改任何页保护、不写入内核映像；LIDT 与 IDT 拷贝
- * 在当前 CPU 上保留的时间仅限于 Phase C 的几行代码。SIDT 变化可能来自 Hyper-V
- * 的指令模拟，计数器增量可能来自异常重注入；这些语义限制在报告里写明，不自称
+ * 本驱动不修改页保护、不写入内核映像；正常恢复时 IDT 拷贝只短暂保留。
+ * 恢复未确认时该 CPU 的副本、计数桩链回状态及驱动会继续驻留，不能正常卸载。
+ * SIDT 变化可能来自 Hyper-V 的指令模拟，计数器增量可能来自异常重注入；不自称
  * 已经证伪或证实其中任何一条。
  *
  * 本文件是独立的 x64 WDM 示例，不加入 KSword 产品驱动，不需要用户态组件。
@@ -139,9 +140,9 @@ __declspec(align(16)) volatile PVOID g_VbsOriginalPfHandler = NULL;
 extern void VbsPfCountingStub(void);
 
 DRIVER_INITIALIZE DriverEntry; /* 声明系统加载入口并保留 WDK 的调用约定。 */
-DRIVER_UNLOAD VbsObserverUnload; /* 声明无资源需要清理的卸载入口。 */
+DRIVER_UNLOAD VbsObserverUnload; /* 仅在 IDTR 已确认恢复、无保留资源时允许卸载。 */
 
-/* 用途：允许系统正常卸载；输入为驱动对象，无输出、无持久资源。 */
+/* 用途：正常恢复路径允许卸载；恢复未确认时 DriverUnload 会置空，不能进入此回调。 */
 _Use_decl_annotations_
 VOID VbsObserverUnload(PDRIVER_OBJECT DriverObject)
 {
@@ -190,10 +191,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     ULONG hypervisorPresent; /* 仅表示 CPUID 通告存在 hypervisor，不表示 VBS。 */
     BOOLEAN sameProcessor; /* 比较两个处理器身份字段，不使用含填充的结构比较。 */
     BOOLEAN sameIdtr; /* 比较两次可见 IDTR 的基址和限长。 */
-    BOOLEAN phaseAComplete; /* Phase A 任一子查询失败都降级为 PARTIAL。 */
+    BOOLEAN phaseAComplete; /* Phase A 任一子查询或连续快照不一致都降级为 PARTIAL。 */
+    PROCESSOR_NUMBER currentProc = { 0 }; /* 选定处理器后，整个采样与恢复过程保持该亲和性。 */
+    GROUP_AFFINITY targetAffinity = { 0 }; /* 原始 IDTR 必须在固定到目标 CPU 之后读取。 */
+    GROUP_AFFINITY savedAffinity = { 0 }; /* 每条结束路径都恢复调用线程原有亲和性。 */
 
     UNREFERENCED_PARAMETER(RegistryPath); /* 不读取或修改任何服务注册表配置。 */
-    DriverObject->DriverUnload = VbsObserverUnload; /* 注册标准卸载回调，不安装异常钩子。 */
+    DriverObject->DriverUnload = VbsObserverUnload; /* 正常恢复后允许卸载；未确认恢复时撤销此入口。 */
     version.dwOSVersionInfoSize = sizeof(version); /* 按公开接口要求填写结构尺寸。 */
     versionStatus = RtlGetVersion(&version); /* 只读查询当前 Windows 的基础版本。 */
     __cpuid(processorInfo, 1); /* 只读查询处理器及 hypervisor 通告的特征位。 */
@@ -211,6 +215,12 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         &ciInformation,
         sizeof(ciInformation),
         NULL); /* 在 PASSIVE_LEVEL 查询，不把失败当作 HVCI 关闭。 */
+
+    /* 先固定 CPU 再采集原始 IDTR；日志与 PASSIVE_LEVEL 缺页期间也不迁移。 */
+    (VOID)KeGetCurrentProcessorNumberEx(&currentProc); /* 此时只选择目标，不采集恢复依据。 */
+    targetAffinity.Group = currentProc.Group; /* 显式使用处理器组，避免跨组 CPU 编号混淆。 */
+    targetAffinity.Mask = ((KAFFINITY)1) << currentProc.Number; /* 单 CPU 亲和性保持至清理结束。 */
+    KeSetSystemGroupAffinityThread(&targetAffinity, &savedAffinity); /* 后续 SIDT 与 LIDT 都在此 CPU。 */
 
     __try /* 只记录 Windows 提供的可捕获异常，不宣称能够捕获 bugcheck。 */
     {
@@ -236,7 +246,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         processorBefore.Number == processorAfter.Number); /* 检查重复读取的 CPU 身份。 */
     sameIdtr = (original.Base == repeated.Base &&
         original.Limit == repeated.Limit); /* 检查未更改 IDTR 时的同值预期。 */
-    phaseAComplete = NT_SUCCESS(versionStatus) && NT_SUCCESS(ciStatus) && NT_SUCCESS(sampleStatus);
+    phaseAComplete = NT_SUCCESS(versionStatus) && NT_SUCCESS(ciStatus) &&
+        NT_SUCCESS(sampleStatus) && sameProcessor && sameIdtr; /* 快照一致性同样属于 Phase A 结果。 */
 
     VbsObserverRecord(
         "[VbsObserver] OS_STATUS=0x%08lX OS=%lu.%lu build=%lu HYPERVISOR_PRESENT=%lu\n",
@@ -297,21 +308,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
             "[VbsObserver] PHASE_B=NOT_TESTED PHASE_C=NOT_TESTED PHASE_D=NOT_TESTED\n");
         VbsObserverRecord(
             "[VbsObserver] === INCOMPLETE ===\n");
+        KeRevertToUserGroupAffinityThread(&savedAffinity); /* 只读采样失败时尚未改动 IDTR。 */
         VbsObserverFlushToRegistry();
         return sampleStatus;
     }
-
-    /*
-     * 固定到当前 CPU：Ex 版本只处理当前处理器组，与我们的单 CPU 测量目标匹配；
-     * 保存返回值用于 KeRevertToUserGroupAffinityThreadEx 的配对调用。
-     */
-    PROCESSOR_NUMBER currentProc = { 0 };
-    (VOID)KeGetCurrentProcessorNumberEx(&currentProc);
-    GROUP_AFFINITY targetAffinity = { 0 };
-    GROUP_AFFINITY savedAffinity = { 0 };
-    targetAffinity.Group = currentProc.Group;
-    targetAffinity.Mask = ((KAFFINITY)1) << currentProc.Number;
-    KeSetSystemGroupAffinityThread(&targetAffinity, &savedAffinity);
 
     /*
      * 本阶段的本地变量集中声明：MSVC 允许混合声明，但集中声明让 __try 的
@@ -325,7 +325,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     NTSTATUS restoreStatus = STATUS_SUCCESS; /* 还原时是否抛出可捕获异常。 */
     NTSTATUS pfStatus = STATUS_UNSUCCESSFUL; /* Phase C 读取非法地址的异常码。 */
     BOOLEAN lidtInstalled = FALSE; /* LIDT 后 SIDT 回读的新基址是否等于我们指定的基址。 */
-    BOOLEAN lidtAttempted = FALSE; /* 是否真的执行了 __lidt（分配失败则不执行）。 */
+    BOOLEAN lidtAttempted = FALSE; /* 在执行 LIDT 前设置，异常后仍必须确认当前 IDTR。 */
+    BOOLEAN restoreConfirmed = FALSE; /* 唯有原 IDTR 的完整回读匹配才允许释放共享状态。 */
+    LONG64 counterBeforeFault = 0; /* 只比较受控读取前后的计数，排除安装及日志期间的旧增量。 */
     LONG64 counterSnapshot = 0; /* Phase C 结束后原子读到的计数器值。 */
     ULONG64 originalPfHandlerAddress = 0; /* 从 IDT 第 14 项提取的原始处理器地址，仅用于日志。 */
     VBS_OBSERVER_IDT_ENTRY* pfEntry = NULL; /* IDT 副本中的第 14 项，便于两次写入。 */
@@ -377,8 +379,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         KeRaiseIrql(DISPATCH_LEVEL, &previousIrql); /* 阻止调度和 DPC 排队中间插入。 */
         __try
         {
+            lidtAttempted = TRUE; /* LIDT 或其后的 SIDT 抛异常时也不能跳过恢复确认。 */
             __lidt(&newIdtr); /* 期望改变 IDTR；若 Hyper-V 拒绝则此处抛异常或静默吞下。 */
-            lidtAttempted = TRUE;
             __sidt(&postLidt); /* 立即回读 IDTR；基址未变即视为"被静默吞下"。 */
         }
         __finally
@@ -427,6 +429,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
      * -------------------------------------------------------------------- */
     if (lidtInstalled)
     {
+        counterBeforeFault = InterlockedCompareExchange64(&g_VbsPfCounter, 0, 0); /* 紧邻受控读取取得基线。 */
         /*
          * 读取用户态非法地址（null 页里的任意位置）从内核态会 #PF；KiPageFault
          * 会检查到用户地址被内核读、CPL=0、有 __try 帧，再派发为访问冲突。
@@ -445,11 +448,11 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
         counterSnapshot = InterlockedCompareExchange64(&g_VbsPfCounter, 0, 0);
 
-        if (counterSnapshot > 0)
+        if (counterSnapshot > counterBeforeFault)
         {
             VbsObserverRecord(
-                "[VbsObserver] PHASE_C=PF_COUNTER_INCREMENTED counter=%I64d pf_status=0x%08lX\n",
-                counterSnapshot, (ULONG)pfStatus);
+                "[VbsObserver] PHASE_C=PF_COUNTER_INCREMENTED before=%I64d after=%I64d pf_status=0x%08lX\n",
+                counterBeforeFault, counterSnapshot, (ULONG)pfStatus);
             VbsObserverRecord(
                 "[VbsObserver] PHASE_C_NOTE=increment_may_follow_hypervisor_reinjection\n");
         }
@@ -474,18 +477,24 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     }
 
     /* -------------------------------------------------------------------- *
-     * Phase D：无论 B/C 结果如何都要还原 IDTR 并释放拷贝。只有 LIDT 真的
-     * 改过基址才有必要再 LIDT 一次；但清理分配和亲和性是无条件的。
+     * Phase D：任何 LIDT 尝试后都独立检查原 IDTR；即使安装后的 SIDT 失败
+     * 也不能凭 lidtInstalled=false 释放仍可能在用的副本。只在确认恢复后释放。
      * -------------------------------------------------------------------- */
-    if (lidtInstalled)
+    if (lidtAttempted)
     {
         __try
         {
             KeRaiseIrql(DISPATCH_LEVEL, &previousIrql);
             __try
             {
-                __lidt(&original); /* 回退到 Phase A 记录的原始 IDTR。 */
-                __sidt(&postRestore); /* 再读一次确认 IDTR 已回到原值。 */
+                __sidt(&postRestore); /* 安装被拒绝时原 IDTR 可能已在位，不必再次写入。 */
+                if (postRestore.Base != original.Base || postRestore.Limit != original.Limit) /* 仅实际偏离时回退。 */
+                {
+                    __lidt(&original); /* 同一固定 CPU 上恢复其原始 IDTR。 */
+                    __sidt(&postRestore); /* 不能用 LIDT 未抛异常替代硬件可见回读。 */
+                }
+                restoreConfirmed = postRestore.Base == original.Base &&
+                    postRestore.Limit == original.Limit; /* 基址和限长必须同时匹配。 */
             }
             __finally
             {
@@ -502,7 +511,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
             VbsObserverRecord(
                 "[VbsObserver] PHASE_D=RESTORE_EXCEPTION status=0x%08lX\n", (ULONG)restoreStatus);
         }
-        else if (postRestore.Base == original.Base && postRestore.Limit == original.Limit)
+        else if (restoreConfirmed)
         {
             VbsObserverRecord(
                 "[VbsObserver] PHASE_D=RESTORED base=%p limit=0x%04X\n",
@@ -517,24 +526,31 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     }
     else
     {
+        restoreConfirmed = TRUE; /* 没有尝试 LIDT，不会留下指向副本的 IDTR。 */
         VbsObserverRecord(
-            "[VbsObserver] PHASE_D=SKIPPED reason=idtr_never_changed\n");
+            "[VbsObserver] PHASE_D=SKIPPED reason=lidt_not_attempted\n");
     }
 
-    /*
-     * 释放前先把全局指针清空：确保一旦有晚到的 #PF 恰好进桩，jmp 不会跳到
-     * 已被释放的内存。桩里的读操作对 NULL 指针跳转会导致 #GP，
-     * 但那比"跳进已释放的 pool 内容"更可诊断。
-     */
-    (VOID)InterlockedExchangePointer((PVOID volatile*)&g_VbsOriginalPfHandler, NULL);
-    ExFreePool(idtCopy);
-    KeRevertToUserGroupAffinityThread(&savedAffinity);
+    if (restoreConfirmed) /* 同一 CPU 已不再引用副本，才可以撤销桩的共享状态。 */
+    {
+        (VOID)InterlockedExchangePointer((PVOID volatile*)&g_VbsOriginalPfHandler, NULL); /* 不再有新 #PF 进入此桩。 */
+        ExFreePool(idtCopy); /* 所有可达 IDTR 均已回到系统原表。 */
+    }
+    else /* 无法证明副本已脱离 CPU，宁可保留有效表和链回指针。 */
+    {
+        DriverObject->DriverUnload = NULL; /* 禁止正常卸载，避免活跃 IDT 继续引用已卸载驱动代码。 */
+        VbsObserverRecord(
+            "[VbsObserver] RESOURCES_RETAINED=1 UNLOAD_DISABLED=1 reason=idtr_restore_unconfirmed\n");
+    }
+    KeRevertToUserGroupAffinityThread(&savedAffinity); /* 表/代码生命周期已有保证，再恢复线程亲和性。 */
 
     VbsObserverRecord(
         "[VbsObserver] === %s ===\n",
-        phaseAComplete && NT_SUCCESS(lidtStatus) && NT_SUCCESS(restoreStatus)
-        ? "COMPLETE" : "INCOMPLETE");
+        phaseAComplete && NT_SUCCESS(lidtStatus) && lidtInstalled &&
+        pfStatus == STATUS_ACCESS_VIOLATION && counterSnapshot > counterBeforeFault &&
+        NT_SUCCESS(restoreStatus) && restoreConfirmed
+        ? "COMPLETE" : "INCOMPLETE"); /* 未安装、无受控缺页或恢复未确认均不能判完成。 */
 
     VbsObserverFlushToRegistry(); /* 把完整报告落盘到 HKLM\\Software\\VbsVtl0Observer\\LastRun。 */
-    return sampleStatus; /* Phase B/C/D 的失败已在日志中展开，不改变 Phase A 的返回值。 */
+    return STATUS_SUCCESS; /* 主动路径失败只影响报告；保留资源时必须让映像继续驻留。 */
 }

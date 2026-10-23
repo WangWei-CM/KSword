@@ -90,6 +90,22 @@ namespace
         info.writableAliasProtection = resp.writableAliasProtection;
         return info;
     }
+
+    // 只把完整且兼容的响应解释成页面状态，传输成功仍不代表 lastStatus 成功。
+    ks::misc::rxpf::PageInfo decodePageInfo(
+        const ksword::ark::IoResult& io,
+        const KSWORD_ARK_RXPF_PAGE_RESPONSE& response)
+    {
+        ks::misc::rxpf::PageInfo result;
+        if (io.bytesReturned != sizeof(response)
+            || response.version != KSWORD_ARK_RXPF_PROTOCOL_VERSION
+            || response.size != sizeof(response))
+        {
+            result.ioErrorText = QStringLiteral("实验响应不完整或版本不兼容。");
+            return result;
+        }
+        return fillPageInfo(response);
+    }
 }
 
 namespace ks::misc::rxpf
@@ -198,7 +214,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -277,7 +293,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -308,7 +324,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -352,7 +368,14 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        result = decodePageInfo(io, response);
+        result.requestedWriteLength = static_cast<std::uint64_t>(bytes.size());
+        if (result.ioSuccess && result.lastStatus >= 0)
+        {
+            // 保留原来的单次64字节上限；显式报告实际范围，不能把截断当成完整写入。
+            result.writtenLength = response.lastWriteLength;
+        }
+        return result;
     }
 
     // ================================================================
@@ -388,7 +411,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -544,7 +567,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -638,7 +661,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return decodePageInfo(io, response);
     }
 
     // ================================================================
@@ -917,6 +940,36 @@ namespace ks::misc::rxpf
                 reinterpret_cast<const char*>(response.bytes),
                 static_cast<int>(response.length));
         }
+        return result;
+    }
+}
+
+namespace ks::misc::rxpf
+{
+    // 只读回读使用现有ArkDriverClient，不增加新的驱动执行路径。
+    ReadbackInfo readPageBytes(const std::uint64_t targetAddress,
+        const unsigned long offset, const unsigned long length)
+    {
+        ReadbackInfo result;
+        if (length == 0UL || length > KSWORD_ARK_RXPF_MAX_WRITE_BYTES
+            || offset >= 4096UL || length > 4096UL - offset)
+        {
+            result.errorText = QStringLiteral("回读范围无效。");
+            return result;
+        }
+        const std::uint64_t address = (targetAddress & ~0xFFFULL) + offset;
+        const ksword::ark::DriverClient client;
+        const auto read = client.readVirtualMemory(0U, address, length,
+            KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS);
+        if (!read.io.ok || read.readStatus != KSWORD_ARK_MEMORY_READ_STATUS_OK
+            || read.data.size() != length)
+        {
+            result.errorText = QStringLiteral("原字节回读失败，尚未证实恢复。");
+            return result;
+        }
+        result.bytes = QByteArray(reinterpret_cast<const char*>(read.data.data()),
+            static_cast<int>(read.data.size()));
+        result.ok = true;
         return result;
     }
 }

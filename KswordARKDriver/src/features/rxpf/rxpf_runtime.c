@@ -244,7 +244,14 @@ KswRxpfRuntimeUninitialize(
             &g_KswRxpfRuntime.PageTable.Slots[index];
 
         if ((ULONGLONG)record->PageBase > KSW_RXPF_PAGE_TOMBSTONE) {
-            KswRxpfImageProtectionReleaseRecord(record);
+            /* 卸载不得丢弃仍待恢复的映像页；释放锁后等待，允许下一次恢复重试。 */
+            while (!NT_SUCCESS(KswRxpfImageProtectionReleaseRecord(record))) {
+                record->State = KSWORD_ARK_RXPF_PAGE_STATE_ERROR;
+                KswRxpfSetLastStatus(record->LastStatus);
+                KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
+                (void)KeDelayExecutionThread(KernelMode, FALSE, &retryDelay);
+                KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+            }
             KswRxpfPageTableClearRemovedLocked(
                 &g_KswRxpfRuntime.PageTable,
                 record);
@@ -667,18 +674,26 @@ KswRxpfRuntimeUnregisterPage(
         status = KswRxpfDiagnosticsWaitForHandlers(5000UL);
     }
     if (!NT_SUCCESS(status)) {
+        /* 恢复/读侧等待失败仍保留同一记录，以便下一次注销重试。 */
+        KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+        record->State = KSWORD_ARK_RXPF_PAGE_STATE_ERROR;
+        record->LastStatus = status;
+        KswRxpfFillPageResponse(record, Response);
+        KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
         KswRxpfSetLastStatus(status);
-        return status;
+        return STATUS_SUCCESS;
     }
 
     KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
-    KswRxpfImageProtectionReleaseRecord(record);
-    /* RestoreExecutableProtection 结果在 Record->LastStatus，
-     * ClearRemovedLocked 会清空该槽——在此之前捕获。 */
-    Response->lastStatus = record->LastStatus;
-    KswRxpfPageTableClearRemovedLocked(
-        &g_KswRxpfRuntime.PageTable,
-        record);
+    status = KswRxpfImageProtectionReleaseRecord(record);
+    if (!NT_SUCCESS(status)) {
+        /* 不清槽、不释放 MDL/备份；ERROR 状态仍可按 recordId 查询和注销。 */
+        record->State = KSWORD_ARK_RXPF_PAGE_STATE_ERROR;
+    }
+    KswRxpfFillPageResponse(record, Response);
+    if (NT_SUCCESS(status)) {
+        KswRxpfPageTableClearRemovedLocked(&g_KswRxpfRuntime.PageTable, record);
+    }
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
     KswRxpfSetLastStatus(Response->lastStatus);
@@ -1005,8 +1020,8 @@ KswRxpfRuntimeQueryBackup(
 
 /*
  * 原子提交：Register→Change(mode=2)→Write→Unregister(SKIP_BACKUP_RESTORE)
- * 全部在单次 IOCTL handler 内完成，把 NX 窗口压到一个函数调用内部（纳秒级），
- * 避免 GUI 分步点击在高频 fetch 页上触发 BugCheck 0xFC。
+ * 全部在单次 IOCTL handler 内完成；这只缩短窗口，不提供跨 CPU 取指隔离，
+ * 活跃代码页仍可能在临时 NX 期间触发 BugCheck 0xFC。
  *
  * 仅支持 EXTERNAL_IMAGE 目标。不分配备份（CAPTURE_BACKUP 不需要），
  * 不启用模拟（无需 IDT 安装/恢复/handler 等待）。
@@ -1021,7 +1036,6 @@ KswRxpfRuntimeAtomicCommit(
     KSW_RXPF_PAGE_RECORD source;
     PKSW_RXPF_PAGE_RECORD record = NULL;
     NTSTATUS status = STATUS_SUCCESS;
-    BOOLEAN inserted = FALSE;
 
     /* 基本参数校验 */
     if (Request == NULL || Response == NULL || Request->reserved != 0UL) {
@@ -1072,7 +1086,6 @@ KswRxpfRuntimeAtomicCommit(
         KswRxpfSetLastStatus(status);
         return status;
     }
-    inserted = TRUE;
 
     /* ── 阶段 3：Change(mode=2) — NX 窗口从此开始 ── */
     status = KswRxpfImageProtectionChangeToRwNx(record);
@@ -1104,32 +1117,36 @@ Cleanup:
     KswRxpfPageTableBeginRemoveLocked(
         &g_KswRxpfRuntime.PageTable,
         record);
-    KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-
-    /* 不需要 IDT restore：原子流程不启用模拟 */
-    /* 不需要 WaitForHandlers：无活跃 handler */
-
-    /* 重新获取锁，释放 record（包含 mode=1 RestoreExecutableProtection） */
-    KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+    /* 保持同一控制锁直到恢复完成，避免 NX 窗口夹入其他控制请求的等待。
+     * 此锁只序列化控制请求，不能阻止其他 CPU 的正常取指。 */
 
     /* 失败路径：不跳过备份恢复（虽然没有备份，ReleaseRecord 会原样恢复 PTE） */
     if (!NT_SUCCESS(status)) {
         record->SkipBackupRestoreOnRelease = FALSE;
     }
 
-    KswRxpfImageProtectionReleaseRecord(record);
+    {
+        /* releaseStatus：清理失败时保留记录，优先向调用方报告恢复失败。 */
+        NTSTATUS releaseStatus = KswRxpfImageProtectionReleaseRecord(record);
+        if (!NT_SUCCESS(releaseStatus)) {
+            record->State = KSWORD_ARK_RXPF_PAGE_STATE_ERROR;
+            status = releaseStatus;
+        }
+    }
     /* ── NX 窗口在 ReleaseRecord 中 mode=1 调用后关闭 ── */
 
     /* 在 ClearRemovedLocked 销毁槽之前捕获最终状态 */
     Response->lastStatus = record->LastStatus;
     KswRxpfFillPageResponse(record, Response);
-    KswRxpfPageTableClearRemovedLocked(
-        &g_KswRxpfRuntime.PageTable,
-        record);
+    if (record->State != KSWORD_ARK_RXPF_PAGE_STATE_ERROR) {
+        KswRxpfPageTableClearRemovedLocked(&g_KswRxpfRuntime.PageTable, record);
+    }
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
     KswRxpfSetLastStatus(NT_SUCCESS(status) ? Response->lastStatus : status);
-    return status;
+    /* 定长响应保留实际状态及可能需要重试注销的 recordId。 */
+    Response->lastStatus = status;
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -1160,12 +1177,9 @@ KswRxpfRuntimeExecProof(
     PKSW_RXPF_PAGE_RECORD record = NULL;
     /* 最终 NTSTATUS；setup 阶段任一步失败即 goto 进 cleanup。 */
     NTSTATUS status = STATUS_SUCCESS;
-    /* RestoreExecutableProtection (mode=1) 之前抓页基址供 call rcx 用；
+    /* 页基址供 call rcx 用；页始终 NX，fetch 由 shadow IDT emulator 服务。
      * Release 前 record 还活着，但 Release 后 MDL 可能被 free，所以要早取。 */
     ULONGLONG executionCallTarget = 0ULL;
-    /* mode=1 restore 的 NTSTATUS 快照（从 record->LastStatus 读）。
-     * guest 下常见 STATUS_ACCESS_VIOLATION；root partition 下期望 STATUS_SUCCESS。 */
-    NTSTATUS restoreStatus = STATUS_SUCCESS;
     /* 单 worker 的返回 RAX。 */
     ULONGLONG returnedValue = 0ULL;
     /* 本次只有一个 worker（当前线程 inline call），用于响应兼容字段。 */
@@ -1176,22 +1190,24 @@ KswRxpfRuntimeExecProof(
     NTSTATUS setupStatus = STATUS_SUCCESS;
     /* call rcx 的 SEH 捕获码，0 表示无异常。 */
     NTSTATUS executionException = STATUS_SUCCESS;
+    /* shadow IDT install 是否成功；成功时 Cleanup 要调 Restore。 */
+    BOOLEAN needPageFaultRestore = FALSE;
+    /* emulator 实际服务的 #PF 次数；零则 shadow IDT 未真的接管 payload fetch。 */
+    ULONGLONG faultsObserved = 0ULL;
+    /* 本次记录身份快照；ClearRemovedLocked 会清空槽位。 */
+    ULONGLONG recordId = 0ULL;
+    ULONGLONG pageBase = 0ULL;
+    /* cleanupStatus：恢复 IDT、等待读侧及释放 MDL 的实际结果。 */
+    NTSTATUS cleanupStatus = STATUS_SUCCESS;
 
-    /* ========== TEMP DIAG: unique sentinel (date+marker) to prove this build is loaded. ========== */
-    /* 不管 Request/Response 哪个 NULL，先 attempt 写 sentinel —— 如果 Response 可写就能看到。
-     * 换成 unique 值而不是 0xDEAD/0xBEEF，确保 CLI 看到的是本次 build 的 handler，
-     * 不是旧 build 的 cached dispatch。 */
-    if (Response != NULL) {
-        Response->version = 0xC0DECAFEUL;
-        Response->size = 0x20261020UL;
-    }
     /* 基本参数校验：Request/Response 非空。 */
     if (Request == NULL || Response == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    /* 响应结构其余部分清零。 */
-    RtlZeroMemory(((UCHAR*)Response) + sizeof(ULONG) * 2,
-        sizeof(*Response) - sizeof(ULONG) * 2);
+    /* 协议字段使用真实版本/大小，避免诊断哨兵冒充正式响应。 */
+    RtlZeroMemory(Response, sizeof(*Response));
+    Response->version = KSWORD_ARK_RXPF_PROTOCOL_VERSION;
+    Response->size = sizeof(*Response);
     /* 预先把期望 RAX 写入响应，便于 R3 不解析请求也能回放。 */
     Response->expectedReturnValue = Request->expectedReturnValue;
     /* 预先把 targetKind 和 length 写入响应，与请求对齐。 */
@@ -1243,9 +1259,11 @@ KswRxpfRuntimeExecProof(
     if (!NT_SUCCESS(status)) {
         /* 插入失败：source 的 MDL/映射归还，走 ReleaseRecord 清理 source。 */
         KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-        KswRxpfImageProtectionReleaseRecord(&source);
+        (void)KswRxpfImageProtectionReleaseRecord(&source);
         goto Complete;
     }
+    recordId = (ULONGLONG)record->RecordId;
+    pageBase = (ULONGLONG)record->PageBase;
 
     /* Step 3: Change(mode=2) 把页改为 RW/NX，建 WritableAlias，开出 NX 窗口。 */
     status = KswRxpfImageProtectionChangeToRwNx(record);
@@ -1269,32 +1287,37 @@ KswRxpfRuntimeExecProof(
         goto Cleanup;
     }
 
-    /* Step 5: 恢复 PTE 到可执行 —— 对 ALLOCATED_TEST 走 MmProtectMdlSystemAddress 对称反向，
-     * **不走 VSL** —— driver 自己 allocate 的物理页，VTL1 没有它的 digest 需要验证。
-     * 对称于 ChangeToRwNx 对 ALLOCATED_TEST 分支：MmProtectMdlSystemAddress(mdl, PAGE_READWRITE)。
-     * 这里反向：MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READ) → PTE 回 RX，保留写入字节。
-     * ALLOCATED_TEST 的 ChangeToRwNx 不设 ChangeProtectionApplied，所以
-     * KswRxpfRestoreExecutableProtection 对它是 no-op（image protection path 不适用）。
-     * EXTERNAL_IMAGE 和 SELF_IMAGE_TEST 需要走 mode=1 + VSL digest 验证（后续加）。 */
+    /* Step 5: 页**保持 RW/NX**；CPU fetch payload 字节必触发 #PF，由 shadow IDT
+     * emulator 服务。此前尝试过 MmProtectMdlSystemAddress(PAGE_EXECUTE_READ) 走
+     * direct execute 路径，在 HVCI 下结构性 fail（API 要么拒 EXECUTE 要么表面
+     * success 但 PTE 保持 NX，call rcx 必 #PF (NX) → __except 捕获 0xC0000005
+     * 或 bugcheck 0xFC）。shadow IDT + emulator 是 HVCI 下唯一可行路径。 */
     executionCallTarget = (ULONGLONG)record->PageBase;
-    restoreStatus = MmProtectMdlSystemAddress(record->Mdl, PAGE_EXECUTE_READ);
-    record->LastStatus = restoreStatus;
-    if (!NT_SUCCESS(restoreStatus)) {
-        /* restore 失败：PTE 没回 RX，call rcx 会 bugcheck 0xFC。进 Cleanup。
-         * verdict 保 SETUP_FAILED，调用方据 setupStatus+restoreStatus 定位。 */
-        setupStatus = restoreStatus;
-        status = restoreStatus;
+
+    /* Step 6: 持 PageTable 锁下 call KswRxpfPageFaultInstall（它拿自己的
+     * g_KswRxpfPageFault.ControlLock + IPI 到所有 CPU 装 shadow IDT）。
+     * VM 下 CPUID "Microsoft Hv" gate 会直接 return STATUS_NOT_SUPPORTED
+     * （裸 LIDT 在 Hyper-V 下 0x1E 蓝屏），EXEC_PROOF 的 verdict 回 setup_failed。 */
+    status = KswRxpfPageFaultInstall();
+    setupStatus = status;
+    record->LastStatus = status;
+    if (!NT_SUCCESS(status)) {
+        /* VM 下预期落点：Hyper-V gate 挡住 LIDT 装载。实体机才可能走通。 */
         goto Cleanup;
     }
-    /* 显式更新 driver 内部名义值与 writable alias，Release 时才知该页已非可写。 */
-    record->CurrentProtection = PAGE_EXECUTE_READ;
-    record->WritableAliasProtection = 0UL;
-    record->WritableAlias = 0ULL;
+    needPageFaultRestore = TRUE;
 
-    /* Step 6: mode=1 restore 成功 → PTE 回 RX 且字节保留 → CPU 可直接执行 payload。
-     * 持 PageTable 排它锁 + IRQL = PASSIVE，直接 call rcx 跳入 payload。
-     * payload 典型 48 B8 <imm64> C3，ret 后栈不受污染。
-     * __try/__except 捕获可能的 #UD/#PF/CET —— HVCI 下 CET IBT 也可能拦非 endbr64 入口。 */
+    /* Step 7: 开启此 record 的 emulation 并增全局 EnabledCount，让 shadow IDT
+     * dispatcher 知道该 record 的 #PF 要走 emulator（否则 CHAIN 到原 handler）。 */
+    InterlockedExchange(&record->EmulationEnabled, 1);
+    InterlockedIncrement(&g_KswRxpfRuntime.PageTable.EnabledCount);
+    InterlockedIncrement(&g_KswRxpfRuntime.Generation);
+
+    /* Step 8: 持 PageTable 排它锁，call rcx。CPU fetch payload 第一字节 → #PF
+     * → shadow IDT entry → KswRxpfPageFaultStub → KswRxpfPageFaultDispatch →
+     * x64_instruction_emulator 从 WritableAlias 读 payload 字节 decode 并
+     * emulate，更新 Frame.Rip 到下一条指令，iretq 继续。dispatcher 不取
+     * PageTable 控制锁；保持此锁防止并行 IOCTL 注销临时记录或复用槽。 */
     workerCount = 1UL;
     __try {
         returnedValue = KswRxpfInvokeTestPage(
@@ -1305,51 +1328,84 @@ KswRxpfRuntimeExecProof(
         returnedValue = 0ULL;
     }
 
-    /* 汇总判定。 */
+    /* Step 9: 关闭此 record 的 emulation 并减全局 EnabledCount。 */
+    InterlockedExchange(&record->EmulationEnabled, 0);
+    InterlockedDecrement(&g_KswRxpfRuntime.PageTable.EnabledCount);
+    InterlockedIncrement(&g_KswRxpfRuntime.Generation);
+
+    /* Step 10: 记录 emulator 实际服务的 #PF 次数（verdict 判定要用）。 */
+    faultsObserved = (ULONGLONG)InterlockedCompareExchange64(
+        (volatile LONG64*)&record->FaultCount, 0LL, 0LL);
+
+    /* 汇总判定。verdict=SUCCESS 要求 (RAX 匹配) AND (fault count 非零)——后者
+     * 证明 shadow IDT emulator 真的介入了 payload 执行。faultsObserved==0 时
+     * 不管 RAX 对不对，都 NO_FAULTS（可能 shadow IDT 没装上，或 CPU 没 fetch）。 */
     if (executionException != STATUS_SUCCESS) {
-        /* SEH 捕获了异常：CPU 走到 payload 但出错。 */
+        /* SEH 捕获了异常：shadow IDT dispatcher decline (CHAIN)，Windows 的
+         * KiPageFault 继续处理 → __except 收 0xC0000005；或 emulator 内部 fail。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_EXEC_FAILED;
         status = executionException;
+    } else if (faultsObserved == 0ULL) {
+        /* emulator 从没服务过 fetch → shadow IDT 未真的接管 → 不能证明 CPU 执行。 */
+        verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_NO_FAULTS;
+        status = STATUS_INVALID_DEVICE_STATE;
     } else if (returnedValue != Request->expectedReturnValue) {
-        /* 跑完了但 RAX 不符：payload 字节可能被 revert、或 VTL1 silently 替换。 */
+        /* emulator 跑了但 RAX 不符：payload 字节可能被 revert、decode 错、
+         * 或 instruction 未全走完 ret。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_RETURN_MISMATCH;
         status = STATUS_DATA_ERROR;
     } else {
-        /* RAX 匹配：CPU 原生执行了我们写入的字节。直接证据。 */
+        /* RAX 匹配且 fault count 非零：shadow IDT emulator 服务了 CPU fetch 且
+         * payload 字节产生了期望结果。CPU 真的执行了我们写入的字节的直接证据。 */
         verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_SUCCESS;
         status = STATUS_SUCCESS;
     }
 
 Cleanup:
-    /* 开始清理 record：先 BeginRemove 标记槽位、再 Release 回收 MDL、最后 Clear 释放槽。 */
+    /* 先撤销发布，再恢复 IDT 并等待读侧；只有成功后才释放记录所有权。 */
     KswRxpfPageTableBeginRemoveLocked(
         &g_KswRxpfRuntime.PageTable,
         record);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
-    /* ReleaseRecord 会 unmap writable alias、释放 MDL（OwnsMdlPages=TRUE）。
-     * 若上面已 call RestoreExecutableProtection，Release 内部不会重复 restore（ChangeProtectionApplied=FALSE）。 */
+    if ((needPageFaultRestore || KswRxpfPageFaultIsInstalled()) &&
+        InterlockedCompareExchange(
+            &g_KswRxpfRuntime.PageTable.EnabledCount, 0, 0) == 0) {
+        cleanupStatus = KswRxpfPageFaultRestore();
+    }
+    if (NT_SUCCESS(cleanupStatus)) {
+        cleanupStatus = KswRxpfDiagnosticsWaitForHandlers(5000UL);
+    }
     KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
-    KswRxpfImageProtectionReleaseRecord(record);
-    /* ClearRemovedLocked 彻底释放 PageTable 的 slot。 */
-    KswRxpfPageTableClearRemovedLocked(
-        &g_KswRxpfRuntime.PageTable,
-        record);
+    if (NT_SUCCESS(cleanupStatus)) {
+        /* ReleaseRecord 失败时保留可按 recordId 重试的页面和 MDL。 */
+        cleanupStatus = KswRxpfImageProtectionReleaseRecord(record);
+    }
+    if (NT_SUCCESS(cleanupStatus)) {
+        KswRxpfPageTableClearRemovedLocked(
+            &g_KswRxpfRuntime.PageTable,
+            record);
+    } else {
+        record->State = KSWORD_ARK_RXPF_PAGE_STATE_ERROR;
+        record->LastStatus = cleanupStatus;
+        status = cleanupStatus;
+        verdict = KSWORD_ARK_RXPF_EXEC_PROOF_VERDICT_EXEC_FAILED;
+    }
     InterlockedIncrement(&g_KswRxpfRuntime.Generation);
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
 
 Complete:
-    /* 填响应：worker、RAX、verdict、lastStatus、setupStatus。faultsObserved 永远 0（这个 path 不走 emulator）。 */
+    /* 填响应：worker、RAX、verdict、lastStatus、setupStatus、faultsObserved。
+     * faultsObserved 为 emulator 实际服务 fetch 的次数，verdict 判定要用。 */
     Response->workerCount = workerCount;
     Response->returnedValue = returnedValue;
-    Response->faultsObserved = 0ULL;
+    Response->faultsObserved = faultsObserved;
     Response->verdict = verdict;
     Response->lastStatus = status;
     Response->setupStatus = setupStatus;
-    if (record != NULL) {
-        Response->recordId = (ULONGLONG)record->RecordId;
-        Response->pageBase = (ULONGLONG)record->PageBase;
-    }
+    Response->recordId = recordId;
+    Response->pageBase = pageBase;
     /* 全局 last status 更新，供 QUERY_SUPPORT 调试显示。 */
     KswRxpfSetLastStatus(status);
-    return status;
+    /* 固定响应在实验失败时仍返回完整判定；业务状态位于 lastStatus。 */
+    return STATUS_SUCCESS;
 }

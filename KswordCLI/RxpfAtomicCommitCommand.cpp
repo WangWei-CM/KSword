@@ -76,7 +76,7 @@ namespace ks::cli
                     {L"targetAddress", Json::hex(targetAddress)},
                     {L"offset", Json::hex(offset32)},
                     {L"length", Json::count(payload.size())}
-                }), {L"IOCTL transport failed before any R0 side effect. Driver must be loaded, signed and the control device must be reachable."}};
+                }), {L"DeviceIoControl failed; inspect Win32 error before attributing a driver stage. If the device could not open, check that the driver and control device are available."}};
             }
 
             // 响应长度检查：R0 handler 以 METHOD_BUFFERED 返回定长 PAGE_RESPONSE。
@@ -119,7 +119,7 @@ namespace ks::cli
                 {L"lastWriteOffset", Json::hex(response.lastWriteOffset)},
                 {L"lastWriteLength", Json::count(response.lastWriteLength)},
                 {L"lastFailureReason", Json::number(response.lastFailureReason)}
-            }), {L"NX window is confined to the driver function body. On success the page returns to RX with payload bytes persisted (SKIP_BACKUP_RESTORE). The payload must restore itself quickly or PatchGuard/exceptions will bugcheck."}};
+            }), {L"The single IOCTL reduces user-mode round trips but does not isolate other CPUs from the temporary NX state. Check lastStatus for the actual restore result; the command does not capture a rollback backup."}};
         }
     }
 
@@ -130,7 +130,7 @@ namespace ks::cli
             L"KswordCLI.exe kernel rxpf-atomic-commit --address VA --offset N --hex HEX --confirm [--json]",
             L"Atomic RXPF Register+Change(mode=2)+Write+Unregister(SKIP_BACKUP_RESTORE) in one IOCTL.",
             L"Required: --address kernel VA inside a loaded image .text page, --offset page-offset (0..0xFFF), --hex payload bytes (1..64 bytes), --confirm. Optional: --json.",
-            L"Fuses the four-step Phase G path into a single R0 handler so the NX window is confined to the kernel function body (microseconds), avoiding BugCheck 0xFC on high-frequency CPU-fetch pages. EXTERNAL_IMAGE only. No backup is captured and no restore is performed; the caller is responsible for reverting payload bytes before PatchGuard scans. Exit codes: 0=NTSTATUS success, 1=NTSTATUS failure, 3=IOCTL transport failure, 4=incompatible response.",
+            L"Fuses the four-step Phase G path into a single R0 handler and reduces user-mode round trips. It does not isolate other CPUs: an active code page can still fault while NX. EXTERNAL_IMAGE only. No backup is captured for later rollback; the caller remains responsible for restoration. Exit codes: 0=reported restore success, 1=reported failure, 3=DeviceIoControl failure, 4=incompatible response.",
             callRxpfAtomicCommit});
     }
 }

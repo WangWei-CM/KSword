@@ -3183,18 +3183,18 @@
     },
     {
       "ioctl": "RXPF_ATOMIC_COMMIT",
-      "reason": "no-cli-path",
-      "detail": "原子提交（Register+Change+Write+Unregister）在单次 IOCTL 内完成 NX 翻转；KswordCLI 无对应子命令，无法在 harness 内触发。属于覆盖缺口，不是安全排除。"
+      "reason": "experimental-page-fault-hooking",
+      "detail": "注册外部映像并撤销执行权限、写入代码、恢复保护；单次 IOCTL 不能隔离其它 CPU 对该页的取指，也不能保证失败时恢复成功。属于内核代码写入实验，所有模式下均排除，不能作为 no-cli-path 缺口运行。"
     },
     {
       "ioctl": "RXPF_EXEC_PROOF",
-      "reason": "no-cli-path",
-      "detail": "执行证明（Register ALLOCATED_TEST+Change+Write custom+InstallIDT+ConcurrentExec+Unregister）在单次 IOCTL 内走 shadow IDT emulator；KswordCLI 子命令 kernel rxpf-exec-proof 存在但 harness 未接入运行时测试，属于覆盖缺口。"
+      "reason": "experimental-page-fault-hooking",
+      "detail": "执行注册、保护变更、载荷写入、shadow IDT 安装和主动取指故障实验；kernel rxpf-exec-proof 虽有 CLI 入口，也不能在通用矩阵中执行。LIDT、故障分发及恢复依赖目标平台，崩溃可能由实验自身造成，所有模式下均排除。"
     },
     {
       "ioctl": "RXPF_QUERY_BACKUP",
-      "reason": "no-cli-path",
-      "detail": "KswordCLI 当前没有对应子命令，无法在本 harness 内触发；属于覆盖缺口，不是安全排除。供 GUI 的 KernelHookWizard 在 Phase G 恢复步骤用。"
+      "reason": "requires-excluded-rxpf-record",
+      "detail": "该 IOCTL 自身只读，但成功路径必须持有 CAPTURE_BACKUP 注册产生的真实 recordId；创建和清理该 fixture 依赖本矩阵已排除的 RXPF_REGISTER_PAGE/UNREGISTER_PAGE。禁止为读备份引入页面保护实验；任意或过期 ID 的失败返回不算成功路径覆盖。"
     },
     {
       "ioctl": "RXPF_QUERY_SUPPORT",

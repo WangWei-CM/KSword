@@ -570,8 +570,8 @@ namespace ks::misc::hvci_bypass
             else if (byteStillModified)
             {
                 lines.append(QStringLiteral(
-                    "[结论] HVCI 绕过已确认：MDL 别名写入穿透了映像保护，"
-                    "恢复后修改仍然保留"
+                    "[结论] 本次 MDL 别名写入及恢复后字节已确认："
+                    "恢复后修改仍然保留；HVCI 状态与执行权限需独立核验"
                     "（0x%1 → 0x%2）。%3")
                     .arg(result.preModifyByte, 2, 16, QChar('0'))
                     .arg(expectedByte, 2, 16, QChar('0'))

@@ -29,6 +29,11 @@ header = (SOURCE / "ioctl_registry.h").read_text(encoding="utf-8-sig")
 protocols = ['#include "ark/ark_ioctl.h"']
 for name in re.findall(r'^#include "(driver/[^"]+)"', registry, re.M):
     protocols.append(f'#include "{name}"')
+# Derive the expected population from production rows so additions cannot stale a literal count.
+registry_rows = re.findall(r'^\s*\{\s*IOCTL_KSWORD_ARK_[A-Z0-9_]+\s*,', registry, re.M)
+if not registry_rows:
+    raise RuntimeError("Missing production registry rows")
+protocols.append(f'#define KSWORD_TEST_EXPECTED_REGISTRY_COUNT {len(registry_rows)}U')
 (OUTPUT / "dispatch_protocol_replay.h").write_text('\n'.join(protocols), encoding="utf-8")
 (OUTPUT / "dispatch_registry_replay.h").write_text(without_includes(header), encoding="utf-8")
 

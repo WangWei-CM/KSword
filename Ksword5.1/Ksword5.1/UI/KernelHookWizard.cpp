@@ -16,6 +16,7 @@
 
 #include "../Framework.h"
 #include "../MiscDock/HvciBypass/RxpfBackend.h"
+#include "../../../shared/driver/KswordArkRxPfIoctl.h"
 #include "../theme.h"
 #include "FlatButtonTheme.h"
 #include "CodeEditorWidget.h"
@@ -25,6 +26,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QComboBox>
+#include <QCloseEvent>
 #include <algorithm>
 #include <memory>
 #include <QDateTime>
@@ -140,6 +142,147 @@ namespace
 // 让 wizard 在 ks::ui 命名空间内也能直接写 rxpf::registerPage 等。
 namespace rxpf = ::ks::misc::rxpf;
 
+namespace
+{
+    // 操作成功必须同时有完整响应及成功NTSTATUS，不能仅依赖DeviceIoControl。
+    bool pageSucceeded(const rxpf::PageInfo& page)
+    {
+        return page.ioSuccess && page.lastStatus >= 0;
+    }
+
+    QString pageFailure(const rxpf::PageInfo& page)
+    {
+        return page.ioSuccess ? formatHex4(static_cast<quint32>(page.lastStatus))
+                              : page.ioErrorText;
+    }
+
+    // 后台恢复携带最新所有权快照；任何中间失败也把记录交还UI，便于重试。
+    struct RecoveryResult
+    {
+        ks::ui::KernelHookPlan plan;
+        QString failure;
+        bool ok = false;
+    };
+
+    RecoveryResult recoverOwnedPage(ks::ui::KernelHookPlan plan)
+    {
+        RecoveryResult result;
+        result.plan = plan;
+        auto& owned = result.plan;
+
+        // 原准备记录持有整页原始Backup，默认注销即可恢复；不重注册捕获补丁。
+        if (owned.recordId != 0ULL && !owned.recoveryRecord)
+        {
+            const auto released = rxpf::unregisterPage(owned.recordId);
+            if (!pageSucceeded(released))
+            {
+                result.failure = pageFailure(released);
+                return result;
+            }
+            owned.recordId = 0ULL;
+            owned.recordPrepared = false;
+            // R0已经恢复整页Backup，不再依赖之前缺失的局部QueryBackup证据。
+            owned.hasUncachedWrites = false;
+        }
+        else if (owned.payloadPending)
+        {
+            if (owned.hasUncachedWrites || owned.restoreRanges.isEmpty())
+            {
+                result.failure = QStringLiteral("缺少完整原字节证据，无法证实恢复。请保留当前窗口并处理目标页面。");
+                return result;
+            }
+
+            // 已保留补丁后只能用缓存的原范围恢复；新记录的Backup包含补丁，绝不能自动回放。
+            if (owned.recordId == 0ULL)
+            {
+                const auto registered = rxpf::registerPage(rxpf::kTargetExternalImage,
+                    owned.targetVa);
+                if (!pageSucceeded(registered))
+                {
+                    result.failure = pageFailure(registered);
+                    return result;
+                }
+                owned.recordId = registered.recordId;
+                owned.recoveryRecord = true;
+                owned.originalBytesWritten = false;
+            }
+            if (!owned.originalBytesWritten)
+            {
+                const auto current = rxpf::queryPage(owned.recordId);
+                if (!pageSucceeded(current))
+                {
+                    result.failure = pageFailure(current);
+                    return result;
+                }
+                if (current.state == KSWORD_ARK_RXPF_PAGE_STATE_ERROR)
+                {
+                    // 失败释放留下的记录先按原收尾路径重试；成功后才创建下一次恢复记录。
+                    const auto released = rxpf::unregisterPage(owned.recordId, true);
+                    if (!pageSucceeded(released))
+                    {
+                        result.failure = pageFailure(released);
+                        return result;
+                    }
+                    owned.recordId = 0ULL;
+                    owned.recoveryRecord = false;
+                    return recoverOwnedPage(owned);
+                }
+                if (current.state != KSWORD_ARK_RXPF_PAGE_STATE_RW_NX)
+                {
+                    const auto changed = rxpf::changePage(owned.recordId);
+                    if (!pageSucceeded(changed))
+                    {
+                        result.failure = pageFailure(changed);
+                        return result;
+                    }
+                }
+                // 这里只回放已缓存的原字节，不扩展用户payload的单次写入能力。
+                for (const auto& range : owned.restoreRanges)
+                {
+                    const auto written = rxpf::writePage(owned.recordId,
+                        range.offset, range.bytes);
+                    if (!pageSucceeded(written)
+                        || written.writtenLength != static_cast<unsigned long>(range.bytes.size()))
+                    {
+                        result.failure = pageSucceeded(written)
+                            ? QStringLiteral("原字节写回长度不完整，尚未证实恢复。")
+                            : pageFailure(written);
+                        return result;
+                    }
+                }
+                owned.originalBytesWritten = true;
+            }
+            const auto released = rxpf::unregisterPage(owned.recordId, true);
+            owned.restoreStatus = released.lastStatus;
+            if (!pageSucceeded(released))
+            {
+                result.failure = pageFailure(released);
+                return result;
+            }
+            owned.recordId = 0ULL;
+            owned.recordPrepared = false;
+        }
+
+        // 完整只读回读才允许把收尾标为完成；回读失败仍保留原范围供重试。
+        for (const auto& range : owned.restoreRanges)
+        {
+            const auto read = rxpf::readPageBytes(owned.targetVa,
+                range.offset, static_cast<unsigned long>(range.bytes.size()));
+            if (!read.ok || read.bytes != range.bytes)
+            {
+                result.failure = read.ok ? QStringLiteral("恢复后字节与原始备份不一致。") : read.errorText;
+                return result;
+            }
+        }
+        owned.payloadPending = false;
+        owned.recoveryRecord = false;
+        owned.originalBytesWritten = false;
+        owned.restored = true;
+        result.ok = true;
+        return result;
+    }
+}
+
 namespace ks::ui
 {
     // ========================================================================
@@ -168,6 +311,8 @@ namespace ks::ui
         setWindowTitle(QStringLiteral("内核 Hook 向导"));
         setMinimumSize(820, 640);
         setModal(false);
+        qApp->installEventFilter(this);
+        if (parent && parent->window()) parent->window()->installEventFilter(this);
         initializeUi();
         refreshModules();
         goTo(0);
@@ -286,32 +431,11 @@ namespace ks::ui
         layout->addWidget(m_vaLabel);
 
         // 根据模块/偏移变化更新 VA 显示
-        auto updateVa = [this]() {
-            bool ok = false;
-            const QString name = m_moduleCombo->currentText();
-            const quint64 base = m_moduleCombo->currentData().toULongLong(&ok);
-            if (!ok || base == 0ULL) {
-                m_vaLabel->setText(QStringLiteral("绝对 VA：模块未加载"));
-                return;
-            }
-            bool offOk = false;
-            const quint64 off = m_offsetEdit->text().toULongLong(&offOk, 16);
-            if (!offOk) {
-                m_vaLabel->setText(QStringLiteral("绝对 VA：偏移格式错误"));
-                return;
-            }
-            m_plan.moduleName = name;
-            m_plan.moduleBase = base;
-            m_plan.targetOffset = off;
-            m_plan.targetVa = base + off;
-            m_vaLabel->setText(QStringLiteral("绝对 VA：%1 (= %2 + %3)")
-                .arg(formatHex8(m_plan.targetVa), formatHex8(base), formatHex8(off)));
-        };
         connect(m_moduleCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [updateVa](int){ updateVa(); });
+            this, [this](int) { updateTargetFromInputs(); });
         connect(m_offsetEdit, &QLineEdit::textChanged,
-            this, [updateVa](const QString&){ updateVa(); });
+            this, [this](const QString&) { updateTargetFromInputs(); });
 
         layout->addStretch();
         return page;
@@ -369,9 +493,9 @@ namespace ks::ui
 
         auto* hint = new QLabel(QStringLiteral(
             "<b>第 3 步：写入 payload</b><br>"
-            "任意 hex 字符串作为 payload，长度与页内偏移由你自己定。"
+            "可输入任意 hex 字符串；现有单次写入最多 64 字节，超出时只写入前 64 字节并报告部分完成。"
             "预设只是一键填充，不代表只能用这些。原字节已在上一步存入 Backup 可随后恢复。<br>"
-            "<i>payload+offset 的合法范围由驱动按单页约束校验；GUI 不替你拒绝。</i>"),
+            "<i>页内范围仍由驱动校验；实际写入长度会明确显示。</i>"),
             page);
         hint->setWordWrap(true);
         layout->addWidget(hint);
@@ -425,9 +549,9 @@ namespace ks::ui
         m_payloadHexEdit = new QLineEdit(QStringLiteral("C3"), page);
         m_payloadHexEdit->setMinimumWidth(360);
         m_payloadHexEdit->setPlaceholderText(QStringLiteral(
-            "任意 hex，空格可选，例如 48 83 EC 20 ...；长度不设 GUI 上限"));
+            "任意 hex，空格可选；单次实际写入最多 64 字节"));
         m_payloadHexEdit->setToolTip(QStringLiteral(
-            "用户任意 hex 字符串；GUI 不设 payload 长度上限，由驱动按单页约束校验"));
+            "保留任意 hex 输入；单次最多写入前 64 字节，其余不写入并报告部分完成"));
         hexRow->addWidget(m_payloadHexEdit);
         hexRow->addStretch();
         layout->addLayout(hexRow);
@@ -455,19 +579,18 @@ namespace ks::ui
         // 两个写入按钮并列：
         // - "写入 payload"：分步模式，依赖第 2 步 Register 产生的 recordId，仅做 Write
         // - "原子提交 (单次 IOCTL)"：Register+Change+Write+Unregister(SKIP) 全部在一次 R0 call
-        //   内完成，NX 窗口被压到驱动函数体内（纳秒级），避免高频 fetch 页在 GUI 分步点击
-        //   过程中被 CPU fetch 命中 BugCheck 0xFC。原子模式**不需要**第 2 步，可直接从第 1 步跳来。
+        //   内完成；减少用户态往返仍不提供全核隔离或无执行故障保证。
         auto* writeRow = new QHBoxLayout();
         m_writeBtn = new QPushButton(QStringLiteral("写入 payload"), page);
         ks::ui::ApplyFlatButtonTheme(m_writeBtn, ks::ui::FlatButtonTone::Accent);
         m_writeBtn->setMinimumHeight(36);
-        m_writeBtn->setToolTip(QStringLiteral("分步模式：仅发 Write IOCTL，需要先在第 2 步完成 Register+Change；适用于低频 fetch 页"));
+        m_writeBtn->setToolTip(QStringLiteral("分步模式：仅发 Write IOCTL，需要先在第 2 步完成 Register+Change；目标页在分步操作期间仍有执行故障风险"));
         writeRow->addWidget(m_writeBtn);
 
         m_atomicCommitBtn = new QPushButton(QStringLiteral("原子提交 (单次 IOCTL)"), page);
         ks::ui::ApplyFlatButtonTheme(m_atomicCommitBtn, ks::ui::FlatButtonTone::Accent);
         m_atomicCommitBtn->setMinimumHeight(36);
-        m_atomicCommitBtn->setToolTip(QStringLiteral("原子模式：R0 单次 IOCTL 做完 Register+Change(mode=2)+Write+Unregister(SKIP)；NX 窗口压到驱动函数内（纳秒级），不走第 2 步 Register；无 Backup 可恢复，payload 必须尽快自行还原否则 PatchGuard 蓝屏"));
+        m_atomicCommitBtn->setToolTip(QStringLiteral("原子模式：在单次 IOCTL 中请求既有操作；减少用户态往返不等于全核隔离，仍可能发生执行故障；无 Backup 可自动恢复"));
         writeRow->addWidget(m_atomicCommitBtn);
         writeRow->addStretch();
         layout->addLayout(writeRow);
@@ -535,9 +658,9 @@ namespace ks::ui
         auto* hint = new QLabel(QStringLiteral(
             "<b>第 5 步：恢复 payload + 验证</b><br>"
             "分两个动作：<br>"
-            "&nbsp;&nbsp;①<b>恢复</b>：Register(CB)+Change+Write(backup)+Unregister，用第 2 步缓存的原字节覆盖回去。走正常 auto-restore 流程。<br>"
-            "&nbsp;&nbsp;②<b>验证</b>：再 Register 一次读 origProt，期望 0x20 (PAGE_EXECUTE_READ)。<br>"
-            "<i>注意 originalProtection 来自 PE 节头解析，不采样 live PTE——只能作为\"页仍在模块范围内\"的参考，不等价于 PTE 真回 RX。</i>"),
+            "&nbsp;&nbsp;①<b>恢复</b>：仍持有准备记录时使用其原始 Backup 收尾；已保留补丁时回写缓存的原范围，跳过新快照的自动回放。<br>"
+            "&nbsp;&nbsp;②<b>验证</b>：只读回读缓存的原字节范围并比较，不改变页面保护。<br>"
+            "<i>字节回读不等价于执行权限验证；本向导未采样 live PTE。</i>"),
             page);
         hint->setWordWrap(true);
         layout->addWidget(hint);
@@ -591,6 +714,11 @@ namespace ks::ui
     void KernelHookWizard::setBusy(bool busy)
     {
         m_busy = busy;
+        if (m_moduleCombo) m_moduleCombo->setEnabled(!busy);
+        if (m_offsetEdit) m_offsetEdit->setEnabled(!busy);
+        if (m_payloadHexEdit) m_payloadHexEdit->setEnabled(!busy);
+        if (m_payloadOffsetEdit) m_payloadOffsetEdit->setEnabled(!busy);
+        if (m_payloadPresetCombo) m_payloadPresetCombo->setEnabled(!busy);
         if (m_prepareBtn) { m_prepareBtn->setEnabled(!busy); }
         if (m_writeBtn)   { m_writeBtn->setEnabled(!busy); }
         if (m_atomicCommitBtn) { m_atomicCommitBtn->setEnabled(!busy); }
@@ -636,232 +764,226 @@ namespace ks::ui
         }
     }
 
-    // ========================================================================
-    // onPrepareClicked：Register(CB) + Change(mode=2) + QueryBackup，异步跑
-    // ========================================================================
+    // 关闭按钮、窗口X与Esc共用异步收尾，不能销毁仍持有记录的窗口。
+    void KernelHookWizard::closeEvent(QCloseEvent* event)
+    {
+        if (m_busy)
+        {
+            event->ignore();
+            return;
+        }
+        if (m_plan.recordId != 0ULL || m_plan.payloadPending)
+        {
+            event->ignore();
+            m_closeAfterCleanup = true;
+            onRestoreClicked();
+            return;
+        }
+        QDialog::closeEvent(event);
+    }
+
+    void KernelHookWizard::reject()
+    {
+        close();
+    }
+
+    bool KernelHookWizard::eventFilter(QObject* watched, QEvent* event)
+    {
+        const bool quitting = watched == qApp && event->type() == QEvent::Quit;
+        const bool hostClosing = parentWidget() && watched == parentWidget()->window()
+            && event->type() == QEvent::Close;
+        if ((quitting || hostClosing)
+            && (m_busy || m_plan.recordId != 0ULL || m_plan.payloadPending))
+        {
+            event->ignore();
+            appendTrace(QStringLiteral("请先完成当前向导的恢复与资源清理，再关闭主程序。"));
+            return true;
+        }
+        return QDialog::eventFilter(watched, event);
+    }
+
+    // 新选择与旧记录分开保存；收尾成功前不覆盖用于恢复的目标身份。
+    void KernelHookWizard::updateTargetFromInputs()
+    {
+        if (m_busy) return;
+        bool baseOk = false;
+        bool offsetOk = false;
+        KernelHookPlan requested;
+        requested.moduleName = m_moduleCombo->currentText();
+        requested.moduleBase = m_moduleCombo->currentData().toULongLong(&baseOk);
+        requested.targetOffset = m_offsetEdit->text().toULongLong(&offsetOk, 16);
+        if (!baseOk || requested.moduleBase == 0ULL || !offsetOk
+            || requested.targetOffset > UINT64_MAX - requested.moduleBase)
+        {
+            if (m_plan.recordId == 0ULL && !m_plan.payloadPending) m_plan.targetVa = 0ULL;
+            m_vaLabel->setText(QStringLiteral("绝对 VA：模块未加载或偏移格式错误"));
+            return;
+        }
+        requested.targetVa = requested.moduleBase + requested.targetOffset;
+        m_requestedTarget = requested;
+        if ((m_plan.recordId != 0ULL || m_plan.payloadPending)
+            && requested.targetVa != m_plan.targetVa)
+        {
+            m_targetChangePending = true;
+            onRestoreClicked();
+            return;
+        }
+        m_plan.moduleName = requested.moduleName;
+        m_plan.moduleBase = requested.moduleBase;
+        m_plan.targetOffset = requested.targetOffset;
+        m_plan.targetVa = requested.targetVa;
+        m_vaLabel->setText(QStringLiteral("绝对 VA：%1 (= %2 + %3)")
+            .arg(formatHex8(requested.targetVa), formatHex8(requested.moduleBase),
+                formatHex8(requested.targetOffset)));
+    }
+
     void KernelHookWizard::onPrepareClicked()
     {
+        if (m_busy) return;
+        if (m_plan.recordId != 0ULL || m_plan.payloadPending)
+        {
+            m_prepareAfterCleanup = true;
+            onRestoreClicked();
+            return;
+        }
         if (m_plan.targetVa == 0ULL)
         {
             appendTrace(QStringLiteral("请先在第 1 步选目标模块与偏移"));
             return;
         }
+        // 新一轮准备只沿用目标参数，不沿用上一轮的局部备份或完成标记。
+        updateTargetFromInputs();
+        if (m_plan.targetVa == 0ULL) return;
+        m_plan = m_requestedTarget;
+        struct PrepareResult
+        {
+            rxpf::PageInfo page;
+            rxpf::BackupInfo preview;
+            quint64 recordId = 0ULL;
+        };
         setBusy(true);
-        m_prepareStatusLabel->setText(QStringLiteral("状态：Register(CB) 中..."));
-        appendTrace(QStringLiteral("Register(EXTERNAL_IMAGE, CAPTURE_BACKUP) target=%1")
-            .arg(formatHex8(m_plan.targetVa)));
-
         const quint64 va = m_plan.targetVa;
-        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
-        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w]() {
-                const auto reg = w->result();
-                w->deleteLater();
-                if (!reg.ioSuccess) {
-                    appendTrace(QStringLiteral("Register 失败：%1").arg(reg.ioErrorText));
-                    m_prepareStatusLabel->setText(QStringLiteral("状态：Register 失败"));
-                    setBusy(false);
-                    return;
-                }
-                m_plan.recordId = reg.recordId;
-                m_plan.originalProtection = reg.originalProtection;
-                appendTrace(QStringLiteral("Register OK recordId=%1 origProt=%2")
-                    .arg(reg.recordId).arg(formatHex4(reg.originalProtection)));
-
-                // 继续 Change(mode=2)
-                appendTrace(QStringLiteral("Change(mode=2) recordId=%1").arg(reg.recordId));
-                const quint64 rid = reg.recordId;
-                auto* w2 = new QFutureWatcher<rxpf::PageInfo>(this);
-                connect(w2, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                    [this, w2]() {
-                        const auto chg = w2->result();
-                        w2->deleteLater();
-                        if (!chg.ioSuccess) {
-                            appendTrace(QStringLiteral("Change 失败：%1").arg(chg.ioErrorText));
-                            m_prepareStatusLabel->setText(QStringLiteral("状态：Change 失败"));
-                            setBusy(false);
-                            return;
-                        }
-                        m_plan.aliasProtection = chg.writableAliasProtection;
-                        appendTrace(QStringLiteral("Change OK curP=%1 aliasP=%2")
-                            .arg(formatHex4(chg.currentProtection))
-                            .arg(formatHex4(chg.writableAliasProtection)));
-
-                        // 继续 QueryBackup（读前 16 字节）
-                        const quint64 rid2 = m_plan.recordId;
-                        auto* w3 = new QFutureWatcher<rxpf::BackupInfo>(this);
-                        connect(w3, &QFutureWatcher<rxpf::BackupInfo>::finished, this,
-                            [this, w3]() {
-                                const auto bk = w3->result();
-                                w3->deleteLater();
-                                // QueryBackup 失败降级为警告：预览字节只用于 UI 展示，
-                                // Register(CAPTURE_BACKUP) + Change(mode=2) 已经完成，用户仍可继续
-                                // 第 3 步 Write 和第 4 步 Unregister，所以不 return 阻塞流程。
-                                // 真实的 payload 恢复由第 5 步"恢复&验证"里的 Register+Change+Write(backup)+Unregister 承担。
-                                if (!bk.ioSuccess || !bk.hasBackup) {
-                                    appendTrace(QStringLiteral(
-                                        "QueryBackup 预览失败（降级为警告，可继续）：%1 (hasBackup=%2)")
-                                        .arg(bk.ioErrorText)
-                                        .arg(bk.hasBackup ? "true" : "false"));
-                                    m_backupHexLabel->setText(QStringLiteral(
-                                        "原字节预览：读取失败（不影响后续步骤）"));
-                                    m_prepareStatusLabel->setText(QStringLiteral(
-                                        "状态：准备完成（QueryBackup 预览失败，已跳过），可进入第 3 步"));
-                                    m_plan.backupBytes.clear();
-                                    setBusy(false);
-                                    return;
-                                }
-                                // 这里的 16 字节只是页头预览给用户看，不作为恢复数据：
-                                // 用户的 payloadOffset / payload.size() 可能完全不同，
-                                // 真正用于恢复的 backup 字节在第 3 步 Write 时按用户选的
-                                // (offset, size) 分段 QueryBackup 读入 m_plan.backupBytes。
-                                m_backupHexLabel->setText(
-                                    QStringLiteral("原字节 (页头前 %1 字节预览，仅显示)：%2")
-                                        .arg(bk.length).arg(bytesToHex(bk.bytes)));
-                                m_prepareStatusLabel->setText(QStringLiteral(
-                                    "状态：准备完成，可进入第 3 步"));
-                                appendTrace(QStringLiteral(
-                                    "QueryBackup preview bytes=%1").arg(bytesToHex(bk.bytes)));
-                                m_plan.backupBytes.clear();
-                                setBusy(false);
-                            });
-                        w3->setFuture(QtConcurrent::run([rid2]() -> rxpf::BackupInfo {
-                            return rxpf::queryBackup(rid2, 0UL, 16UL);
-                        }));
-                    });
-                w2->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {
-                    return rxpf::changePage(rid);
-                }));
-            });
-        w->setFuture(QtConcurrent::run([va]() -> rxpf::PageInfo {
-            return rxpf::registerPage(rxpf::kTargetExternalImage, va);
+        appendTrace(QStringLiteral("Register(EXTERNAL_IMAGE, CAPTURE_BACKUP) target=%1")
+            .arg(formatHex8(va)));
+        auto* watcher = new QFutureWatcher<PrepareResult>(this);
+        connect(watcher, &QFutureWatcher<PrepareResult>::finished, this, [this, watcher]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            m_plan.recordId = result.recordId;
+            m_plan.recordPrepared = pageSucceeded(result.page)
+                && result.page.state == KSWORD_ARK_RXPF_PAGE_STATE_RW_NX;
+            m_plan.originalProtection = result.page.originalProtection;
+            m_plan.aliasProtection = result.page.writableAliasProtection;
+            appendTrace(QStringLiteral("Register OK recordId=%1 origProt=%2")
+                .arg(result.recordId).arg(formatHex4(result.page.originalProtection)));
+            m_prepareStatusLabel->setText(m_plan.recordPrepared
+                ? QStringLiteral("状态：准备完成，可进入第 3 步")
+                : QStringLiteral("状态：准备失败，记录保留供清理重试"));
+            if (!m_plan.recordPrepared) appendTrace(pageFailure(result.page));
+            if (result.preview.ioSuccess && result.preview.hasBackup)
+                m_backupHexLabel->setText(bytesToHex(result.preview.bytes));
+            setBusy(false);
+        });
+        watcher->setFuture(QtConcurrent::run([va]() {
+            PrepareResult result;
+            result.page = rxpf::registerPage(rxpf::kTargetExternalImage, va);
+            if (!pageSucceeded(result.page)) return result;
+            result.recordId = result.page.recordId;
+            result.page = rxpf::changePage(result.recordId);
+            if (pageSucceeded(result.page)) result.preview = rxpf::queryBackup(result.recordId, 0UL, 16UL);
+            return result;
         }));
     }
 
-    // ========================================================================
-    // onWritePayloadClicked：Write(payload) 异步
-    // ========================================================================
     void KernelHookWizard::onWritePayloadClicked()
     {
-        // 前置：必须已完成第 2 步 Register+Change 拿到 recordId
-        if (m_plan.recordId == 0ULL) {
+        if (m_busy) return;
+        if (m_plan.recordId == 0ULL)
+        {
             appendTrace(QStringLiteral("请先在第 2 步完成准备"));
             return;
         }
-
-        // 1) 解析 payload hex：空输入直接拒；长度不设 GUI 上限，交给驱动按单页约束
         const QByteArray payload = parseHexBytes(m_payloadHexEdit->text());
-        if (payload.isEmpty()) {
+        if (payload.isEmpty())
+        {
             appendTrace(QStringLiteral("Payload hex 解析失败或为空"));
             return;
         }
-
-        // 2) 解析用户指定的页内 offset：支持 0x 前缀 hex 与十进制；只拒"解析失败"或负数
         bool offsetOk = false;
-        const QString offsetText = m_payloadOffsetEdit->text().trimmed();
-        const QString normalizedOffsetText = offsetText.startsWith(QStringLiteral("0x"),
-            Qt::CaseInsensitive)
-            ? offsetText.mid(2)
-            : offsetText;
-        const int offsetBase = offsetText.startsWith(QStringLiteral("0x"),
-            Qt::CaseInsensitive)
-            ? 16
-            : 10;
-        const qulonglong parsedOffset = normalizedOffsetText.toULongLong(&offsetOk, offsetBase);
-        if (!offsetOk) {
-            appendTrace(QStringLiteral("Offset 解析失败：%1").arg(offsetText));
+        const QString text = m_payloadOffsetEdit->text().trimmed();
+        const bool hexadecimal = text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive);
+        const auto parsedOffset = (hexadecimal ? text.mid(2) : text).toULongLong(&offsetOk,
+            hexadecimal ? 16 : 10);
+        if (!offsetOk)
+        {
+            appendTrace(QStringLiteral("Offset 解析失败：%1").arg(text));
             return;
         }
-
-        // 3) 把用户选择全部塞进 plan，供后续恢复步骤使用；不在 GUI 侧 clamp，由驱动校验
-        m_plan.payload = payload;
-        m_plan.payloadOffset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
-
-        setBusy(true);
-        m_writeStatusLabel->setText(QStringLiteral("状态：QueryBackup + Write 中..."));
-        appendTrace(QStringLiteral("Write(offset=0x%1, len=%2) bytes=%3")
-            .arg(static_cast<quint64>(m_plan.payloadOffset), 0, 16)
-            .arg(payload.size())
-            .arg(bytesToHex(payload)));
-
-        // 4) Worker thread: 先分段 QueryBackup 读准确 (offset, size) 的原字节用于恢复，
-        //    再 Write(offset, payload) 下用户 payload。QueryBackup 单段 ≤ 64 字节是协议上限，
-        //    用户 payload 长度无 GUI 上限 → 需要分段循环；任意一段失败整体失败。
-        //    backup 字节通过 shared_ptr 跨线程回传给 UI finished 回调。
+        struct WriteResult
+        {
+            rxpf::PageInfo page;
+            rxpf::BackupInfo backup;
+        };
+        const auto offset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
         const quint64 rid = m_plan.recordId;
-        const unsigned long offsetArg = m_plan.payloadOffset;
-        auto backupHolder = std::make_shared<QByteArray>();
-        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
-        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w, backupHolder]() {
-                const auto info = w->result();
-                w->deleteLater();
-                if (!info.ioSuccess) {
-                    appendTrace(QStringLiteral("Write 失败：%1").arg(info.ioErrorText));
+        setBusy(true);
+        appendTrace(QStringLiteral("Write(offset=0x%1, len=%2) bytes=%3")
+            .arg(static_cast<quint64>(offset), 0, 16)
+            .arg(payload.size()).arg(bytesToHex(payload)));
+        auto* watcher = new QFutureWatcher<WriteResult>(this);
+        connect(watcher, &QFutureWatcher<WriteResult>::finished, this,
+            [this, watcher, payload, offset]() {
+                const auto result = watcher->result();
+                watcher->deleteLater();
+                // 包括失败调用在内保守记账；原准备记录仍可通过整页Backup安全清理。
+                m_plan.payloadPending = true;
+                m_plan.restored = false;
+                const auto written = result.page.writtenLength;
+                if (result.backup.ioSuccess && result.backup.hasBackup
+                    && result.backup.bytes.size() == static_cast<int>(result.backup.length))
+                {
+                    const int cached = pageSucceeded(result.page)
+                        ? static_cast<int>(written) : result.backup.bytes.size();
+                    if (cached > 0)
+                        m_plan.restoreRanges.append({offset, result.backup.bytes.left(cached)});
+                }
+                else
+                {
+                    m_plan.hasUncachedWrites = true;
+                    appendTrace(QStringLiteral("WARN: QueryBackup 失败，payload 已写入但 backup 为空，第 5 步无法原字节恢复"));
+                }
+                m_plan.payloadOffset = offset;
+                m_plan.payload = payload.left(static_cast<int>(written));
+                m_plan.backupBytes = result.backup.bytes.left(static_cast<int>(written));
+                if (!pageSucceeded(result.page))
+                {
                     m_writeStatusLabel->setText(QStringLiteral("状态：Write 失败"));
-                    // Write 失败时清空 cached backup，避免第 5 步用错数据写回
-                    m_plan.backupBytes.clear();
-                } else {
-                    // Write OK：把 Write 之前读到的准确 backup 字节 cache 进 plan 供第 5 步恢复
-                    m_plan.backupBytes = *backupHolder;
-                    appendTrace(QStringLiteral("Backup cached len=%1 bytes=%2")
-                        .arg(backupHolder->size()).arg(bytesToHex(*backupHolder)));
-                    appendTrace(QStringLiteral("Write OK status=%1")
-                        .arg(formatHex4(static_cast<quint32>(info.lastStatus))));
-                    // 若 worker 用 ioErrorText 带回 warning（例如 QueryBackup 降级），trace 一行
-                    if (!info.ioErrorText.isEmpty()) {
-                        appendTrace(info.ioErrorText);
-                    }
-                    m_writeStatusLabel->setText(QStringLiteral(
-                        "状态：payload 已写入可写别名，可进入第 4 步"));
+                    appendTrace(pageFailure(result.page));
+                }
+                else
+                {
+                    // 保持原64字节写入能力，准确说明请求长于实际写入的部分完成状态。
+                    m_writeStatusLabel->setText(QStringLiteral("写入结果：请求 %1 字节，实际写入 %2 字节。")
+                        .arg(payload.size()).arg(written));
+                    if (static_cast<std::uint64_t>(written) != static_cast<std::uint64_t>(payload.size()))
+                        appendTrace(QStringLiteral("仅部分写入，剩余 payload 未写入；恢复范围按实际写入字节记录。"));
                 }
                 setBusy(false);
             });
-        w->setFuture(QtConcurrent::run([rid, offsetArg, payload, backupHolder]() -> rxpf::PageInfo {
-            // 分段 QueryBackup：协议上限 64 字节/段，用户 payload 任意长 → 按 chunk 循环
-            // Phase G keep-modified 场景下 backup 不是必需（用户可能选择不恢复），
-            // QueryBackup 失败就跳过 backup 直接 Write；第 5 步"恢复"时如果 backup 为空
-            // 会提示"无 backup 可恢复"，由用户决定是否重启清理。
-            constexpr int kQueryBackupChunk = 64;
-            bool backupSucceeded = true;
-            for (int readIndex = 0; readIndex < payload.size(); readIndex += kQueryBackupChunk) {
-                const int remaining = payload.size() - readIndex;
-                const int thisChunk = std::min(kQueryBackupChunk, remaining);
-                const auto qb = rxpf::queryBackup(rid,
-                    offsetArg + static_cast<unsigned long>(readIndex),
-                    static_cast<unsigned long>(thisChunk));
-                if (!qb.ioSuccess || !qb.hasBackup) {
-                    backupSucceeded = false;
-                    backupHolder->clear();
-                    break;
-                }
-                backupHolder->append(qb.bytes);
-            }
-            // 不管 backup 成不成功都走 Write；Write 本身可以写任意长度 payload（driver 校验越页）
-            rxpf::PageInfo info = rxpf::writePage(rid, offsetArg, payload);
-            if (info.ioSuccess && !backupSucceeded) {
-                // 用 ioErrorText 字段 hack 带一条警告，让回调把它拼到 trace 里但不走失败分支
-                info.ioErrorText = QStringLiteral(
-                    "WARN: QueryBackup 失败，payload 已写入但 backup 为空，第 5 步无法原字节恢复");
-            }
-            return info;
+        watcher->setFuture(QtConcurrent::run([rid, offset, payload]() {
+            WriteResult result;
+            const unsigned long effectiveLength = static_cast<unsigned long>(
+                std::min<qsizetype>(payload.size(), KSWORD_ARK_RXPF_MAX_WRITE_BYTES));
+            result.backup = rxpf::queryBackup(rid, offset, effectiveLength);
+            // 保留原warning语义；没有备份仍可请求既有写入，但不能虚构恢复证据。
+            result.page = rxpf::writePage(rid, offset, payload);
+            return result;
         }));
     }
 
-    // ========================================================================
-    // onAtomicCommitClicked：R0 单次 IOCTL 完成 Register→Change(mode=2)→Write→
-    //                        Unregister(SKIP_BACKUP_RESTORE) 的原子路径。
-    //
-    // 为什么要有它：GUI 分步点击在 Change(mode=2) 到 Unregister 之间会把目标页
-    // 停在 NX 态数毫秒；高频被 fetch 的 .text 入口（例如 CI.dll+0x1598，fetch 间隔
-    // 微秒级）在 NX 窗口首个微秒内就会被 CPU 命中 BugCheck 0xFC。原子路径把
-    // 整条序列压缩到驱动函数内（纳秒级），让 CPU 没有空档。
-    //
-    // 与第 2/4 步的关系：不依赖 recordId——R0 自己 Register→Unregister 全走完；
-    // 用户可以直接从第 1 步跳到第 3 步点原子提交。
-    // ========================================================================
     void KernelHookWizard::onAtomicCommitClicked()
     {
+        if (m_busy) return;
         // 前置：必须完成第 1 步得到 targetVa（页 0 的 updateVa 会填 moduleBase+offset）
         if (m_plan.targetVa == 0ULL) {
             appendTrace(QStringLiteral("请先在第 1 步选目标模块与偏移"));
@@ -948,7 +1070,7 @@ namespace ks::ui
                         .arg(info.originalProtection, 0, 16)
                         .arg(info.currentProtection, 0, 16));
                     m_writeStatusLabel->setText(QStringLiteral(
-                        "状态：原子提交成功 payload 已持久（PTE 已回 RX）"));
+                        "状态：原子提交返回成功；字节与执行权限仍需独立核验"));
                 }
                 setBusy(false);
             });
@@ -957,184 +1079,107 @@ namespace ks::ui
         }));
     }
 
-    // ========================================================================
-    // onKeepModifiedClicked：Unregister(SKIP_RESTORE)
-    // ========================================================================
+
     void KernelHookWizard::onKeepModifiedClicked()
     {
-        if (m_plan.recordId == 0ULL) {
+        if (m_busy) return;
+        if (m_plan.recordId == 0ULL)
+        {
             appendTrace(QStringLiteral("请先完成第 3 步 Write"));
             return;
         }
         setBusy(true);
-        m_keepStatusLabel->setText(QStringLiteral(
-            "状态：Unregister(SKIP) 中——完成后 payload 已就位，等待外部触发"));
-        appendTrace(QStringLiteral("Unregister(FLAG_SKIP_BACKUP_RESTORE) recordId=%1")
-            .arg(m_plan.recordId));
-
         const quint64 rid = m_plan.recordId;
-        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
-        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w]() {
-                const auto info = w->result();
-                w->deleteLater();
-                if (!info.ioSuccess) {
-                    appendTrace(QStringLiteral("Unregister 失败：%1").arg(info.ioErrorText));
-                    m_keepStatusLabel->setText(QStringLiteral("状态：Unregister 失败"));
-                } else {
-                    m_plan.mode1Status = info.lastStatus;
-                    appendTrace(QStringLiteral("Unregister OK mode=1 lastStatus=%1")
-                        .arg(formatHex4(static_cast<quint32>(info.lastStatus))));
-                    m_keepStatusLabel->setText(QStringLiteral(
-                        "状态：payload 已就位；立刻进入第 5 步恢复以避免蓝屏"));
-                    // record 已销毁，recordId 作废
-                    m_plan.recordId = 0ULL;
-                }
-                setBusy(false);
-            });
-        w->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {
-            return rxpf::unregisterPage(rid, /*skipBackupRestore=*/true);
-        }));
+        appendTrace(QStringLiteral("Unregister(FLAG_SKIP_BACKUP_RESTORE) recordId=%1")
+            .arg(rid));
+        auto* watcher = new QFutureWatcher<rxpf::PageInfo>(this);
+        connect(watcher, &QFutureWatcher<rxpf::PageInfo>::finished, this, [this, watcher]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            m_plan.mode1Status = result.lastStatus;
+            if (pageSucceeded(result))
+            {
+                m_plan.recordId = 0ULL;
+                m_plan.recordPrepared = false;
+                m_keepStatusLabel->setText(QStringLiteral("状态：payload 已就位；立刻进入第 5 步恢复以避免蓝屏"));
+            }
+            else
+            {
+                m_keepStatusLabel->setText(QStringLiteral("状态：注销或权限恢复失败，记录保留供重试"));
+                appendTrace(pageFailure(result));
+            }
+            setBusy(false);
+        });
+        watcher->setFuture(QtConcurrent::run([rid]() { return rxpf::unregisterPage(rid, true); }));
     }
 
-    // ========================================================================
-    // onRestoreClicked：Register+Change+Write(backup)+Unregister 恢复原字节
-    // ========================================================================
     void KernelHookWizard::onRestoreClicked()
     {
-        if (m_plan.backupBytes.isEmpty()) {
-            appendTrace(QStringLiteral("无 Backup，无法恢复；回到第 2 步重新准备"));
-            return;
-        }
+        if (m_busy) return;
         setBusy(true);
+        const KernelHookPlan snapshot = m_plan;
         m_finalStatusLabel->setText(QStringLiteral("状态：恢复中..."));
-        appendTrace(QStringLiteral(
-            "恢复：Register+Change+Write(backup len=%1)+Unregister target=%2")
-            .arg(m_plan.backupBytes.size()).arg(formatHex8(m_plan.targetVa)));
-
-        const quint64 va = m_plan.targetVa;
-        const QByteArray backup = m_plan.backupBytes;
-        const unsigned long restoreOffset = m_plan.payloadOffset;
-        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
-        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w, backup, restoreOffset]() {
-                const auto reg = w->result();
-                w->deleteLater();
-                if (!reg.ioSuccess) {
-                    appendTrace(QStringLiteral("恢复 Register 失败：%1").arg(reg.ioErrorText));
-                    m_finalStatusLabel->setText(QStringLiteral("状态：Register 失败"));
-                    setBusy(false);
-                    return;
-                }
-                const quint64 rid = reg.recordId;
-                auto* w2 = new QFutureWatcher<rxpf::PageInfo>(this);
-                connect(w2, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                    [this, w2, rid, backup, restoreOffset]() {
-                        const auto chg = w2->result();
-                        w2->deleteLater();
-                        if (!chg.ioSuccess) {
-                            appendTrace(QStringLiteral("恢复 Change 失败：%1")
-                                .arg(chg.ioErrorText));
-                            m_finalStatusLabel->setText(QStringLiteral("状态：Change 失败"));
-                            setBusy(false);
-                            return;
-                        }
-                        auto* w3 = new QFutureWatcher<rxpf::PageInfo>(this);
-                        connect(w3, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                            [this, w3, rid]() {
-                                const auto wr = w3->result();
-                                w3->deleteLater();
-                                if (!wr.ioSuccess) {
-                                    appendTrace(QStringLiteral("恢复 Write 失败：%1")
-                                        .arg(wr.ioErrorText));
-                                    m_finalStatusLabel->setText(QStringLiteral(
-                                        "状态：Write 失败"));
-                                    setBusy(false);
-                                    return;
-                                }
-                                auto* w4 = new QFutureWatcher<rxpf::PageInfo>(this);
-                                connect(w4, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                                    [this, w4]() {
-                                        const auto un = w4->result();
-                                        w4->deleteLater();
-                                        if (!un.ioSuccess) {
-                                            appendTrace(QStringLiteral(
-                                                "恢复 Unregister 失败：%1").arg(un.ioErrorText));
-                                            m_finalStatusLabel->setText(QStringLiteral(
-                                                "状态：Unregister 失败"));
-                                        } else {
-                                            m_plan.restored = true;
-                                            m_plan.restoreStatus = un.lastStatus;
-                                            appendTrace(QStringLiteral(
-                                                "恢复 Unregister OK mode=1 status=%1")
-                                                .arg(formatHex4(static_cast<quint32>(
-                                                    un.lastStatus))));
-                                            m_finalStatusLabel->setText(QStringLiteral(
-                                                "状态：恢复完成，可点\"验证\"检查页面保护"));
-                                        }
-                                        setBusy(false);
-                                    });
-                                w4->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {
-                                    return rxpf::unregisterPage(rid, /*skip=*/false);
-                                }));
-                            });
-                        // 用用户在第 3 步指定的 payloadOffset 把 backup 写回同一位置
-                        w3->setFuture(QtConcurrent::run([rid, backup, restoreOffset]() -> rxpf::PageInfo {
-                            return rxpf::writePage(rid, restoreOffset, backup);
-                        }));
-                    });
-                w2->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {
-                    return rxpf::changePage(rid);
-                }));
-            });
-        w->setFuture(QtConcurrent::run([va]() -> rxpf::PageInfo {
-            return rxpf::registerPage(rxpf::kTargetExternalImage, va);
-        }));
+        auto* watcher = new QFutureWatcher<RecoveryResult>(this);
+        connect(watcher, &QFutureWatcher<RecoveryResult>::finished, this, [this, watcher]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            m_plan = result.plan;
+            setBusy(false);
+            if (!result.ok)
+            {
+                m_closeAfterCleanup = false;
+                m_prepareAfterCleanup = false;
+                m_finalStatusLabel->setText(QStringLiteral("恢复尚未完成：%1").arg(result.failure));
+                appendTrace(result.failure);
+                return;
+            }
+            m_finalStatusLabel->setText(QStringLiteral("状态：原字节及资源清理已完成；执行权限以驱动恢复回执为准。"));
+            if (m_targetChangePending)
+            {
+                m_targetChangePending = false;
+                m_plan = m_requestedTarget;
+                updateTargetFromInputs();
+            }
+            if (m_closeAfterCleanup)
+            {
+                m_closeAfterCleanup = false;
+                close();
+            }
+            else if (m_prepareAfterCleanup)
+            {
+                m_prepareAfterCleanup = false;
+                m_plan.restoreRanges.clear();
+                onPrepareClicked();
+            }
+        });
+        watcher->setFuture(QtConcurrent::run([snapshot]() { return recoverOwnedPage(snapshot); }));
     }
 
-    // ========================================================================
-    // onFinalVerifyClicked：Re-Register 查 origProt，立即 Unregister
-    // ========================================================================
+    // 验证只读回放原范围，不再注册新记录，也不把PE节头当成live PTE证据。
     void KernelHookWizard::onFinalVerifyClicked()
     {
+        if (m_busy) return;
+        const KernelHookPlan snapshot = m_plan;
         setBusy(true);
-        const quint64 va = m_plan.targetVa;
-        appendTrace(QStringLiteral("验证：Register target=%1").arg(formatHex8(va)));
-        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
-        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-            [this, w]() {
-                const auto reg = w->result();
-                w->deleteLater();
-                if (!reg.ioSuccess) {
-                    appendTrace(QStringLiteral("验证 Register 失败：%1").arg(reg.ioErrorText));
-                    m_finalStatusLabel->setText(QStringLiteral("状态：Register 失败"));
-                    setBusy(false);
-                    return;
-                }
-                m_plan.verifyOrigProt = reg.originalProtection;
-                const QString ok = (reg.originalProtection == 0x20)
-                    ? QStringLiteral("<b style='color:#5cb85c;'>origProt=0x20 (PAGE_EXECUTE_READ) OK</b>")
-                    : QStringLiteral("<b style='color:#d9534f;'>origProt=%1 (非 0x20)</b>")
-                        .arg(formatHex4(reg.originalProtection));
-                appendTrace(QStringLiteral("验证 origProt=%1 (期望 0x20)")
-                    .arg(formatHex4(reg.originalProtection)));
-                // 立即 Unregister 清理 record
-                const quint64 rid = reg.recordId;
-                auto* w2 = new QFutureWatcher<rxpf::PageInfo>(this);
-                connect(w2, &QFutureWatcher<rxpf::PageInfo>::finished, this,
-                    [this, w2, ok]() {
-                        const auto un = w2->result();
-                        w2->deleteLater();
-                        appendTrace(QStringLiteral("清理 Unregister OK"));
-                        m_finalStatusLabel->setText(QStringLiteral("验证结果：%1").arg(ok));
-                        setBusy(false);
-                    });
-                w2->setFuture(QtConcurrent::run([rid]() -> rxpf::PageInfo {
-                    return rxpf::unregisterPage(rid, /*skip=*/false);
-                }));
-            });
-        w->setFuture(QtConcurrent::run([va]() -> rxpf::PageInfo {
-            return rxpf::registerPage(rxpf::kTargetExternalImage, va);
+        auto* watcher = new QFutureWatcher<QString>(this);
+        connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher]() {
+            const QString failure = watcher->result();
+            watcher->deleteLater();
+            m_finalStatusLabel->setText(failure.isEmpty()
+                ? QStringLiteral("验证：缓存原字节回读一致；未采样 live PTE。") : failure);
+            setBusy(false);
+        });
+        watcher->setFuture(QtConcurrent::run([snapshot]() -> QString {
+            if (snapshot.restoreRanges.isEmpty() || snapshot.hasUncachedWrites)
+                return QStringLiteral("缺少完整原字节证据，无法证实恢复。请保留当前窗口并处理目标页面。");
+            for (const auto& range : snapshot.restoreRanges)
+            {
+                const auto read = rxpf::readPageBytes(snapshot.targetVa, range.offset,
+                    static_cast<unsigned long>(range.bytes.size()));
+                if (!read.ok) return read.errorText;
+                if (read.bytes != range.bytes) return QStringLiteral("恢复后字节与原始备份不一致。");
+            }
+            return QString();
         }));
     }
 }
