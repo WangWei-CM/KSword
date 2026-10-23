@@ -574,6 +574,19 @@ namespace ksword::debugger
         { SetLastError(ERROR_BUSY); return FALSE; }
         ark::DriverHandle identity(OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pid));
         if (!identity.isValid()) identity.reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
+        // When OpenProcess is stripped by a third-party Ob callback the attach
+        // never gets off the ground. Request the handle from the R0 broker
+        // (ObOpenObjectByPointer with KernelMode); the result is a real OS
+        // handle the WaitForSingleObject identity check accepts verbatim.
+        if (!identity.isValid())
+        {
+            HANDLE brokered = brokerOpenHandle(pid, 0, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
+            if (brokered != nullptr)
+            {
+                identity.reset(brokered);
+                log("Attach identity opened via R0 handle broker for PID " + std::to_string(pid));
+            }
+        }
         if (!identity.isValid()) return FALSE;
         if (!DebugActiveProcess(pid)) return FALSE;
         // Detaching or losing the debugger must leave the target alive.

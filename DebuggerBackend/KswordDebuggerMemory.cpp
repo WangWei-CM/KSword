@@ -24,6 +24,27 @@ namespace ksword::debugger
         HANDLE handle = OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
         if (handle == nullptr) handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
         if (handle != nullptr) return handle;
+        // Win32 OpenProcess refused — a third-party Ob callback has likely
+        // stripped PROCESS_* rights for user-mode opens. Try the R0 broker
+        // path (ObOpenObjectByPointer with PreviousMode=KernelMode) which
+        // bypasses callbacks that gate on KernelHandle==FALSE. The returned
+        // value is a real Windows handle in this process, usable for
+        // ReadProcessMemory / DebugActiveProcess / etc.
+        const DWORD openError = GetLastError();
+        HANDLE brokered = brokerOpenHandle(pid, 0,
+            access | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
+        if (brokered == nullptr)
+        {
+            brokered = brokerOpenHandle(pid, 0,
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
+        }
+        if (brokered != nullptr)
+        {
+            recordFallback("Win32 OpenProcess", "R0 handle broker", openError,
+                "ObOpenObjectByPointer(KernelMode) bypassed callback-stripped access");
+            return brokered;
+        }
+        SetLastError(openError);
         for (auto iterator = processIds_.begin(); iterator != processIds_.end();)
         {
             if (!sameObject(iterator->first, iterator->second.identity.native())) iterator = processIds_.erase(iterator);

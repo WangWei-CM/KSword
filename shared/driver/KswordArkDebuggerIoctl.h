@@ -29,12 +29,26 @@
 /* Latch an owned target after incomplete content rollback. Only a successful
  * SHADOW_RESTORE with address=bytes=0 clears it; all direct STARTs are blocked. */
 #define KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE 12UL
+/* Open a process or thread handle via ObOpenObjectByPointer with
+ * PreviousMode=KernelMode so Ob callbacks that strip access only for
+ * UserMode opens (the common anti-cheat pattern) are bypassed. The
+ * resulting handle is inserted into the requesting R3 process's handle
+ * table and returned verbatim in Response.reserved0; callers close it
+ * with CloseHandle. threadId=0 selects the process kind; threadId!=0
+ * selects the thread kind (processId is still echoed). The desired
+ * ACCESS_MASK is passed in Request.address (low 32 bits). */
+#define KSWORD_ARK_DEBUGGER_OPEN_HANDLE 13UL
 #define KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED 1UL
 #define KSWORD_ARK_DEBUGGER_CAP_CONTEXT 1UL
 #define KSWORD_ARK_DEBUGGER_CAP_SUSPEND 2UL
 #define KSWORD_ARK_DEBUGGER_CAP_MEMORY 4UL
 #define KSWORD_ARK_DEBUGGER_CAP_SHADOW_INT3 8UL
 #define KSWORD_ARK_DEBUGGER_CAP_SHADOW_WRITES 16UL
+/* Advertised whenever the driver can broker a KernelMode-opened handle
+ * duplicated into the requesting R3 handle table. Always on when the
+ * debugger module is linked; included so adapters can gate the attach
+ * path without probing. */
+#define KSWORD_ARK_DEBUGGER_CAP_HANDLE_BROKER 32UL
 /* QUERY response.reserved1: an owned view or content rollback is quarantined;
  * residency must remain stopped until restore/reinstall repairs that page. */
 #define KSWORD_ARK_DEBUGGER_SHADOW_INVALID_VIEW 1ULL

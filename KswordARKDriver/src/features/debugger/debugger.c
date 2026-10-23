@@ -171,6 +171,72 @@ Complete:
     return status;
 }
 
+/* Broker a user-mode handle to the target process/thread opened via the
+ * KernelMode previous-mode path. The resulting handle is inserted into the
+ * requesting R3 process's handle table because ObOpenObjectByPointer
+ * without OBJ_KERNEL_HANDLE binds to PsGetCurrentProcess()'s object table,
+ * and the IOCTL handler runs on the requesting thread. Ob callbacks that
+ * strip access only on UserMode-sourced opens (the common anti-cheat
+ * pattern) see KernelHandle=TRUE and skip stripping. */
+static NTSTATUS KswordARKDebuggerOpenHandleForDebug(const KSWORD_ARK_DEBUGGER_REQUEST* Request,
+    KSWORD_ARK_DEBUGGER_RESPONSE* Response)
+{
+    /* Hold an object reference across the handle-insert step. */
+    PVOID object = NULL;
+    /* Capture the open target's object type for pointer-based open. */
+    POBJECT_TYPE objectType = NULL;
+    /* The requested ACCESS_MASK rides in the ULONGLONG address field. */
+    ACCESS_MASK desiredAccess = (ACCESS_MASK)(Request->address & 0xFFFFFFFFULL);
+    /* The resulting R3 handle value lives in the requesting process's handle table. */
+    HANDLE handle = NULL;
+    /* Preserve exact native completion status for the typed response. */
+    NTSTATUS status;
+    /* An empty ACCESS_MASK offers no debug utility — reject to make faults loud. */
+    if (desiredAccess == 0U) { return STATUS_INVALID_PARAMETER; }
+    /* Reject bits set outside the low 32 bits — those are not ACCESS_MASK territory. */
+    if ((Request->address & 0xFFFFFFFF00000000ULL) != 0ULL) { return STATUS_INVALID_PARAMETER; }
+    /* bytes/protection/allocationType/context must stay zero on this operation. */
+    if (Request->bytes != 0ULL || Request->protection != 0UL ||
+        Request->allocationType != 0UL || Request->contextFlags != 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    /* Resolve the real target object by its authoritative identifier. */
+    if (Request->threadId != 0UL) {
+        /* Thread kind: bind to TID; processId is echoed only for adapters. */
+        PETHREAD thread = NULL;
+        status = PsLookupThreadByThreadId(ULongToHandle(Request->threadId), &thread);
+        if (!NT_SUCCESS(status)) { return status; }
+        /* Validate that the thread actually belongs to the declared process. */
+        if (HandleToULong(PsGetThreadProcessId(thread)) != Request->processId) {
+            ObDereferenceObject(thread);
+            return STATUS_INVALID_PARAMETER;
+        }
+        object = thread;
+        objectType = *PsThreadType;
+    } else {
+        /* Process kind: bind to PID. */
+        PEPROCESS process = NULL;
+        status = PsLookupProcessByProcessId(ULongToHandle(Request->processId), &process);
+        if (!NT_SUCCESS(status)) { return status; }
+        object = process;
+        objectType = *PsProcessType;
+    }
+    /* Open a user-mode (non-OBJ_KERNEL_HANDLE) handle in the requesting R3 process's
+     * handle table with PreviousMode=KernelMode. The callback bypass hinges on this
+     * second argument being zero — adding OBJ_KERNEL_HANDLE would route the handle
+     * into the system handle table and R3 cannot use it. */
+    status = ObOpenObjectByPointer(object, 0UL, NULL, desiredAccess,
+        objectType, KernelMode, &handle);
+    /* Balance the lookup reference irrespective of open success. */
+    ObDereferenceObject(object);
+    /* Publish the opened R3 handle only on success; close happens in R3 via CloseHandle. */
+    if (NT_SUCCESS(status)) {
+        Response->reserved0 = (ULONGLONG)(ULONG_PTR)handle;
+    }
+    /* Return the authoritative native result inside the typed response envelope. */
+    return status;
+}
+
 NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const KSWORD_ARK_DEBUGGER_REQUEST* Request,
     KSWORD_ARK_DEBUGGER_RESPONSE* Response)
 {
@@ -188,10 +254,11 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const 
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) { Response->status = STATUS_INVALID_DEVICE_STATE; return STATUS_SUCCESS; }
     /* Reject foreign revisions, invalid operations, and undefined flags. */
     if (Request->version != KSWORD_ARK_DEBUGGER_VERSION || Request->size != sizeof(*Request) ||
-        Request->operation > KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE || Request->reserved != 0UL || Request->reservedArgument != 0ULL ||
+        Request->operation > KSWORD_ARK_DEBUGGER_OPEN_HANDLE || Request->reserved != 0UL || Request->reservedArgument != 0ULL ||
         (Request->flags & ~KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED) != 0UL) { Response->status = STATUS_INVALID_PARAMETER; return STATUS_SUCCESS; }
     /* Advertise only native routines present on the running Windows build. */
-    Response->capabilities = KSWORD_ARK_DEBUGGER_CAP_MEMORY | KSWORD_ARK_DEBUGGER_CAP_SHADOW_INT3 | KSWORD_ARK_DEBUGGER_CAP_SHADOW_WRITES;
+    Response->capabilities = KSWORD_ARK_DEBUGGER_CAP_MEMORY | KSWORD_ARK_DEBUGGER_CAP_SHADOW_INT3 | KSWORD_ARK_DEBUGGER_CAP_SHADOW_WRITES |
+        KSWORD_ARK_DEBUGGER_CAP_HANDLE_BROKER;
     /* Publish native context support only with both operations available. */
     if (KswordARKDebuggerResolve(L"PsGetContextThread") != NULL && KswordARKDebuggerResolve(L"PsSetContextThread") != NULL) { Response->capabilities |= KSWORD_ARK_DEBUGGER_CAP_CONTEXT; }
     /* Publish previous-count control only with both kernel-handle operations. */
@@ -201,9 +268,12 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const 
         Response->reserved1 = NT_SUCCESS(KswordARKDebuggerShadowValidateViews(OwnerProcessId)) ? 0ULL : 1ULL;
         return STATUS_SUCCESS;
     }
-    /* Kernel/system processes and null thread IDs are outside this user-debugger contract. */
+    /* Kernel/system processes and null thread IDs are outside this user-debugger contract.
+     * OPEN_HANDLE permits threadId=0 (process kind), so exempt it from the null-TID check. */
     if (Request->processId <= 4UL || (Request->operation <= KSWORD_ARK_DEBUGGER_RESUME && Request->threadId == 0UL)) { Response->status = STATUS_INVALID_PARAMETER; return STATUS_SUCCESS; }
-    /* Preserve central policy for each mutating user operation. */
+    /* Preserve central policy for each mutating user operation. OPEN_HANDLE grants an
+     * access-masked handle whose practical reach spans memory_write and suspend, so it
+     * belongs under the memory-write policy gate. */
     if (Request->operation != KSWORD_ARK_DEBUGGER_GET_CONTEXT && Request->operation != KSWORD_ARK_DEBUGGER_RESUME &&
         Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_REMOVE && Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_RESTORE &&
         Request->operation != KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE) {
@@ -220,11 +290,16 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, const 
         /* Complete a typed rejection without touching the target. */
         if (!NT_SUCCESS(Response->status)) { return STATUS_SUCCESS; }
     }
-    /* Dispatch target work into the corresponding feature helper. */
-    Response->status = Request->operation >= KSWORD_ARK_DEBUGGER_SHADOW_ADD
-        ? KswordARKDebuggerShadow(OwnerProcessId, Request, Response)
-        : Request->operation <= KSWORD_ARK_DEBUGGER_RESUME
-            ? KswordARKDebuggerThread(Request, Response) : KswordARKDebuggerMemory(Request, Response);
+    /* Dispatch target work into the corresponding feature helper. OPEN_HANDLE routes
+     * to its own broker so Shadow/Thread/Memory handlers stay single-purpose. */
+    if (Request->operation == KSWORD_ARK_DEBUGGER_OPEN_HANDLE) {
+        Response->status = KswordARKDebuggerOpenHandleForDebug(Request, Response);
+    } else {
+        Response->status = Request->operation >= KSWORD_ARK_DEBUGGER_SHADOW_ADD
+            ? KswordARKDebuggerShadow(OwnerProcessId, Request, Response)
+            : Request->operation <= KSWORD_ARK_DEBUGGER_RESUME
+                ? KswordARKDebuggerThread(Request, Response) : KswordARKDebuggerMemory(Request, Response);
+    }
     /* Keep operation NTSTATUS inside the typed packet. */
     return STATUS_SUCCESS;
 }

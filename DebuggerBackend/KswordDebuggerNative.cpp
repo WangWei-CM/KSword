@@ -450,6 +450,37 @@ namespace ksword::debugger
         return convert == nullptr ? ERROR_GEN_FAILURE : convert(response.status);
     }
 
+    HANDLE Backend::brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess)
+    {
+        // Only pursue the broker path when the driver is actually attached — the
+        // identity-proxy fallback owned by openProcess is still useful without R0.
+        if (!driver_.isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return nullptr; }
+        if (pid == 0 || desiredAccess == 0) { SetLastError(ERROR_INVALID_PARAMETER); return nullptr; }
+        KSWORD_ARK_DEBUGGER_REQUEST request{};
+        request.operation = KSWORD_ARK_DEBUGGER_OPEN_HANDLE;
+        request.processId = pid;
+        request.threadId = tid;
+        // The protocol packs ACCESS_MASK into the ULONGLONG address field, zero-extended.
+        request.address = static_cast<std::uint64_t>(desiredAccess);
+        KSWORD_ARK_DEBUGGER_RESPONSE response{};
+        const DWORD transportError = nativeRequest(request, response);
+        if (transportError != ERROR_SUCCESS) { SetLastError(transportError); return nullptr; }
+        if (response.status < 0)
+        {
+            using Convert = ULONG(WINAPI*)(LONG);
+            const auto convert = reinterpret_cast<Convert>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError"));
+            SetLastError(convert == nullptr ? ERROR_GEN_FAILURE : convert(response.status));
+            return nullptr;
+        }
+        // The driver inserts the handle into this process's handle table via
+        // ObOpenObjectByPointer without OBJ_KERNEL_HANDLE; reserved0 therefore holds a
+        // handle that is immediately valid for subsequent Win32 calls here.
+        const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(response.reserved0));
+        if (handle == nullptr) { SetLastError(ERROR_NOT_SUPPORTED); return nullptr; }
+        SetLastError(ERROR_SUCCESS);
+        return handle;
+    }
+
     BOOL Backend::nativeContext(HANDLE thread, CONTEXT* context, bool write)
     {
         if (context == nullptr || sizeof(*context) != KSWORD_ARK_DEBUGGER_CONTEXT_BYTES)

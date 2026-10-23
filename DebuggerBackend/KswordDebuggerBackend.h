@@ -75,6 +75,12 @@ namespace ksword::debugger
         void overlayShadowBytes(DWORD pid, std::uint64_t address, void* data, SIZE_T bytes);
         bool shadowPatchByte(DWORD pid, std::uint64_t address, unsigned char& byte);
         DWORD nativeExecutionBreakpointPath(std::uint64_t address);
+        // Open a real Windows handle to a process/thread via the R0 handle broker
+        // (ObOpenObjectByPointer with PreviousMode=KernelMode) so Ob callbacks that
+        // strip access only for UserMode opens are bypassed. tid==0 selects process
+        // kind. Returns nullptr with SetLastError on refusal; the returned handle
+        // is a genuine OS handle in this process and must be closed with CloseHandle.
+        HANDLE brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess);
     private:
 #ifdef KSWORD_DEBUGGER_TESTING
         friend struct BackendTestPeer;
