@@ -828,7 +828,8 @@ namespace
                 if (!lifetime || !m_tabs) return;
                 if (owner && owner->layout()) owner->layout()->activate();
                 if (!lifetime || !m_tabs) return;
-                if (m_tabs->currentWidget() != page || pageLayoutOwner(page) != owner)
+                // 最后一页被同步销毁后，空指针相等不代表仍是原准备对象。
+                if (!page || m_tabs->currentWidget() != page || pageLayoutOwner(page) != owner)
                 {
                     m_preparing = false;
                     m_layoutDirty = true;
