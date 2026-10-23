@@ -51,11 +51,12 @@ namespace ks::ui
         enum PropertyRole { KindRole = Qt::UserRole + 176, KeyRole, RowRole, ValueRole };
 
         void retireFieldProjection(std::shared_ptr<const FieldTreeProjection> snapshot,
-            QHash<QString, bool> expansion = {})
+            QHash<QString, bool> expansion = {}, std::function<QString(const QString&)> translate = {})
         {
-            if (snapshot || !expansion.isEmpty())
-                QThreadPool::globalInstance()->start([snapshot = std::move(snapshot), expansion = std::move(expansion)]() mutable
-                    { snapshot.reset(); expansion.clear(); });
+            if (snapshot || !expansion.isEmpty() || translate)
+                QThreadPool::globalInstance()->start([snapshot = std::move(snapshot), expansion = std::move(expansion),
+                    translate = std::move(translate)]() mutable
+                    { snapshot.reset(); expansion.clear(); translate = {}; }); // 旧译者与旧投影同一次后台退休。
         }
 
         void retireFieldSelection(std::shared_ptr<FieldTreeSelection> selection)
@@ -63,10 +64,11 @@ namespace ks::ui
             if (selection) QThreadPool::globalInstance()->start([selection = std::move(selection)]() mutable { selection.reset(); });
         }
 
-        bool writeDocumentText(const FieldDocument& document, const QString& filePath, QString* error)
+        bool writeDocumentText(const FieldDocument& document, const QString& filePath, QString* error,
+            const std::function<QString(const QString&)>& translate = {})
         {
             QSaveFile file(filePath);
-            const QByteArray bytes = document.toPlainText(true).toUtf8();
+            const QByteArray bytes = (translate ? document.toPlainText(translate) : document.toPlainText(true)).toUtf8();
             if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
             {
                 if (error) *error = file.errorString();
@@ -341,17 +343,18 @@ namespace ks::ui
         {
             setPresentation(index == 1 ? Presentation::Tree : Presentation::Sections);
         });
-        connect(m_copy, &QToolButton::clicked, this, [this] { copyText(plainText()); });
+        connect(m_copy, &QToolButton::clicked, this, [this] { copyText(actionPlainText()); });
         connect(m_export, &QToolButton::clicked, this, [this]
         {
             const QPointer<StructuredFieldView> self(this);
-            const FieldDocument snapshot = m_document;
+            const FieldDocument snapshot = actionDocument();
+            const auto translate = actionTranslator(); // 对话框可重入，文档和译者一起冻结。
             const QString path = QFileDialog::getSaveFileName(this,
                 translated(QStringLiteral("导出文本")), QString(),
                 translated(QStringLiteral("文本文件 (*.txt);;所有文件 (*)")));
             if (!self || path.isEmpty()) return;
             QString error;
-            if (!writeDocumentText(snapshot, path, &error))
+            if (!writeDocumentText(snapshot, path, &error, translate))
                 QMessageBox::warning(self.data(), translated(QStringLiteral("导出失败")), error);
         });
         connect(m_tree, &QTreeWidget::customContextMenuRequested,
@@ -361,7 +364,7 @@ namespace ks::ui
         connect(copyShortcut, &QShortcut::activated, this, [this]
         {
             const auto selected = selectedText();
-            copyText(selected.isEmpty() ? plainText() : selected);
+            copyText(selected.isEmpty() ? actionPlainText() : selected);
         });
         updateTranslations();
         setPresentation(sessionPresentation());
@@ -375,7 +378,7 @@ namespace ks::ui
         if (m_valueModel)
         {
             auto old = m_valueModel->takeSnapshotForDisposal();
-            if (old) QThreadPool::globalInstance()->start([old = std::move(old)]() mutable { old.reset(); });
+            retireFieldProjection(std::move(old), {}, std::move(m_valuePublishedTranslate));
         }
     }
 
@@ -393,6 +396,7 @@ namespace ks::ui
         valueTree->clearLogicalSelection = [this]
         {
             if (m_valueApplying || !m_valueTree->isVisible()) return;
+            ++m_valueReadingRevision;
             auto old = std::move(m_valueSelection);
             m_valueSelection = std::make_shared<FieldTreeSelection>();
             retireFieldSelection(std::move(old));
@@ -431,8 +435,12 @@ namespace ks::ui
             [this](const QPoint& position) { showValueCopyMenu(position); });
         const auto recordExpansion = [this](const QModelIndex& index, bool expanded)
         {
-            if (!m_valueApplying && !m_valueSearchActive)
+            const auto displayed = m_valueModel->snapshot();
+            if (!m_valueApplying && displayed && displayed->query.isEmpty())
+            {
+                ++m_valueReadingRevision;
                 m_valueExpansion.insert(index.data(KeyRole).toString(), expanded);
+            }
         };
         connect(m_valueTree, &QTreeView::expanded, this,
             [recordExpansion](const QModelIndex& index) { recordExpansion(index, true); });
@@ -452,6 +460,7 @@ namespace ks::ui
             [this](const QItemSelection& selected, const QItemSelection& deselected)
         {
             if (m_valueApplying || !m_valueTree->isVisible() || !m_valueSelection) return;
+            ++m_valueReadingRevision;
             const auto apply = [this](const QItemSelection& ranges, bool state)
             {
                 for (const auto& range : ranges)
@@ -473,16 +482,18 @@ namespace ks::ui
         connect(shortcut, &QShortcut::activated, this, [this]
         {
             const QString selected = selectedText();
-            copyText(selected.isEmpty() ? plainText() : selected);
+            copyText(selected.isEmpty() ? actionPlainText() : selected);
         });
         auto* selectAll = new QShortcut(QKeySequence::SelectAll, m_valueTree);
         selectAll->setContext(Qt::WidgetWithChildrenShortcut);
         connect(selectAll, &QShortcut::activated, this, [this]
         {
             if (m_valueModel->rowCount() == 0) return;
+            ++m_valueReadingRevision;
             auto old = std::move(m_valueSelection);
             m_valueSelection = std::make_shared<FieldTreeSelection>();
-            m_valueSelection->selectAll(m_valueModel->snapshot(), m_valueExpansion, m_valueSearchActive);
+            const auto displayed = m_valueModel->snapshot();
+            m_valueSelection->selectAll(displayed, m_valueExpansion, displayed && !displayed->query.isEmpty());
             m_valueClearPending = false;
             retireFieldSelection(std::move(old));
             m_valueApplying = true;
@@ -499,6 +510,11 @@ namespace ks::ui
         flushValueSelection();
         if (m_valueCancel) m_valueCancel->store(true, std::memory_order_relaxed);
         const quint64 ticket = ++m_valueTicket;
+        const QPointer<StructuredFieldView> guard(this);
+        const auto current = [&guard, ticket]
+        {
+            return guard && guard->m_valueTree && guard->m_valueTicket == ticket;
+        };
         m_valueRows.clear();
         m_valueRowCursor = 0;
         m_valueRootNext = m_valueRootTotal = 0;
@@ -514,11 +530,18 @@ namespace ks::ui
             m_valueScroll = m_valueTree->verticalScrollBar()->value();
         }
         m_valueRestoreSelection = false;
-        m_title->setText(translated(m_document.title));
-        m_title->setVisible(!m_document.title.isEmpty());
-        m_valueLoading->setText(ks::i18n::text(QStringLiteral("shared.fields.loading"), QStringLiteral("正在准备字段...")));
-        m_valueTree->hide(); // pending values/language are never presented as the completed new snapshot
-        m_valueLoading->show();
+        // 已发布的标题和正文保持同一份快照，更新时不切换布局槽或闪回加载页。
+        // 首份快照（包括池换对象后的首份）仍明确显示原有加载状态。
+        if (!m_valuePublished)
+        {
+            m_title->hide();
+            if (!current()) return;
+            m_valueTree->hide();
+            if (!current()) return;
+            m_valueLoading->setText(ks::i18n::text(QStringLiteral("shared.fields.loading"), QStringLiteral("正在准备字段...")));
+            m_valueLoading->show();
+            if (!current()) return;
+        }
         const FieldDocument document = m_document;
         const QString query = m_search->text();
         const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
@@ -527,9 +550,11 @@ namespace ks::ui
         const auto selection = std::make_shared<FieldTreeSelection>(*m_valueSelection);
         const auto cancelled = std::make_shared<std::atomic_bool>(false);
         m_valueCancel = cancelled;
-        const QPointer<StructuredFieldView> guard(this);
-        QThreadPool::globalInstance()->start([document, query, translator, previous, expansion, selection, cancelled, guard, ticket]
+        const quint64 readingRevision = m_valueReadingRevision;
+        QThreadPool::globalInstance()->start([document, query, translator, previous, expansion, selection, cancelled, guard, ticket, readingRevision]
         {
+            const QString title = translator.sourceText(document.title); // 与正文使用同一冻结翻译快照。
+            const bool titleVisible = !document.title.isEmpty();
             auto projection = PrepareFieldTreeProjection(document,
                 [translator](const QString& source) { return translator.sourceText(source); }, query, previous, cancelled);
             if (!projection) return;
@@ -539,7 +564,8 @@ namespace ks::ui
             for (auto it = expansion.cbegin(); it != expansion.cend(); ++it)
                 if (projection->keys.contains(it.key())) keptExpansion.insert(it.key(), it.value());
             QMetaObject::invokeMethod(QCoreApplication::instance(),
-                [guard, projection = std::move(projection), keptExpansion = std::move(keptExpansion), selection = selection, ticket]() mutable
+                [guard, projection = std::move(projection), keptExpansion = std::move(keptExpansion), selection = selection,
+                    ticket, readingRevision, title, titleVisible, translator]() mutable
             {
                 if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket)
                 { retireFieldProjection(std::move(projection), std::move(keptExpansion)); retireFieldSelection(std::move(selection)); return; }
@@ -551,17 +577,35 @@ namespace ks::ui
                     return !guard->m_valuePrepared || !projection->sameStructure
                         || projection->base.lock() != before || !before || before->query != projection->query;
                 }();
+                // 旧正文在后台准备时仍可交互；在模型重置前收口待清选的真实状态。
+                guard->flushValueSelection();
                 guard->m_valueApplying = true;
                 guard->m_valueRows.clear();
                 guard->m_valueRowCursor = 0;
                 auto old = guard->m_valueModel->applySnapshot(std::move(projection));
-                retireFieldProjection(std::move(old));
                 if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket)
-                { retireFieldProjection({}, std::move(keptExpansion)); retireFieldSelection(std::move(selection)); return; }
-                retireFieldProjection({}, std::move(guard->m_valueExpansion));
-                guard->m_valueExpansion = std::move(keptExpansion);
-                retireFieldSelection(std::move(guard->m_valueSelection));
-                guard->m_valueSelection = std::move(selection);
+                {
+                    retireFieldProjection(std::move(old), std::move(keptExpansion));
+                    retireFieldSelection(std::move(selection));
+                    return;
+                }
+                auto oldTranslate = std::move(guard->m_valuePublishedTranslate);
+                guard->m_valuePublishedTranslate = [translator](const QString& source) { return translator.sourceText(source); };
+                retireFieldProjection(std::move(old), {}, std::move(oldTranslate));
+                if (guard->m_valueReadingRevision == readingRevision)
+                {
+                    retireFieldProjection({}, std::move(guard->m_valueExpansion));
+                    guard->m_valueExpansion = std::move(keptExpansion);
+                    retireFieldSelection(std::move(guard->m_valueSelection));
+                    guard->m_valueSelection = std::move(selection);
+                }
+                else
+                {
+                    // 等待期间的新选择/展开优先；过期键仍由下一轮既有 worker 裁剪。
+                    // 这里只释放后台旧副本，不在 GUI 线程全文遍历，也不另起准备任务。
+                    retireFieldProjection({}, std::move(keptExpansion));
+                    retireFieldSelection(std::move(selection));
+                }
                 guard->m_valueApplying = false;
                 guard->m_valueRows.clear();
                 guard->m_valueRowCursor = 0;
@@ -572,7 +616,13 @@ namespace ks::ui
                 if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
                 if (prepare) guard->consumeValueRows(ticket); // unchanged topology never rescans expanded rows
                 if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
+                guard->m_title->setText(title);
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
+                guard->m_title->setVisible(titleVisible);
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
+                guard->m_valuePublished = true;
                 guard->m_valueLoading->hide();
+                if (!guard || !guard->m_valueTree || guard->m_valueTicket != ticket) return;
                 guard->m_valueTree->show();
             }, Qt::QueuedConnection);
         });
@@ -732,7 +782,7 @@ namespace ks::ui
         if (m_valueModel)
         {
             auto old = m_valueModel->takeSnapshotForDisposal();
-            if (old) QThreadPool::globalInstance()->start([old = std::move(old)]() mutable { old.reset(); });
+            retireFieldProjection(std::move(old), {}, std::move(m_valuePublishedTranslate));
             delete m_valueModel;
             m_valueModel = nullptr;
         }
@@ -772,12 +822,24 @@ namespace ks::ui
         }
     }
 
-    void StructuredFieldView::setDocument(const FieldDocument& document)
+    void StructuredFieldView::setDocument(const FieldDocument& document, const bool resetPublished)
     {
-        if (m_document.title == document.title
-            && (m_document.nodes.isSharedWith(document.nodes)
-                || (!m_valueTree && m_document.nodes == document.nodes)))
+        const bool sameDocument = (m_document.isEmpty() && document.isEmpty())
+            || (m_document.title == document.title
+                && (m_document.nodes.isSharedWith(document.nodes)
+                    || (!m_valueTree && m_document.nodes == document.nodes)));
+        if (sameDocument && !resetPublished)
         {
+            if (!m_valueTree || !document.isEmpty() || !m_valuePublished) return;
+            const auto displayed = m_valueModel->snapshot();
+            if (!displayed || displayed->document.isEmpty()) return; // 已发布空结果仍保持等值 no-op。
+        }
+        // 清空/业务换对象是显式语义，不从字段数量或内容猜测身份；判断只有 O(1)。
+        const bool resetValueProjection = m_valueTree && (resetPublished || document.isEmpty());
+        if (resetValueProjection) m_valuePublished = false;
+        if (sameDocument)
+        {
+            if (resetValueProjection) rebuild(); // 只在明确重置或仍展示非空旧结果时取消旧回执。
             return;
         }
         if (m_valueTree)
@@ -898,6 +960,27 @@ namespace ks::ui
         m_tree->verticalScrollBar()->setValue(scroll);
     }
 
+    FieldDocument StructuredFieldView::actionDocument() const
+    {
+        if (m_valueTree && m_valuePublished)
+        {
+            const auto displayed = m_valueModel->snapshot();
+            if (displayed) return displayed->document; // COW 值引用既有快照，不遍历或另建规范源。
+        }
+        return m_document; // 原生树、document-only 和首份加载保留原有动作语义。
+    }
+
+    std::function<QString(const QString&)> StructuredFieldView::actionTranslator() const
+    {
+        return m_valueTree && m_valuePublished ? m_valuePublishedTranslate : std::function<QString(const QString&)>{};
+    }
+
+    QString StructuredFieldView::actionPlainText() const
+    {
+        const auto translate = actionTranslator();
+        return translate ? actionDocument().toPlainText(translate) : actionDocument().toPlainText(true);
+    }
+
     QString StructuredFieldView::plainText() const
     {
         return m_document.toPlainText(true);
@@ -912,7 +995,7 @@ namespace ks::ui
     {
         if (m_valueTree)
         {
-            if (!selectedOnly) return plainText();
+            if (!selectedOnly) return actionPlainText();
             flushValueSelection();
             const auto snapshot = m_valueModel->snapshot();
             return snapshot && m_valueSelection ? m_valueSelection->text(*snapshot) : QString();
@@ -934,7 +1017,7 @@ namespace ks::ui
     FieldCopySnapshot StructuredFieldView::captureCopy(const QModelIndex& clicked) const
     {
         FieldCopySnapshot snapshot;
-        snapshot.all = plainText();
+        snapshot.all = actionPlainText();
         if (clicked.isValid() && ((m_tree && clicked.model() == m_tree->model())
             || (m_valueTree && clicked.model() == m_valueTree->model())))
         {

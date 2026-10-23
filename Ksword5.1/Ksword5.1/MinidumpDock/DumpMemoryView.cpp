@@ -833,7 +833,7 @@ void DumpMemoryView::setDiagnostic(const QString& text)
 {
     if (m_messageView != nullptr)
     {
-        m_messageView->setDocument(ks::ui::FieldDocument{}.note(text));
+        m_messageView->setDocument(ks::ui::FieldDocument{}.note(text), true); // 新读取/错误诊断立即替换上一地址字段。
     }
 }
 

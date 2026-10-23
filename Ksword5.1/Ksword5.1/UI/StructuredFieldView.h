@@ -110,7 +110,8 @@ namespace ks::ui
         // 普通页面可显式延后隐藏树投影；规范文档、复制和导出始终立即可用。
         // 默认关闭，专业工作台仍保持 tree() 的同步模型契约。
         void setHiddenProjectionDeferred(bool enabled = true);
-        void setDocument(const FieldDocument& document);
+        // 普通刷新保留已发布画面；显式换对象可重置显示，空文档始终按清空处理。
+        void setDocument(const FieldDocument& document, bool resetPublished = false);
         const FieldDocument& document() const { return m_document; }
         // 规范文档代次供卡片合并通知；未变化的document-only快照不增加代次。
         quint64 documentRevision() const { return m_documentRevision; }
@@ -162,6 +163,10 @@ namespace ks::ui
         void updateColumns();
         void showCopyMenu(const QPoint& position);
         void copyText(const QString& text);
+        // 用户复制/导出跟随当前显示快照；公开 document/plainText/exportText 仍读取规范文档。
+        FieldDocument actionDocument() const;
+        std::function<QString(const QString&)> actionTranslator() const;
+        QString actionPlainText() const;
         QString exportItems(bool selectedOnly) const;
 
         FieldDocument m_document;
@@ -177,6 +182,9 @@ namespace ks::ui
         QLabel* m_valueLoading = nullptr;
         std::shared_ptr<std::atomic_bool> m_valueCancel;
         quint64 m_valueTicket = 0;
+        quint64 m_valueReadingRevision = 0; // 只在既有选择/展开操作时递增，后台旧副本不得覆盖等待期间的新操作。
+        bool m_valuePublished = false; // 合法空结果同样算已发布；池换对象时重新等待首份对应快照。
+        std::function<QString(const QString&)> m_valuePublishedTranslate; // 只保留已发布译者，不复制规范文档。
         QVector<QPersistentModelIndex> m_valueRows;
         qsizetype m_valueRowCursor = 0;
         int m_valueRootNext = 0;

@@ -556,7 +556,7 @@ void HyperVMemoryPage::showPartition(int index) {
     // the newly selected object while its canonical HCS fields are prepared.
     if(!m_detailJob||m_detailJob->index!=index||m_detailJob->snapshot!=m_snapshot) {
         ks::ui::FieldDocument pending;pending.note(L("Reading HCS utility VM memory"));
-        const QPointer<HyperVMemoryPage>guard(this);m_detail->setDocument(pending);if(!guard)return;
+        const QPointer<HyperVMemoryPage>guard(this);m_detail->setDocument(pending, true);if(!guard)return;
     }
     if(m_detailJob)return;
     auto job=std::make_shared<DetailJob>();job->index=index;job->snapshot=m_snapshot;job->locale=m_localeVersion;m_detailJob=job;

@@ -34,7 +34,9 @@ namespace ks::ui
         if (!m_valueTree || m_documentOnly) return {};
         flushValueSelection();
         auto state = std::make_shared<StructuredFieldViewState>();
-        state->document = m_document;
+        const auto displayed = m_valueModel->snapshot();
+        // 已展示旧画面时读状态属于该快照；池复用尚未发布时，逻辑状态已由 restore 归属新规范对象。
+        state->document = m_valuePublished && displayed ? displayed->document : m_document;
         if (m_valueSelection) state->selection = std::make_shared<FieldTreeSelection>(*m_valueSelection);
         state->expansion = m_valueExpansion;
         state->query = m_search->text();
@@ -60,6 +62,15 @@ namespace ks::ui
         // a synchronous selection callback. Keep the immutable value alive.
         const auto retainedState = state;
         const bool accepted = retainedState && retainedState->matches(m_document);
+        // 编辑器池可能刚换到另一行；只比较隐式共享身份，不扫描规范字段。
+        // 普通刷新保留旧画面，但池复用不能把上一行数据短暂投到新对象下面。
+        const bool displayedDocumentMatches = [this]
+        {
+            const auto displayed = m_valueModel->snapshot();
+            return displayed && displayed->document.title == m_document.title
+                && displayed->document.nodes.isSharedWith(m_document.nodes);
+        }();
+        if (!displayedDocumentMatches) m_valuePublished = false;
         if (m_valueCancel) m_valueCancel->store(true, std::memory_order_relaxed);
         const quint64 restoreTicket = ++m_valueTicket;
         // Read-only selection bases are immutable/COW values. Old large bases
