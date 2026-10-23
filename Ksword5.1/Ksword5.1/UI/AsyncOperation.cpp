@@ -221,8 +221,10 @@ namespace ks::ui
             }
             else
             {
-                request->generation = ++m_shared->generation;
+                // Job 分配失败时尚未发布 active/pending；不能留下没有 worker 的已占用请求。
                 job.request = request;
+                auto admittedJob = std::make_unique<Job>(std::move(job));
+                request->generation = ++m_shared->generation;
                 replaced = std::move(m_shared->pending);
                 m_pending.reset();
                 if (m_shared->active)
@@ -238,12 +240,12 @@ namespace ks::ui
                 if (m_shared->active)
                 {
                     m_shared->pending = request;
-                    m_pending = std::make_unique<Job>(std::move(job));
+                    m_pending = std::move(admittedJob);
                 }
                 else
                 {
                     m_shared->active = request;
-                    m_active = std::make_unique<Job>(std::move(job));
+                    m_active = std::move(admittedJob);
                     launch = true;
                 }
             }
