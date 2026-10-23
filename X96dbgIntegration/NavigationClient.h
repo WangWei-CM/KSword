@@ -1,6 +1,7 @@
 #pragma once
 #include "NavigationProtocol.h"
 #include <TlHelp32.h>
+#include <cwchar>
 #include <vector>
 
 namespace ksword::x64dbg_navigation
@@ -68,6 +69,25 @@ namespace ksword::x64dbg_navigation
         CloseHandle(pipe);
         return error;
     }
+    inline bool debuggerExecutableName(const wchar_t* name)
+    {
+        if (_wcsicmp(name, L"x64dbg.exe") == 0 || _wcsicmp(name, L"x32dbg.exe") == 0)
+            return true;
+        const size_t length = wcslen(name);
+        const bool suffixed = length == 19 &&
+            (_wcsnicmp(name, L"x64dbg-", 7) == 0 ||
+             _wcsnicmp(name, L"x32dbg-", 7) == 0);
+        const bool fullyRandom = length == 36;
+        if (!suffixed && !fullyRandom) return false;
+        const size_t start = suffixed ? 7 : 0;
+        const size_t end = suffixed ? 15 : 32;
+        if (_wcsicmp(name + end, L".exe") != 0) return false;
+        for (size_t i = start; i < end; ++i)
+            if (!((name[i] >= L'0' && name[i] <= L'9') ||
+                  (name[i] >= L'a' && name[i] <= L'f') ||
+                  (name[i] >= L'A' && name[i] <= L'F'))) return false;
+        return true;
+    }
     // Return a matching connected debugger only. A busy debugger for another
     // target is never given any command, including an attach command.
     inline DWORD findSession(const Request& navigation, DWORD& debuggerPid, HANDLE& debuggerIdentity)
@@ -79,7 +99,7 @@ namespace ksword::x64dbg_navigation
         DWORD result = ERROR_NOT_FOUND;
         if (Process32FirstW(processes, &process)) do
         {
-            if (_wcsicmp(process.szExeFile, L"x64dbg.exe") != 0 && _wcsicmp(process.szExeFile, L"x32dbg.exe") != 0) continue;
+            if (!debuggerExecutableName(process.szExeFile)) continue;
             const HANDLE identity = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process.th32ProcessID);
             if (identity == nullptr) continue;
             Request query = navigation; query.operation = Operation::Query;

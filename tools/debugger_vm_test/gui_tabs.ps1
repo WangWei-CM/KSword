@@ -17,6 +17,18 @@ Set-Content -LiteralPath $report -Value ''
 function Check($Value,[string]$Message) { if(!$Value){throw $Message}; Add-Content -LiteralPath $report -Value "PASS $Message" }
 function Note([string]$Message) { Add-Content -LiteralPath $report -Value "INFO $Message" }
 function UnderRoot([string]$Path) { $Path -and $Path.StartsWith($Root+'\',[StringComparison]::OrdinalIgnoreCase) }
+function RandomizedPayload([string]$Path,[string]$Kind) {
+    if(!$Path){return $false}
+    $sessions=Join-Path $env:LOCALAPPDATA 'KSword\sessions'
+    $parent=Split-Path -Parent $Path
+    $session=Split-Path -Leaf $parent
+    if(![string]::Equals((Split-Path -Parent $parent),$sessions,[StringComparison]::OrdinalIgnoreCase) -or
+       $session -cnotmatch '^x-[0-9A-F]{16}$'){return $false}
+    $name=Split-Path -Leaf $Path
+    if($name -cmatch '^[0-9A-F]{32}\.exe$'){return $true}
+    if($Kind -eq 'CE'){return $name -cmatch '^cheatengine-x86_64-[0-9A-F]{8}\.exe$'}
+    return $name -cmatch '^x64dbg-[0-9A-F]{8}\.exe$'
+}
 try {
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 if(-not ('GuestPolicyWindows' -as [type])) { Add-Type -TypeDefinition @'
@@ -263,7 +275,10 @@ function NewContext([int]$HelperId,[switch]$Fresh) {
     $end=(Get-Date).AddSeconds(20); $client=$null; $owned=@()
     do {
         $expected=if($kind -eq 'CE'){'cheatengine-x86_64.exe'}else{'x64dbg.exe'}
-        $clients=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$HelperId" | Where-Object {$_.Name -eq $expected -and (UnderRoot $_.ExecutablePath)})
+        $clients=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$HelperId" | Where-Object {
+            (($_.Name -eq $expected) -and (UnderRoot $_.ExecutablePath)) -or
+            (RandomizedPayload $_.ExecutablePath $kind)
+        })
         $owned=@(OwnedChildren $HelperId)
         if($clients.Count -eq 1 -and $owned.Count -ge 4){$client=Get-Process -Id $clients[0].ProcessId; $client.Refresh(); if($client.MainWindowHandle -ne 0){break}}
         Start-Sleep -Milliseconds 150

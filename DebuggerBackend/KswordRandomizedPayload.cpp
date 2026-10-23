@@ -4,6 +4,9 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <bcrypt.h>
+#include <TlHelp32.h>
+#include <cstdint>
+#include <cwchar>
 #include <vector>
 
 #pragma comment(lib, "ole32.lib")
@@ -178,48 +181,190 @@ DWORD cloneDirectoryTree(
     return lastError;
 }
 
-// 判断 directory 下所有 .exe 都能用 FILE_SHARE_NONE 独占打开，等同于"没有进程把它作为 image 加载"。
-// 一旦有任何 exe 打开失败就返回 false，调用方不删这个目录（可能还在用）。
-bool directoryExesAreNotInUse(const std::wstring& directory)
+constexpr DWORD kSessionMagic = 0x5357534BU; // KSWS
+constexpr DWORD kSessionVersion = 1U;
+constexpr DWORD kPreparing = 1U;
+constexpr DWORD kRunning = 2U;
+constexpr ULONGLONG kAbandonedLaunchGrace = 120ULL * 10000000ULL;
+constexpr wchar_t kMarkerName[] = L".ksword-launch";
+
+struct SessionRecord {
+    DWORD magic = kSessionMagic;
+    DWORD version = kSessionVersion;
+    DWORD state = kPreparing;
+    DWORD ownerPid = 0;
+    ULONGLONG ownerCreated = 0;
+    DWORD childPid = 0;
+    ULONGLONG childCreated = 0;
+};
+
+ULONGLONG fileTimeValue(const FILETIME& time)
 {
-    const std::wstring pattern = joinPath(directory, L"*");
-    WIN32_FIND_DATAW find{};
-    HANDLE finder = ::FindFirstFileW(pattern.c_str(), &find);
-    if (finder == INVALID_HANDLE_VALUE) {
-        return true; // 空目录视为可清。
+    return (static_cast<ULONGLONG>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+}
+
+ULONGLONG processCreationTime(HANDLE process)
+{
+    FILETIME created{}, exited{}, kernel{}, user{};
+    return process != nullptr && ::GetProcessTimes(process, &created, &exited, &kernel, &user)
+        ? fileTimeValue(created) : 0;
+}
+
+bool processIdentityIsRunning(DWORD pid, ULONGLONG created)
+{
+    if (pid == 0 || created == 0) return false;
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    if (process == nullptr) return false;
+    const bool running = ::WaitForSingleObject(process, 0) == WAIT_TIMEOUT &&
+        processCreationTime(process) == created;
+    ::CloseHandle(process);
+    return running;
+}
+
+bool writeRecord(HANDLE file, const SessionRecord& record)
+{
+    LARGE_INTEGER start{};
+    DWORD written = 0;
+    return ::SetFilePointerEx(file, start, nullptr, FILE_BEGIN) &&
+        ::WriteFile(file, &record, sizeof(record), &written, nullptr) &&
+        written == sizeof(record) && ::SetEndOfFile(file) && ::FlushFileBuffers(file);
+}
+
+bool validSessionLeaf(const std::wstring& leaf)
+{
+    if (leaf.size() != 18 || leaf[0] != L'x' || leaf[1] != L'-') return false;
+    for (size_t i = 2; i < leaf.size(); ++i) {
+        const wchar_t c = leaf[i];
+        if (!((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F'))) return false;
     }
-    bool freeToDelete = true;
+    return true;
+}
+
+bool validSessionDirectory(const std::wstring& path, std::wstring& leaf)
+{
+    const std::wstring appData = preferredContainerRoot();
+    if (appData.empty()) return false;
+    const std::wstring root = joinPath(joinPath(appData, L"KSword"), L"sessions");
+    wchar_t expanded[32768];
+    const DWORD length = ::GetFullPathNameW(path.c_str(), _countof(expanded), expanded, nullptr);
+    if (length == 0 || length >= _countof(expanded)) return false;
+    const std::wstring canonical(expanded, length);
+    const std::wstring prefix = root + L'\\';
+    if (canonical.size() <= prefix.size() ||
+        ::_wcsnicmp(canonical.c_str(), prefix.c_str(), prefix.size()) != 0) return false;
+    leaf = canonical.substr(prefix.size());
+    if (!validSessionLeaf(leaf)) return false;
+    const DWORD attrs = ::GetFileAttributesW(canonical.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+HANDLE lockSession(const std::wstring& leaf)
+{
+    const std::wstring name = L"Local\\KSword.RandomPayload." + leaf;
+    HANDLE mutex = ::CreateMutexW(nullptr, FALSE, name.c_str());
+    if (mutex == nullptr) return nullptr;
+    const DWORD result = ::WaitForSingleObject(mutex, 0);
+    if (result == WAIT_OBJECT_0 || result == WAIT_ABANDONED) return mutex;
+    ::CloseHandle(mutex);
+    return nullptr;
+}
+
+void unlockSession(HANDLE mutex)
+{
+    ::ReleaseMutex(mutex);
+    ::CloseHandle(mutex);
+}
+
+bool recentlyCreated(const std::wstring& directory)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    FILETIME now{};
+    if (!::GetFileAttributesExW(directory.c_str(), GetFileExInfoStandard, &attributes)) return true;
+    ::GetSystemTimeAsFileTime(&now);
+    const ULONGLONG current = fileTimeValue(now);
+    const ULONGLONG created = fileTimeValue(attributes.ftCreationTime);
+    return current < created || current - created < kAbandonedLaunchGrace;
+}
+
+bool collectExeNames(const std::wstring& directory, std::vector<std::wstring>& names)
+{
+    WIN32_FIND_DATAW find{};
+    HANDLE finder = ::FindFirstFileW(joinPath(directory, L"*").c_str(), &find);
+    if (finder == INVALID_HANDLE_VALUE) return ::GetLastError() == ERROR_FILE_NOT_FOUND;
+    bool complete = true;
     do {
         const wchar_t* name = find.cFileName;
-        if (name[0] == L'.' && (name[1] == L'\0' || (name[1] == L'.' && name[2] == L'\0'))) {
-            continue;
-        }
+        if (name[0] == L'.' && (name[1] == L'\0' || (name[1] == L'.' && name[2] == L'\0'))) continue;
         const std::wstring child = joinPath(directory, name);
         if ((find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) {
-            if (!directoryExesAreNotInUse(child)) {
-                freeToDelete = false;
-                break;
-            }
-            continue;
+            if ((find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U)
+                complete = collectExeNames(child, names) && complete;
+        } else {
+            const size_t length = ::wcslen(name);
+            if (length >= 4 && ::_wcsicmp(name + length - 4, L".exe") == 0)
+                names.emplace_back(name);
         }
-        const size_t nameLen = ::wcslen(name);
-        if (nameLen < 4U) {
-            continue;
-        }
-        if (::_wcsicmp(name + nameLen - 4U, L".exe") != 0 &&
-            ::_wcsicmp(name + nameLen - 4U, L".dll") != 0) {
-            continue;
-        }
-        HANDLE probe = ::CreateFileW(child.c_str(), DELETE, 0U, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (probe == INVALID_HANDLE_VALUE) {
-            freeToDelete = false;
-            break;
-        }
-        ::CloseHandle(probe);
-    } while (::FindNextFileW(finder, &find) != FALSE);
+    } while (::FindNextFileW(finder, &find));
+    complete = ::GetLastError() == ERROR_NO_MORE_FILES && complete;
     ::FindClose(finder);
-    return freeToDelete;
+    return complete;
+}
+
+// Query the actual running image paths. Openability of an image file is not a
+// liveness test: a child may outlive its launcher or load another exe in the
+// cloned tree. Inaccessible processes with a matching cloned name are retained.
+bool directoryMayContainRunningProcess(const std::wstring& directory)
+{
+    std::vector<std::wstring> exeNames;
+    if (!collectExeNames(directory, exeNames)) return true;
+    const std::wstring prefix = directory + L'\\';
+    HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return true;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool inUse = false;
+    if (!::Process32FirstW(snapshot, &entry)) {
+        ::CloseHandle(snapshot);
+        return true;
+    }
+    do {
+        HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            FALSE, entry.th32ProcessID);
+        if (process != nullptr) {
+            if (::WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+                wchar_t image[32768];
+                DWORD length = _countof(image);
+                if (::QueryFullProcessImageNameW(process, 0, image, &length)) {
+                    if (length > prefix.size() &&
+                        ::_wcsnicmp(image, prefix.c_str(), prefix.size()) == 0) inUse = true;
+                } else {
+                    for (const auto& name : exeNames)
+                        if (::_wcsicmp(entry.szExeFile, name.c_str()) == 0) inUse = true;
+                }
+            }
+            ::CloseHandle(process);
+        } else {
+            for (const auto& name : exeNames)
+                if (::_wcsicmp(entry.szExeFile, name.c_str()) == 0) inUse = true;
+        }
+        if (inUse) break;
+    } while (::Process32NextW(snapshot, &entry));
+    if (::GetLastError() != ERROR_NO_MORE_FILES) inUse = true;
+    ::CloseHandle(snapshot);
+    return inUse;
+}
+
+void deleteTreeUnchecked(const std::wstring& directory)
+{
+    std::vector<wchar_t> path(directory.begin(), directory.end());
+    path.push_back(L'\0');
+    path.push_back(L'\0');
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = path.data();
+    op.fFlags = FOF_NO_UI | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI;
+    (void)::SHFileOperationW(&op);
 }
 
 } // anonymous namespace
@@ -250,10 +395,7 @@ void sweepStaleSessions()
         if (name[0] == L'.') {
             continue;
         }
-        const std::wstring candidate = joinPath(sessionsRoot, name);
-        if (directoryExesAreNotInUse(candidate)) {
-            cleanupRandomizedPayload(candidate);
-        }
+        cleanupRandomizedPayload(joinPath(sessionsRoot, name));
     } while (::FindNextFileW(finder, &find) != FALSE);
     ::FindClose(finder);
 }
@@ -299,25 +441,55 @@ PrepareResult prepareRandomizedPayload(
     // 本次会话目录名：16 字节 hex。GUID 32 字符太长，容易让日志难读。
     const std::wstring sessionHex = randomHex(8U);
     if (sessionHex.empty()) {
-        return makeFailure("BCryptGenRandom(session)", ::GetLastError());
+        return makeFailure("BCryptGenRandom(session)", ERROR_GEN_FAILURE);
     }
     const std::wstring sessionDir = joinPath(sessionsRoot, L"x-" + sessionHex);
-    if (::CreateDirectoryW(sessionDir.c_str(), nullptr) == FALSE) {
-        return makeFailure("CreateDirectoryW(session)", ::GetLastError());
+    // The named mutex closes the small gap between directory creation and
+    // opening its marker. Other launchers cannot sweep this new directory.
+    HANDLE creationMutex = lockSession(L"x-" + sessionHex);
+    if (creationMutex == nullptr) {
+        return makeFailure("CreateMutexW(session)", ::GetLastError());
     }
+    if (::CreateDirectoryW(sessionDir.c_str(), nullptr) == FALSE) {
+        const DWORD error = ::GetLastError();
+        unlockSession(creationMutex);
+        return makeFailure("CreateDirectoryW(session)", error);
+    }
+    const std::wstring markerPath = joinPath(sessionDir, kMarkerName);
+    HANDLE launchLease = ::CreateFileW(markerPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+        0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_HIDDEN, nullptr);
+    if (launchLease != INVALID_HANDLE_VALUE) {
+        SessionRecord record{};
+        record.ownerPid = ::GetCurrentProcessId();
+        record.ownerCreated = processCreationTime(::GetCurrentProcess());
+        if (!writeRecord(launchLease, record)) {
+            ::CloseHandle(launchLease);
+            (void)::DeleteFileW(markerPath.c_str());
+            launchLease = INVALID_HANDLE_VALUE;
+        }
+    }
+    // The mutex remains owned until CreateProcess finishes. If the marker
+    // cannot be written, launches still work and cleanup falls back to the
+    // bounded age window plus exact running-image path check.
 
     // 主 exe 新名字。
     std::wstring renamedExe;
     if (mode == NamingMode::FullyRandomized) {
         const std::wstring fullHex = randomHex(16U);
         if (fullHex.empty()) {
-            return makeFailure("BCryptGenRandom(exe)", ::GetLastError());
+            if (launchLease != INVALID_HANDLE_VALUE) ::CloseHandle(launchLease);
+            deleteTreeUnchecked(sessionDir);
+            unlockSession(creationMutex);
+            return makeFailure("BCryptGenRandom(exe)", ERROR_GEN_FAILURE);
         }
         renamedExe = fullyRandomizedName(primaryExeName, fullHex);
     } else {
         const std::wstring suffixHex = randomHex(4U);
         if (suffixHex.empty()) {
-            return makeFailure("BCryptGenRandom(suffix)", ::GetLastError());
+            if (launchLease != INVALID_HANDLE_VALUE) ::CloseHandle(launchLease);
+            deleteTreeUnchecked(sessionDir);
+            unlockSession(creationMutex);
+            return makeFailure("BCryptGenRandom(suffix)", ERROR_GEN_FAILURE);
         }
         renamedExe = suffixedName(primaryExeName, suffixHex);
     }
@@ -328,7 +500,9 @@ PrepareResult prepareRandomizedPayload(
         primaryExeName, renamedExe, failureOp);
     if (cloneError != ERROR_SUCCESS) {
         // 克隆失败：尽力清理半成品会话目录。
-        cleanupRandomizedPayload(sessionDir);
+        if (launchLease != INVALID_HANDLE_VALUE) ::CloseHandle(launchLease);
+        deleteTreeUnchecked(sessionDir);
+        unlockSession(creationMutex);
         return makeFailure(failureOp != nullptr ? failureOp : "cloneDirectoryTree", cloneError);
     }
 
@@ -337,32 +511,72 @@ PrepareResult prepareRandomizedPayload(
     result.clonedDirectory = sessionDir;
     result.clonedExecutable = joinPath(sessionDir, renamedExe);
     result.lastError = ERROR_SUCCESS;
+    result.launchLease = launchLease;
+    result.launchMutex = creationMutex;
     return result;
+}
+
+void finishRandomizedPayloadLaunch(PrepareResult& prepared, HANDLE launchedProcess)
+{
+    if (prepared.launchLease != INVALID_HANDLE_VALUE && launchedProcess != nullptr) {
+        SessionRecord record{};
+        record.ownerPid = ::GetCurrentProcessId();
+        record.ownerCreated = processCreationTime(::GetCurrentProcess());
+        record.childPid = ::GetProcessId(launchedProcess);
+        record.childCreated = processCreationTime(launchedProcess);
+        record.state = kRunning;
+        if (record.childPid != 0 && record.childCreated != 0)
+            (void)writeRecord(prepared.launchLease, record);
+    }
+    if (prepared.launchLease != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(prepared.launchLease);
+        prepared.launchLease = INVALID_HANDLE_VALUE;
+    }
+    if (prepared.launchMutex != nullptr) {
+        unlockSession(prepared.launchMutex);
+        prepared.launchMutex = nullptr;
+    }
 }
 
 void cleanupRandomizedPayload(const std::wstring& clonedDirectory)
 {
-    if (clonedDirectory.empty()) {
-        return;
+    std::wstring leaf;
+    if (!validSessionDirectory(clonedDirectory, leaf)) return;
+    HANDLE mutex = lockSession(leaf);
+    if (mutex == nullptr) return;
+    const std::wstring markerPath = joinPath(clonedDirectory, kMarkerName);
+    HANDLE marker = ::CreateFileW(markerPath.c_str(), GENERIC_READ, 0, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (marker == INVALID_HANDLE_VALUE) {
+        const DWORD error = ::GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND || recentlyCreated(clonedDirectory)) {
+            unlockSession(mutex);
+            return;
+        }
+    } else {
+        SessionRecord record{};
+        DWORD read = 0;
+        const bool valid = ::ReadFile(marker, &record, sizeof(record), &read, nullptr) &&
+            read == sizeof(record) && record.magic == kSessionMagic &&
+            record.version == kSessionVersion;
+        ::CloseHandle(marker);
+        if (valid) {
+            if ((record.state == kPreparing && record.ownerPid != ::GetCurrentProcessId() &&
+                    (processIdentityIsRunning(record.ownerPid, record.ownerCreated) ||
+                     recentlyCreated(clonedDirectory))) ||
+                (record.state == kRunning &&
+                    processIdentityIsRunning(record.childPid, record.childCreated))) {
+                unlockSession(mutex);
+                return;
+            }
+        } else if (recentlyCreated(clonedDirectory)) {
+            unlockSession(mutex);
+            return;
+        }
     }
-    // 必须包含 KSword\\sessions\\ 前缀，否则拒绝（防误删任意路径）。
-    if (clonedDirectory.find(L"\\KSword\\sessions\\") == std::wstring::npos) {
-        return;
-    }
-    const DWORD attrs = ::GetFileAttributesW(clonedDirectory.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES ||
-        (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0U) {
-        return;
-    }
-    // SHFileOperationW 需要双 null 结尾的路径数组。
-    std::vector<wchar_t> path(clonedDirectory.begin(), clonedDirectory.end());
-    path.push_back(L'\0');
-    path.push_back(L'\0');
-    SHFILEOPSTRUCTW op{};
-    op.wFunc = FO_DELETE;
-    op.pFrom = path.data();
-    op.fFlags = FOF_NO_UI | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI;
-    (void)::SHFileOperationW(&op);
+    if (!directoryMayContainRunningProcess(clonedDirectory))
+        deleteTreeUnchecked(clonedDirectory);
+    unlockSession(mutex);
 }
 
 } // namespace ksword::randomized_payload

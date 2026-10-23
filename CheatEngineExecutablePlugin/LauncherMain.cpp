@@ -456,6 +456,7 @@ namespace
         const std::wstring ceExecutable = prepared.clonedExecutable;
         // 失败前统一回收克隆目录的小工具；调用后清空全局，避免被后续 WM_TIMER 再清一次。
         auto discardClonedPayload = [&]() {
+            ksword::randomized_payload::finishRandomizedPayloadLaunch(prepared, nullptr);
             if (!gClonedCeDirectory.empty())
             {
                 ksword::randomized_payload::cleanupRandomizedPayload(gClonedCeDirectory);
@@ -537,6 +538,9 @@ namespace
             discardClonedPayload();
             return BridgeStatus::launchFailed;
         }
+
+        ksword::randomized_payload::finishRandomizedPayloadLaunch(
+            prepared, processInformation.hProcess);
 
         if (cheatEngineProcessIdOut != nullptr)
         {

@@ -223,9 +223,10 @@ namespace
         // 让进程名/路径对按名匹配的反作弊和日志呈现为陌生身份；用户外挂的 debugger 保留原路径。
         std::wstring exe;
         std::wstring root;
+        ksword::randomized_payload::PrepareResult prepared;
         if (selectedDebugger.empty()) {
             const std::wstring sourceRoot = directory() + L"\\payload\\x64dbg";
-            auto prepared = ksword::randomized_payload::prepareRandomizedPayload(
+            prepared = ksword::randomized_payload::prepareRandomizedPayload(
                 sourceRoot, L"x64dbg.exe",
                 ksword::randomized_payload::NamingMode::SuffixedPreserveStem);
             if (!prepared.success) {
@@ -249,6 +250,7 @@ namespace
             CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP, block.data(), root.c_str(), &startup, &process))
         {
             error = failure("Cannot start standalone x64dbg", GetLastError());
+            ksword::randomized_payload::finishRandomizedPayloadLaunch(prepared, nullptr);
             // 启动失败则立即回收刚刚克隆的目录，避免遗留在 LocalAppData 下。
             if (!gClonedPayloadDirectory.empty()) {
                 ksword::randomized_payload::cleanupRandomizedPayload(gClonedPayloadDirectory);
@@ -256,6 +258,7 @@ namespace
             }
             return false;
         }
+        ksword::randomized_payload::finishRandomizedPayloadLaunch(prepared, process.hProcess);
         CloseHandle(process.hThread); gDebugger = process.hProcess; debuggerPid = process.dwProcessId;
         return true;
     }

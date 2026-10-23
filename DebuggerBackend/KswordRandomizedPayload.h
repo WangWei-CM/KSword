@@ -26,15 +26,19 @@ enum class NamingMode : unsigned long {
 };
 
 struct PrepareResult {
-    bool success;
+    bool success = false;
     // 克隆后的 payload 根目录（新路径），退出清理用。
     std::wstring clonedDirectory;
     // 克隆目录下主 exe 的完整路径（已随机命名）。
     std::wstring clonedExecutable;
     // 失败时的 Win32 错误码（success==true 时为 ERROR_SUCCESS）。
-    DWORD lastError;
+    DWORD lastError = ERROR_SUCCESS;
     // 失败时的最后一次操作描述（可读 ASCII），success==true 时为空。
     std::string failureDescription;
+    // Held exclusively from directory creation until CreateProcess has either
+    // succeeded or failed. Call finishRandomizedPayloadLaunch on every path.
+    HANDLE launchLease = INVALID_HANDLE_VALUE;
+    HANDLE launchMutex = nullptr;
 };
 
 // 克隆 sourcePayloadRoot 整个目录树到 %LOCALAPPDATA%\KSword\sessions\<guid>\，
@@ -46,14 +50,18 @@ PrepareResult prepareRandomizedPayload(
     const std::wstring& primaryExeName,
     NamingMode mode);
 
+// Records the actual child PID and creation time before releasing the launch
+// lease. Pass nullptr when CreateProcess was not called or failed. This is
+// best-effort bookkeeping and must not turn a successful launch into a failure.
+void finishRandomizedPayloadLaunch(PrepareResult& prepared, HANDLE launchedProcess);
+
 // 删除克隆目录及其下所有内容。clonedDirectory 必须是
 // prepareRandomizedPayload 返回的目录，否则直接拒绝（防误删）。
 void cleanupRandomizedPayload(const std::wstring& clonedDirectory);
 
-// 清理过期的旧会话目录。prepareRandomizedPayload 内部会调。
-// 启发式：%LOCALAPPDATA%\KSword\sessions\x-* 中，所有可被独占访问
-// 的目录（意味着里面的 exe 不再有进程持有）视为陈旧并移除。无 waiter
-// 的 launch 命令场景（CE 进程脱离 launcher 独立运行）靠这一步兜底。
+// 清理过期的旧会话目录。prepareRandomizedPayload 内部会调。启动租约、
+// 精确进程身份及实际映像路径共同保护尚在使用的会话；无 waiter 的 launch
+// 命令场景（CE 进程脱离 launcher 独立运行）由持久身份记录兜底。
 void sweepStaleSessions();
 
 } // namespace ksword::randomized_payload
