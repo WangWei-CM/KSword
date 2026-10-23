@@ -3,17 +3,16 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <new>
 
 namespace ksword::debugger
 {
-    namespace
+    // 对象比较不要求查询权限；用于核对公开槽和已持有的真实对象。
+    bool Backend::sameObject(HANDLE first, HANDLE second)
     {
-        bool sameObject(HANDLE first, HANDLE second)
-        {
-            using Compare = LONG(NTAPI*)(HANDLE, HANDLE);
-            static const auto compare = reinterpret_cast<Compare>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCompareObjects"));
-            return compare != nullptr && compare(first, second) >= 0;
-        }
+        using Compare = LONG(NTAPI*)(HANDLE, HANDLE);
+        static const auto compare = reinterpret_cast<Compare>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCompareObjects"));
+        return compare != nullptr && compare(first, second) >= 0;
     }
 
     bool Backend::queryHandleAccess(HANDLE handle, DWORD& grantedAccess)
@@ -39,6 +38,181 @@ namespace ksword::debugger
         return requestedAccess & ~selectors;
     }
 
+    // 释放本次引用时保留业务接口的 LastError，清理不覆盖真实结果。
+    Backend::TargetLease::~TargetLease()
+    {
+        clear();
+    }
+
+    // 清除临时事件别名时保留原公开句柄的记录与业务错误。
+    void Backend::TargetLease::clear()
+    {
+        const DWORD error = GetLastError();
+        releaseAlias();
+        retained.reset();
+        identity.reset();
+        pid = 0;
+        tid = 0;
+        SetLastError(error);
+    }
+
+    // TLS 只保存无别名的对象引用；别名移除在正常调用阶段完成。
+    void Backend::TargetLease::releaseAlias()
+    {
+        const DWORD error = GetLastError();
+        if (aliasOwner != nullptr)
+        {
+            std::lock_guard<std::recursive_mutex> lock(aliasOwner->mutex_);
+            auto& records = threadAlias ? aliasOwner->threadIds_ : aliasOwner->processIds_;
+            const auto record = records.find(identity.native());
+            if (record != records.end() && record->second == retained) records.erase(record);
+            aliasOwner = nullptr;
+        }
+        SetLastError(error);
+    }
+
+    // 组合 wrapper 只固定一次目标；事件副本在作用域内复用既有代理识别记录。
+    bool Backend::retainTarget(HANDLE handle, bool thread, TargetLease& lease) noexcept
+    {
+        try
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            lease.clear();
+            if (!pinTarget(handle, thread, lease))
+            {
+                const DWORD error = GetLastError();
+                lease.clear();
+                SetLastError(error);
+                return false;
+            }
+            if (lease.retained && lease.retained->publicIdentity.isValid())
+            {
+                auto& records = thread ? threadIds_ : processIds_;
+                records[lease.identity.native()] = lease.retained;
+                lease.aliasOwner = this;
+                lease.threadAlias = thread;
+            }
+            return true;
+        }
+        catch (const std::bad_alloc&)
+        {
+            lease.clear();
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return false;
+        }
+        catch (...)
+        {
+            lease.clear();
+            SetLastError(ERROR_GEN_FAILURE);
+            return false;
+        }
+    }
+
+    // device：仅为事件代理选择其持有目标引用的私有控制文件。
+    ark::DriverHandle* Backend::TargetLease::device(ark::DriverHandle& fallback) const
+    {
+        return retained && retained->deviceIdentity.isValid()
+            ? &retained->deviceIdentity : &fallback;
+    }
+
+    // rememberTarget：缓存缺少查询权限的已打开对象，不改变返回句柄的权限。
+    HANDLE Backend::rememberTarget(HANDLE handle, DWORD pid, DWORD tid) noexcept
+    {
+        try
+        {
+            if (handle == nullptr) return nullptr;
+            HANDLE retained = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+                &retained, 0, FALSE, DUPLICATE_SAME_ACCESS)) return handle;
+            ark::DriverHandle identity(retained);
+            const bool queryable = tid == 0 ? GetProcessId(retained) != 0 :
+                GetThreadId(retained) != 0 && GetProcessIdOfThread(retained) != 0;
+            if (queryable) return handle;
+            auto& records = tid == 0 ? processIds_ : threadIds_;
+            // 清退已经关闭或被重用的外部句柄，不为真实句柄新增代理容量限制。
+            for (auto iterator = records.begin(); iterator != records.end();)
+            {
+                if (!sameObject(iterator->first, iterator->second->publicIdentity.native()))
+                    iterator = records.erase(iterator);
+                else ++iterator;
+            }
+            auto record = std::make_shared<TargetIdentity>();
+            record->pid = pid;
+            record->tid = tid;
+            record->publicIdentity = std::move(identity);
+            records[handle] = std::move(record);
+            return handle;
+        }
+        catch (...)
+        {
+            // 元数据分配失败仍返回真实原生句柄，不丢弃其已授予权限。
+            return handle;
+        }
+    }
+
+    // pinTarget：一次 API 只复制一次句柄，身份一直保留到全部同步请求结束。
+    bool Backend::pinTarget(HANDLE handle, bool thread, TargetLease& lease) noexcept
+    {
+        try
+        {
+            HANDLE retained = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+                &retained, 0, FALSE, DUPLICATE_SAME_ACCESS)) return false;
+            lease.identity.reset(retained);
+            lease.pid = thread ? GetProcessIdOfThread(retained) : GetProcessId(retained);
+            lease.tid = thread ? GetThreadId(retained) : 0;
+            if (lease.pid != 0 && (!thread || lease.tid != 0)) return true;
+            auto& records = thread ? threadIds_ : processIds_;
+            const auto record = records.find(handle);
+            if (record != records.end() &&
+                sameObject(retained, record->second->publicIdentity.native()))
+            {
+                lease.retained = record->second;
+                lease.pid = lease.retained->pid;
+                lease.tid = lease.retained->tid;
+                return lease.pid != 0 && (!thread || lease.tid != 0);
+            }
+            if (record != records.end()) records.erase(record);
+            // 复制回调可能只削减副本的查询权限；不能因此拒绝原本有效的真实对象。
+            // 通过请求方表内的私有副本做零权限类型引用，不回查可重用的公开槽位。
+            if (!driver_.isValid()) { SetLastError(ERROR_INVALID_HANDLE); return false; }
+            auto target = std::make_shared<TargetIdentity>();
+            target->deviceIdentity = client_.openSilently();
+            if (!target->deviceIdentity.isValid()) return false;
+            KSWORD_ARK_DEBUGGER_REQUEST request{};
+            KSWORD_ARK_DEBUGGER_RESPONSE response{};
+            request.operation = KSWORD_ARK_DEBUGGER_IDENTITY_RETAIN;
+            request.contextFlags = thread ? KSWORD_ARK_DEBUGGER_IDENTITY_SOURCE_THREAD_HANDLE :
+                KSWORD_ARK_DEBUGGER_IDENTITY_SOURCE_PROCESS_HANDLE;
+            request.address = reinterpret_cast<std::uintptr_t>(retained);
+            const DWORD error = nativeRequest(request, response, &target->deviceIdentity);
+            if (error != ERROR_SUCCESS || response.processId == 0 ||
+                (thread ? response.threadId == 0 : response.threadId != 0))
+            {
+                SetLastError(error == ERROR_SUCCESS ? ERROR_INVALID_DATA : error);
+                return false;
+            }
+            target->pid = response.processId;
+            target->tid = response.threadId;
+            lease.pid = target->pid;
+            lease.tid = target->tid;
+            lease.retained = std::move(target);
+            return true;
+        }
+        catch (const std::bad_alloc&)
+        {
+            lease.clear();
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return false;
+        }
+        catch (...)
+        {
+            lease.clear();
+            SetLastError(ERROR_GEN_FAILURE);
+            return false;
+        }
+    }
+
     HANDLE Backend::openProcess(DWORD access, BOOL inherit, DWORD pid)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -55,7 +229,7 @@ namespace ksword::debugger
             // 无法读取权限时不以未知权限的代理句柄替换已有可用原生句柄。
             if (!queryHandleAccess(handle, grantedAccess) ||
                 (grantedAccess & explicitAccess) == explicitAccess)
-                return handle;
+                return rememberTarget(handle, pid);
         }
 
         HANDLE brokered = brokerOpenHandle(pid, 0, requiredAccess, inherit);
@@ -69,56 +243,82 @@ namespace ksword::debugger
             {
                 // 代理句柄不能替换掉原生句柄已经可用的操作权限。
                 CloseHandle(brokered);
-                return handle;
+                return rememberTarget(handle, pid);
             }
             if (handle != nullptr) CloseHandle(handle);
             recordFallback("Win32 OpenProcess", "R0 handle broker", openError,
                 "native handle lacked requested rights or could not be opened");
-            return brokered;
+            return rememberTarget(brokered, pid);
         }
         // 保留仍然有效的原生句柄及身份权限回退，不能因代理失败降低服务可用性。
-        if (handle != nullptr) return handle;
+        if (handle != nullptr) return rememberTarget(handle, pid);
         handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
-        if (handle != nullptr) return handle;
-        SetLastError(openError);
+        if (handle != nullptr) return rememberTarget(handle, pid);
+        auto target = std::make_shared<TargetIdentity>();
+        target->pid = pid;
+        // 零权限原生句柄只固定对象，不增加任何读写或调试权限。
+        target->targetIdentity.reset(OpenProcess(0, FALSE, pid));
+        if (!target->targetIdentity.isValid())
+        {
+            // 无原生引用时，用独立设备文件仅保留 EPROCESS，绝不生成权限句柄。
+            if (!driver_.isValid()) { SetLastError(openError); return nullptr; }
+            target->deviceIdentity = client_.openSilently();
+            if (!target->deviceIdentity.isValid()) return nullptr;
+            KSWORD_ARK_DEBUGGER_REQUEST request{};
+            KSWORD_ARK_DEBUGGER_RESPONSE response{};
+            request.operation = KSWORD_ARK_DEBUGGER_IDENTITY_RETAIN;
+            request.processId = pid;
+            const DWORD error = nativeRequest(request, response, &target->deviceIdentity);
+            if (error != ERROR_SUCCESS || response.processId != pid)
+            {
+                SetLastError(error == ERROR_SUCCESS ? ERROR_INVALID_DATA : error);
+                return nullptr;
+            }
+        }
         for (auto iterator = processIds_.begin(); iterator != processIds_.end();)
         {
-            if (!sameObject(iterator->first, iterator->second.identity.native())) iterator = processIds_.erase(iterator);
+            if (!sameObject(iterator->first, iterator->second->publicIdentity.native())) iterator = processIds_.erase(iterator);
             else ++iterator;
         }
-        if (processIds_.size() >= 1024) { SetLastError(ERROR_TOO_MANY_OPEN_FILES); return nullptr; }
+        // 既有容量只限制事件代理，不把真实低权限句柄纳入新增限制。
+        const auto proxies = std::count_if(processIds_.begin(), processIds_.end(), [](const auto& entry) {
+            return entry.first == entry.second->publicHandle &&
+                (entry.second->targetIdentity.isValid() || entry.second->deviceIdentity.isValid());
+        });
+        if (proxies >= 1024) { SetLastError(ERROR_TOO_MANY_OPEN_FILES); return nullptr; }
         SECURITY_ATTRIBUTES security{};
         security.nLength = sizeof(security);
         security.bInheritHandle = inherit;
-        handle = CreateEventW(&security, FALSE, FALSE, nullptr);
+        // 事件在缓存发布前由本地 RAII 拥有，分配失败也不会漏掉公开句柄。
+        ark::DriverHandle event(CreateEventW(&security, FALSE, FALSE, nullptr));
+        handle = event.native();
         HANDLE identity = nullptr;
         if (handle == nullptr) return nullptr;
         if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &identity, 0, FALSE, DUPLICATE_SAME_ACCESS))
-        { const DWORD error = GetLastError(); CloseHandle(handle); SetLastError(error); return nullptr; }
-        processIds_[handle] = ProcessProxy{pid, ark::DriverHandle(identity)};
-        return handle;
+        { const DWORD error = GetLastError(); event.reset(); SetLastError(error); return nullptr; }
+        target->publicIdentity.reset(identity);
+        target->publicHandle = handle;
+        processIds_[handle] = std::move(target);
+        return event.release();
     }
 
     DWORD Backend::processId(HANDLE process)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        const DWORD actual = GetProcessId(process);
-        if (actual != 0) return actual;
-        const auto iterator = processIds_.find(process);
-        if (iterator == processIds_.end() || !sameObject(process, iterator->second.identity.native()))
-        { if (iterator != processIds_.end()) processIds_.erase(iterator); SetLastError(ERROR_INVALID_HANDLE); return 0; }
-        return iterator->second.pid;
+        TargetLease lease;
+        return pinTarget(process, false, lease) ? lease.pid : 0;
     }
 
     bool Backend::transfer(bool write, DWORD pid, std::uint64_t address, void* data,
-        SIZE_T bytes, SIZE_T& transferred, bool dataWrite)
+        SIZE_T bytes, SIZE_T& transferred, bool dataWrite, ark::DriverHandle* targetDevice)
     {
         transferred = 0;
         ordinaryDataFallback_ = false;
         if (pid == 0 || (bytes != 0 && (data == nullptr || address == 0)) ||
             bytes > (std::numeric_limits<std::uint64_t>::max)() - address)
         { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-        if (!driver_.isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return false; }
+        auto* const device = targetDevice != nullptr ? targetDevice : &driver_;
+        if (!device->isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return false; }
         if (write && useHvm_ && !dataWrite)
         {
             bool handled = false;
@@ -128,7 +328,7 @@ namespace ksword::debugger
         if (write && bytes != 0 && (options_.shadowMemoryWrites != 0 || options_.mode == KSWORD_DEBUGGER_MODE_STEALTH))
         {
             bool handled = false;
-            const bool completed = shadowMemoryWrite(pid, address, data, bytes, transferred, handled, dataWrite);
+            const bool completed = shadowMemoryWrite(pid, address, data, bytes, transferred, handled, dataWrite, device);
             if (handled) return completed;
         }
         while (transferred < bytes)
@@ -140,7 +340,7 @@ namespace ksword::debugger
             if (useHvm_)
             {
                 const auto result = client_.hvmMemory(write ? KSWORD_ARK_HVM_MEMORY_OP_WRITE_VIRTUAL : KSWORD_ARK_HVM_MEMORY_OP_READ_VIRTUAL,
-                    address + transferred, 0, count, write ? part : nullptr, true, true, pid, &driver_);
+                    address + transferred, 0, count, write ? part : nullptr, true, true, pid, device);
                 if (!result.io.ok || result.response.status != KSWORD_ARK_HVM_MEMORY_STATUS_OK || result.response.usedDirectWindow == 0)
                 {
                     const DWORD error = result.io.ok ? ERROR_PARTIAL_COPY : result.io.win32Error;
@@ -163,7 +363,7 @@ namespace ksword::debugger
             {
                 const std::vector<std::uint8_t> payload(part, part + count);
                 const auto result = client_.writeVirtualMemory(pid, address + transferred, payload,
-                    KSWORD_ARK_MEMORY_WRITE_FLAG_UI_CONFIRMED | KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE, &driver_);
+                    KSWORD_ARK_MEMORY_WRITE_FLAG_UI_CONFIRMED | KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE, device);
                 if (!result.io.ok) { SetLastError(result.io.win32Error); return false; }
                 if (result.bytesWritten > count) { SetLastError(ERROR_INVALID_DATA); return false; }
                 transferred += result.bytesWritten;
@@ -172,7 +372,7 @@ namespace ksword::debugger
             }
             else
             {
-                const auto result = client_.readVirtualMemory(pid, address + transferred, count, 0, &driver_);
+                const auto result = client_.readVirtualMemory(pid, address + transferred, count, 0, device);
                 if (!result.io.ok) { SetLastError(result.io.win32Error); return false; }
                 if (result.data.size() > count) { SetLastError(ERROR_INVALID_DATA); return false; }
                 std::memcpy(part, result.data.data(), result.data.size());
@@ -186,7 +386,7 @@ namespace ksword::debugger
     }
 
     bool Backend::shadowMemoryWrite(DWORD pid, std::uint64_t address, const void* data,
-        SIZE_T bytes, SIZE_T& transferred, bool& handled, bool dataWrite)
+        SIZE_T bytes, SIZE_T& transferred, bool& handled, bool dataWrite, ark::DriverHandle* targetDevice)
     {
         handled = true;
         if (shadowRecoveryRequired_)
@@ -194,7 +394,7 @@ namespace ksword::debugger
         bool code = false, ordinary = false;
         for (std::uint64_t cursor = address; cursor < address + bytes;)
         {
-            const auto region = client_.queryVirtualMemory(pid, cursor, 0, &driver_);
+            const auto region = client_.queryVirtualMemory(pid, cursor, 0, targetDevice != nullptr ? targetDevice : &driver_);
             if (!region.io.ok || (region.fieldFlags & KSWORD_ARK_MEMORY_FIELD_BASIC_PRESENT) == 0 ||
                 region.state != MEM_COMMIT || region.regionSize == 0 || region.baseAddress > cursor ||
                 region.regionSize > (std::numeric_limits<std::uint64_t>::max)() - region.baseAddress ||
@@ -242,7 +442,7 @@ namespace ksword::debugger
             SetLastError(ERROR_NOT_SUPPORTED); return false;
         }
         auto target = shadowWrites_.find(pid);
-        if (target != shadowWrites_.end() && WaitForSingleObject(target->second.identity.native(), 0) != WAIT_TIMEOUT)
+        if (target != shadowWrites_.end() && WaitForSingleObject(target->second.identity->native(), 0) != WAIT_TIMEOUT)
         {
             // R0 exit cleanup already removed the retained target's mappings.
             shadowWrites_.erase(target); target = shadowWrites_.end();
@@ -253,9 +453,12 @@ namespace ksword::debugger
             if (!identity.isValid()) { SetLastError(GetLastError()); return false; }
             if (GetProcessId(identity.native()) != pid || WaitForSingleObject(identity.native(), 0) != WAIT_TIMEOUT)
             { SetLastError(ERROR_INVALID_STATE); return false; }
-            ShadowWriteTarget value{}; value.identity = std::move(identity);
+            ShadowWriteTarget value{};
+            value.identity = std::make_shared<ark::DriverHandle>(std::move(identity));
             target = shadowWrites_.emplace(pid, std::move(value)).first;
         }
+        // 即使失败清掉最后一个页记录，延迟恢复仍保留原对象。
+        const auto targetIdentity = target->second.identity;
         DWORD addedPages = 0;
         for (std::uint64_t page = address & ~0xfffULL; page <= ((address + bytes - 1) & ~0xfffULL); page += 4096)
             if (target->second.pages.count(page) == 0) ++addedPages;
@@ -270,7 +473,7 @@ namespace ksword::debugger
             log("Shadow code write refused: configured page limit reached"); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false;
         }
         KSWORD_ARK_DEBUGGER_REQUEST query{}; KSWORD_ARK_DEBUGGER_RESPONSE capability{};
-        DWORD error = nativeRequest(query, capability);
+        DWORD error = nativeRequest(query, capability, targetDevice);
         if (error == ERROR_SUCCESS && (capability.capabilities & KSWORD_ARK_DEBUGGER_CAP_SHADOW_WRITES) == 0)
             error = ERROR_NOT_SUPPORTED;
         if (error == ERROR_SUCCESS) error = ensureShadowHvm();
@@ -289,7 +492,7 @@ namespace ksword::debugger
             request.operation = KSWORD_ARK_DEBUGGER_SHADOW_WRITE; request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
             request.processId = pid; request.address = current; request.bytes = count;
             std::memcpy(request.context, static_cast<const unsigned char*>(data) + transferred, count);
-            error = nativeRequest(request, response);
+            error = nativeRequest(request, response, targetDevice);
             if (error != ERROR_SUCCESS)
             {
                 if ((response.reserved1 & KSWORD_ARK_DEBUGGER_SHADOW_BACKING_SHARED) != 0)
@@ -325,7 +528,7 @@ namespace ksword::debugger
                 KSWORD_ARK_DEBUGGER_REQUEST restore{}; KSWORD_ARK_DEBUGGER_RESPONSE response{};
                 restore.operation = KSWORD_ARK_DEBUGGER_SHADOW_RESTORE; restore.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
                 restore.processId = pid; restore.address = address; restore.bytes = bytes;
-                if (rollback == ERROR_SUCCESS) rollback = nativeRequest(restore, response);
+                if (rollback == ERROR_SUCCESS) rollback = nativeRequest(restore, response, targetDevice);
                 const auto first = static_cast<SIZE_T>(address & 0xfffULL);
                 for (SIZE_T offset = first; rollback == ERROR_SUCCESS && offset < first + bytes;)
                 {
@@ -336,7 +539,7 @@ namespace ksword::debugger
                     prior.operation = KSWORD_ARK_DEBUGGER_SHADOW_WRITE; prior.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
                     prior.processId = pid; prior.address = writePage + begin; prior.bytes = offset - begin;
                     std::memcpy(prior.context, saved.bytes.data() + begin, static_cast<SIZE_T>(prior.bytes));
-                    rollback = nativeRequest(prior, response);
+                    rollback = nativeRequest(prior, response, targetDevice);
                 }
                 if (rollback == ERROR_SUCCESS)
                 {
@@ -351,11 +554,11 @@ namespace ksword::debugger
             if (rollback != ERROR_SUCCESS) shadowRecoveryRequired_ = true;
             if (shadowRecoveryRequired_)
             {
-                shadowQuarantinedTargets_.insert(pid);
+                shadowQuarantinedTargets_[pid] = targetIdentity;
                 KSWORD_ARK_DEBUGGER_REQUEST quarantine{}; KSWORD_ARK_DEBUGGER_RESPONSE response{};
                 quarantine.operation = KSWORD_ARK_DEBUGGER_SHADOW_QUARANTINE; quarantine.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
                 quarantine.processId = pid;
-                const DWORD guarded = nativeRequest(quarantine, response);
+                const DWORD guarded = nativeRequest(quarantine, response, targetDevice);
                 log("Shadow content recovery quarantine: PID " + std::to_string(pid) +
                     "; direct driver starts blocked until full restore; latch result " + std::to_string(guarded));
             }
@@ -408,11 +611,11 @@ namespace ksword::debugger
         }
         if (address == 0)
         {
-            for (const auto pid : shadowQuarantinedTargets_)
+            for (const auto& target : shadowQuarantinedTargets_)
             {
                 KSWORD_ARK_DEBUGGER_REQUEST request{}; KSWORD_ARK_DEBUGGER_RESPONSE response{};
                 request.operation = KSWORD_ARK_DEBUGGER_SHADOW_RESTORE; request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
-                request.processId = pid;
+                request.processId = target.first;
                 error = nativeRequest(request, response);
                 if (error != ERROR_SUCCESS) { log("Shadow quarantine restore failed: " + std::to_string(error)); return error; }
             }
@@ -426,8 +629,12 @@ namespace ksword::debugger
     BOOL Backend::readMemory(HANDLE process, LPCVOID address, LPVOID data, SIZE_T bytes, SIZE_T* transferred)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (transferred != nullptr) *transferred = 0;
+        if (!pinTarget(process, false, lease)) return FALSE;
         SIZE_T done = 0;
-        const bool ok = transfer(false, processId(process), reinterpret_cast<std::uintptr_t>(address), data, bytes, done);
+        const bool ok = transfer(false, lease.pid, reinterpret_cast<std::uintptr_t>(address), data, bytes, done,
+            false, lease.device(driver_));
         if (transferred != nullptr) *transferred = done;
         return ok ? TRUE : FALSE;
     }
@@ -436,9 +643,12 @@ namespace ksword::debugger
         MemoryWriteKind kind)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (transferred != nullptr) *transferred = 0;
+        if (!pinTarget(process, false, lease)) return FALSE;
         SIZE_T done = 0;
-        const bool ok = transfer(true, processId(process), reinterpret_cast<std::uintptr_t>(address), const_cast<void*>(data), bytes, done,
-            kind == MemoryWriteKind::data);
+        const bool ok = transfer(true, lease.pid, reinterpret_cast<std::uintptr_t>(address), const_cast<void*>(data), bytes, done,
+            kind == MemoryWriteKind::data, lease.device(driver_));
         const DWORD error = GetLastError();
         if (ordinaryDataFallback_)
             log(std::string("Ordinary data fallback ") + (ok ? "completed" : "failed") +
@@ -453,8 +663,10 @@ namespace ksword::debugger
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (info == nullptr || bytes < sizeof(*info)) { SetLastError(ERROR_BAD_LENGTH); return 0; }
+        TargetLease lease;
+        if (!pinTarget(process, false, lease)) return 0;
         const auto requested = reinterpret_cast<std::uintptr_t>(address);
-        const auto result = client_.queryVirtualMemory(processId(process), requested, 0, &driver_);
+        const auto result = client_.queryVirtualMemory(lease.pid, requested, 0, lease.device(driver_));
         if (!result.io.ok || (result.queryStatus != KSWORD_ARK_MEMORY_QUERY_STATUS_OK && result.queryStatus != KSWORD_ARK_MEMORY_QUERY_STATUS_PARTIAL) ||
             (result.fieldFlags & KSWORD_ARK_MEMORY_FIELD_BASIC_PRESENT) == 0 ||
             result.regionSize == 0 || result.baseAddress > requested ||
@@ -477,12 +689,14 @@ namespace ksword::debugger
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (previous == nullptr) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+        TargetLease lease;
+        if (!pinTarget(process, false, lease)) return FALSE;
         KSWORD_ARK_DEBUGGER_REQUEST request{};
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
         request.operation = KSWORD_ARK_DEBUGGER_PROTECT; request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
-        request.processId = processId(process); request.address = reinterpret_cast<std::uintptr_t>(address);
+        request.processId = lease.pid; request.address = reinterpret_cast<std::uintptr_t>(address);
         request.bytes = bytes; request.protection = protection;
-        const DWORD error = nativeRequest(request, response);
+        const DWORD error = nativeRequest(request, response, lease.device(driver_));
         if (error == ERROR_SUCCESS) *previous = response.previousProtection;
         SetLastError(error); return error == ERROR_SUCCESS ? TRUE : FALSE;
     }
@@ -490,12 +704,14 @@ namespace ksword::debugger
     LPVOID Backend::allocateMemory(HANDLE process, LPVOID address, SIZE_T bytes, DWORD type, DWORD protection)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (!pinTarget(process, false, lease)) return nullptr;
         KSWORD_ARK_DEBUGGER_REQUEST request{};
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
         request.operation = KSWORD_ARK_DEBUGGER_ALLOCATE; request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
-        request.processId = processId(process); request.address = reinterpret_cast<std::uintptr_t>(address);
+        request.processId = lease.pid; request.address = reinterpret_cast<std::uintptr_t>(address);
         request.bytes = bytes; request.allocationType = type; request.protection = protection;
-        const DWORD error = nativeRequest(request, response);
+        const DWORD error = nativeRequest(request, response, lease.device(driver_));
         SetLastError(error);
         return error == ERROR_SUCCESS ? reinterpret_cast<void*>(static_cast<std::uintptr_t>(response.address)) : nullptr;
     }
@@ -503,12 +719,14 @@ namespace ksword::debugger
     BOOL Backend::freeMemory(HANDLE process, LPVOID address, SIZE_T bytes, DWORD type)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (!pinTarget(process, false, lease)) return FALSE;
         KSWORD_ARK_DEBUGGER_REQUEST request{};
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
         request.operation = KSWORD_ARK_DEBUGGER_FREE; request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
-        request.processId = processId(process); request.address = reinterpret_cast<std::uintptr_t>(address);
+        request.processId = lease.pid; request.address = reinterpret_cast<std::uintptr_t>(address);
         request.bytes = bytes; request.allocationType = type;
-        const DWORD error = nativeRequest(request, response);
+        const DWORD error = nativeRequest(request, response, lease.device(driver_));
         SetLastError(error); return error == ERROR_SUCCESS ? TRUE : FALSE;
     }
 
@@ -516,17 +734,19 @@ namespace ksword::debugger
         LPTHREAD_START_ROUTINE start, LPVOID parameter, DWORD flags, LPDWORD tid)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (!pinTarget(process, false, lease)) return nullptr;
         // 优先使用前端传入的真实进程句柄，避免按裸 PID 再打开另一个对象。
-        HANDLE result = CreateRemoteThread(process, attributes, stackBytes, start, parameter, flags, tid);
+        HANDLE result = CreateRemoteThread(lease.identity.native(), attributes, stackBytes, start, parameter, flags, tid);
         if (result != nullptr) return result;
         const DWORD firstError = GetLastError();
-        const DWORD pid = processId(process);
+        const DWORD pid = lease.pid;
         if (pid == 0) { SetLastError(firstError); return nullptr; }
 
         constexpr DWORD threadCreationAccess = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
             PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
         // 被降权的原生句柄与身份代理都可通过同一 PID 请求完整操作句柄。
-        ark::DriverHandle brokered(brokerOpenHandle(pid, 0, threadCreationAccess));
+        ark::DriverHandle brokered(brokerOpenHandle(pid, 0, threadCreationAccess, FALSE, lease.device(driver_)));
         if (brokered.isValid())
         {
             result = CreateRemoteThread(brokered.native(), attributes, stackBytes, start, parameter, flags, tid);

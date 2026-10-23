@@ -125,6 +125,7 @@
     <ClCompile Include="src\features\hvm\hvm_debug_ioctl.c"><EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet></ClCompile>
     <ClCompile Include="src\features\debugger\debugger.c" />
     <ClCompile Include="src\features\debugger\debugger_ioctl.c" />
+    <ClCompile Include="src\features\debugger\debugger_identity.c" />
     <ClCompile Include="src\features\debugger\debugger_shadow.c" />
     <ClCompile Include="src\features\hvm\hvm_ept_view.c">
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
@@ -575,6 +576,7 @@
     <ClInclude Include="src\features\hvm\hvm_noattach.h" />
     <ClInclude Include="..\shared\driver\KswordArkHvmNoAttachIoctl.h" />
     <ClInclude Include="src\features\debugger\debugger.h" />
+    <ClInclude Include="src\features\debugger\debugger_identity.h" />
     <ClInclude Include="src\features\hvm\hvm_ept_view.h" />
     <ClInclude Include="src\features\hvm\hvm_process.h" />
     <ClInclude Include="src\features\hvm\hvm_inject.h" />

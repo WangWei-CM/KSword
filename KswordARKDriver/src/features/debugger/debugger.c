@@ -436,9 +436,9 @@ NTSTATUS KswordARKDebuggerControl(WDFDEVICE Device, ULONG OwnerProcessId, PEPROC
     if (Request->version != KSWORD_ARK_DEBUGGER_VERSION || Request->size != sizeof(*Request) ||
         Request->operation > KSWORD_ARK_DEBUGGER_OPEN_HANDLE || Request->reserved != 0UL || Request->reservedArgument != 0ULL ||
         (Request->flags & ~KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED) != 0UL) { Response->status = STATUS_INVALID_PARAMETER; return STATUS_SUCCESS; }
-    /* Advertise only native routines present on the running Windows build. */
+    /* 保留既有能力声明，并额外声明独立的仅引用身份租约。 */
     Response->capabilities = KSWORD_ARK_DEBUGGER_CAP_MEMORY | KSWORD_ARK_DEBUGGER_CAP_SHADOW_INT3 | KSWORD_ARK_DEBUGGER_CAP_SHADOW_WRITES |
-        KSWORD_ARK_DEBUGGER_CAP_HANDLE_BROKER;
+        KSWORD_ARK_DEBUGGER_CAP_HANDLE_BROKER | KSWORD_ARK_DEBUGGER_CAP_IDENTITY_RETAIN;
     /* Publish native context support only with both operations available. */
     if (KswordARKDebuggerResolve(L"PsGetContextThread") != NULL && KswordARKDebuggerResolve(L"PsSetContextThread") != NULL) { Response->capabilities |= KSWORD_ARK_DEBUGGER_CAP_CONTEXT; }
     /* Publish previous-count control only with both kernel-handle operations. */

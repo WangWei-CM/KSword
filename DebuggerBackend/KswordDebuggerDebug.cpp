@@ -126,10 +126,23 @@ namespace ksword::debugger
             GetProcessIdOfThread(thread) == attachedPid_ && GetThreadId(thread) != 0;
     }
 
+    // 身份来自固定对象，不再依赖可能已被回调削减的副本查询权限。
+    bool Backend::validTargetThread(const TargetLease& lease) const
+    {
+        return attachedPid_ != 0 && attachedIdentity_.isValid() &&
+            WaitForSingleObject(attachedIdentity_.native(), 0) == WAIT_TIMEOUT &&
+            lease.pid == attachedPid_ && lease.tid != 0;
+    }
+
     bool Backend::matchesThreadRecord(HANDLE thread, const ThreadBreakpoints& record) const
     {
-        if (!validTargetThread(thread) || record.generation != sessionGeneration_ ||
+        if (record.generation != sessionGeneration_ ||
             !record.identity || !record.identity->isValid()) return false;
+        // 已持有同一线程对象与会话代次即可匹配，不因缺少 QUERY 误丢记录。
+        if (attachedIdentity_.isValid() &&
+            WaitForSingleObject(attachedIdentity_.native(), 0) == WAIT_TIMEOUT &&
+            sameObject(thread, record.identity->native())) return true;
+        if (!validTargetThread(thread)) return false;
         FILETIME created{}, exited{}, kernel{}, user{}, retainedCreated{};
         return GetThreadTimes(thread, &created, &exited, &kernel, &user) &&
             GetThreadTimes(record.identity->native(), &retainedCreated, &exited, &kernel, &user) &&
@@ -401,6 +414,12 @@ namespace ksword::debugger
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (tid == 0) { SetLastError(ERROR_INVALID_PARAMETER); return nullptr; }
+        // 真实线程句柄已固定 TID，查询权限被削减时保留其原所属进程信息。
+        const auto rememberThread = [this, tid](HANDLE handle) {
+            DWORD pid = GetProcessIdOfThread(handle);
+            if (pid == 0) pid = threadOwnerFromSnapshot(tid);
+            return rememberTarget(handle, pid, tid);
+        };
         const DWORD requiredAccess = access | THREAD_QUERY_LIMITED_INFORMATION;
         HANDLE thread = OpenThread(requiredAccess, inherit, tid);
         DWORD nativeError = thread == nullptr ? GetLastError() : ERROR_ACCESS_DENIED;
@@ -411,7 +430,7 @@ namespace ksword::debugger
             // 权限查询不可用时保留原生线程句柄，避免代理结果缩小既有能力。
             if (!queryHandleAccess(thread, grantedAccess) ||
                 (grantedAccess & explicitAccess) == explicitAccess)
-                return thread;
+                return rememberThread(thread);
         }
         if (thread == nullptr)
         {
@@ -433,24 +452,27 @@ namespace ksword::debugger
                 {
                     // 不用缺少既有线程权限的代理句柄取代可用原生句柄。
                     CloseHandle(brokered);
-                    return thread;
+                    return rememberThread(thread);
                 }
                 if (thread != nullptr) CloseHandle(thread);
                 recordFallback("Win32 OpenThread", "R0 handle broker", nativeError,
                     "native thread handle lacked requested rights or could not be opened");
-                return brokered;
+                return rememberTarget(brokered, pid, tid);
             }
         }
         if (thread == nullptr) SetLastError(nativeError);
-        return thread;
+        return thread != nullptr ? rememberThread(thread) : nullptr;
     }
 
     BOOL Backend::getContext(HANDLE thread, LPCONTEXT context)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (context == nullptr) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-        if (!nativeContext(thread, context, false)) return FALSE;
-        const auto found = breakpoints_.find(GetThreadId(thread));
+        TargetLease lease;
+        if (!pinTarget(thread, true, lease)) return FALSE;
+        thread = lease.identity.native();
+        if (!nativeContext(thread, context, false, &lease)) return FALSE;
+        const auto found = breakpoints_.find(lease.tid);
         if ((context->ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS &&
             found != breakpoints_.end() && matchesThreadRecord(thread, found->second))
         {
@@ -459,8 +481,8 @@ namespace ksword::debugger
             context->Dr2 = virtualContext.Dr2; context->Dr3 = virtualContext.Dr3;
             context->Dr7 = virtualContext.Dr7;
         }
-        const auto stop = shadowStops_.find(GetThreadId(thread));
-        if (stop != shadowStops_.end() && !stop->second.stepping && validTargetThread(thread))
+        const auto stop = shadowStops_.find(lease.tid);
+        if (stop != shadowStops_.end() && !stop->second.stepping && validTargetThread(lease))
         {
             // Windows owns an INT3 stop. Its DR6 is not a hardware-stop result:
             // SetThreadContext may discard the B0-B3 bits. Expose the verified
@@ -481,9 +503,12 @@ namespace ksword::debugger
         if (context == nullptr ||
             (context->ContextFlags & CONTEXT_DEBUG_REGISTERS) != CONTEXT_DEBUG_REGISTERS)
         { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-        if (attachmentOwner_ != AttachmentOwner::native || !validTargetThread(thread))
+        TargetLease lease;
+        if (!pinTarget(thread, true, lease)) return FALSE;
+        thread = lease.identity.native();
+        if (attachmentOwner_ != AttachmentOwner::native || !validTargetThread(lease))
         { SetLastError(ERROR_INVALID_STATE); return FALSE; }
-        const auto found = breakpoints_.find(GetThreadId(thread));
+        const auto found = breakpoints_.find(lease.tid);
         if (found == breakpoints_.end()) return TRUE;
         if (!matchesThreadRecord(thread, found->second))
         { SetLastError(ERROR_INVALID_STATE); return FALSE; }
@@ -503,9 +528,12 @@ namespace ksword::debugger
         if (writer == nullptr || context == nullptr ||
             (context->ContextFlags & CONTEXT_DEBUG_REGISTERS) != CONTEXT_DEBUG_REGISTERS)
         { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-        if (attachmentOwner_ != AttachmentOwner::native || !validTargetThread(thread))
+        TargetLease lease;
+        if (!pinTarget(thread, true, lease)) return FALSE;
+        thread = lease.identity.native();
+        if (attachmentOwner_ != AttachmentOwner::native || !validTargetThread(lease))
         { SetLastError(ERROR_INVALID_STATE); return FALSE; }
-        return applyDebugContext(thread, context, writer, opaque);
+        return applyDebugContext(thread, context, writer, opaque, &lease);
     }
 
     BOOL Backend::setContext(HANDLE thread, const CONTEXT* context)
@@ -514,10 +542,16 @@ namespace ksword::debugger
     }
 
     BOOL Backend::applyDebugContext(HANDLE thread, const CONTEXT* context,
-        NativeDebugWriter writer, void* opaque)
+        NativeDebugWriter writer, void* opaque, TargetLease* bound)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (context == nullptr) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+        // 读取、记录替换、实际写入和回滚共用同一对象，内部不再重复复制。
+        TargetLease localLease;
+        TargetLease& lease = bound != nullptr ? *bound : localLease;
+        if (bound == nullptr && !pinTarget(thread, true, lease)) return FALSE;
+        thread = lease.identity.native();
+        const DWORD tid = lease.tid;
         if (!useHvm_ || (context->ContextFlags & CONTEXT_DEBUG_REGISTERS) != CONTEXT_DEBUG_REGISTERS)
         {
             if (options_.mode == KSWORD_DEBUGGER_MODE_STEALTH &&
@@ -525,16 +559,16 @@ namespace ksword::debugger
             { logRepeated("Stealth breakpoint refused: select HVM before arming debug registers"); SetLastError(ERROR_INVALID_STATE); return FALSE; }
             CONTEXT native = *context;
             if (writer != nullptr) native.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true);
+            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true, &lease);
         }
         // A context update with no armed slots and no owned breakpoint record
         // does not mutate HVM. Route it before Shadow preparation so a harmless
         // DR clear cannot try to pause a pre-existing Main/other-client resident.
-        if ((context->Dr7 & 0xffU) == 0 && breakpoints_.find(GetThreadId(thread)) == breakpoints_.end() && validTargetThread(thread))
+        if ((context->Dr7 & 0xffU) == 0 && breakpoints_.find(tid) == breakpoints_.end() && validTargetThread(lease))
         {
             CONTEXT native = *context;
             if (writer != nullptr) native.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true);
+            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true, &lease);
         }
         if (writer == nullptr)
         {
@@ -550,7 +584,7 @@ namespace ksword::debugger
                     { logRepeated("EPT breakpoint fallback refused: fallback is disabled"); SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
                 }
                 const bool reportFallback = options_.mode == KSWORD_DEBUGGER_MODE_NORMAL && !shadowPrepared_;
-                const BOOL completed = applyShadowContext(thread, context);
+                const BOOL completed = applyShadowContext(thread, context, &lease);
                 const DWORD actualError = GetLastError();
                 if (reportFallback && executionRequested) recordFallback("EPT #DB execution breakpoint", completed ? "Shadow Page hidden INT3" : "Shadow route rejected", ERROR_NOT_SUPPORTED,
                     "EPT breakpoint protocol unavailable; Shadow result error=" + std::to_string(completed ? ERROR_SUCCESS : actualError) + "; no visible native DR fallback");
@@ -562,7 +596,7 @@ namespace ksword::debugger
             {
                 if (options_.allowFallback == 0)
                 { logRepeated("EPT breakpoint fallback refused: fallback is disabled"); SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
-                const BOOL completed = applyShadowContext(thread, context);
+                const BOOL completed = applyShadowContext(thread, context, &lease);
                 const DWORD actualError = GetLastError();
                 if (executionRequested) recordFallback("EPT #DB execution breakpoint", completed ? "Shadow Page hidden INT3" : "Shadow route rejected", ERROR_NOT_SUPPORTED,
                     "EPT breakpoint protocol unavailable; Shadow result error=" + std::to_string(completed ? ERROR_SUCCESS : actualError) + "; no visible native DR fallback");
@@ -574,8 +608,7 @@ namespace ksword::debugger
             logRepeated("Native EPT context seam refused: this policy requires the adapter's Shadow execution breakpoint path");
             SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
         }
-        const DWORD tid = GetThreadId(thread);
-        if (!validTargetThread(thread))
+        if (!validTargetThread(lease))
         { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
         const bool enabled = (context->Dr7 & 0xffU) != 0;
         const auto found = breakpoints_.find(tid);
@@ -583,7 +616,7 @@ namespace ksword::debugger
         {
             CONTEXT native = *context;
             if (writer != nullptr) native.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true);
+            return writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true, &lease);
         }
         // Validate the complete replacement before any old rule is removed.
         const auto addresses = debugAddresses(*context);
@@ -601,7 +634,7 @@ namespace ksword::debugger
             &retained, 0, FALSE, DUPLICATE_SAME_ACCESS)) return FALSE;
         if (identity) identity->reset(retained);
         CONTEXT saved{}; saved.ContextFlags = writer != nullptr ? CONTEXT_DEBUG_REGISTERS : context->ContextFlags;
-        if (!nativeContext(thread, &saved, false)) return FALSE;
+        if (!nativeContext(thread, &saved, false, &lease)) return FALSE;
         DWORD error = enabled ? ensureDebugHvm() : ERROR_SUCCESS;
         bool restart = false;
         if (error == ERROR_SUCCESS) error = pauseOwnedHvm(restart);
@@ -620,7 +653,7 @@ namespace ksword::debugger
         native.Dr0 = 0; native.Dr1 = 0; native.Dr2 = 0; native.Dr3 = 0;
         if (writer != nullptr) native.ContextFlags = CONTEXT_DEBUG_REGISTERS;
         if (error == ERROR_SUCCESS &&
-            !(writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true)))
+            !(writer != nullptr ? writer(thread, &native, FALSE, opaque) : nativeContext(thread, &native, true, &lease)))
             error = GetLastError();
         if (error == ERROR_SUCCESS && restart) error = startOwnedHvm();
         if (error != ERROR_SUCCESS)
@@ -634,7 +667,7 @@ namespace ksword::debugger
                 rollback = installBreakpoints(tid, restored);
             }
             if (rollback == ERROR_SUCCESS &&
-                !(writer != nullptr ? writer(thread, &saved, TRUE, opaque) : nativeContext(thread, &saved, true)))
+                !(writer != nullptr ? writer(thread, &saved, TRUE, opaque) : nativeContext(thread, &saved, true, &lease)))
                 rollback = GetLastError();
             if (rollback == ERROR_SUCCESS && restart) rollback = startOwnedHvm();
             log("EPT breakpoint transaction failed: " + std::to_string(error) +
@@ -806,7 +839,7 @@ NextEvent:
         if (restoreShadowWrites() != ERROR_SUCCESS) return false;
         if (releaseOwnedHvm() != ERROR_SUCCESS) return false;
         ownsResident_ = false; useHvm_ = false; clearAttachment();
-        processIds_.clear(); driver_.reset();
+        processIds_.clear(); threadIds_.clear(); driver_.reset();
         return true;
     }
 }

@@ -182,10 +182,15 @@ namespace ksword::debugger
         breakpoints_.erase(found); return ERROR_SUCCESS;
     }
 
-    BOOL Backend::applyShadowContext(HANDLE thread, const CONTEXT* context)
+    BOOL Backend::applyShadowContext(HANDLE thread, const CONTEXT* context, TargetLease* bound)
     {
-        if (!validTargetThread(thread)) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
-        const DWORD tid = GetThreadId(thread);
+        // 现有事务只延长目标引用，不改变任何断点安装或执行分支。
+        TargetLease localLease;
+        TargetLease& lease = bound != nullptr ? *bound : localLease;
+        if (bound == nullptr && !pinTarget(thread, true, lease)) return FALSE;
+        thread = lease.identity.native();
+        if (!validTargetThread(lease)) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
+        const DWORD tid = lease.tid;
         const std::uint64_t addresses[] = {context->Dr0, context->Dr1, context->Dr2, context->Dr3};
         bool execute = false;
         for (DWORD slot = 0; slot < 4; ++slot)
@@ -217,7 +222,7 @@ namespace ksword::debugger
             // metadata for the policy guard, but never acquire/pause a foreign
             // resident for installation, replacement, or removal of this path.
             CONTEXT native = *context;
-            const BOOL completed = nativeContext(thread, &native, true);
+            const BOOL completed = nativeContext(thread, &native, true, &lease);
             const DWORD actualError = GetLastError();
             if (completed)
             {
@@ -238,7 +243,7 @@ namespace ksword::debugger
         // warranted and no other caller's resident state may be stopped.
         if (error != ERROR_SUCCESS) { SetLastError(error); return FALSE; }
         CONTEXT saved{}; saved.ContextFlags = context->ContextFlags;
-        if (!nativeContext(thread, &saved, false))
+        if (!nativeContext(thread, &saved, false, &lease))
         {
             error = GetLastError();
             if (!hasShadowViews()) (void)releaseOwnedHvm();
@@ -282,7 +287,7 @@ namespace ksword::debugger
                 if ((context->Dr7 & (3ULL << (2 * slot))) != 0 && ((context->Dr7 >> (16 + 4 * slot)) & 3) != 0)
                     recordFallback("EPT data watchpoint", "native hardware debug register", ERROR_NOT_SUPPORTED,
                         "Shadow execution views do not implement data watchpoints; physical DR slot " + std::to_string(slot) + " will be visible");
-        if (error == ERROR_SUCCESS && !nativeContext(thread, &native, true)) error = GetLastError();
+        if (error == ERROR_SUCCESS && !nativeContext(thread, &native, true, &lease)) error = GetLastError();
         if (error == ERROR_SUCCESS && hasShadowViews()) error = startOwnedHvm();
         if (error != ERROR_SUCCESS)
         {
@@ -290,7 +295,7 @@ namespace ksword::debugger
             DWORD rollback = pauseOwnedHvm(ignored);
             if (rollback == ERROR_SUCCESS) rollback = removeShadowRecord(tid);
             if (rollback == ERROR_SUCCESS && hadPrevious) rollback = install(old);
-            if (rollback == ERROR_SUCCESS && !nativeContext(thread, &saved, true)) rollback = GetLastError();
+            if (rollback == ERROR_SUCCESS && !nativeContext(thread, &saved, true, &lease)) rollback = GetLastError();
             if (rollback == ERROR_SUCCESS && hasShadowViews()) rollback = startOwnedHvm();
             log("ShadowPage context transaction failed: " + std::to_string(error) + "; rollback " + std::to_string(rollback));
             if (rollback != ERROR_SUCCESS) lastError_ = rollback;
@@ -435,12 +440,13 @@ namespace ksword::debugger
         SetLastError(error); return error == ERROR_SUCCESS;
     }
 
-    DWORD Backend::nativeRequest(KSWORD_ARK_DEBUGGER_REQUEST& request, KSWORD_ARK_DEBUGGER_RESPONSE& response)
+    DWORD Backend::nativeRequest(KSWORD_ARK_DEBUGGER_REQUEST& request, KSWORD_ARK_DEBUGGER_RESPONSE& response,
+        ark::DriverHandle* targetDevice)
     {
         request.version = KSWORD_ARK_DEBUGGER_VERSION;
         request.size = sizeof(request);
         const auto result = client_.deviceIoControl(IOCTL_KSWORD_ARK_DEBUGGER,
-            &request, sizeof(request), &response, sizeof(response), &driver_);
+            &request, sizeof(request), &response, sizeof(response), targetDevice != nullptr ? targetDevice : &driver_);
         if (!result.ok) return result.win32Error;
         if (result.bytesReturned != sizeof(response) || response.version != KSWORD_ARK_DEBUGGER_VERSION ||
             response.size != sizeof(response)) return ERROR_INVALID_DATA;
@@ -450,12 +456,13 @@ namespace ksword::debugger
         return convert == nullptr ? ERROR_GEN_FAILURE : convert(response.status);
     }
 
-    HANDLE Backend::brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit)
+    HANDLE Backend::brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit,
+        ark::DriverHandle* targetDevice)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        // Only pursue the broker path when the driver is actually attached — the
-        // identity-proxy fallback owned by openProcess is still useful without R0.
-        if (!driver_.isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return nullptr; }
+        // 身份租约文件只改变引用的生命周期，不改变代理请求的权限或策略。
+        auto* const device = targetDevice != nullptr ? targetDevice : &driver_;
+        if (!device->isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return nullptr; }
         if (pid == 0 || desiredAccess == 0) { SetLastError(ERROR_INVALID_PARAMETER); return nullptr; }
         KSWORD_ARK_DEBUGGER_REQUEST request{};
         request.operation = KSWORD_ARK_DEBUGGER_OPEN_HANDLE;
@@ -464,7 +471,7 @@ namespace ksword::debugger
         // The protocol packs ACCESS_MASK into the ULONGLONG address field, zero-extended.
         request.address = static_cast<std::uint64_t>(desiredAccess);
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
-        const DWORD transportError = nativeRequest(request, response);
+        const DWORD transportError = nativeRequest(request, response, device);
         if (transportError != ERROR_SUCCESS) { SetLastError(transportError); return nullptr; }
         if (response.status < 0)
         {
@@ -489,12 +496,16 @@ namespace ksword::debugger
         return handle;
     }
 
-    BOOL Backend::nativeContext(HANDLE thread, CONTEXT* context, bool write)
+    BOOL Backend::nativeContext(HANDLE thread, CONTEXT* context, bool write, TargetLease* bound)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (context == nullptr || sizeof(*context) != KSWORD_ARK_DEBUGGER_CONTEXT_BYTES)
         { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
-        const auto windowsContext = [this, thread, context, write](DWORD sourceError, const char* reason) {
-            const BOOL completed = write ? ::SetThreadContext(thread, context) : ::GetThreadContext(thread, context);
+        TargetLease localLease;
+        TargetLease& lease = bound != nullptr ? *bound : localLease;
+        if (bound == nullptr && !pinTarget(thread, true, lease)) return FALSE;
+        const auto windowsContext = [this, target = lease.identity.native(), context, write](DWORD sourceError, const char* reason) {
+            const BOOL completed = write ? ::SetThreadContext(target, context) : ::GetThreadContext(target, context);
             const DWORD actualError = GetLastError();
             recordFallback("R0 thread context", "Windows thread context", sourceError,
                 std::string(reason) + "; Windows " + (write ? "write" : "read") +
@@ -510,10 +521,10 @@ namespace ksword::debugger
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
         request.operation = write ? KSWORD_ARK_DEBUGGER_SET_CONTEXT : KSWORD_ARK_DEBUGGER_GET_CONTEXT;
         request.flags = write ? KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED : 0;
-        request.processId = GetProcessIdOfThread(thread); request.threadId = GetThreadId(thread);
+        request.processId = lease.pid; request.threadId = lease.tid;
         request.contextFlags = context->ContextFlags;
         std::memcpy(request.context, context, sizeof(*context));
-        const DWORD error = nativeRequest(request, response);
+        const DWORD error = nativeRequest(request, response, lease.device(driver_));
         // Some Windows builds export PsGet/SetContextThread but reject the
         // target's context APC. Preserve actual Windows debug-port semantics.
         // Identity, access and policy rejections must not trigger this fallback.
@@ -539,17 +550,19 @@ namespace ksword::debugger
     DWORD Backend::changeSuspendCount(HANDLE thread, bool suspend)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        TargetLease lease;
+        if (!pinTarget(thread, true, lease)) return MAXDWORD;
         KSWORD_ARK_DEBUGGER_REQUEST request{};
         KSWORD_ARK_DEBUGGER_RESPONSE response{};
         request.operation = suspend ? KSWORD_ARK_DEBUGGER_SUSPEND : KSWORD_ARK_DEBUGGER_RESUME;
         request.flags = KSWORD_ARK_DEBUGGER_FLAG_CONFIRMED;
-        request.processId = GetProcessIdOfThread(thread); request.threadId = GetThreadId(thread);
-        const DWORD error = nativeRequest(request, response);
+        request.processId = lease.pid; request.threadId = lease.tid;
+        const DWORD error = nativeRequest(request, response, lease.device(driver_));
         if (error == ERROR_NOT_SUPPORTED && options_.allowFallback != 0 && options_.nativeSuspendFallback != 0)
         {
             recordFallback("R0 suspend count", suspend ? "Windows SuspendThread" : "Windows ResumeThread", error,
                 "optional kernel suspend-count export is unavailable");
-            return suspend ? ::SuspendThread(thread) : ::ResumeThread(thread);
+            return suspend ? ::SuspendThread(lease.identity.native()) : ::ResumeThread(lease.identity.native());
         }
         if (error != ERROR_SUCCESS) log("R0 suspend-count operation failed without fallback, error " + std::to_string(error));
         SetLastError(error); return error == ERROR_SUCCESS ? response.previousSuspendCount : MAXDWORD;

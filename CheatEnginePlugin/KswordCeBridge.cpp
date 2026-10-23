@@ -20,7 +20,8 @@ namespace ksword::ce
 
         struct DataProtection
         {
-            ark::DriverHandle identity;
+            // 保护与下一次写入保留同一目标作用域，不在保护成功后补抓公开槽位。
+            std::shared_ptr<debugger::Backend::TargetLease> identity;
             DWORD pid = 0;
             std::uintptr_t address = 0;
             SIZE_T bytes = 0;
@@ -51,25 +52,32 @@ namespace ksword::ce
         { return boundary([&] { return debugger::backend().openProcess(access, inherit, pid); }, static_cast<HANDLE>(nullptr)); }
         BOOL WINAPI readMemory(HANDLE process, LPCVOID address, LPVOID data, SIZE_T bytes, SIZE_T* transferred)
         { return boundary([&] {
+            if (transferred != nullptr) *transferred = 0;
+            debugger::Backend::TargetLease target;
+            if (!debugger::backend().retainTarget(process, false, target)) return FALSE;
+            process = target.native();
             // CE's Local Lua functions build our ABI packets in its own memory.
             // Driver process protections must not intercept these local buffers.
-            if (GetProcessId(process) == GetCurrentProcessId())
+            if (target.processId() == GetCurrentProcessId())
                 return ::ReadProcessMemory(process, address, data, bytes, transferred);
             return debugger::backend().readMemory(process, address, data, bytes, transferred);
         }, FALSE); }
         BOOL WINAPI writeMemory(HANDLE process, LPVOID address, LPCVOID data, SIZE_T bytes, SIZE_T* transferred)
         { return boundary([&] {
+            if (transferred != nullptr) *transferred = 0;
             auto transaction = std::move(g_dataProtection);
             g_dataProtection = {};
-            if (GetProcessId(process) == GetCurrentProcessId())
+            debugger::Backend::TargetLease target;
+            if (!debugger::backend().retainTarget(process, false, target)) return FALSE;
+            process = target.native();
+            if (target.processId() == GetCurrentProcessId())
                 return ::WriteProcessMemory(process, address, data, bytes, transferred);
             auto kind = debugger::Backend::MemoryWriteKind::byProtection;
-            if (transaction.pid != 0 && debugger::backend().processId(process) == transaction.pid &&
+            if (transaction.pid != 0 && target.processId() == transaction.pid &&
                 contains(transaction.address, transaction.bytes, reinterpret_cast<std::uintptr_t>(address), bytes))
             {
                 MEMORY_BASIC_INFORMATION current{};
-                if (!transaction.identity.isValid() || WaitForSingleObject(transaction.identity.native(), 0) != WAIT_TIMEOUT ||
-                    GetProcessId(transaction.identity.native()) != transaction.pid ||
+                if (!transaction.identity || transaction.identity->processId() != transaction.pid ||
                     debugger::backend().queryMemory(process, address, &current, sizeof(current)) == 0 ||
                     current.State != MEM_COMMIT || current.Protect != PAGE_EXECUTE_READWRITE ||
                     current.AllocationBase != transaction.original.AllocationBase || current.Type != transaction.original.Type ||
@@ -103,6 +111,9 @@ namespace ksword::ce
         BOOL WINAPI protectMemory(HANDLE process, LPVOID address, SIZE_T bytes, DWORD protection, PDWORD previous)
         { return boundary([&] {
             g_dataProtection = {};
+            auto target = std::make_shared<debugger::Backend::TargetLease>();
+            if (!debugger::backend().retainTarget(process, false, *target)) return FALSE;
+            process = target->native();
             MEMORY_BASIC_INFORMATION original{};
             const auto requested = reinterpret_cast<std::uintptr_t>(address);
             const bool data = protection == PAGE_EXECUTE_READWRITE &&
@@ -114,13 +125,12 @@ namespace ksword::ce
             const DWORD error = GetLastError();
             if (ok && data && previous != nullptr && *previous == original.Protect)
             {
-                g_dataProtection.pid = debugger::backend().processId(process);
+                g_dataProtection.pid = target->processId();
                 g_dataProtection.address = requested; g_dataProtection.bytes = bytes;
                 g_dataProtection.original = original;
-                HANDLE identity = nullptr;
-                if (DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &identity,
-                    0, FALSE, DUPLICATE_SAME_ACCESS))
-                    g_dataProtection.identity = ark::DriverHandle(identity);
+                // TLS 析构只能释放引用，不在 loader lock 下等待后端 mutex。
+                target->releaseAlias();
+                g_dataProtection.identity = std::move(target);
             }
             SetLastError(error); return ok;
         }, FALSE); }

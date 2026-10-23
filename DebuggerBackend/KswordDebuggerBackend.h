@@ -19,7 +19,33 @@ namespace ksword::debugger
     // One backend instance per debugger process; CE-specific ABI stays outside.
     class Backend
     {
+        struct TargetIdentity;
     public:
+        // 适配器的组合操作共享同一目标；只暴露私有句柄及已固定的数字身份。
+        class TargetLease
+        {
+        public:
+            TargetLease() = default;
+            ~TargetLease();
+            TargetLease(const TargetLease&) = delete;
+            TargetLease& operator=(const TargetLease&) = delete;
+            HANDLE native() const { return identity.native(); }
+            DWORD processId() const { return pid; }
+            DWORD threadId() const { return tid; }
+            // 长期/TLS 保存前结束临时别名；身份引用继续存续，析构无需后端锁。
+            void releaseAlias();
+        private:
+            friend class Backend;
+            DWORD pid = 0;
+            DWORD tid = 0;
+            ark::DriverHandle identity;
+            std::shared_ptr<TargetIdentity> retained;
+            Backend* aliasOwner = nullptr;
+            bool threadAlias = false;
+            void clear();
+            ark::DriverHandle* device(ark::DriverHandle& fallback) const;
+        };
+        bool retainTarget(HANDLE handle, bool thread, TargetLease& lease) noexcept;
         bool initialize();
         bool shutdown();
         DWORD dispatch(KSWORD_DEBUGGER_CALL& call);
@@ -78,7 +104,8 @@ namespace ksword::debugger
         // 通过 R0 代理取得真实进程/线程句柄，并复制到请求者句柄表。
         // tid==0 表示进程；失败返回 nullptr 并设置 LastError。
         // 返回句柄属于本进程，由调用方用 CloseHandle 关闭。
-        HANDLE brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit = FALSE);
+        HANDLE brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit = FALSE,
+            ark::DriverHandle* targetDevice = nullptr);
     private:
 #ifdef KSWORD_DEBUGGER_TESTING
         friend struct BackendTestPeer;
@@ -97,8 +124,21 @@ namespace ksword::debugger
         std::recursive_mutex mutex_;
         ark::DriverClient client_;
         ark::DriverHandle driver_;
-        struct ProcessProxy { DWORD pid = 0; ark::DriverHandle identity; };
-        std::unordered_map<HANDLE, ProcessProxy> processIds_;
+        // 句柄身份与目标身份分别持有；事件对象不能替代真实进程引用。
+        struct TargetIdentity
+        {
+            DWORD pid = 0;
+            DWORD tid = 0;
+            HANDLE publicHandle = nullptr;
+            ark::DriverHandle publicIdentity;
+            ark::DriverHandle targetIdentity;
+            ark::DriverHandle deviceIdentity;
+        };
+        std::unordered_map<HANDLE, std::shared_ptr<TargetIdentity>> processIds_;
+        std::unordered_map<HANDLE, std::shared_ptr<TargetIdentity>> threadIds_;
+        HANDLE rememberTarget(HANDLE handle, DWORD pid, DWORD tid = 0) noexcept;
+        bool pinTarget(HANDLE handle, bool thread, TargetLease& lease) noexcept;
+        static bool sameObject(HANDLE first, HANDLE second);
         // 查询句柄实际权限，识别 Ob 回调“打开成功但降权”的情况。
         static bool queryHandleAccess(HANDLE handle, DWORD& grantedAccess);
         // GENERIC_* / MAXIMUM_ALLOWED 是请求选择器，不出现在 GrantedAccess 中。
@@ -125,18 +165,20 @@ namespace ksword::debugger
         };
         struct ShadowWriteTarget
         {
-            ark::DriverHandle identity;
+            std::shared_ptr<ark::DriverHandle> identity;
             std::unordered_map<std::uint64_t, ShadowWritePage> pages;
         };
         std::unordered_map<DWORD, ShadowWriteTarget> shadowWrites_;
         DWORD shadowWritePageCount() const;
         bool hasShadowViews() const;
         bool shadowMemoryWrite(DWORD pid, std::uint64_t address, const void* data,
-            SIZE_T bytes, SIZE_T& transferred, bool& handled, bool dataWrite);
+            SIZE_T bytes, SIZE_T& transferred, bool& handled, bool dataWrite,
+            ark::DriverHandle* targetDevice = nullptr);
         std::unordered_set<std::uint64_t> shadowInt3_;
         bool shadowPrepared_ = false;
         bool shadowRecoveryRequired_ = false;
-        std::unordered_set<DWORD> shadowQuarantinedTargets_;
+        // 延迟恢复继续保留原对象，不能只保留可复用的 PID。
+        std::unordered_map<DWORD, std::shared_ptr<ark::DriverHandle>> shadowQuarantinedTargets_;
         bool ordinaryDataFallback_ = false;
         std::unordered_map<std::uint64_t, DWORD> shadowReferences_;
         struct ShadowStop { std::uint64_t address; DWORD mask; bool userStep; bool stepping; };
@@ -145,7 +187,7 @@ namespace ksword::debugger
         DWORD removeShadowInt3(std::uint64_t address);
         DWORD addShadowInt3(std::uint64_t address);
         DWORD removeShadowRecord(DWORD tid);
-        BOOL applyShadowContext(HANDLE thread, const CONTEXT* context);
+        BOOL applyShadowContext(HANDLE thread, const CONTEXT* context, TargetLease* bound = nullptr);
         DWORD shadowEvent(DEBUG_EVENT& event, bool& consume);
         DWORD beginShadowStep(DWORD tid, bool automatic);
         bool shadowWrite(DWORD pid, std::uint64_t address, const void* data, SIZE_T bytes,
@@ -164,19 +206,22 @@ namespace ksword::debugger
         DWORD retireAttachment();
         void clearAttachment();
         bool validTargetThread(HANDLE thread) const;
+        bool validTargetThread(const TargetLease& lease) const;
         bool matchesThreadRecord(HANDLE thread, const ThreadBreakpoints& record) const;
         BOOL applyDebugContext(HANDLE thread, const CONTEXT* context,
-            NativeDebugWriter writer, void* opaque);
+            NativeDebugWriter writer, void* opaque, TargetLease* bound = nullptr);
         void retireDetachedTarget();
         DWORD removeBreakpoints(DWORD tid);
         DWORD installBreakpoints(DWORD tid, ThreadBreakpoints& record);
-        DWORD nativeRequest(KSWORD_ARK_DEBUGGER_REQUEST& request, KSWORD_ARK_DEBUGGER_RESPONSE& response);
-        BOOL nativeContext(HANDLE thread, CONTEXT* context, bool write);
+        DWORD nativeRequest(KSWORD_ARK_DEBUGGER_REQUEST& request, KSWORD_ARK_DEBUGGER_RESPONSE& response,
+            ark::DriverHandle* targetDevice = nullptr);
+        BOOL nativeContext(HANDLE thread, CONTEXT* context, bool write, TargetLease* bound = nullptr);
         DWORD changeSuspendCount(HANDLE thread, bool suspend);
         DWORD breakpointRequest(KSWORD_ARK_HVM_DEBUG_REQUEST& request,
             KSWORD_ARK_HVM_DEBUG_RESPONSE& response);
         bool transfer(bool write, DWORD pid, std::uint64_t address, void* data,
-            SIZE_T bytes, SIZE_T& transferred, bool dataWrite = false);
+            SIZE_T bytes, SIZE_T& transferred, bool dataWrite = false,
+            ark::DriverHandle* targetDevice = nullptr);
     };
     Backend& backend();
 }

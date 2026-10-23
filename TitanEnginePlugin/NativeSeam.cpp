@@ -30,21 +30,38 @@ namespace ksword::titan
 
         BOOL WINAPI readMemory(HANDLE process, LPCVOID address, LPVOID data, SIZE_T bytes, SIZE_T* transferred)
         {
+            if (transferred != nullptr) *transferred = 0;
+            // 只有组合读取与叠加需要作用域，纯原生转发沿用 Windows 合同。
+            debugger::Backend::TargetLease target;
+            const bool overlay = nativeLogicalRead && hvmSelected.load();
+            if (overlay)
+            {
+                if (!debugger::backend().retainTarget(process, false, target)) return FALSE;
+                process = target.native();
+            }
             SIZE_T done = 0;
             const BOOL completed = ::ReadProcessMemory(process, address, data, bytes, &done);
             const DWORD error = GetLastError();
-            if (completed && nativeLogicalRead && hvmSelected.load())
-                debugger::backend().overlayShadowBytes(GetProcessId(process), reinterpret_cast<std::uintptr_t>(address), data, done);
+            if (completed && overlay)
+                debugger::backend().overlayShadowBytes(target.processId(), reinterpret_cast<std::uintptr_t>(address), data, done);
             if (transferred != nullptr) *transferred = done;
             SetLastError(error); return completed;
         }
 
         BOOL WINAPI writeMemory(HANDLE process, LPVOID address, LPCVOID data, SIZE_T bytes, SIZE_T* transferred)
         {
+            if (transferred != nullptr) *transferred = 0;
+            const auto options = debugger::backend().options();
+            if (!hvmSelected.load() && options.shadowMemoryWrites == 0 && options.mode != KSWORD_DEBUGGER_MODE_STEALTH)
+                return ::WriteProcessMemory(process, address, data, bytes, transferred);
+            // 逻辑字节判断、原生读取和后端写入必须消费同一对象。
+            debugger::Backend::TargetLease target;
+            if (!debugger::backend().retainTarget(process, false, target)) return FALSE;
+            process = target.native();
             // Titan can restore a temporarily removed breakpoint again during
             // stepping. An already matching logical byte is not a user code
             // patch and must not allocate a persistent Shadow write page.
-            const DWORD pid = GetProcessId(process);
+            const DWORD pid = target.processId();
             if (nativeLogicalRead && hvmSelected.load() && bytes == 1 && data != nullptr &&
                 *static_cast<const BYTE*>(data) != 0xcc &&
                 isShadowBreakpointAddress(pid, reinterpret_cast<ULONG_PTR>(address)))
@@ -61,10 +78,9 @@ namespace ksword::titan
                     }
                 }
             }
-            const auto options = debugger::backend().options();
             if (options.shadowMemoryWrites != 0 || options.mode == KSWORD_DEBUGGER_MODE_STEALTH)
                 return debugger::backend().writeMemory(process, address, data, bytes, transferred);
-            if (!hvmSelected.load() || GetProcessId(process) != observedPid.load() || observedGeneration.load() == 0)
+            if (!hvmSelected.load() || pid != observedPid.load() || observedGeneration.load() == 0)
                 return ::WriteProcessMemory(process, address, data, bytes, transferred);
             return debugger::backend().writeMemory(process, address, data, bytes, transferred);
         }
@@ -83,20 +99,24 @@ namespace ksword::titan
         BOOL WINAPI getContext(HANDLE thread, LPCONTEXT context)
         {
             std::lock_guard<std::recursive_mutex> policy(policyMutex);
+            if (!hvmSelected.load() || observedGeneration.load() == 0) return windowsGet(thread, context);
+            debugger::Backend::TargetLease target;
+            if (!debugger::backend().retainTarget(thread, true, target)) return FALSE;
+            thread = target.native();
             if (!windowsGet(thread, context))
             {
                 const DWORD error = GetLastError();
-                if (hvmSelected.load() && observedGeneration.load() != 0 && GetProcessIdOfThread(thread) == observedPid.load()) seamError = error;
+                if (hvmSelected.load() && observedGeneration.load() != 0 && target.processId() == observedPid.load()) seamError = error;
                 SetLastError(error); return FALSE;
             }
             const DWORD error = GetLastError();
             if (hvmSelected.load() && observedGeneration.load() != 0 &&
-                GetProcessIdOfThread(thread) == observedPid.load() &&
+                target.processId() == observedPid.load() &&
                 (context->ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS)
             {
                 if (!debugger::backend().overlayNativeDebugContext(thread, context, observedGeneration.load())) return FALSE;
                 std::lock_guard<std::mutex> lock(pendingMutex);
-                const auto found = pendingDebug.find(GetThreadId(thread));
+                const auto found = pendingDebug.find(target.threadId());
                 if (found != pendingDebug.end())
                 {
                     context->Dr0 = found->second.Dr0; context->Dr1 = found->second.Dr1;
@@ -110,7 +130,12 @@ namespace ksword::titan
         BOOL WINAPI setContext(HANDLE thread, const CONTEXT* context)
         {
             std::lock_guard<std::recursive_mutex> policy(policyMutex);
-            if (context == nullptr || !hvmSelected.load() || observedGeneration.load() == 0 || GetProcessIdOfThread(thread) != observedPid.load() ||
+            if (context == nullptr || !hvmSelected.load() || observedGeneration.load() == 0)
+                return windowsSet(thread, context);
+            debugger::Backend::TargetLease target;
+            if (!debugger::backend().retainTarget(thread, true, target)) return FALSE;
+            thread = target.native();
+            if (target.processId() != observedPid.load() ||
                 (context->ContextFlags & CONTEXT_DEBUG_REGISTERS) != CONTEXT_DEBUG_REGISTERS)
                 return windowsSet(thread, context);
             try
@@ -136,7 +161,7 @@ namespace ksword::titan
                 if (!debugger::backend().applyNativeDebugContext(thread, &ready, &writeContext, &write, observedGeneration.load()))
                 { seamError = GetLastError(); return FALSE; }
                 // Titan programs DR7 before the address; stage that short sequence.
-                const DWORD tid = GetThreadId(thread);
+                const DWORD tid = target.threadId();
                 {
                     std::lock_guard<std::mutex> lock(pendingMutex);
                     if (incomplete != 0) pendingDebug[tid] = logical;
