@@ -1418,23 +1418,27 @@ void MonitorDock::refreshArkRiskCenterAsync()
         return;
     }
 
+    const QPointer<MonitorDock> guardThis(this);
+    const auto dispatcher = m_arkRiskDispatcher;
     m_arkRiskRefreshInProgress = true;
     const std::uint64_t ticket = ++m_arkRiskRefreshTicket;
     if (m_arkRiskRefreshButton != nullptr)
     {
         m_arkRiskRefreshButton->setEnabled(false);
     }
+    if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
     if (m_arkRiskStatusLabel != nullptr)
     {
         m_arkRiskStatusLabel->setText(QStringLiteral("状态：聚合查询中..."));
+        if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
         m_arkRiskStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
+        if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
     }
 
-    QPointer<MonitorDock> guardThis(this);
     // sessionBootId 在 GUI 线程先取一次：进程内恒定，工作线程直接用值，
     // 免得静态初始化和采集在不同线程上竞争。
     const QString sessionBootId = arkRiskSessionBootId();
-    QRunnable* task = QRunnable::create([guardThis, ticket, sessionBootId]() {
+    QRunnable* task = QRunnable::create([guardThis, dispatcher, ticket, sessionBootId]() {
         std::vector<MonitorDock::ArkRiskCenterEntry> entries;
         QStringList statusLines;
         const ksword::ark::DriverClient client;
@@ -1490,18 +1494,14 @@ void MonitorDock::refreshArkRiskCenterAsync()
             entry.searchFields = {entry.sourceName, entry.category, entry.title, entry.detail, entry.riskScoreText,
                 QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact))};
 
-        if (guardThis == nullptr)
-        {
-            return;
-        }
         // Create the retirement owner on this value worker before queuing a
         // callback. A closed page or rejected ticket can release only aliases.
         const auto deferredEntries = ks::ui::RetainCompleteExportSnapshot<std::vector<MonitorDock::ArkRiskCenterEntry>>(
             std::make_shared<const std::vector<MonitorDock::ArkRiskCenterEntry>>(std::move(entries)));
         const auto deferredStatusLines = ks::ui::RetainCompleteExportSnapshot<QStringList>(
             std::make_shared<const QStringList>(std::move(statusLines)));
-        QMetaObject::invokeMethod(
-            guardThis.data(),
+        // 复用既有投递器与析构同步；后台线程不再检查后借用可能已销毁的 QObject。
+        dispatcher->post(
             [guardThis, ticket, deferredEntries, deferredStatusLines]() mutable {
                 if (guardThis == nullptr || guardThis->m_arkRiskRefreshTicket != ticket)
                 {
@@ -1520,18 +1520,22 @@ void MonitorDock::refreshArkRiskCenterAsync()
                     {
                         guardThis->m_arkRiskRefreshButton->setEnabled(true);
                     }
+                    if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
                     auto previousEntries = std::move(guardThis->m_arkRiskCenterEntries);
                     guardThis->m_arkRiskCenterEntries = deferredEntries;
                     guardThis->m_arkRiskEntriesVersion = ticket;
                     // The old complete root is retired by its publication owner.
                     guardThis->rebuildArkRiskCenterTable();
+                    if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
                     guardThis->showArkRiskCenterDetailForCurrentRow();
+                    if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
                     if (guardThis->m_arkRiskStatusLabel != nullptr)
                     {
                         guardThis->m_arkRiskStatusLabel->setText(
                             QStringLiteral("状态：%1 项；%2")
                             .arg(static_cast<qulonglong>(guardThis->m_arkRiskCenterEntries->size()))
                             .arg(deferredStatusLines->join(QStringLiteral("；"))));
+                        if (!guardThis || guardThis->m_arkRiskRefreshTicket != ticket) return;
                         guardThis->m_arkRiskStatusLabel->setStyleSheet(
                             QStringLiteral("color:%1; font-weight:700;")
                                 .arg(KswordTheme::TextPrimaryHex()));
@@ -1546,8 +1550,7 @@ void MonitorDock::refreshArkRiskCenterAsync()
                     return;
                 }
                 commit();
-            },
-            Qt::QueuedConnection);
+            });
     });
     task->setAutoDelete(true);
     QThreadPool::globalInstance()->start(task);
